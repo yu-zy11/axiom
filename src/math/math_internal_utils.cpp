@@ -9,10 +9,17 @@
 namespace axiom::detail {
 
 Scalar safe_norm(const Vec3& value) {
-    return norm(value);
+    // std::hypot provides better overflow/underflow behavior than sqrt(x*x+y*y+z*z).
+    const auto n = std::hypot(value.x, value.y, value.z);
+    return std::isfinite(n) ? n : std::numeric_limits<Scalar>::infinity();
 }
 
 Scalar clamp_cosine(Scalar value) {
+    if (!std::isfinite(value)) {
+        // Treat non-finite cosine as "unknown"; return a safe in-range value.
+        // 1.0 keeps acos() stable (returns 0) and avoids propagating NaN.
+        return 1.0;
+    }
     return std::clamp(value, -1.0, 1.0);
 }
 
@@ -198,6 +205,33 @@ Scalar effective_tolerance(Scalar requested, Scalar fallback) {
         return requested;
     }
     return std::max(fallback, 0.0);
+}
+
+Scalar clamp_local_tolerance(Scalar value, const TolerancePolicy& policy) {
+    if (!std::isfinite(value)) {
+        return std::numeric_limits<Scalar>::infinity();
+    }
+    const auto min_t = std::max(policy.min_local, 0.0);
+    const auto max_t = std::max(policy.max_local, min_t);
+    return std::clamp(std::max(value, 0.0), min_t, max_t);
+}
+
+Scalar resolve_linear_tolerance(Scalar requested, const TolerancePolicy& policy) {
+    return clamp_local_tolerance(effective_tolerance(requested, policy.linear), policy);
+}
+
+Scalar resolve_angular_tolerance(Scalar requested, const TolerancePolicy& policy) {
+    return clamp_local_tolerance(effective_tolerance(requested, policy.angular), policy);
+}
+
+Scalar resolve_linear_tolerance_for_scale(Scalar requested, const TolerancePolicy& policy, Scalar model_scale) {
+    const auto scale = std::max(model_scale, 1e-12);
+    return clamp_local_tolerance(resolve_linear_tolerance(requested, policy) * scale, policy);
+}
+
+Scalar resolve_angular_tolerance_for_scale(Scalar requested, const TolerancePolicy& policy, Scalar model_scale) {
+    const auto ratio = std::clamp(std::max(model_scale, 1e-12), 0.1, 10.0);
+    return clamp_local_tolerance(resolve_angular_tolerance(requested, policy) * ratio, policy);
 }
 
 bool within_tolerance(Scalar lhs, Scalar rhs, Scalar tolerance) {

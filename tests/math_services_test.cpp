@@ -109,6 +109,29 @@ int main() {
         std::cerr << "unexpected orientation predicate behavior\n";
         return 1;
     }
+    // Scale-adaptive robustness regression: very large coordinates should not overflow
+    // and should still return a stable sign when the configuration is well-separated.
+    {
+        const double s = 1e150;
+        const auto sign = kernel.predicates().orient2d({0.0, 0.0}, {s, 0.0}, {0.0, s});
+        if (sign != axiom::Sign::Positive) {
+            std::cerr << "unexpected orient2d behavior for large scale\n";
+            return 1;
+        }
+        const auto sign3 = kernel.predicates().orient3d({0.0, 0.0, 0.0}, {s, 0.0, 0.0}, {0.0, s, 0.0}, {0.0, 0.0, s});
+        if (sign3 != axiom::Sign::Positive) {
+            std::cerr << "unexpected orient3d behavior for large scale\n";
+            return 1;
+        }
+    }
+    // Non-finite inputs should not silently claim a sign.
+    {
+        const auto sign = kernel.predicates().orient2d_tol({0.0, 0.0}, {NAN, 0.0}, {0.0, 1.0}, 1e-12);
+        if (sign != axiom::Sign::Uncertain) {
+            std::cerr << "expected orient2d_tol to be Uncertain for NaN input\n";
+            return 1;
+        }
+    }
 
     const axiom::BoundingBox b0 {{0.0, 0.0, 0.0}, {1.0, 1.0, 1.0}, true};
     const axiom::BoundingBox b1 {{0.9, 0.9, 0.9}, {2.0, 2.0, 2.0}, true};
@@ -164,6 +187,33 @@ int main() {
         !kernel.tolerance().within_angular(0.1, 0.10001, 1e-3)) {
         std::cerr << "unexpected tolerance helper behavior\n";
         return 1;
+    }
+    // Centralized tolerance resolution should respect min_local/max_local clamps (via KernelConfig).
+    {
+        axiom::KernelConfig cfg {};
+        cfg.tolerance.linear = 1e-6;
+        cfg.tolerance.angular = 1e-6;
+        cfg.tolerance.min_local = 1e-4;
+        cfg.tolerance.max_local = 2e-4;
+        axiom::Kernel k2 {cfg};
+        // Too small request clamps up to min_local.
+        if (!approx(k2.tolerance().effective_linear(1e-12), 1e-4) ||
+            !approx(k2.tolerance().effective_angular(1e-12), 1e-4)) {
+            std::cerr << "unexpected effective_* clamp-up behavior\n";
+            return 1;
+        }
+        // Too large request clamps down to max_local.
+        if (!approx(k2.tolerance().effective_linear(1.0), 2e-4) ||
+            !approx(k2.tolerance().effective_angular(1.0), 2e-4)) {
+            std::cerr << "unexpected effective_* clamp-down behavior\n";
+            return 1;
+        }
+        // Scale-aware resolution should still respect local clamps.
+        if (!approx(k2.tolerance().resolve_linear_for_scale(1e-6, 10.0), 2e-4) ||
+            !approx(k2.tolerance().resolve_angular_for_scale(1e-6, 10.0), 2e-4)) {
+            std::cerr << "unexpected resolve_*_for_scale clamp behavior\n";
+            return 1;
+        }
     }
 
     const std::vector<axiom::Point3> pts {{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}};

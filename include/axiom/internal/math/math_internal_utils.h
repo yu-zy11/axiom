@@ -25,6 +25,11 @@ bool bbox_intersects_tol(const BoundingBox& lhs, const BoundingBox& rhs, Scalar 
 bool bbox_contains_tol(const BoundingBox& outer, const BoundingBox& inner, Scalar tolerance);
 bool point_equal_tol(const Point3& lhs, const Point3& rhs, Scalar tolerance);
 Scalar effective_tolerance(Scalar requested, Scalar fallback);
+Scalar clamp_local_tolerance(Scalar value, const TolerancePolicy& policy);
+Scalar resolve_linear_tolerance(Scalar requested, const TolerancePolicy& policy);
+Scalar resolve_angular_tolerance(Scalar requested, const TolerancePolicy& policy);
+Scalar resolve_linear_tolerance_for_scale(Scalar requested, const TolerancePolicy& policy, Scalar model_scale);
+Scalar resolve_angular_tolerance_for_scale(Scalar requested, const TolerancePolicy& policy, Scalar model_scale);
 bool within_tolerance(Scalar lhs, Scalar rhs, Scalar tolerance);
 TolerancePolicy clamp_tolerance_policy(const TolerancePolicy& base);
 TolerancePolicy scale_tolerance_policy(const TolerancePolicy& base, Scalar factor);

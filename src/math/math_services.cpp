@@ -297,26 +297,76 @@ Sign PredicateService::orient3d(const Point3 &a, const Point3 &b,
 
 Sign PredicateService::orient2d_tol(const Point2 &a, const Point2 &b,
                                     const Point2 &c, Scalar eps) const {
-  const auto value = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
-  const auto tol = std::max(eps, 0.0);
-  if (std::abs(value) < tol) {
+  if (!std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(b.x) ||
+      !std::isfinite(b.y) || !std::isfinite(c.x) || !std::isfinite(c.y)) {
+    return Sign::Uncertain;
+  }
+
+  // Use long double to reduce overflow and cancellation risk.
+  const long double bax = static_cast<long double>(b.x) - static_cast<long double>(a.x);
+  const long double bay = static_cast<long double>(b.y) - static_cast<long double>(a.y);
+  const long double cax = static_cast<long double>(c.x) - static_cast<long double>(a.x);
+  const long double cay = static_cast<long double>(c.y) - static_cast<long double>(a.y);
+  const long double det = bax * cay - bay * cax;
+  if (!std::isfinite(static_cast<double>(det)) && std::isfinite(static_cast<double>(bax)) &&
+      std::isfinite(static_cast<double>(bay)) && std::isfinite(static_cast<double>(cax)) &&
+      std::isfinite(static_cast<double>(cay))) {
+    // If det overflows in double representation, sign is still meaningful in long double.
+  }
+
+  const auto user_tol = std::max(eps, 0.0);
+  // Scale-aware tolerance for determinant magnitude.
+  const long double scale =
+      std::max({std::abs(bax), std::abs(bay), std::abs(cax), std::abs(cay), 1.0L});
+  const long double auto_tol =
+      16.0L * static_cast<long double>(std::numeric_limits<Scalar>::epsilon()) * scale * scale;
+  const long double tol = std::max(static_cast<long double>(user_tol), auto_tol);
+  if (std::abs(det) <= tol) {
     return Sign::Zero;
   }
-  return value > 0.0 ? Sign::Positive : Sign::Negative;
+  return det > 0.0L ? Sign::Positive : Sign::Negative;
 }
 
 Sign PredicateService::orient3d_tol(const Point3 &a, const Point3 &b,
                                     const Point3 &c, const Point3 &d,
                                     Scalar eps) const {
+  if (!detail::finite_point3(a) || !detail::finite_point3(b) ||
+      !detail::finite_point3(c) || !detail::finite_point3(d)) {
+    return Sign::Uncertain;
+  }
   const auto ab = detail::subtract(b, a);
   const auto ac = detail::subtract(c, a);
   const auto ad = detail::subtract(d, a);
-  const auto value = detail::dot(detail::cross(ab, ac), ad);
-  const auto tol = std::max(eps, 0.0);
-  if (std::abs(value) < tol) {
+  if (!detail::finite_vec3(ab) || !detail::finite_vec3(ac) || !detail::finite_vec3(ad)) {
+    return Sign::Uncertain;
+  }
+
+  const long double abx = static_cast<long double>(ab.x);
+  const long double aby = static_cast<long double>(ab.y);
+  const long double abz = static_cast<long double>(ab.z);
+  const long double acx = static_cast<long double>(ac.x);
+  const long double acy = static_cast<long double>(ac.y);
+  const long double acz = static_cast<long double>(ac.z);
+  const long double adx = static_cast<long double>(ad.x);
+  const long double ady = static_cast<long double>(ad.y);
+  const long double adz = static_cast<long double>(ad.z);
+  const long double cx = aby * acz - abz * acy;
+  const long double cy = abz * acx - abx * acz;
+  const long double cz = abx * acy - aby * acx;
+  const long double det = cx * adx + cy * ady + cz * adz;
+
+  const auto user_tol = std::max(eps, 0.0);
+  const long double scale = std::max(
+      {std::abs(abx), std::abs(aby), std::abs(abz), std::abs(acx), std::abs(acy),
+       std::abs(acz), std::abs(adx), std::abs(ady), std::abs(adz), 1.0L});
+  const long double auto_tol =
+      64.0L * static_cast<long double>(std::numeric_limits<Scalar>::epsilon()) * scale * scale *
+      scale;
+  const long double tol = std::max(static_cast<long double>(user_tol), auto_tol);
+  if (std::abs(det) <= tol) {
     return Sign::Zero;
   }
-  return value > 0.0 ? Sign::Positive : Sign::Negative;
+  return det > 0.0L ? Sign::Positive : Sign::Negative;
 }
 
 bool PredicateService::aabb_intersects(const BoundingBox &lhs,
@@ -481,8 +531,7 @@ Result<bool> PredicateService::point_on_curve(const Point3 &point,
                                        "点在曲线上判断失败");
   }
   const auto dist = detail::safe_norm(detail::subtract(*cp.value, point));
-  const auto tol =
-      detail::effective_tolerance(tolerance, state_->config.tolerance.linear);
+  const auto tol = detail::resolve_linear_tolerance(tolerance, state_->config.tolerance);
   return ok_result(dist <= tol,
                    state_->create_diagnostic("已完成点在曲线上判断"));
 }
@@ -535,8 +584,7 @@ Result<bool> PredicateService::point_on_surface(const Point3 &point,
                                        "点在曲面上判断失败");
   }
   const auto dist = detail::safe_norm(detail::subtract(*cp.value, point));
-  const auto tol =
-      detail::effective_tolerance(tolerance, state_->config.tolerance.linear);
+  const auto tol = detail::resolve_linear_tolerance(tolerance, state_->config.tolerance);
   return ok_result(dist <= tol,
                    state_->create_diagnostic("已完成点在曲面上判断"));
 }
@@ -584,8 +632,7 @@ Result<bool> PredicateService::point_in_body(const Point3 &point,
         "点在体内判断失败：目标体不存在", "点在体内判断失败");
   }
   const auto &bbox = it->second.bbox;
-  const auto tol =
-      detail::effective_tolerance(tolerance, state_->config.tolerance.linear);
+  const auto tol = detail::resolve_linear_tolerance(tolerance, state_->config.tolerance);
   const bool inside = detail::point_in_bbox_tol(point, bbox, tol);
   return ok_result(inside, state_->create_diagnostic("已完成点在体内判断"));
 }
@@ -700,13 +747,11 @@ TolerancePolicy ToleranceService::choose_body_or_global(BodyId body_id) const {
 }
 
 Scalar ToleranceService::effective_linear(Scalar requested) const {
-  return detail::effective_tolerance(requested,
-                                     state_->config.tolerance.linear);
+  return detail::resolve_linear_tolerance(requested, state_->config.tolerance);
 }
 
 Scalar ToleranceService::effective_angular(Scalar requested) const {
-  return detail::effective_tolerance(requested,
-                                     state_->config.tolerance.angular);
+  return detail::resolve_angular_tolerance(requested, state_->config.tolerance);
 }
 
 Scalar ToleranceService::normalize_linear_request(Scalar requested) const {
@@ -719,13 +764,12 @@ Scalar ToleranceService::normalize_angular_request(Scalar requested) const {
 
 Scalar ToleranceService::resolve_linear_for_scale(Scalar requested,
                                                   Scalar model_scale) const {
-  return effective_linear(requested) * std::max(model_scale, 1e-12);
+  return detail::resolve_linear_tolerance_for_scale(requested, state_->config.tolerance, model_scale);
 }
 
 Scalar ToleranceService::resolve_angular_for_scale(Scalar requested,
                                                    Scalar model_scale) const {
-  const auto ratio = std::clamp(std::max(model_scale, 1e-12), 0.1, 10.0);
-  return effective_angular(requested) * ratio;
+  return detail::resolve_angular_tolerance_for_scale(requested, state_->config.tolerance, model_scale);
 }
 
 int ToleranceService::compare_linear(Scalar lhs, Scalar rhs,
