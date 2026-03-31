@@ -27,6 +27,7 @@ std::string_view body_kind_name(detail::BodyKind kind) {
         case detail::BodyKind::Cylinder: return "Cylinder";
         case detail::BodyKind::Cone: return "Cone";
         case detail::BodyKind::Torus: return "Torus";
+        case detail::BodyKind::Wedge: return "Wedge";
         case detail::BodyKind::Sweep: return "Sweep";
         case detail::BodyKind::BooleanResult: return "BooleanResult";
         case detail::BodyKind::Modified: return "Modified";
@@ -44,6 +45,7 @@ detail::BodyKind parse_body_kind(std::string_view value) {
     if (value == "Cylinder") return detail::BodyKind::Cylinder;
     if (value == "Cone") return detail::BodyKind::Cone;
     if (value == "Torus") return detail::BodyKind::Torus;
+    if (value == "Wedge") return detail::BodyKind::Wedge;
     if (value == "Sweep") return detail::BodyKind::Sweep;
     if (value == "BooleanResult") return detail::BodyKind::BooleanResult;
     if (value == "Modified") return detail::BodyKind::Modified;

@@ -254,6 +254,18 @@ BoundingBox bbox_from_span_vectors(const Point3 &origin, const Vec3 &axis_u,
   return detail::bbox_from_center_radius(origin, ex, ey, ez);
 }
 
+// Rodrigues rotation: rotate vector `v` around unit axis `k` by angle `theta`.
+Vec3 rotate_vec_around_axis(const Vec3 &k, const Vec3 &v, Scalar theta) {
+  const auto c = std::cos(theta);
+  const auto s = std::sin(theta);
+  const auto omc = 1.0 - c;
+  const auto kdotv = detail::dot(k, v);
+  const auto kxv = detail::cross(k, v);
+  return Vec3{v.x * c + kxv.x * s + k.x * kdotv * omc,
+              v.y * c + kxv.y * s + k.y * kdotv * omc,
+              v.z * c + kxv.z * s + k.z * kdotv * omc};
+}
+
 Point3 lerp_point(const Point3 &lhs, const Point3 &rhs, Scalar t) {
   return Point3{lhs.x + (rhs.x - lhs.x) * t, lhs.y + (rhs.y - lhs.y) * t,
                 lhs.z + (rhs.z - lhs.z) * t};
@@ -474,6 +486,17 @@ Range2D surface_domain(const detail::SurfaceRecord &surface) {
         Range1D{0.0, std::max<Scalar>(1.0, static_cast<Scalar>(rows - 1))},
         Range1D{0.0, std::max<Scalar>(1.0, static_cast<Scalar>(cols - 1))}};
   }
+  case detail::SurfaceKind::Revolved:
+    return Range2D{Range1D{0.0, std::max(surface.sweep_angle_rad, 0.0)},
+                   Range1D{0.0, 1.0}};
+  case detail::SurfaceKind::Swept:
+    return Range2D{Range1D{0.0, 1.0}, Range1D{0.0, 1.0}};
+  case detail::SurfaceKind::Trimmed:
+    return Range2D{Range1D{surface.trim_u_min, surface.trim_u_max},
+                   Range1D{surface.trim_v_min, surface.trim_v_max}};
+  case detail::SurfaceKind::Offset:
+    // Domain is inherited from base surface; fallback to [0,1] if missing.
+    return Range2D{Range1D{0.0, 1.0}, Range1D{0.0, 1.0}};
   default:
     return Range2D{Range1D{0.0, 1.0}, Range1D{0.0, 1.0}};
   }
@@ -683,6 +706,11 @@ BoundingBox make_surface_bbox(const detail::SurfaceRecord &surface) {
     }
     return detail::make_bbox(min, max);
   }
+  case detail::SurfaceKind::Revolved:
+  case detail::SurfaceKind::Swept:
+  case detail::SurfaceKind::Trimmed:
+  case detail::SurfaceKind::Offset:
+    return detail::bbox_from_center_radius(surface.origin, 50.0, 50.0, 50.0);
   default:
     return detail::bbox_from_center_radius(surface.origin, 10.0, 10.0, 10.0);
   }
@@ -725,7 +753,16 @@ detail::SurfaceRecord make_surface_record(detail::SurfaceKind kind,
                                           std::vector<Point3> poles = {},
                                           std::vector<Scalar> weights = {},
                                           std::vector<Scalar> knots_u = {},
-                                          std::vector<Scalar> knots_v = {}) {
+                                          std::vector<Scalar> knots_v = {},
+                                          SurfaceId base_surface_id = {},
+                                          CurveId profile_curve_id = {},
+                                          Scalar sweep_angle_rad = 0.0,
+                                          Scalar sweep_length = 0.0,
+                                          Scalar trim_u_min = 0.0,
+                                          Scalar trim_u_max = 1.0,
+                                          Scalar trim_v_min = 0.0,
+                                          Scalar trim_v_max = 1.0,
+                                          Scalar offset_distance = 0.0) {
   detail::SurfaceRecord record;
   record.kind = kind;
   record.origin = origin;
@@ -734,6 +771,15 @@ detail::SurfaceRecord make_surface_record(detail::SurfaceKind kind,
   record.radius_a = radius_a;
   record.radius_b = radius_b;
   record.semi_angle = semi_angle;
+  record.base_surface_id = base_surface_id;
+  record.profile_curve_id = profile_curve_id;
+  record.sweep_angle_rad = sweep_angle_rad;
+  record.sweep_length = sweep_length;
+  record.trim_u_min = trim_u_min;
+  record.trim_u_max = trim_u_max;
+  record.trim_v_min = trim_v_min;
+  record.trim_v_max = trim_v_max;
+  record.offset_distance = offset_distance;
   record.poles = std::move(poles);
   record.weights = std::move(weights);
   record.knots_u = std::move(knots_u);
@@ -1238,6 +1284,118 @@ Result<SurfaceId> SurfaceFactory::make_nurbs(const NURBSSurfaceDesc &desc) {
                           desc.poles, std::move(normalized_weights),
                           uniform_knot_vector(rows), uniform_knot_vector(cols)));
   return ok_result(id, state_->create_diagnostic("已创建NURBS曲面"));
+}
+
+Result<SurfaceId> SurfaceFactory::make_revolved(CurveId generatrix,
+                                                const Axis3 &axis,
+                                                Scalar sweep_angle_radians) {
+  if (!finite_point(axis.origin) || !finite_vec(axis.direction) ||
+      !finite_scalar(sweep_angle_radians)) {
+    return detail::invalid_input_result<SurfaceId>(
+        *state_, diag_codes::kGeoSurfaceCreationInvalid,
+        "旋转面创建失败：输入包含非法数值", "旋转面创建失败");
+  }
+  if (detail::norm(axis.direction) <= kEpsilon) {
+    return detail::invalid_input_result<SurfaceId>(
+        *state_, diag_codes::kGeoSurfaceCreationInvalid,
+        "旋转面创建失败：旋转轴方向不能为零", "旋转面创建失败");
+  }
+  if (!detail::has_curve(*state_, generatrix)) {
+    return detail::invalid_input_result<SurfaceId>(
+        *state_, diag_codes::kGeoSurfaceCreationInvalid,
+        "旋转面创建失败：母线曲线不存在", "旋转面创建失败");
+  }
+  if (sweep_angle_radians <= 0.0 ||
+      sweep_angle_radians > std::acos(-1.0) * 64.0) {
+    return detail::invalid_input_result<SurfaceId>(
+        *state_, diag_codes::kGeoSurfaceCreationInvalid,
+        "旋转面创建失败：扫描角必须在 (0, 64π] 弧度内", "旋转面创建失败");
+  }
+  const auto ax = detail::normalize(axis.direction);
+  const auto id = SurfaceId{state_->allocate_id()};
+  state_->surfaces.emplace(
+      id.value,
+      make_surface_record(detail::SurfaceKind::Revolved, axis.origin, ax, ax,
+                          0.0, 0.0, 0.0, {}, {}, {}, {}, {}, generatrix,
+                          sweep_angle_radians));
+  return ok_result(id, state_->create_diagnostic("已创建旋转面"));
+}
+
+Result<SurfaceId> SurfaceFactory::make_swept_linear(CurveId profile,
+                                                    const Vec3 &direction,
+                                                    Scalar sweep_length) {
+  if (!finite_vec(direction) || !finite_scalar(sweep_length)) {
+    return detail::invalid_input_result<SurfaceId>(
+        *state_, diag_codes::kGeoSurfaceCreationInvalid,
+        "扫掠面创建失败：输入包含非法数值", "扫掠面创建失败");
+  }
+  if (detail::norm(direction) <= kEpsilon) {
+    return detail::invalid_input_result<SurfaceId>(
+        *state_, diag_codes::kGeoSurfaceCreationInvalid,
+        "扫掠面创建失败：扫掠方向不能为零", "扫掠面创建失败");
+  }
+  if (!detail::has_curve(*state_, profile)) {
+    return detail::invalid_input_result<SurfaceId>(
+        *state_, diag_codes::kGeoSurfaceCreationInvalid,
+        "扫掠面创建失败：轮廓曲线不存在", "扫掠面创建失败");
+  }
+  if (sweep_length <= 0.0) {
+    return detail::invalid_input_result<SurfaceId>(
+        *state_, diag_codes::kGeoSurfaceCreationInvalid,
+        "扫掠面创建失败：扫掠长度必须大于 0", "扫掠面创建失败");
+  }
+  const auto dir = detail::normalize(direction);
+  const auto id = SurfaceId{state_->allocate_id()};
+  state_->surfaces.emplace(
+      id.value,
+      make_surface_record(detail::SurfaceKind::Swept, {0.0, 0.0, 0.0}, dir, dir,
+                          0.0, 0.0, 0.0, {}, {}, {}, {}, {}, profile, 0.0,
+                          sweep_length));
+  return ok_result(id, state_->create_diagnostic("已创建扫掠面(线性)"));
+}
+
+Result<SurfaceId> SurfaceFactory::make_trimmed(SurfaceId base_surface, Scalar u_min,
+                                               Scalar u_max, Scalar v_min,
+                                               Scalar v_max) {
+  if (!detail::has_surface(*state_, base_surface) || !finite_scalar(u_min) ||
+      !finite_scalar(u_max) || !finite_scalar(v_min) || !finite_scalar(v_max)) {
+    return detail::invalid_input_result<SurfaceId>(
+        *state_, diag_codes::kGeoSurfaceCreationInvalid,
+        "修剪面创建失败：基曲面不存在或参数包含非法数值", "修剪面创建失败");
+  }
+  if (!(u_min < u_max) || !(v_min < v_max)) {
+    return detail::invalid_input_result<SurfaceId>(
+        *state_, diag_codes::kGeoSurfaceCreationInvalid,
+        "修剪面创建失败：修剪参数范围必须满足 min < max", "修剪面创建失败");
+  }
+  const auto &base = state_->surfaces.at(base_surface.value);
+  const auto id = SurfaceId{state_->allocate_id()};
+  state_->surfaces.emplace(
+      id.value,
+      make_surface_record(detail::SurfaceKind::Trimmed, base.origin, base.axis,
+                          base.normal, base.radius_a, base.radius_b,
+                          base.semi_angle, {}, {}, {}, {}, base_surface, {},
+                          0.0, 0.0, u_min, u_max, v_min, v_max));
+  return ok_result(id, state_->create_diagnostic("已创建修剪面"));
+}
+
+Result<SurfaceId> SurfaceFactory::make_offset(SurfaceId base_surface,
+                                              Scalar offset_distance) {
+  if (!detail::has_surface(*state_, base_surface) ||
+      !finite_scalar(offset_distance)) {
+    return detail::invalid_input_result<SurfaceId>(
+        *state_, diag_codes::kGeoSurfaceCreationInvalid,
+        "偏置面创建失败：基曲面不存在或偏置距离非法", "偏置面创建失败");
+  }
+  const auto &base = state_->surfaces.at(base_surface.value);
+  const auto id = SurfaceId{state_->allocate_id()};
+  state_->surfaces.emplace(
+      id.value,
+      make_surface_record(detail::SurfaceKind::Offset, base.origin, base.axis,
+                          base.normal, base.radius_a, base.radius_b,
+                          base.semi_angle, {}, {}, {}, {}, base_surface, {},
+                          0.0, 0.0, 0.0, 1.0, 0.0, 1.0, offset_distance));
+  return ok_result(id, state_->create_diagnostic("已创建偏置面"));
 }
 
 CurveService::CurveService(std::shared_ptr<detail::KernelState> state)

@@ -39,7 +39,12 @@ enum class SurfaceKind {
     Torus,
     Bezier,
     BSpline,
-    Nurbs
+    Nurbs,
+    // Stage 2 minimal analytic/derived surfaces.
+    Revolved,
+    Swept,
+    Trimmed,
+    Offset
 };
 
 enum class BodyKind {
@@ -49,6 +54,8 @@ enum class BodyKind {
     Cylinder,
     Cone,
     Torus,
+    /// 直角三棱柱：XY 平面内直角三角形顶点 (0,0)、(+dx,0)、(0,+dy)，沿 +Z 拉伸 dz（相对 BodyRecord.origin）。
+    Wedge,
     Sweep,
     BooleanResult,
     Modified,
@@ -85,6 +92,16 @@ struct SurfaceRecord {
     Scalar radius_a {0.0};
     Scalar radius_b {0.0};
     Scalar semi_angle {0.0};
+    // For derived surfaces.
+    SurfaceId base_surface_id {};
+    CurveId profile_curve_id {};
+    Scalar sweep_angle_rad {0.0};
+    Scalar sweep_length {0.0};
+    Scalar trim_u_min {0.0};
+    Scalar trim_u_max {1.0};
+    Scalar trim_v_min {0.0};
+    Scalar trim_v_max {1.0};
+    Scalar offset_distance {0.0};
     std::vector<Point3> poles;
     std::vector<Scalar> weights;
     std::vector<Scalar> knots_u;

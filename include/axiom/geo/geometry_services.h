@@ -57,6 +57,11 @@ public:
     Result<SurfaceId> make_bezier(std::span<const Point3> poles);
     Result<SurfaceId> make_bspline(const BSplineSurfaceDesc& desc);
     Result<SurfaceId> make_nurbs(const NURBSSurfaceDesc& desc);
+    // Stage 2 minimal: surfaces required by docs (7.1).
+    Result<SurfaceId> make_revolved(CurveId generatrix, const Axis3& axis, Scalar sweep_angle_radians);
+    Result<SurfaceId> make_swept_linear(CurveId profile, const Vec3& direction, Scalar sweep_length);
+    Result<SurfaceId> make_trimmed(SurfaceId base_surface, Scalar u_min, Scalar u_max, Scalar v_min, Scalar v_max);
+    Result<SurfaceId> make_offset(SurfaceId base_surface, Scalar offset_distance);
 
 private:
     std::shared_ptr<detail::KernelState> state_;
