@@ -266,6 +266,24 @@ Vec3 rotate_vec_around_axis(const Vec3 &k, const Vec3 &v, Scalar theta) {
               v.z * c + kxv.z * s + k.z * kdotv * omc};
 }
 
+bool solve_2x2(Scalar a00, Scalar a01, Scalar a10, Scalar a11,
+               Scalar b0, Scalar b1, Scalar &x0, Scalar &x1) {
+  const auto det = a00 * a11 - a01 * a10;
+  if (!std::isfinite(det) || std::abs(det) <= kEpsilon) {
+    return false;
+  }
+  x0 = (b0 * a11 - a01 * b1) / det;
+  x1 = (a00 * b1 - b0 * a10) / det;
+  return std::isfinite(x0) && std::isfinite(x1);
+}
+
+Scalar squared_distance(const Point3& a, const Point3& b) {
+  const auto dx = a.x - b.x;
+  const auto dy = a.y - b.y;
+  const auto dz = a.z - b.z;
+  return dx * dx + dy * dy + dz * dz;
+}
+
 Point3 lerp_point(const Point3 &lhs, const Point3 &rhs, Scalar t) {
   return Point3{lhs.x + (rhs.x - lhs.x) * t, lhs.y + (rhs.y - lhs.y) * t,
                 lhs.z + (rhs.z - lhs.z) * t};
@@ -334,6 +352,66 @@ Point3 evaluate_polyline_point(const std::vector<Point3> &poles, Scalar t) {
   return lerp_point(poles[segment], poles[segment + 1], local_t);
 }
 
+Vec3 polyline_first_derivative(const std::vector<Point3> &poles, Scalar t) {
+  if (poles.size() < 2) {
+    return {0.0, 0.0, 0.0};
+  }
+  const auto max_t = static_cast<Scalar>(poles.size() - 1);
+  const auto ct = std::clamp(t, 0.0, max_t);
+  const auto max_seg_index = poles.size() - 2;
+  const auto segment = static_cast<std::size_t>(
+      std::min<Scalar>(std::floor(ct), static_cast<Scalar>(max_seg_index)));
+  return detail::subtract(poles[segment + 1], poles[segment]);
+}
+
+void bernstein_values(int n, Scalar t, std::vector<Scalar> &B) {
+  if (n < 0) {
+    B.clear();
+    return;
+  }
+  B.assign(static_cast<std::size_t>(n) + 1, 0.0);
+  t = std::clamp(t, 0.0, 1.0);
+  for (int i = 0; i <= n; ++i) {
+    Scalar binom = 1.0;
+    for (int j = 1; j <= i; ++j) {
+      binom *= static_cast<Scalar>(n - j + 1) / static_cast<Scalar>(j);
+    }
+    B[static_cast<std::size_t>(i)] =
+        binom * std::pow(1.0 - t, static_cast<Scalar>(n - i)) *
+        std::pow(t, static_cast<Scalar>(i));
+  }
+}
+
+void bernstein_first_deriv(int n, Scalar t, std::vector<Scalar> &Bp) {
+  Bp.assign(static_cast<std::size_t>(n) + 1, 0.0);
+  if (n <= 0) {
+    return;
+  }
+  std::vector<Scalar> b_nm1;
+  bernstein_values(n - 1, t, b_nm1);
+  const Scalar nn = static_cast<Scalar>(n);
+  for (int i = 0; i <= n; ++i) {
+    const Scalar left = (i == 0) ? 0.0 : b_nm1[static_cast<std::size_t>(i - 1)];
+    const Scalar right = (i == n) ? 0.0 : b_nm1[static_cast<std::size_t>(i)];
+    Bp[static_cast<std::size_t>(i)] = nn * (left - right);
+  }
+}
+
+void bernstein_second_deriv(int n, Scalar t, std::vector<Scalar> &Bpp) {
+  Bpp.assign(static_cast<std::size_t>(n) + 1, 0.0);
+  if (n <= 1) {
+    return;
+  }
+  std::vector<Scalar> bp_nm1;
+  bernstein_first_deriv(n - 1, t, bp_nm1);
+  const Scalar nn = static_cast<Scalar>(n);
+  for (int i = 0; i <= n; ++i) {
+    const Scalar left = (i == 0) ? 0.0 : bp_nm1[static_cast<std::size_t>(i - 1)];
+    const Scalar right = (i == n) ? 0.0 : bp_nm1[static_cast<std::size_t>(i)];
+    Bpp[static_cast<std::size_t>(i)] = nn * (left - right);
+  }
+}
+
 Vec3 finite_difference_tangent(const std::function<Point3(Scalar)> &eval_fn,
                                Scalar t, Scalar t_min, Scalar t_max) {
   const auto step = std::max((t_max - t_min) * 1e-4, 1e-6);
@@ -344,6 +422,58 @@ Vec3 finite_difference_tangent(const std::function<Point3(Scalar)> &eval_fn,
   }
   return normalize_or_default(detail::subtract(eval_fn(t1), eval_fn(t0)),
                               Vec3{1.0, 0.0, 0.0});
+}
+
+Point3 de_casteljau_point(std::vector<Point3> pts, Scalar t) {
+  if (pts.empty()) {
+    return {};
+  }
+  if (pts.size() == 1) {
+    return pts.front();
+  }
+  const auto ct = std::clamp(t, 0.0, 1.0);
+  for (std::size_t k = pts.size(); k > 1; --k) {
+    for (std::size_t i = 0; i + 1 < k; ++i) {
+      pts[i] = lerp_point(pts[i], pts[i + 1], ct);
+    }
+  }
+  return pts.front();
+}
+
+Vec3 bezier_first_derivative(std::span<const Point3> poles, Scalar t) {
+  if (poles.size() < 2) {
+    return {0.0, 0.0, 0.0};
+  }
+  std::vector<Point3> dp;
+  dp.reserve(poles.size() - 1);
+  const auto n = static_cast<Scalar>(poles.size() - 1);
+  for (std::size_t i = 0; i + 1 < poles.size(); ++i) {
+    const auto d = detail::subtract(poles[i + 1], poles[i]);
+    dp.push_back(detail::add_point_vec(Point3{}, detail::scale(d, n)));
+  }
+  const auto p = de_casteljau_point(std::move(dp), t);
+  return Vec3{p.x, p.y, p.z};
+}
+
+Vec3 bezier_second_derivative(std::span<const Point3> poles, Scalar t) {
+  if (poles.size() < 3) {
+    return {0.0, 0.0, 0.0};
+  }
+  std::vector<Point3> ddp;
+  ddp.reserve(poles.size() - 2);
+  const auto n = static_cast<Scalar>(poles.size() - 1);
+  const auto scale = n * (n - 1.0);
+  for (std::size_t i = 0; i + 2 < poles.size(); ++i) {
+    // P_{i+2} - 2 P_{i+1} + P_i
+    const Vec3 v = Vec3{
+        poles[i + 2].x - 2.0 * poles[i + 1].x + poles[i].x,
+        poles[i + 2].y - 2.0 * poles[i + 1].y + poles[i].y,
+        poles[i + 2].z - 2.0 * poles[i + 1].z + poles[i].z,
+    };
+    ddp.push_back(detail::add_point_vec(Point3{}, detail::scale(v, scale)));
+  }
+  const auto p = de_casteljau_point(std::move(ddp), t);
+  return Vec3{p.x, p.y, p.z};
 }
 
 Range1D curve_domain(const detail::CurveRecord &curve) {
@@ -1585,13 +1715,24 @@ Result<CurveEvalResult> CurveService::eval(CurveId curve_id, Scalar t,
   case detail::CurveKind::Nurbs: {
     if (!curve.poles.empty()) {
       const auto domain = curve_domain(curve);
-      const auto eval_fn = [&curve](Scalar value) {
-        return evaluate_curve_point(curve, value);
-      };
       const auto clamped_t = std::clamp(t, domain.min, domain.max);
-      result.point = eval_fn(clamped_t);
-      result.tangent =
-          finite_difference_tangent(eval_fn, clamped_t, domain.min, domain.max);
+      if (curve.kind == detail::CurveKind::Bezier) {
+        result.point = evaluate_bezier_point(
+            std::vector<Point3>(curve.poles.begin(), curve.poles.end()), clamped_t);
+        const auto d1 = bezier_first_derivative(curve.poles, clamped_t);
+        result.tangent = normalize_or_default(d1, Vec3{1.0, 0.0, 0.0});
+      } else if (curve.kind == detail::CurveKind::BSpline) {
+        result.point = evaluate_polyline_point(curve.poles, clamped_t);
+        const auto d1 = polyline_first_derivative(curve.poles, clamped_t);
+        result.tangent = normalize_or_default(d1, Vec3{1.0, 0.0, 0.0});
+      } else {
+        Vec3 d1{};
+        Vec3 d2{};
+        rational_bezier_eval_all(curve.poles, curve.weights, clamped_t, result.point, d1,
+                                 d2);
+        result.tangent = normalize_or_default(d1, Vec3{1.0, 0.0, 0.0});
+        (void)d2;
+      }
     } else {
       result.point = curve.origin;
       result.tangent = {1.0, 0.0, 0.0};
@@ -1641,6 +1782,24 @@ Result<CurveEvalResult> CurveService::eval(CurveId curve_id, Scalar t,
   result.derivatives.resize(static_cast<std::size_t>(order), Vec3{0.0, 0.0, 0.0});
   if (order > 0) {
     result.derivatives[0] = result.tangent;
+  }
+  if (order > 1 && curve.kind == detail::CurveKind::Bezier && !curve.poles.empty()) {
+    const auto domain = curve_domain(curve);
+    const auto clamped_t = std::clamp(t, domain.min, domain.max);
+    result.derivatives[1] = bezier_second_derivative(curve.poles, clamped_t);
+  }
+  if (order > 1 && curve.kind == detail::CurveKind::BSpline && !curve.poles.empty()) {
+    // C1 polyline: second derivative is 0 on segment interiors (kink model).
+    result.derivatives[1] = {0.0, 0.0, 0.0};
+  }
+  if (order > 1 && curve.kind == detail::CurveKind::Nurbs && !curve.poles.empty()) {
+    const auto domain = curve_domain(curve);
+    const auto clamped_t = std::clamp(t, domain.min, domain.max);
+    Point3 p0{};
+    Vec3 d1{};
+    Vec3 d2{};
+    rational_bezier_eval_all(curve.poles, curve.weights, clamped_t, p0, d1, d2);
+    result.derivatives[1] = d2;
   }
   if (state_->config.enable_cache) {
     state_->curve_eval_cache.emplace(
@@ -1743,9 +1902,158 @@ Result<Scalar> CurveService::closest_parameter(CurveId curve_id,
       curve.kind == detail::CurveKind::Hyperbola ||
       curve.kind == detail::CurveKind::CompositePolyline) {
     const auto domain = curve_domain(curve);
-    const auto t = std::clamp(approximate_curve_parameter(curve, point),
-                              domain.min, domain.max);
-    return ok_result<Scalar>(t, state_->create_diagnostic("曲线最近参数已求解"));
+    Scalar t = std::clamp(approximate_curve_parameter(curve, point),
+                          domain.min, domain.max);
+    // Damped Gauss-Newton (LM-style) 1D refinement:
+    // minimize ||C(t) - P||^2 with clamp + descent-only acceptance.
+    auto best_cost = std::numeric_limits<Scalar>::max();
+    {
+      const auto ev0 = eval(curve_id, t, 0);
+      if (ev0.status == StatusCode::Ok && ev0.value.has_value()) {
+        best_cost = squared_distance(ev0.value->point, point);
+      }
+    }
+    Scalar lambda = 1e-6;
+    for (int iter = 0; iter < 20; ++iter) {
+      const auto ct = std::clamp(t, domain.min, domain.max);
+      const auto ev = eval(curve_id, ct, 1);
+      if (ev.status != StatusCode::Ok || !ev.value.has_value()) {
+        break;
+      }
+      const auto &r = *ev.value;
+      const Vec3 err = detail::subtract(r.point, point);
+      const auto jtj = detail::dot(r.tangent, r.tangent);
+      const auto g = detail::dot(r.tangent, err);
+      if (!(jtj > 1e-18) || !std::isfinite(jtj) || !std::isfinite(g)) {
+        break;
+      }
+      bool accepted = false;
+      for (int attempt = 0; attempt < 8; ++attempt) {
+        const auto scale = std::max<Scalar>(1.0, jtj);
+        const auto lam = lambda * scale;
+        const auto denom = jtj + lam;
+        if (!(denom > 0.0) || !std::isfinite(denom)) {
+          lambda *= 10.0;
+          continue;
+        }
+        const auto step = -g / denom;
+        if (!std::isfinite(step)) {
+          lambda *= 10.0;
+          continue;
+        }
+        const auto next_t = std::clamp(ct + step, domain.min, domain.max);
+        const auto ev_next = eval(curve_id, next_t, 0);
+        if (ev_next.status != StatusCode::Ok || !ev_next.value.has_value()) {
+          lambda *= 10.0;
+          continue;
+        }
+        const auto next_cost = squared_distance(ev_next.value->point, point);
+        if (next_cost <= best_cost) {
+          best_cost = next_cost;
+          t = next_t;
+          lambda = std::max<Scalar>(1e-12, lambda * 0.3);
+          accepted = true;
+          if (std::abs(step) < 1e-12) {
+            iter = 9999;
+          }
+          break;
+        }
+        lambda *= 10.0;
+      }
+      if (!accepted) {
+        break;
+      }
+    }
+    return ok_result<Scalar>(std::clamp(t, domain.min, domain.max),
+                             state_->create_diagnostic("曲线最近参数已求解"));
+  }
+
+  if (curve.kind == detail::CurveKind::CompositeChain) {
+    if (curve.children.empty()) {
+      return detail::failed_result<Scalar>(
+          *state_, StatusCode::OperationFailed, diag_codes::kGeoParameterSolveFailure,
+          "曲线最近参数求解失败：复合链不包含任何子曲线", "曲线最近参数求解失败");
+    }
+    const auto domain = curve_domain(curve);
+    // Coarse: try each child and pick the best mapped parameter.
+    Scalar best_t = domain.min;
+    Scalar best_cost = std::numeric_limits<Scalar>::max();
+    for (std::size_t i = 0; i < curve.children.size(); ++i) {
+      const auto child_id = curve.children[i];
+      if (!detail::has_curve(*state_, child_id)) {
+        continue;
+      }
+      const auto child_t = closest_parameter(child_id, point);
+      if (child_t.status != StatusCode::Ok || !child_t.value.has_value()) {
+        continue;
+      }
+      const auto child_eval = eval(child_id, *child_t.value, 0);
+      if (child_eval.status != StatusCode::Ok || !child_eval.value.has_value()) {
+        continue;
+      }
+      const auto cost = squared_distance(child_eval.value->point, point);
+      if (cost < best_cost) {
+        best_cost = cost;
+        const auto local = std::clamp(*child_t.value, 0.0, 1.0);
+        best_t = std::clamp(static_cast<Scalar>(i) + local, domain.min, domain.max);
+      }
+    }
+
+    // Refine on the composite chain parameter directly (uses chain eval/tangent).
+    Scalar t = std::clamp(best_t, domain.min, domain.max);
+    Scalar lambda = 1e-6;
+    for (int iter = 0; iter < 25; ++iter) {
+      const auto ct = std::clamp(t, domain.min, domain.max);
+      const auto ev = eval(curve_id, ct, 1);
+      if (ev.status != StatusCode::Ok || !ev.value.has_value()) {
+        break;
+      }
+      const auto &r = *ev.value;
+      const Vec3 err = detail::subtract(r.point, point);
+      const auto jtj = detail::dot(r.tangent, r.tangent);
+      const auto g = detail::dot(r.tangent, err);
+      if (!(jtj > 1e-18) || !std::isfinite(jtj) || !std::isfinite(g)) {
+        break;
+      }
+      bool accepted = false;
+      for (int attempt = 0; attempt < 8; ++attempt) {
+        const auto scale = std::max<Scalar>(1.0, jtj);
+        const auto lam = lambda * scale;
+        const auto denom = jtj + lam;
+        if (!(denom > 0.0) || !std::isfinite(denom)) {
+          lambda *= 10.0;
+          continue;
+        }
+        const auto step = -g / denom;
+        if (!std::isfinite(step)) {
+          lambda *= 10.0;
+          continue;
+        }
+        const auto next_t = std::clamp(ct + step, domain.min, domain.max);
+        const auto ev_next = eval(curve_id, next_t, 0);
+        if (ev_next.status != StatusCode::Ok || !ev_next.value.has_value()) {
+          lambda *= 10.0;
+          continue;
+        }
+        const auto next_cost = squared_distance(ev_next.value->point, point);
+        if (next_cost <= best_cost) {
+          best_cost = next_cost;
+          t = next_t;
+          lambda = std::max<Scalar>(1e-12, lambda * 0.3);
+          accepted = true;
+          if (std::abs(step) < 1e-12) {
+            iter = 9999;
+          }
+          break;
+        }
+        lambda *= 10.0;
+      }
+      if (!accepted) {
+        break;
+      }
+    }
+    return ok_result<Scalar>(std::clamp(t, domain.min, domain.max),
+                             state_->create_diagnostic("曲线最近参数已求解"));
   }
 
   const auto eval0 = eval(curve_id, 0.0, 1);
@@ -1945,6 +2253,12 @@ Result<SurfaceEvalResult> SurfaceService::eval(SurfaceId surface_id, Scalar u,
         Point3{surface.origin.x + surface.radius_a * std::cos(u) * std::sin(v),
                surface.origin.y + surface.radius_a * std::sin(u) * std::sin(v),
                surface.origin.z + surface.radius_a * std::cos(v)};
+    result.du = Vec3{-surface.radius_a * std::sin(u) * std::sin(v),
+                     surface.radius_a * std::cos(u) * std::sin(v),
+                     0.0};
+    result.dv = Vec3{surface.radius_a * std::cos(u) * std::cos(v),
+                     surface.radius_a * std::sin(u) * std::cos(v),
+                     -surface.radius_a * std::sin(v)};
     result.normal =
         detail::normalize(detail::subtract(result.point, surface.origin));
     result.k1 = surface.radius_a > 0.0 ? 1.0 / surface.radius_a : 0.0;
@@ -1978,8 +2292,17 @@ Result<SurfaceEvalResult> SurfaceService::eval(SurfaceId surface_id, Scalar u,
     if (detail::dot(result.normal, radial_dir) < 0.0) {
       result.normal = detail::scale(result.normal, -1.0);
     }
+    // Cone is developable: one principal curvature is zero.
+    // Provide a minimal stable curvature for the circumferential direction.
+    // Our parameterization uses v as axial distance from apex; radius = v * tan(semi_angle).
+    const auto radius = std::max(radial, kEpsilon);
+    const auto sa = std::sin(surface.semi_angle);
+    const auto ca = std::cos(surface.semi_angle);
+    // Avoid division by ~0 when angle is near 0.
+    const auto denom = std::max(radius, kEpsilon) * std::max(sa, kEpsilon);
+    // This matches cylinder-like behavior in spirit (curvature decreases with radius).
     result.k1 = 0.0;
-    result.k2 = 0.0;
+    result.k2 = (ca / denom);
     break;
   }
   case detail::SurfaceKind::Torus: {
@@ -1997,8 +2320,15 @@ Result<SurfaceEvalResult> SurfaceService::eval(SurfaceId surface_id, Scalar u,
         vec_from_local(frame, std::cos(v) * std::cos(u),
                        std::cos(v) * std::sin(u), std::sin(v)),
         frame.u);
-    result.k1 = surface.radius_b > 0.0 ? 1.0 / surface.radius_b : 0.0;
-    result.k2 = surface.radius_a > 0.0 ? 1.0 / surface.radius_a : 0.0;
+    // Principal curvatures for a standard torus parameterization:
+    // k_v (minor circle direction) = 1 / r
+    // k_u (major circle direction) = cos(v) / (R + r cos(v))
+    // (Signs depend on chosen normal; we keep a consistent convention using this formula.)
+    const auto r = std::max(surface.radius_b, kEpsilon);
+    const auto R = surface.radius_a;
+    const auto denom = (R + r * std::cos(v));
+    result.k1 = 1.0 / r;
+    result.k2 = std::abs(denom) > kEpsilon ? (std::cos(v) / denom) : 0.0;
     break;
   }
   case detail::SurfaceKind::Bezier: {
@@ -2050,8 +2380,169 @@ Result<SurfaceEvalResult> SurfaceService::eval(SurfaceId surface_id, Scalar u,
     result.k2 = 0.0;
     break;
   }
+  case detail::SurfaceKind::Revolved: {
+    if (!detail::has_curve(*state_, surface.profile_curve_id)) {
+      result.point = surface.origin;
+      result.du = {1.0, 0.0, 0.0};
+      result.dv = {0.0, 1.0, 0.0};
+      result.normal = {0.0, 0.0, 1.0};
+      result.k1 = 0.0;
+      result.k2 = 0.0;
+      break;
+    }
+    const auto dom = surface_domain(surface);
+    const auto cu = std::clamp(u, dom.u.min, dom.u.max);
+    const auto cv = std::clamp(v, dom.v.min, dom.v.max);
+    const auto k = normalize_or_default(surface.axis, Vec3{0.0, 0.0, 1.0});
+    const auto O = surface.origin;
+    CurveService curves{state_};
+    const auto &gen_rec = state_->curves.at(surface.profile_curve_id.value);
+    const auto gen_dom = curve_domain(gen_rec);
+    const auto tv = gen_dom.min + cv * (gen_dom.max - gen_dom.min);
+    const auto base_ev = curves.eval(surface.profile_curve_id, tv, 1);
+    if (base_ev.status != StatusCode::Ok || !base_ev.value.has_value()) {
+      result.point = surface.origin;
+      result.du = {1.0, 0.0, 0.0};
+      result.dv = {0.0, 1.0, 0.0};
+      result.normal = {0.0, 0.0, 1.0};
+      result.k1 = 0.0;
+      result.k2 = 0.0;
+      break;
+    }
+    const auto p = base_ev.value->point;
+    const auto r = detail::subtract(p, O);
+    const Vec3 rv{r.x, r.y, r.z};
+    const auto r_rot = rotate_vec_around_axis(k, rv, cu);
+    result.point = detail::add_point_vec(O, {r_rot.x, r_rot.y, r_rot.z});
+
+    const auto step_u = std::max((dom.u.max - dom.u.min) * 1e-5, 1e-7);
+    const auto step_v = std::max((dom.v.max - dom.v.min) * 1e-5, 1e-7);
+    const auto eval_pt = [&](Scalar uu, Scalar vv) -> Point3 {
+      const auto cuu = std::clamp(uu, dom.u.min, dom.u.max);
+      const auto cvv = std::clamp(vv, dom.v.min, dom.v.max);
+      const auto tvv = gen_dom.min + cvv * (gen_dom.max - gen_dom.min);
+      const auto ev = curves.eval(surface.profile_curve_id, tvv, 1);
+      if (ev.status != StatusCode::Ok || !ev.value.has_value()) {
+        return O;
+      }
+      const auto pp = ev.value->point;
+      const auto rr = detail::subtract(pp, O);
+      const Vec3 rvv{rr.x, rr.y, rr.z};
+      const auto rr_rot = rotate_vec_around_axis(k, rvv, cuu);
+      return detail::add_point_vec(O, {rr_rot.x, rr_rot.y, rr_rot.z});
+    };
+    const auto u0 = std::clamp(cu - step_u, dom.u.min, dom.u.max);
+    const auto u1 = std::clamp(cu + step_u, dom.u.min, dom.u.max);
+    const auto v0 = std::clamp(cv - step_v, dom.v.min, dom.v.max);
+    const auto v1 = std::clamp(cv + step_v, dom.v.min, dom.v.max);
+    result.du = normalize_or_default(detail::subtract(eval_pt(u1, cv), eval_pt(u0, cv)),
+                                     Vec3{1.0, 0.0, 0.0});
+    result.dv = normalize_or_default(detail::subtract(eval_pt(cu, v1), eval_pt(cu, v0)),
+                                     Vec3{0.0, 1.0, 0.0});
+    result.normal = normalize_or_default(detail::cross(result.du, result.dv),
+                                         Vec3{0.0, 0.0, 1.0});
+    result.k1 = 0.0;
+    result.k2 = 0.0;
+    break;
+  }
+  case detail::SurfaceKind::Swept: {
+    if (!detail::has_curve(*state_, surface.profile_curve_id)) {
+      result.point = surface.origin;
+      result.du = {1.0, 0.0, 0.0};
+      result.dv = {0.0, 1.0, 0.0};
+      result.normal = {0.0, 0.0, 1.0};
+      result.k1 = 0.0;
+      result.k2 = 0.0;
+      break;
+    }
+    const auto dom = surface_domain(surface);
+    const auto cu = std::clamp(u, dom.u.min, dom.u.max);
+    const auto cv = std::clamp(v, dom.v.min, dom.v.max);
+    const auto dir = normalize_or_default(surface.axis, Vec3{0.0, 0.0, 1.0});
+    const auto L = surface.sweep_length;
+    CurveService curves{state_};
+    const auto &prof_rec = state_->curves.at(surface.profile_curve_id.value);
+    const auto prof_dom = curve_domain(prof_rec);
+    const auto tv = prof_dom.min + cv * (prof_dom.max - prof_dom.min);
+    const auto base_ev = curves.eval(surface.profile_curve_id, tv, 1);
+    if (base_ev.status != StatusCode::Ok || !base_ev.value.has_value()) {
+      result.point = surface.origin;
+      result.du = detail::scale(dir, L);
+      result.dv = {0.0, 1.0, 0.0};
+      result.normal = {0.0, 0.0, 1.0};
+      result.k1 = 0.0;
+      result.k2 = 0.0;
+      break;
+    }
+    result.point = detail::add_point_vec(base_ev.value->point, detail::scale(dir, cu * L));
+    result.du = detail::scale(dir, L);
+    result.dv = detail::scale(base_ev.value->tangent, (prof_dom.max - prof_dom.min));
+    result.normal = normalize_or_default(detail::cross(result.du, result.dv),
+                                         Vec3{0.0, 0.0, 1.0});
+    result.k1 = 0.0;
+    result.k2 = 0.0;
+    break;
+  }
+  case detail::SurfaceKind::Trimmed: {
+    if (!detail::has_surface(*state_, surface.base_surface_id)) {
+      result.point = surface.origin;
+      result.du = {1.0, 0.0, 0.0};
+      result.dv = {0.0, 1.0, 0.0};
+      result.normal = {0.0, 0.0, 1.0};
+      result.k1 = 0.0;
+      result.k2 = 0.0;
+      break;
+    }
+    SurfaceService base{state_};
+    const auto dom = surface_domain(surface);
+    const auto cu = std::clamp(u, dom.u.min, dom.u.max);
+    const auto cv = std::clamp(v, dom.v.min, dom.v.max);
+    const auto ev = base.eval(surface.base_surface_id, cu, cv, deriv_order);
+    if (ev.status != StatusCode::Ok || !ev.value.has_value()) {
+      result.point = surface.origin;
+      result.du = {1.0, 0.0, 0.0};
+      result.dv = {0.0, 1.0, 0.0};
+      result.normal = {0.0, 0.0, 1.0};
+      result.k1 = 0.0;
+      result.k2 = 0.0;
+      break;
+    }
+    result = *ev.value;
+    break;
+  }
+  case detail::SurfaceKind::Offset: {
+    if (!detail::has_surface(*state_, surface.base_surface_id)) {
+      result.point = surface.origin;
+      result.du = {1.0, 0.0, 0.0};
+      result.dv = {0.0, 1.0, 0.0};
+      result.normal = {0.0, 0.0, 1.0};
+      result.k1 = 0.0;
+      result.k2 = 0.0;
+      break;
+    }
+    SurfaceService base{state_};
+    const auto base_dom = base.domain(surface.base_surface_id);
+    Range2D dom = base_dom.value.has_value() ? *base_dom.value : Range2D{Range1D{0.0, 1.0}, Range1D{0.0, 1.0}};
+    const auto cu = std::clamp(u, dom.u.min, dom.u.max);
+    const auto cv = std::clamp(v, dom.v.min, dom.v.max);
+    const auto ev = base.eval(surface.base_surface_id, cu, cv, deriv_order);
+    if (ev.status != StatusCode::Ok || !ev.value.has_value()) {
+      result.point = surface.origin;
+      result.du = {1.0, 0.0, 0.0};
+      result.dv = {0.0, 1.0, 0.0};
+      result.normal = {0.0, 0.0, 1.0};
+      result.k1 = 0.0;
+      result.k2 = 0.0;
+      break;
+    }
+    result = *ev.value;
+    result.point = detail::add_point_vec(result.point, detail::scale(result.normal, surface.offset_distance));
+    break;
+  }
   default:
     result.point = surface.origin;
+    result.du = {1.0, 0.0, 0.0};
+    result.dv = {0.0, 1.0, 0.0};
     result.normal = {0.0, 0.0, 1.0};
     result.k1 = 0.0;
     result.k2 = 0.0;
@@ -2276,9 +2767,175 @@ SurfaceService::closest_uv(SurfaceId surface_id, const Point3 &point) const {
   case detail::SurfaceKind::Nurbs:
   {
     const auto domain = surface_domain(surface);
-    const auto uv = approximate_surface_uv(surface, point);
+    auto uv = approximate_surface_uv(surface, point);
+    // Damped Gauss-Newton (LM-style) refinement using local tangents (du/dv).
+    auto best_cost = std::numeric_limits<Scalar>::max();
+    {
+      const auto ev0 = eval(surface_id, std::clamp(uv.first, domain.u.min, domain.u.max),
+                            std::clamp(uv.second, domain.v.min, domain.v.max), 0);
+      if (ev0.status == StatusCode::Ok && ev0.value.has_value()) {
+        best_cost = squared_distance(ev0.value->point, point);
+      }
+    }
+    Scalar lambda = 1e-6;
+    for (int iter = 0; iter < 15; ++iter) {
+      const auto cu = std::clamp(uv.first, domain.u.min, domain.u.max);
+      const auto cv = std::clamp(uv.second, domain.v.min, domain.v.max);
+      const auto ev = eval(surface_id, cu, cv, 1);
+      if (ev.status != StatusCode::Ok || !ev.value.has_value()) {
+        break;
+      }
+      const auto &r = *ev.value;
+      const Vec3 err = detail::subtract(r.point, point);
+      const auto j00 = detail::dot(r.du, r.du);
+      const auto j01 = detail::dot(r.du, r.dv);
+      const auto j11 = detail::dot(r.dv, r.dv);
+      const auto g0 = detail::dot(r.du, err);
+      const auto g1 = detail::dot(r.dv, err);
+      // Try a few lambda values to ensure descent.
+      bool accepted = false;
+      for (int attempt = 0; attempt < 6; ++attempt) {
+        Scalar du_step = 0.0;
+        Scalar dv_step = 0.0;
+        const auto scale = std::max<Scalar>(1.0, j00 + j11);
+        const auto lam = lambda * scale;
+        if (!solve_2x2(j00 + lam, j01, j01, j11 + lam, -g0, -g1, du_step, dv_step)) {
+          lambda *= 10.0;
+          continue;
+        }
+        const auto next_u = std::clamp(cu + du_step, domain.u.min, domain.u.max);
+        const auto next_v = std::clamp(cv + dv_step, domain.v.min, domain.v.max);
+        const auto ev_next = eval(surface_id, next_u, next_v, 0);
+        if (ev_next.status != StatusCode::Ok || !ev_next.value.has_value()) {
+          lambda *= 10.0;
+          continue;
+        }
+        const auto next_cost = squared_distance(ev_next.value->point, point);
+        if (next_cost <= best_cost) {
+          best_cost = next_cost;
+          uv.first = next_u;
+          uv.second = next_v;
+          lambda = std::max<Scalar>(1e-12, lambda * 0.3);
+          accepted = true;
+          if (std::abs(du_step) + std::abs(dv_step) < 1e-10) {
+            iter = 9999;
+          }
+          break;
+        }
+        lambda *= 10.0;
+      }
+      if (!accepted) {
+        break;
+      }
+    }
     return ok_result(std::make_pair(std::clamp(uv.first, domain.u.min, domain.u.max),
                                     std::clamp(uv.second, domain.v.min, domain.v.max)),
+                     state_->create_diagnostic("已求出曲面最近参数"));
+  }
+  case detail::SurfaceKind::Trimmed: {
+    if (!detail::has_surface(*state_, surface.base_surface_id)) {
+      return detail::failed_result<std::pair<Scalar, Scalar>>(
+          *state_, StatusCode::InvalidInput, diag_codes::kGeoParameterSolveFailure,
+          "曲面参数反求失败：基曲面不存在", "曲面参数反求失败");
+    }
+    SurfaceService base{state_};
+    const auto base_uv = base.closest_uv(surface.base_surface_id, point);
+    if (base_uv.status != StatusCode::Ok || !base_uv.value.has_value()) {
+      return error_result<std::pair<Scalar, Scalar>>(base_uv.status, base_uv.diagnostic_id);
+    }
+    const auto dom = surface_domain(surface);
+    return ok_result(std::make_pair(std::clamp(base_uv.value->first, dom.u.min, dom.u.max),
+                                    std::clamp(base_uv.value->second, dom.v.min, dom.v.max)),
+                     state_->create_diagnostic("已求出曲面最近参数"));
+  }
+  case detail::SurfaceKind::Revolved:
+  case detail::SurfaceKind::Swept:
+  case detail::SurfaceKind::Offset: {
+    const auto dom = domain(surface_id);
+    if (dom.status != StatusCode::Ok || !dom.value.has_value()) {
+      return detail::failed_result<std::pair<Scalar, Scalar>>(
+          *state_, StatusCode::OperationFailed, diag_codes::kGeoParameterSolveFailure,
+          "曲面参数反求失败：曲面定义域不可用", "曲面参数反求失败");
+    }
+    const auto d = *dom.value;
+    const int samples = 28;
+    Scalar best_u = d.u.min;
+    Scalar best_v = d.v.min;
+    Scalar best_dist = std::numeric_limits<Scalar>::max();
+    for (int ui = 0; ui <= samples; ++ui) {
+      const auto au = static_cast<Scalar>(ui) / static_cast<Scalar>(samples);
+      const auto uu = d.u.min + (d.u.max - d.u.min) * au;
+      for (int vi = 0; vi <= samples; ++vi) {
+        const auto av = static_cast<Scalar>(vi) / static_cast<Scalar>(samples);
+        const auto vv = d.v.min + (d.v.max - d.v.min) * av;
+        const auto ev = eval(surface_id, uu, vv, 0);
+        if (ev.status != StatusCode::Ok || !ev.value.has_value()) {
+          return detail::failed_result<std::pair<Scalar, Scalar>>(
+              *state_, StatusCode::OperationFailed, diag_codes::kGeoParameterSolveFailure,
+              "曲面参数反求失败：曲面求值不可用", "曲面参数反求失败");
+        }
+        const auto dist = detail::norm(detail::subtract(point, ev.value->point));
+        if (dist < best_dist) {
+          best_dist = dist;
+          best_u = uu;
+          best_v = vv;
+        }
+      }
+    }
+    // Damped Gauss-Newton refinement (best-effort).
+    Scalar best_cost = best_dist * best_dist;
+    Scalar lambda = 1e-6;
+    for (int iter = 0; iter < 15; ++iter) {
+      const auto cu = std::clamp(best_u, d.u.min, d.u.max);
+      const auto cv = std::clamp(best_v, d.v.min, d.v.max);
+      const auto ev = eval(surface_id, cu, cv, 1);
+      if (ev.status != StatusCode::Ok || !ev.value.has_value()) {
+        break;
+      }
+      const auto &r = *ev.value;
+      const Vec3 err = detail::subtract(r.point, point);
+      const auto j00 = detail::dot(r.du, r.du);
+      const auto j01 = detail::dot(r.du, r.dv);
+      const auto j11 = detail::dot(r.dv, r.dv);
+      const auto g0 = detail::dot(r.du, err);
+      const auto g1 = detail::dot(r.dv, err);
+      bool accepted = false;
+      for (int attempt = 0; attempt < 6; ++attempt) {
+        Scalar du_step = 0.0;
+        Scalar dv_step = 0.0;
+        const auto scale = std::max<Scalar>(1.0, j00 + j11);
+        const auto lam = lambda * scale;
+        if (!solve_2x2(j00 + lam, j01, j01, j11 + lam, -g0, -g1, du_step, dv_step)) {
+          lambda *= 10.0;
+          continue;
+        }
+        const auto next_u = std::clamp(cu + du_step, d.u.min, d.u.max);
+        const auto next_v = std::clamp(cv + dv_step, d.v.min, d.v.max);
+        const auto ev_next = eval(surface_id, next_u, next_v, 0);
+        if (ev_next.status != StatusCode::Ok || !ev_next.value.has_value()) {
+          lambda *= 10.0;
+          continue;
+        }
+        const auto next_cost = squared_distance(ev_next.value->point, point);
+        if (next_cost <= best_cost) {
+          best_cost = next_cost;
+          best_u = next_u;
+          best_v = next_v;
+          lambda = std::max<Scalar>(1e-12, lambda * 0.3);
+          accepted = true;
+          if (std::abs(du_step) + std::abs(dv_step) < 1e-10) {
+            iter = 9999;
+          }
+          break;
+        }
+        lambda *= 10.0;
+      }
+      if (!accepted) {
+        break;
+      }
+    }
+    return ok_result(std::make_pair(std::clamp(best_u, d.u.min, d.u.max),
+                                    std::clamp(best_v, d.v.min, d.v.max)),
                      state_->create_diagnostic("已求出曲面最近参数"));
   }
   default:
@@ -2403,6 +3060,276 @@ Result<SurfaceId> GeometryTransformService::transform_surface(
   const auto id = SurfaceId{state_->allocate_id()};
   state_->surfaces.emplace(id.value, std::move(record));
   return ok_result(id, state_->create_diagnostic("已完成曲面变换"));
+}
+
+GeometryIntersectionService::GeometryIntersectionService(
+    std::shared_ptr<detail::KernelState> state)
+    : state_(std::move(state)) {}
+
+namespace {
+
+Result<std::vector<CurveSurfaceIntersection>>
+unsupported_intersection(detail::KernelState &state,
+                         std::string_view detail_message) {
+  return detail::failed_result<std::vector<CurveSurfaceIntersection>>(
+      state, StatusCode::NotImplemented, diag_codes::kCoreOperationUnsupported,
+      std::string(detail_message), "曲线-曲面求交失败");
+}
+
+} // namespace
+
+Result<std::vector<CurveSurfaceIntersection>>
+GeometryIntersectionService::intersect_curve_surface(CurveId curve_id,
+                                                     SurfaceId surface_id) const {
+  if (!detail::has_curve(*state_, curve_id) || !detail::has_surface(*state_, surface_id)) {
+    return detail::invalid_input_result<std::vector<CurveSurfaceIntersection>>(
+        *state_, diag_codes::kCoreInvalidHandle,
+        "曲线-曲面求交失败：曲线或曲面不存在", "曲线-曲面求交失败");
+  }
+
+  const auto &curve = state_->curves.at(curve_id.value);
+  const auto &surface = state_->surfaces.at(surface_id.value);
+
+  // Delegate wrappers (minimal industrial semantics).
+  if (surface.kind == detail::SurfaceKind::Trimmed) {
+    if (!detail::has_surface(*state_, surface.base_surface_id)) {
+      return detail::failed_result<std::vector<CurveSurfaceIntersection>>(
+          *state_, StatusCode::OperationFailed, diag_codes::kGeoIntersectionFailure,
+          "曲线-曲面求交失败：Trimmed 基曲面不存在", "曲线-曲面求交失败");
+    }
+    GeometryIntersectionService base{state_};
+    auto hits = base.intersect_curve_surface(curve_id, surface.base_surface_id);
+    if (hits.status != StatusCode::Ok || !hits.value.has_value()) {
+      return error_result<std::vector<CurveSurfaceIntersection>>(hits.status, hits.diagnostic_id);
+    }
+    std::vector<CurveSurfaceIntersection> filtered;
+    filtered.reserve(hits.value->size());
+    for (const auto &h : *hits.value) {
+      if (h.surface_u >= surface.trim_u_min - 1e-12 &&
+          h.surface_u <= surface.trim_u_max + 1e-12 &&
+          h.surface_v >= surface.trim_v_min - 1e-12 &&
+          h.surface_v <= surface.trim_v_max + 1e-12) {
+        filtered.push_back(h);
+      }
+    }
+    return ok_result(std::move(filtered),
+                     state_->create_diagnostic("曲线-修剪曲面求交完成"));
+  }
+  if (surface.kind == detail::SurfaceKind::Offset ||
+      surface.kind == detail::SurfaceKind::Revolved ||
+      surface.kind == detail::SurfaceKind::Swept ||
+      surface.kind == detail::SurfaceKind::Bezier ||
+      surface.kind == detail::SurfaceKind::BSpline ||
+      surface.kind == detail::SurfaceKind::Nurbs ||
+      surface.kind == detail::SurfaceKind::Cone ||
+      surface.kind == detail::SurfaceKind::Torus) {
+    return unsupported_intersection(*state_,
+                                    "曲线-曲面求交暂不支持该曲面类型（后续将接入通用数值/裁剪链路）");
+  }
+
+  const auto frame = make_frame_from_axis(surface.normal);
+
+  auto add_hit = [](std::vector<CurveSurfaceIntersection> &out, const Point3 &p,
+                    Scalar t, Scalar u, Scalar v) {
+    CurveSurfaceIntersection h;
+    h.point = p;
+    h.curve_t = t;
+    h.surface_u = u;
+    h.surface_v = v;
+    out.push_back(h);
+  };
+
+  std::vector<CurveSurfaceIntersection> out;
+
+  // Helpers to map 3D point to (u,v) for analytic surfaces.
+  auto uv_on_plane = [&](const Point3 &p) -> std::pair<Scalar, Scalar> {
+    const auto local = to_local(detail::subtract(p, surface.origin), frame);
+    return {local[0], local[1]};
+  };
+  auto uv_on_sphere = [&](const Point3 &p) -> std::pair<Scalar, Scalar> {
+    const auto rel = detail::subtract(p, surface.origin);
+    const auto radius = std::max(surface.radius_a, 1e-12);
+    const auto u = normalize_angle_0_2pi(std::atan2(rel.y, rel.x));
+    const auto cos_v = std::clamp(rel.z / radius, -1.0, 1.0);
+    const auto v = std::acos(cos_v);
+    return {u, v};
+  };
+  auto uv_on_cylinder = [&](const Point3 &p) -> std::pair<Scalar, Scalar> {
+    const auto local = to_local(detail::subtract(p, surface.origin), frame);
+    const auto u = normalize_angle_0_2pi(std::atan2(local[1], local[0]));
+    return {u, local[2]};
+  };
+
+  const auto surface_dom = surface_domain(surface);
+  auto in_surface_domain = [&](Scalar u, Scalar v) {
+    return u >= surface_dom.u.min - 1e-9 && u <= surface_dom.u.max + 1e-9 &&
+           v >= surface_dom.v.min - 1e-9 && v <= surface_dom.v.max + 1e-9;
+  };
+
+  // Curve: Line / Segment analytic intersections.
+  if (curve.kind == detail::CurveKind::Line || curve.kind == detail::CurveKind::LineSegment) {
+    Point3 o = curve.origin;
+    Vec3 d = curve.direction;
+    if (curve.kind == detail::CurveKind::LineSegment) {
+      if (curve.poles.size() < 2) {
+        return detail::failed_result<std::vector<CurveSurfaceIntersection>>(
+            *state_, StatusCode::OperationFailed, diag_codes::kGeoIntersectionFailure,
+            "曲线-曲面求交失败：线段数据缺失", "曲线-曲面求交失败");
+      }
+      const auto a = curve.poles.front();
+      const auto b = curve.poles.back();
+      o = a;
+      d = detail::subtract(b, a);
+    }
+    const auto dd = detail::dot(d, d);
+    if (!(dd > kEpsilon)) {
+      return detail::failed_result<std::vector<CurveSurfaceIntersection>>(
+          *state_, StatusCode::OperationFailed, diag_codes::kGeoDegenerateGeometry,
+          "曲线-曲面求交失败：直线方向退化", "曲线-曲面求交失败");
+    }
+
+    const auto t_min = (curve.kind == detail::CurveKind::LineSegment) ? 0.0 : -std::numeric_limits<Scalar>::infinity();
+    const auto t_max = (curve.kind == detail::CurveKind::LineSegment) ? 1.0 :  std::numeric_limits<Scalar>::infinity();
+
+    if (surface.kind == detail::SurfaceKind::Plane) {
+      const auto n = surface.normal;
+      const auto denom = detail::dot(n, d);
+      const auto num = detail::dot(n, detail::subtract(surface.origin, o));
+      if (std::abs(denom) <= 1e-12) {
+        // Parallel or coplanar: treat as no hit for minimal API.
+        return ok_result(out, state_->create_diagnostic("曲线-平面求交完成（无交或共面）"));
+      }
+      const auto t = num / denom;
+      if (t < t_min - 1e-12 || t > t_max + 1e-12 || !finite_scalar(t)) {
+        return ok_result(out, state_->create_diagnostic("曲线-平面求交完成（无交）"));
+      }
+      const auto p = detail::add_point_vec(o, detail::scale(d, t));
+      const auto [u, v] = uv_on_plane(p);
+      if (in_surface_domain(u, v)) {
+        add_hit(out, p, t, u, v);
+      }
+      return ok_result(out, state_->create_diagnostic("曲线-平面求交完成"));
+    }
+
+    if (surface.kind == detail::SurfaceKind::Sphere) {
+      const auto c = surface.origin;
+      const auto r = surface.radius_a;
+      if (!(r > kEpsilon) || !std::isfinite(r)) {
+        return detail::failed_result<std::vector<CurveSurfaceIntersection>>(
+            *state_, StatusCode::OperationFailed, diag_codes::kGeoDegenerateGeometry,
+            "曲线-曲面求交失败：球半径退化", "曲线-曲面求交失败");
+      }
+      const Vec3 oc = detail::subtract(o, c);
+      const auto a = dd;
+      const auto b = 2.0 * detail::dot(oc, d);
+      const auto c0 = detail::dot(oc, oc) - r * r;
+      const auto disc = b * b - 4.0 * a * c0;
+      if (disc < 0.0) {
+        return ok_result(out, state_->create_diagnostic("曲线-球面求交完成（无交）"));
+      }
+      const auto sqrt_disc = std::sqrt(std::max<Scalar>(0.0, disc));
+      const auto inv = 1.0 / (2.0 * a);
+      const auto t0 = (-b - sqrt_disc) * inv;
+      const auto t1 = (-b + sqrt_disc) * inv;
+      for (auto t : {t0, t1}) {
+        if (!finite_scalar(t) || t < t_min - 1e-12 || t > t_max + 1e-12) continue;
+        const auto p = detail::add_point_vec(o, detail::scale(d, t));
+        const auto [u, v] = uv_on_sphere(p);
+        if (in_surface_domain(u, v)) {
+          add_hit(out, p, t, u, v);
+        }
+      }
+      return ok_result(out, state_->create_diagnostic("曲线-球面求交完成"));
+    }
+
+    if (surface.kind == detail::SurfaceKind::Cylinder) {
+      if (!(surface.radius_a > kEpsilon) || !std::isfinite(surface.radius_a)) {
+        return detail::failed_result<std::vector<CurveSurfaceIntersection>>(
+            *state_, StatusCode::OperationFailed, diag_codes::kGeoDegenerateGeometry,
+            "曲线-曲面求交失败：圆柱半径退化", "曲线-曲面求交失败");
+      }
+      // Work in cylinder local frame: x^2 + y^2 = r^2.
+      const auto oL = to_local(detail::subtract(o, surface.origin), frame);
+      const auto dL = to_local(d, frame);
+      const auto a = dL[0] * dL[0] + dL[1] * dL[1];
+      const auto b = 2.0 * (oL[0] * dL[0] + oL[1] * dL[1]);
+      const auto c0 = oL[0] * oL[0] + oL[1] * oL[1] - surface.radius_a * surface.radius_a;
+      if (a <= 1e-18) {
+        // Parallel to axis: either no hit or infinite; treat as no hit.
+        return ok_result(out, state_->create_diagnostic("曲线-圆柱面求交完成（无交或共线）"));
+      }
+      const auto disc = b * b - 4.0 * a * c0;
+      if (disc < 0.0) {
+        return ok_result(out, state_->create_diagnostic("曲线-圆柱面求交完成（无交）"));
+      }
+      const auto sqrt_disc = std::sqrt(std::max<Scalar>(0.0, disc));
+      const auto inv = 1.0 / (2.0 * a);
+      const auto t0 = (-b - sqrt_disc) * inv;
+      const auto t1 = (-b + sqrt_disc) * inv;
+      for (auto t : {t0, t1}) {
+        if (!finite_scalar(t) || t < t_min - 1e-12 || t > t_max + 1e-12) continue;
+        const auto p = detail::add_point_vec(o, detail::scale(d, t));
+        const auto [u, v] = uv_on_cylinder(p);
+        if (in_surface_domain(u, v)) {
+          add_hit(out, p, t, u, v);
+        }
+      }
+      return ok_result(out, state_->create_diagnostic("曲线-圆柱面求交完成"));
+    }
+  }
+
+  // Curve: Circle with Plane intersection.
+  if (curve.kind == detail::CurveKind::Circle && surface.kind == detail::SurfaceKind::Plane) {
+    // Circle paramization: p(t)=c + r*(cos t * U + sin t * V)
+    const auto c = curve.origin;
+    const auto U = curve.axis_u;
+    const auto V = curve.axis_v;
+    const auto r = curve.radius;
+    if (!(r > kEpsilon) || !std::isfinite(r)) {
+      return detail::failed_result<std::vector<CurveSurfaceIntersection>>(
+          *state_, StatusCode::OperationFailed, diag_codes::kGeoDegenerateGeometry,
+          "曲线-曲面求交失败：圆半径退化", "曲线-曲面求交失败");
+    }
+    const auto n = surface.normal;
+    const auto w = detail::subtract(c, surface.origin);
+    const auto A = r * detail::dot(n, U);
+    const auto B = r * detail::dot(n, V);
+    const auto C = detail::dot(n, w);
+    const auto R = std::hypot(A, B);
+    if (R <= 1e-14) {
+      // Circle plane parallel to surface plane normal -> either coplanar or no hit.
+      if (std::abs(C) <= 1e-10) {
+        return unsupported_intersection(*state_, "曲线-平面求交：圆与平面共面（交线为整圆，暂不返回曲线交集）");
+      }
+      return ok_result(out, state_->create_diagnostic("曲线-平面求交完成（无交）"));
+    }
+    // A cos t + B sin t + C = 0 -> R cos(t - phi) = -C
+    const auto phi = std::atan2(B, A);
+    const auto rhs = -C / R;
+    if (rhs < -1.0 - 1e-12 || rhs > 1.0 + 1e-12) {
+      return ok_result(out, state_->create_diagnostic("曲线-平面求交完成（无交）"));
+    }
+    const auto clamped = std::clamp(rhs, -1.0, 1.0);
+    const auto alpha = std::acos(clamped);
+    const auto t0 = normalize_angle_0_2pi(phi + alpha);
+    const auto t1 = normalize_angle_0_2pi(phi - alpha);
+    const std::array<Scalar, 2> ts{{t0, t1}};
+    auto add_vec = [](const Vec3& a, const Vec3& b) -> Vec3 {
+      return Vec3{a.x + b.x, a.y + b.y, a.z + b.z};
+    };
+    for (const auto t : ts) {
+      const auto p = detail::add_point_vec(c,
+                                           add_vec(detail::scale(U, r * std::cos(t)),
+                                                   detail::scale(V, r * std::sin(t))));
+      const auto [u, v] = uv_on_plane(p);
+      if (in_surface_domain(u, v)) {
+        add_hit(out, p, t, u, v);
+      }
+    }
+    return ok_result(out, state_->create_diagnostic("曲线-平面求交完成"));
+  }
+
+  return unsupported_intersection(*state_, "曲线-曲面求交暂不支持该曲线类型或曲面类型组合");
 }
 
 } // namespace axiom

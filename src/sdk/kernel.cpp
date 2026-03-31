@@ -13,6 +13,7 @@ Kernel::Kernel(const KernelConfig& config)
       pcurve_service_(state_),
       surface_service_(state_),
       geometry_transform_service_(state_),
+      geometry_intersection_service_(state_),
       linear_algebra_service_(state_),
       predicate_service_(state_),
       tolerance_service_(state_),
@@ -39,6 +40,7 @@ static std::vector<std::string> fixed_service_names() {
       "geo.curves",
       "geo.surfaces",
       "geo.transform",
+      "geo.intersection",
       "topo.topology",
       "rep.representation",
       "rep.conversion",
@@ -180,6 +182,8 @@ Result<void> Kernel::clear_intersections_store() {
 
 Result<void> Kernel::clear_mesh_store() {
   state_->meshes.clear();
+  state_->tessellation_cache.clear();
+  state_->face_tessellation_cache.clear();
   return ok_void(state_->create_diagnostic("已清空网格存储"));
 }
 
@@ -220,6 +224,8 @@ Result<bool> Kernel::has_edge_id(EdgeId id) const {
 
 Result<void> Kernel::reset_runtime_stores() {
   state_->meshes.clear();
+  state_->tessellation_cache.clear();
+  state_->face_tessellation_cache.clear();
   state_->intersections.clear();
   state_->curve_eval_cache.clear();
   state_->surface_eval_cache.clear();
@@ -363,6 +369,7 @@ CurveService& Kernel::curve_service() { return curve_service_; }
 PCurveService& Kernel::pcurve_service() { return pcurve_service_; }
 SurfaceService& Kernel::surface_service() { return surface_service_; }
 GeometryTransformService& Kernel::geometry_transform() { return geometry_transform_service_; }
+GeometryIntersectionService& Kernel::geometry_intersection() { return geometry_intersection_service_; }
 LinearAlgebraService& Kernel::linear_algebra() { return linear_algebra_service_; }
 PredicateService& Kernel::predicates() { return predicate_service_; }
 ToleranceService& Kernel::tolerance() { return tolerance_service_; }

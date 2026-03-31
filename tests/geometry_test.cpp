@@ -178,6 +178,11 @@ int main() {
         std::cerr << "unexpected sphere eval result\n";
         return 1;
     }
+    // Curvature sanity for sphere: k1 == k2 == 1/r.
+    if (!approx(surf_eval.value->k1, 1.0 / 5.0, 1e-8) || !approx(surf_eval.value->k2, 1.0 / 5.0, 1e-8)) {
+        std::cerr << "unexpected sphere curvature\n";
+        return 1;
+    }
     auto sphere_uv_center = kernel.surface_service().closest_uv(*sphere.value, {0.0, 0.0, 0.0});
     if (sphere_uv_center.status != axiom::StatusCode::Ok || !sphere_uv_center.value.has_value() ||
         !approx(sphere_uv_center.value->first, 0.0) || !approx(sphere_uv_center.value->second, 0.0)) {
@@ -425,6 +430,14 @@ int main() {
             std::cerr << "unexpected composite chain eval mapping\n";
             return 1;
         }
+
+        // Regression: closest_parameter on composite chain should land on the correct segment.
+        auto t = kernel.curve_service().closest_parameter(*chain.value, {1.0, 0.6, 0.2});
+        if (t.status != axiom::StatusCode::Ok || !t.value.has_value() ||
+            *t.value < 1.0 || *t.value > 2.0) {
+            std::cerr << "unexpected composite chain closest_parameter domain\n";
+            return 1;
+        }
     }
 
     // ---- Missing surface type required by docs: Bezier surface (minimal semantics) ----
@@ -453,6 +466,52 @@ int main() {
         return 1;
     }
 
+    // Regression: closest_parameter should converge back near the true t on a Bezier curve.
+    {
+        const std::array<axiom::Point3, 3> poles{{{0.0, 0.0, 0.0}, {0.5, 1.0, 0.0}, {1.0, 0.0, 0.0}}};
+        auto bez = kernel.curves().make_bezier(poles);
+        if (bez.status != axiom::StatusCode::Ok || !bez.value.has_value()) {
+            std::cerr << "failed to create bezier curve for closest_parameter regression\n";
+            return 1;
+        }
+        const double t0 = 0.8;
+        auto p0 = kernel.curve_service().eval(*bez.value, t0, 1);
+        if (p0.status != axiom::StatusCode::Ok || !p0.value.has_value()) {
+            std::cerr << "failed to eval bezier curve\n";
+            return 1;
+        }
+        // Perturb off the curve.
+        const axiom::Point3 q{p0.value->point.x + 0.03, p0.value->point.y - 0.02, 0.2};
+        auto t = kernel.curve_service().closest_parameter(*bez.value, q);
+        if (t.status != axiom::StatusCode::Ok || !t.value.has_value() ||
+            std::abs(*t.value - t0) > 0.25) {
+            std::cerr << "unexpected bezier closest_parameter refinement\n";
+            return 1;
+        }
+    }
+
+    // Regression: Bezier curve second derivative should be stable and correct (quadratic).
+    {
+        const std::array<axiom::Point3, 3> poles{{{0.0, 0.0, 0.0}, {0.5, 1.0, 0.0}, {1.0, 0.0, 0.0}}};
+        auto bez = kernel.curves().make_bezier(poles);
+        if (bez.status != axiom::StatusCode::Ok || !bez.value.has_value()) {
+            std::cerr << "failed to create bezier curve for second derivative regression\n";
+            return 1;
+        }
+        auto ev = kernel.curve_service().eval(*bez.value, 0.3, 2);
+        if (ev.status != axiom::StatusCode::Ok || !ev.value.has_value() ||
+            ev.value->derivatives.size() < 2) {
+            std::cerr << "expected bezier curve to provide second derivative\n";
+            return 1;
+        }
+        // Quadratic Bezier: r'' = 2*(P2 - 2*P1 + P0) = (0, -4, 0) for these poles.
+        const auto d2 = ev.value->derivatives[1];
+        if (!approx(d2.x, 0.0, 1e-6) || !approx(d2.y, -4.0, 1e-6) || !approx(d2.z, 0.0, 1e-6)) {
+            std::cerr << "unexpected bezier second derivative\n";
+            return 1;
+        }
+    }
+
     axiom::NURBSCurveDesc nurbs_desc;
     nurbs_desc.poles = {{0.0, 0.0, 0.0}, {1.0, 2.0, 0.0}, {2.0, 0.0, 0.0}};
     nurbs_desc.weights = {1.0, 2.0, 1.0};
@@ -467,6 +526,35 @@ int main() {
         !approx(nurbs_eval.value->point.x, 1.0) || !approx(nurbs_eval.value->point.y, 1.333333333333, 1e-5)) {
         std::cerr << "unexpected nurbs eval result\n";
         return 1;
+    }
+
+    // Rational Bézier with unit weights matches polynomial Bézier: analytic second derivative.
+    {
+        const std::array<axiom::Point3, 3> poles{{{0.0, 0.0, 0.0}, {0.5, 1.0, 0.0}, {1.0, 0.0, 0.0}}};
+        auto bez_w = kernel.curves().make_bezier(poles);
+        axiom::NURBSCurveDesc nw;
+        nw.poles = {{0.0, 0.0, 0.0}, {0.5, 1.0, 0.0}, {1.0, 0.0, 0.0}};
+        nw.weights = {1.0, 1.0, 1.0};
+        auto rat_w = kernel.curves().make_nurbs(nw);
+        if (bez_w.status != axiom::StatusCode::Ok || rat_w.status != axiom::StatusCode::Ok ||
+            !bez_w.value.has_value() || !rat_w.value.has_value()) {
+            std::cerr << "failed to create curves for nurbs second-derivative regression\n";
+            return 1;
+        }
+        auto e_b = kernel.curve_service().eval(*bez_w.value, 0.37, 2);
+        auto e_r = kernel.curve_service().eval(*rat_w.value, 0.37, 2);
+        if (e_b.status != axiom::StatusCode::Ok || e_r.status != axiom::StatusCode::Ok ||
+            !e_b.value.has_value() || !e_r.value.has_value() || e_b.value->derivatives.size() < 2 ||
+            e_r.value->derivatives.size() < 2) {
+            std::cerr << "expected nurbs/bezier second derivatives\n";
+            return 1;
+        }
+        const auto& db = e_b.value->derivatives[1];
+        const auto& dr = e_r.value->derivatives[1];
+        if (!approx(db.x, dr.x, 1e-5) || !approx(db.y, dr.y, 1e-5) || !approx(db.z, dr.z, 1e-5)) {
+            std::cerr << "nurbs second derivative mismatch vs bezier\n";
+            return 1;
+        }
     }
 
     auto bspline_surface =
@@ -593,6 +681,11 @@ int main() {
         std::cerr << "unexpected tilted cylinder normal stability\n";
         return 1;
     }
+    // Curvature sanity for cylinder: k1 == 1/r, k2 == 0.
+    if (!approx(tilted_cylinder_eval.value->k1, 1.0 / 2.0, 1e-8) || !approx(tilted_cylinder_eval.value->k2, 0.0, 1e-12)) {
+        std::cerr << "unexpected cylinder curvature\n";
+        return 1;
+    }
     auto moved_line = kernel.geometry_transform().transform_curve(
         *line.value, kernel.linear_algebra().make_translation({1.0, 2.0, 3.0}));
     auto moved_sphere = kernel.geometry_transform().transform_surface(
@@ -610,6 +703,22 @@ int main() {
         !approx(moved_line_eval.value->point.z, 3.0) || !approx(moved_sphere_eval.value->point.z, 9.0)) {
         std::cerr << "unexpected transformed geometry behavior\n";
         return 1;
+    }
+
+    // Curvature sanity checks for analytic surfaces.
+    {
+        auto torus = kernel.surfaces().make_torus({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, 3.0, 1.0);
+        if (torus.status != axiom::StatusCode::Ok || !torus.value.has_value()) {
+            std::cerr << "failed to create torus\n";
+            return 1;
+        }
+        // At v=0: k_minor ~= 1/r, k_major ~= 1/(R+r)
+        auto te = kernel.surface_service().eval(*torus.value, 0.2, 0.0, 1);
+        if (te.status != axiom::StatusCode::Ok || !te.value.has_value() ||
+            !approx(te.value->k1, 1.0, 1e-6) || !approx(te.value->k2, 1.0 / 4.0, 1e-6)) {
+            std::cerr << "unexpected torus curvature\n";
+            return 1;
+        }
     }
 
     // Stage 2 regression: reject NaN/Inf inputs instead of silently propagating.
@@ -641,6 +750,158 @@ int main() {
     if (invalid_nurbs_s.status != axiom::StatusCode::InvalidInput) {
         std::cerr << "expected invalid input for invalid nurbs surface weights\n";
         return 1;
+    }
+
+    // ---- Stage 2: surfaces required by docs — revolved / swept / trimmed / offset ----
+    {
+        const double half_pi = std::acos(-1.0) * 0.5;
+        axiom::Axis3 axis {{0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}};
+        auto gen = kernel.curves().make_line_segment({1.0, 0.0, 0.0}, {2.0, 0.0, 0.0});
+        if (gen.status != axiom::StatusCode::Ok || !gen.value.has_value()) {
+            std::cerr << "failed to create generatrix\n";
+            return 1;
+        }
+        auto rev = kernel.surfaces().make_revolved(*gen.value, axis, half_pi);
+        if (rev.status != axiom::StatusCode::Ok || !rev.value.has_value()) {
+            std::cerr << "failed to create revolved surface\n";
+            return 1;
+        }
+        auto rev_eval = kernel.surface_service().eval(*rev.value, half_pi, 0.0, 1);
+        if (rev_eval.status != axiom::StatusCode::Ok || !rev_eval.value.has_value() ||
+            !approx(rev_eval.value->point.x, 0.0) || !approx(rev_eval.value->point.y, 1.0)) {
+            std::cerr << "unexpected revolved surface eval\n";
+            return 1;
+        }
+
+        auto prof = kernel.curves().make_line_segment({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
+        if (prof.status != axiom::StatusCode::Ok || !prof.value.has_value()) {
+            std::cerr << "failed to create profile\n";
+            return 1;
+        }
+        auto sw = kernel.surfaces().make_swept_linear(*prof.value, {0.0, 0.0, 1.0}, 2.0);
+        if (sw.status != axiom::StatusCode::Ok || !sw.value.has_value()) {
+            std::cerr << "failed to create swept surface\n";
+            return 1;
+        }
+        auto sw_ev = kernel.surface_service().eval(*sw.value, 1.0, 0.0, 1);
+        if (sw_ev.status != axiom::StatusCode::Ok || !sw_ev.value.has_value() ||
+            !approx(sw_ev.value->point.z, 2.0)) {
+            std::cerr << "unexpected swept linear eval\n";
+            return 1;
+        }
+
+        auto sph = kernel.surfaces().make_sphere({0.0, 0.0, 0.0}, 2.0);
+        if (sph.status != axiom::StatusCode::Ok || !sph.value.has_value()) {
+            std::cerr << "failed to create sphere for trimmed/offset\n";
+            return 1;
+        }
+        auto trimmed = kernel.surfaces().make_trimmed(*sph.value, 0.1, 1.0, 0.2, 1.2);
+        if (trimmed.status != axiom::StatusCode::Ok || !trimmed.value.has_value()) {
+            std::cerr << "failed to create trimmed surface\n";
+            return 1;
+        }
+        auto uv_trim = kernel.surface_service().closest_uv(*trimmed.value, {2.0, 0.0, 0.0});
+        if (uv_trim.status != axiom::StatusCode::Ok || !uv_trim.value.has_value() ||
+            uv_trim.value->first < 0.1 || uv_trim.value->first > 1.0 ||
+            uv_trim.value->second < 0.2 || uv_trim.value->second > 1.2) {
+            std::cerr << "unexpected trimmed closest_uv clamping\n";
+            return 1;
+        }
+
+        auto off = kernel.surfaces().make_offset(*sph.value, 1.0);
+        if (off.status != axiom::StatusCode::Ok || !off.value.has_value()) {
+            std::cerr << "failed to create offset surface\n";
+            return 1;
+        }
+        auto off_eval = kernel.surface_service().eval(*off.value, 0.0, 0.0, 1);
+        if (off_eval.status != axiom::StatusCode::Ok || !off_eval.value.has_value() ||
+            !approx(off_eval.value->point.z, 3.0)) {
+            std::cerr << "unexpected offset eval\n";
+            return 1;
+        }
+    }
+
+    // Regression: refined closest_uv should recover parameters near a known point (Bezier surface).
+    {
+        const std::array<axiom::Point3, 4> poles{{{0.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {1.0, 0.0, 0.0}, {1.0, 1.0, 0.0}}};
+        auto surf = kernel.surfaces().make_bezier(poles);
+        if (surf.status != axiom::StatusCode::Ok || !surf.value.has_value()) {
+            std::cerr << "failed to create bezier surface for closest_uv refine\n";
+            return 1;
+        }
+        const double u0 = 0.25;
+        const double v0 = 0.75;
+        auto p0 = kernel.surface_service().eval(*surf.value, u0, v0, 1);
+        if (p0.status != axiom::StatusCode::Ok || !p0.value.has_value()) {
+            std::cerr << "failed to eval bezier surface\n";
+            return 1;
+        }
+        const auto q = axiom::Point3{p0.value->point.x + 0.02, p0.value->point.y - 0.01, p0.value->point.z + 0.1};
+        auto uv = kernel.surface_service().closest_uv(*surf.value, q);
+        if (uv.status != axiom::StatusCode::Ok || !uv.value.has_value() ||
+            std::abs(uv.value->first - u0) > 0.2 || std::abs(uv.value->second - v0) > 0.2) {
+            std::cerr << "unexpected bezier surface closest_uv refinement\n";
+            return 1;
+        }
+    }
+
+    // Regression: trimmed closest_uv must remain inside trim domain.
+    {
+        auto sph = kernel.surfaces().make_sphere({0.0, 0.0, 0.0}, 2.0);
+        auto tr = kernel.surfaces().make_trimmed(*sph.value, 0.1, 1.0, 0.2, 1.2);
+        if (sph.status != axiom::StatusCode::Ok || tr.status != axiom::StatusCode::Ok ||
+            !sph.value.has_value() || !tr.value.has_value()) {
+            std::cerr << "failed to create trimmed surface for closest_uv\n";
+            return 1;
+        }
+        auto uv = kernel.surface_service().closest_uv(*tr.value, {2.0, 0.0, 0.0});
+        if (uv.status != axiom::StatusCode::Ok || !uv.value.has_value() ||
+            uv.value->first < 0.1 || uv.value->first > 1.0 ||
+            uv.value->second < 0.2 || uv.value->second > 1.2) {
+            std::cerr << "unexpected trimmed closest_uv clamping\n";
+            return 1;
+        }
+    }
+
+    // ---- Stage 3 (minimal): curve-surface intersection (analytic pairs) ----
+    {
+        auto& isect = kernel.geometry_intersection();
+
+        // Line-plane: single hit.
+        auto ln = kernel.curves().make_line({0.0, 0.0, -1.0}, {0.0, 0.0, 1.0});
+        auto pl = kernel.surfaces().make_plane({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0});
+        if (ln.status != axiom::StatusCode::Ok || pl.status != axiom::StatusCode::Ok ||
+            !ln.value.has_value() || !pl.value.has_value()) {
+            std::cerr << "failed to create line/plane for intersection\n";
+            return 1;
+        }
+        auto hits_lp = isect.intersect_curve_surface(*ln.value, *pl.value);
+        if (hits_lp.status != axiom::StatusCode::Ok || !hits_lp.value.has_value() ||
+            hits_lp.value->size() != 1 || !approx(hits_lp.value->front().point.z, 0.0)) {
+            std::cerr << "unexpected line-plane intersection\n";
+            return 1;
+        }
+
+        // Segment-sphere: two hits at z=±2.
+        auto seg = kernel.curves().make_line_segment({0.0, 0.0, -3.0}, {0.0, 0.0, 3.0});
+        auto sph = kernel.surfaces().make_sphere({0.0, 0.0, 0.0}, 2.0);
+        if (seg.status != axiom::StatusCode::Ok || sph.status != axiom::StatusCode::Ok ||
+            !seg.value.has_value() || !sph.value.has_value()) {
+            std::cerr << "failed to create segment/sphere for intersection\n";
+            return 1;
+        }
+        auto hits_ss = isect.intersect_curve_surface(*seg.value, *sph.value);
+        if (hits_ss.status != axiom::StatusCode::Ok || !hits_ss.value.has_value() ||
+            hits_ss.value->size() != 2) {
+            std::cerr << "unexpected segment-sphere intersection count\n";
+            return 1;
+        }
+        const auto z0 = hits_ss.value->at(0).point.z;
+        const auto z1 = hits_ss.value->at(1).point.z;
+        if (!( (approx(z0, -2.0) && approx(z1, 2.0)) || (approx(z0, 2.0) && approx(z1, -2.0)) )) {
+            std::cerr << "unexpected segment-sphere intersection locations\n";
+            return 1;
+        }
     }
 
     return 0;

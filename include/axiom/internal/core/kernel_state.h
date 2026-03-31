@@ -160,8 +160,14 @@ struct BodyRecord {
 struct MeshRecord {
     BodyId source_body {};
     std::string label;
+    /// Stable strategy tag: owned_welded, primitive_*, bbox_proxy, implicit, local_welded, …
+    std::string tessellation_strategy;
+    /// Short digest of TessellationOptions / budget inputs (JSON fragment).
+    std::string tessellation_budget_digest;
     BoundingBox bbox;
     std::vector<Point3> vertices;
+    std::vector<Vec3> normals;
+    std::vector<Point2> texcoords;
     std::vector<Index> indices;
 };
 
@@ -196,6 +202,10 @@ struct KernelState {
     std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> face_to_shells;
     std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> shell_to_bodies;
     std::unordered_map<std::uint64_t, MeshRecord> meshes;
+    // key: stable hash of (body geometry params + tessellation options).
+    std::unordered_map<std::string, MeshId> tessellation_cache;
+    // key: stable hash of (face topology + tessellation options) for local re-tessellation.
+    std::unordered_map<std::string, MeshId> face_tessellation_cache;
     std::unordered_map<std::uint64_t, IntersectionRecord> intersections;
     std::unordered_map<std::string, CurveEvalResult> curve_eval_cache;
     std::unordered_map<std::string, SurfaceEvalResult> surface_eval_cache;

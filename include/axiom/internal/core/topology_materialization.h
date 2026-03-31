@@ -2,11 +2,12 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <span>
+#include <utility>
+#include <vector>
 #include <unordered_set>
 #include <unordered_map>
-#include <utility>
-
 #include "axiom/internal/core/kernel_state.h"
 
 namespace axiom::detail {
@@ -871,6 +872,282 @@ inline FaceId create_materialized_face(KernelState& state,
     }
     state.faces.emplace(face_id.value, std::move(face));
     return face_id;
+}
+
+inline Vec3 safe_unit_normal(const Vec3& normal) {
+    const auto n = norm(normal);
+    if (!(n > 0.0)) {
+        return Vec3 {0.0, 0.0, 1.0};
+    }
+    return scale(normal, 1.0 / n);
+}
+
+inline FaceId create_materialized_polygon_face(KernelState& state,
+                                               const std::vector<EdgeId>& edges,
+                                               std::span<const std::pair<int, bool>> edge_refs,
+                                               const Vec3& normal,
+                                               std::span<const FaceId> source_faces) {
+    if (edge_refs.empty() || edges.empty()) {
+        return {};
+    }
+    SurfaceRecord surface;
+    surface.kind = SurfaceKind::Plane;
+    const auto first_edge = edges[static_cast<std::size_t>(edge_refs[0].first)];
+    const auto first_edge_it = state.edges.find(first_edge.value);
+    if (first_edge_it != state.edges.end()) {
+        const auto v0_it = state.vertices.find(first_edge_it->second.v0.value);
+        if (v0_it != state.vertices.end()) {
+            surface.origin = v0_it->second.point;
+        }
+    }
+    surface.normal = safe_unit_normal(normal);
+    const auto surface_id = SurfaceId {state.allocate_id()};
+    state.surfaces.emplace(surface_id.value, std::move(surface));
+
+    std::vector<CoedgeId> coedges;
+    coedges.reserve(edge_refs.size());
+    for (const auto& [edge_index, reversed] : edge_refs) {
+        const auto idx = static_cast<std::size_t>(edge_index);
+        if (idx >= edges.size()) {
+            continue;
+        }
+        const auto coedge_id = CoedgeId {state.allocate_id()};
+        state.coedges.emplace(coedge_id.value, CoedgeRecord {edges[idx], reversed});
+        coedges.push_back(coedge_id);
+    }
+
+    const auto loop_id = LoopId {state.allocate_id()};
+    state.loops.emplace(loop_id.value, LoopRecord {std::move(coedges)});
+
+    const auto face_id = FaceId {state.allocate_id()};
+    FaceRecord face;
+    face.surface_id = surface_id;
+    face.outer_loop = loop_id;
+    if (source_faces.empty()) {
+        face.source_faces.push_back(face_id);
+    } else {
+        face.source_faces.assign(source_faces.begin(), source_faces.end());
+    }
+    state.faces.emplace(face_id.value, std::move(face));
+    return face_id;
+}
+
+inline void orthonormal_frame_from_axis(const Vec3& axis_unit, Vec3& u, Vec3& v) {
+    const auto a = axis_unit;
+    Vec3 ref = (std::abs(a.z) < 0.9) ? Vec3 {0.0, 0.0, 1.0} : Vec3 {1.0, 0.0, 0.0};
+    u = cross(ref, a);
+    if (norm(u) <= 1e-14) {
+        ref = Vec3 {0.0, 1.0, 0.0};
+        u = cross(ref, a);
+    }
+    u = normalize(u);
+    v = cross(a, u);
+}
+
+inline void materialize_body_wedge_shell(KernelState& state, BodyRecord& record) {
+    if (record.kind != BodyKind::Wedge || record.rep_kind != RepKind::ExactBRep || !record.bbox.is_valid ||
+        !record.shells.empty()) {
+        return;
+    }
+    const auto o = record.origin;
+    const auto dx = record.a;
+    const auto dy = record.b;
+    const auto dz = record.c;
+    if (!(dx > 0.0 && dy > 0.0 && dz > 0.0)) {
+        return;
+    }
+
+    const std::array<Point3, 6> corners {
+        Point3 {o.x, o.y, o.z},
+        Point3 {o.x + dx, o.y, o.z},
+        Point3 {o.x, o.y + dy, o.z},
+        Point3 {o.x, o.y, o.z + dz},
+        Point3 {o.x + dx, o.y, o.z + dz},
+        Point3 {o.x, o.y + dy, o.z + dz},
+    };
+
+    std::array<VertexId, 6> vertices {};
+    for (std::size_t i = 0; i < corners.size(); ++i) {
+        vertices[i] = VertexId {state.allocate_id()};
+        state.vertices.emplace(vertices[i].value, VertexRecord {corners[i]});
+    }
+
+    const std::array<std::pair<int, int>, 9> edge_vertices {{
+        {0, 1}, {1, 2}, {2, 0},
+        {3, 4}, {4, 5}, {5, 3},
+        {0, 3}, {1, 4}, {2, 5},
+    }};
+    std::vector<EdgeId> edges;
+    edges.reserve(edge_vertices.size());
+    for (std::size_t i = 0; i < edge_vertices.size(); ++i) {
+        const auto s = edge_vertices[i].first;
+        const auto t = edge_vertices[i].second;
+        const auto curve_id = create_materialized_line(state, corners[s], corners[t]);
+        const auto eid = EdgeId {state.allocate_id()};
+        state.edges.emplace(eid.value, EdgeRecord {curve_id, vertices[s], vertices[t]});
+        edges.push_back(eid);
+    }
+
+    const auto source_faces = std::span<const FaceId>(record.source_faces);
+    std::vector<FaceId> faces;
+    faces.reserve(5);
+
+    {
+        const std::array<std::pair<int, bool>, 3> refs {{{2, true}, {1, true}, {0, true}}};
+        faces.push_back(create_materialized_polygon_face(state, edges, std::span<const std::pair<int, bool>>(refs),
+                                                         Vec3 {0.0, 0.0, -1.0}, source_faces));
+    }
+    {
+        const std::array<std::pair<int, bool>, 3> refs {{{3, false}, {4, false}, {5, false}}};
+        faces.push_back(create_materialized_polygon_face(state, edges, std::span<const std::pair<int, bool>>(refs),
+                                                         Vec3 {0.0, 0.0, 1.0}, source_faces));
+    }
+    {
+        const std::array<std::pair<int, bool>, 4> refs {{{0, false}, {7, false}, {3, true}, {6, true}}};
+        faces.push_back(create_materialized_polygon_face(state, edges, std::span<const std::pair<int, bool>>(refs),
+                                                         Vec3 {0.0, -1.0, 0.0}, source_faces));
+    }
+    {
+        const std::array<std::pair<int, bool>, 4> refs {{{6, false}, {5, true}, {8, true}, {2, false}}};
+        faces.push_back(create_materialized_polygon_face(state, edges, std::span<const std::pair<int, bool>>(refs),
+                                                         Vec3 {-1.0, 0.0, 0.0}, source_faces));
+    }
+    {
+        const std::array<std::pair<int, bool>, 4> refs {{{1, false}, {8, false}, {4, true}, {7, true}}};
+        faces.push_back(create_materialized_polygon_face(state, edges, std::span<const std::pair<int, bool>>(refs),
+                                                         Vec3 {1.0, 1.0, 0.0}, source_faces));
+    }
+
+    const auto shell_id = ShellId {state.allocate_id()};
+    ShellRecord shell;
+    shell.faces = std::move(faces);
+    shell.source_shells = record.source_shells;
+    if (record.source_faces.empty()) {
+        shell.source_faces = shell.faces;
+    } else {
+        shell.source_faces = record.source_faces;
+    }
+    state.shells.emplace(shell_id.value, std::move(shell));
+    record.shells.push_back(shell_id);
+}
+
+inline void materialize_body_prism_cylinder_shell(KernelState& state, BodyRecord& record) {
+    if (record.kind != BodyKind::Cylinder || record.rep_kind != RepKind::ExactBRep || !record.bbox.is_valid ||
+        !record.shells.empty()) {
+        return;
+    }
+    const auto r = record.a;
+    const auto h = record.b;
+    if (!(r > 0.0 && h > 0.0)) {
+        return;
+    }
+    constexpr int N = 8;
+    Vec3 u {};
+    Vec3 v {};
+    orthonormal_frame_from_axis(record.axis, u, v);
+    const auto C = record.origin;
+    const auto C0 = add_point_vec(C, scale(record.axis, -h * 0.5));
+    const auto C1 = add_point_vec(C, scale(record.axis, h * 0.5));
+
+    std::array<Point3, static_cast<std::size_t>(2 * N)> corners {};
+      for (int i = 0; i < N; ++i) {
+        const Scalar th = 2.0 * 3.14159265358979323846 * static_cast<Scalar>(i) / static_cast<Scalar>(N);
+        const Scalar cs = std::cos(th);
+        const Scalar sn = std::sin(th);
+        const Vec3 rad {u.x * r * cs + v.x * r * sn, u.y * r * cs + v.y * r * sn, u.z * r * cs + v.z * r * sn};
+        corners[static_cast<std::size_t>(i)] = add_point_vec(C0, rad);
+        corners[static_cast<std::size_t>(N + i)] = add_point_vec(C1, rad);
+    }
+
+    std::array<VertexId, static_cast<std::size_t>(2 * N)> vertices {};
+    for (int i = 0; i < 2 * N; ++i) {
+        vertices[static_cast<std::size_t>(i)] = VertexId {state.allocate_id()};
+        state.vertices.emplace(vertices[static_cast<std::size_t>(i)].value, VertexRecord {corners[static_cast<std::size_t>(i)]});
+    }
+
+    std::vector<EdgeId> edges;
+    edges.reserve(static_cast<std::size_t>(3 * N));
+    for (int i = 0; i < N; ++i) {
+        const int j = (i + 1) % N;
+        const auto curve_id =
+            create_materialized_line(state, corners[static_cast<std::size_t>(i)], corners[static_cast<std::size_t>(j)]);
+        const auto eid = EdgeId {state.allocate_id()};
+        state.edges.emplace(eid.value,
+                            EdgeRecord {curve_id, vertices[static_cast<std::size_t>(i)],
+                                        vertices[static_cast<std::size_t>(j)]});
+        edges.push_back(eid);
+    }
+    for (int i = 0; i < N; ++i) {
+        const int j = (i + 1) % N;
+        const auto curve_id = create_materialized_line(
+            state, corners[static_cast<std::size_t>(N + i)], corners[static_cast<std::size_t>(N + j)]);
+        const auto eid = EdgeId {state.allocate_id()};
+        state.edges.emplace(eid.value,
+                            EdgeRecord {curve_id, vertices[static_cast<std::size_t>(N + i)],
+                                        vertices[static_cast<std::size_t>(N + j)]});
+        edges.push_back(eid);
+    }
+    for (int i = 0; i < N; ++i) {
+        const auto curve_id =
+            create_materialized_line(state, corners[static_cast<std::size_t>(i)], corners[static_cast<std::size_t>(N + i)]);
+        const auto eid = EdgeId {state.allocate_id()};
+        state.edges.emplace(eid.value,
+                            EdgeRecord {curve_id, vertices[static_cast<std::size_t>(i)],
+                                        vertices[static_cast<std::size_t>(N + i)]});
+        edges.push_back(eid);
+    }
+
+    const auto source_faces = std::span<const FaceId>(record.source_faces);
+    std::vector<FaceId> out_faces;
+    out_faces.reserve(static_cast<std::size_t>(N + 2));
+
+    for (int i = 0; i < N; ++i) {
+        const int j = (i + 1) % N;
+        const Scalar th = 2.0 * 3.14159265358979323846 * (static_cast<Scalar>(i) + 0.5) / static_cast<Scalar>(N);
+        const Scalar cs = std::cos(th);
+        const Scalar sn = std::sin(th);
+        const Vec3 nout {u.x * cs + v.x * sn, u.y * cs + v.y * sn, u.z * cs + v.z * sn};
+        const std::array<std::pair<int, bool>, 4> refs {{
+            {i, false},
+            {2 * N + j, false},
+            {N + i, true},
+            {2 * N + i, true},
+        }};
+        out_faces.push_back(create_materialized_polygon_face(state, edges, std::span<const std::pair<int, bool>>(refs), nout,
+                                                             source_faces));
+    }
+
+    {
+        std::vector<std::pair<int, bool>> bottom_refs;
+        bottom_refs.reserve(static_cast<std::size_t>(N));
+        for (int k = N - 1; k >= 0; --k) {
+            bottom_refs.push_back({k, true});
+        }
+        out_faces.push_back(create_materialized_polygon_face(
+            state, edges, std::span<const std::pair<int, bool>>(bottom_refs.data(), bottom_refs.size()),
+            scale(record.axis, -1.0), source_faces));
+    }
+    {
+        std::vector<std::pair<int, bool>> top_refs;
+        top_refs.reserve(static_cast<std::size_t>(N));
+        for (int k = 0; k < N; ++k) {
+            top_refs.push_back({N + k, false});
+        }
+        out_faces.push_back(create_materialized_polygon_face(
+            state, edges, std::span<const std::pair<int, bool>>(top_refs.data(), top_refs.size()), record.axis, source_faces));
+    }
+
+    const auto shell_id = ShellId {state.allocate_id()};
+    ShellRecord shell;
+    shell.faces = std::move(out_faces);
+    shell.source_shells = record.source_shells;
+    if (record.source_faces.empty()) {
+        shell.source_faces = shell.faces;
+    } else {
+        shell.source_faces = record.source_faces;
+    }
+    state.shells.emplace(shell_id.value, std::move(shell));
+    record.shells.push_back(shell_id);
 }
 
 inline void materialize_body_bbox_shell(KernelState& state, BodyRecord& record) {

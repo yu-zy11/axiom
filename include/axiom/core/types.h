@@ -314,6 +314,29 @@ struct MeshInspectionReport {
   bool is_indexed{false};
   bool has_out_of_range_indices{false};
   bool has_degenerate_triangles{false};
+  /// Pipeline id for rep closure (budget → strategy → QA); empty if unavailable.
+  std::string tessellation_strategy;
+  /// Serialized tessellation inputs (chordal/angular/normals) for regression exports.
+  std::string tessellation_budget_digest;
+};
+
+struct ConversionErrorBudget {
+  // Linear budgets in model units.
+  Scalar bbox_abs_tol{0.0};
+  Scalar max_point_abs_tol{0.0};
+  // Angular budgets in degrees.
+  Scalar normal_angle_deg_tol{0.0};
+};
+
+struct RoundTripReport {
+  bool passed{false};
+  ConversionErrorBudget budget{};
+  Scalar bbox_max_abs_delta{0.0};
+  Scalar max_point_abs_delta{0.0};
+  std::uint64_t source_triangles{0};
+  std::uint64_t roundtrip_triangles{0};
+  /// BRep→Mesh path tag used for the source mesh (same semantics as MeshInspectionReport).
+  std::string tessellation_strategy;
 };
 
 struct TopologySummary {

@@ -1,3 +1,4 @@
+#include <array>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -66,6 +67,7 @@ int main() {
     }
     auto coarse_triangles = kernel.convert().mesh_triangle_count(*coarse_mesh.value);
     auto fine_triangles = kernel.convert().mesh_triangle_count(*fine_mesh.value);
+    auto coarse_vertices = kernel.convert().mesh_vertex_count(*coarse_mesh.value);
     auto fine_vertices = kernel.convert().mesh_vertex_count(*fine_mesh.value);
     auto fine_indices = kernel.convert().mesh_index_count(*fine_mesh.value);
     auto fine_components = kernel.convert().mesh_connected_components(*fine_mesh.value);
@@ -73,17 +75,20 @@ int main() {
     auto fine_degenerate = kernel.convert().mesh_has_degenerate_triangles(*fine_mesh.value);
     auto fine_report = kernel.convert().inspect_mesh(*fine_mesh.value);
     if (coarse_triangles.status != axiom::StatusCode::Ok || fine_triangles.status != axiom::StatusCode::Ok ||
+        coarse_vertices.status != axiom::StatusCode::Ok ||
         fine_vertices.status != axiom::StatusCode::Ok || fine_indices.status != axiom::StatusCode::Ok ||
         fine_components.status != axiom::StatusCode::Ok || fine_out_of_range.status != axiom::StatusCode::Ok ||
         fine_degenerate.status != axiom::StatusCode::Ok || fine_report.status != axiom::StatusCode::Ok ||
         !coarse_triangles.value.has_value() || !fine_triangles.value.has_value() ||
+        !coarse_vertices.value.has_value() ||
         !fine_vertices.value.has_value() || !fine_indices.value.has_value() ||
         !fine_components.value.has_value() || !fine_out_of_range.value.has_value() ||
         !fine_degenerate.value.has_value() || !fine_report.value.has_value()) {
         std::cerr << "failed to query mesh statistics\n";
         return 1;
     }
-    if (*fine_triangles.value <= *coarse_triangles.value || *fine_vertices.value != 8 ||
+    if (*fine_triangles.value <= *coarse_triangles.value ||
+        *fine_vertices.value <= *coarse_vertices.value ||
         *fine_indices.value != (*fine_triangles.value * 3) || *fine_components.value != 1 ||
         *fine_out_of_range.value || *fine_degenerate.value ||
         fine_report.value->triangle_count != *fine_triangles.value ||
@@ -103,11 +108,96 @@ int main() {
     std::string mesh_report_text((std::istreambuf_iterator<char>(mesh_report_in)),
                                  std::istreambuf_iterator<char>());
     if (mesh_report_text.find("\"triangle_count\":" + std::to_string(*fine_triangles.value)) == std::string::npos ||
-        mesh_report_text.find("\"has_out_of_range_indices\":false") == std::string::npos) {
+        mesh_report_text.find("\"has_out_of_range_indices\":false") == std::string::npos ||
+        mesh_report_text.find("\"tessellation_strategy\":\"primitive_box\"") == std::string::npos ||
+        mesh_report_text.find("\"tessellation_budget_digest\"") == std::string::npos) {
         std::cerr << "mesh report json content is unexpected\n";
         std::filesystem::remove(mesh_report_path);
         return 1;
     }
+
+    {
+        auto pl = kernel.surfaces().make_plane({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0});
+        auto trimmed_plane = kernel.surfaces().make_trimmed(*pl.value, 0.0, 10.0, 0.0, 20.0);
+        auto l0 = kernel.curves().make_line({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
+        auto l1 = kernel.curves().make_line({10.0, 0.0, 0.0}, {0.0, 1.0, 0.0});
+        auto l2 = kernel.curves().make_line({10.0, 20.0, 0.0}, {-1.0, 0.0, 0.0});
+        auto l3 = kernel.curves().make_line({0.0, 20.0, 0.0}, {0.0, -1.0, 0.0});
+        if (pl.status != axiom::StatusCode::Ok || !pl.value.has_value() ||
+            trimmed_plane.status != axiom::StatusCode::Ok || !trimmed_plane.value.has_value() ||
+            l0.status != axiom::StatusCode::Ok || !l0.value.has_value() ||
+            l1.status != axiom::StatusCode::Ok || !l1.value.has_value() ||
+            l2.status != axiom::StatusCode::Ok || !l2.value.has_value() ||
+            l3.status != axiom::StatusCode::Ok || !l3.value.has_value()) {
+            std::cerr << "trimmed-plane tessellation: geometry init failed\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        auto ttx = kernel.topology().begin_transaction();
+        auto tv0 = ttx.create_vertex({0.0, 0.0, 0.0});
+        auto tv1 = ttx.create_vertex({10.0, 0.0, 0.0});
+        auto tv2 = ttx.create_vertex({10.0, 20.0, 0.0});
+        auto tv3 = ttx.create_vertex({0.0, 20.0, 0.0});
+        auto te0 = ttx.create_edge(*l0.value, *tv0.value, *tv1.value);
+        auto te1 = ttx.create_edge(*l1.value, *tv1.value, *tv2.value);
+        auto te2 = ttx.create_edge(*l2.value, *tv2.value, *tv3.value);
+        auto te3 = ttx.create_edge(*l3.value, *tv3.value, *tv0.value);
+        auto tc0 = ttx.create_coedge(*te0.value, false);
+        auto tc1 = ttx.create_coedge(*te1.value, false);
+        auto tc2 = ttx.create_coedge(*te2.value, false);
+        auto tc3 = ttx.create_coedge(*te3.value, false);
+        if (tv0.status != axiom::StatusCode::Ok || tv1.status != axiom::StatusCode::Ok ||
+            tv2.status != axiom::StatusCode::Ok || tv3.status != axiom::StatusCode::Ok ||
+            te0.status != axiom::StatusCode::Ok || te1.status != axiom::StatusCode::Ok ||
+            te2.status != axiom::StatusCode::Ok || te3.status != axiom::StatusCode::Ok ||
+            tc0.status != axiom::StatusCode::Ok || tc1.status != axiom::StatusCode::Ok ||
+            tc2.status != axiom::StatusCode::Ok || tc3.status != axiom::StatusCode::Ok ||
+            !tv0.value.has_value() || !tv1.value.has_value() || !tv2.value.has_value() || !tv3.value.has_value() ||
+            !te0.value.has_value() || !te1.value.has_value() || !te2.value.has_value() || !te3.value.has_value() ||
+            !tc0.value.has_value() || !tc1.value.has_value() || !tc2.value.has_value() || !tc3.value.has_value()) {
+            std::cerr << "trimmed-plane tessellation: topology txn failed\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        const std::array<axiom::CoedgeId, 4> trim_coedges {
+            *tc0.value, *tc1.value, *tc2.value, *tc3.value};
+        auto tloop = ttx.create_loop(trim_coedges);
+        auto tface = ttx.create_face(*trimmed_plane.value, *tloop.value, {});
+        auto tshell = ttx.create_shell({*tface.value});
+        auto tbody = ttx.create_body({*tshell.value});
+        if (tloop.status != axiom::StatusCode::Ok || tface.status != axiom::StatusCode::Ok ||
+            tshell.status != axiom::StatusCode::Ok || tbody.status != axiom::StatusCode::Ok ||
+            !tloop.value.has_value() || !tface.value.has_value() || !tshell.value.has_value() ||
+            !tbody.value.has_value()) {
+            std::cerr << "trimmed-plane tessellation: face/shell/body creation failed\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        auto trim_commit = ttx.commit();
+        if (trim_commit.status != axiom::StatusCode::Ok) {
+            std::cerr << "trimmed-plane tessellation: commit failed\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        auto trim_mesh =
+            kernel.convert().brep_to_mesh(*tbody.value, {0.4, 25.0, true});
+        if (trim_mesh.status != axiom::StatusCode::Ok || !trim_mesh.value.has_value()) {
+            std::cerr << "trimmed-plane brep_to_mesh failed\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        auto trim_tris = kernel.convert().mesh_triangle_count(*trim_mesh.value);
+        auto trim_insp = kernel.convert().inspect_mesh(*trim_mesh.value);
+        if (trim_tris.status != axiom::StatusCode::Ok || !trim_tris.value.has_value() ||
+            trim_insp.status != axiom::StatusCode::Ok || !trim_insp.value.has_value() ||
+            *trim_tris.value < 32 ||
+            trim_insp.value->tessellation_strategy != "owned_topo_welded") {
+            std::cerr << "trimmed-plane should use topo patch tessellation with strategy metadata\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+    }
+
     const std::vector<axiom::BodyId> batch_body_ids {*box.value};
     auto batch_mesh = kernel.convert().brep_to_mesh_batch(batch_body_ids, {0.1, 10.0, true});
     if (batch_mesh.status != axiom::StatusCode::Ok || !batch_mesh.value.has_value() || batch_mesh.value->size() != 1) {
@@ -143,6 +233,12 @@ int main() {
         return 1;
     }
 
+    auto rt_brep_mesh = kernel.convert().verify_brep_mesh_round_trip(*box.value, {0.1, 10.0, true});
+    if (rt_brep_mesh.status != axiom::StatusCode::Ok || !rt_brep_mesh.value.has_value() || !rt_brep_mesh.value->passed) {
+        std::cerr << "brep-mesh round-trip report should pass\n";
+        return 1;
+    }
+
     auto brep_bbox = kernel.representation().bbox_of_body(*brep.value);
     if (brep_bbox.status != axiom::StatusCode::Ok || !brep_bbox.value.has_value()) {
         std::cerr << "failed to query converted brep bbox\n";
@@ -175,6 +271,11 @@ int main() {
     auto implicit_mesh = kernel.convert().implicit_to_mesh(axiom::ImplicitFieldId {1}, {0.2, 15.0, true});
     if (implicit_mesh.status != axiom::StatusCode::Ok || !implicit_mesh.value.has_value()) {
         std::cerr << "failed to convert implicit field to mesh with valid options\n";
+        return 1;
+    }
+    auto rt_mesh_brep = kernel.convert().verify_mesh_brep_round_trip(*implicit_mesh.value, {0.2, 15.0, true});
+    if (rt_mesh_brep.status != axiom::StatusCode::Ok || !rt_mesh_brep.value.has_value() || !rt_mesh_brep.value->passed) {
+        std::cerr << "mesh-brep round-trip report should pass\n";
         return 1;
     }
     auto implicit_brep = kernel.convert().mesh_to_brep(*implicit_mesh.value);
@@ -214,6 +315,34 @@ int main() {
 
     if (!approx(*min_distance.value, 10.0)) {
         std::cerr << "unexpected min distance result\n";
+        return 1;
+    }
+
+    // Local re-tessellation (Topo-driven) should work for derived bodies with owned topology.
+    // Use a placeholder boolean result body which materializes minimal owned topology.
+    axiom::BooleanOptions bool_opts;
+    bool_opts.diagnostics = true;
+    auto boolean_result = kernel.booleans().run(axiom::BooleanOp::Union, *box.value, *box2.value, bool_opts);
+    if (boolean_result.status != axiom::StatusCode::Ok || !boolean_result.value.has_value() ||
+        boolean_result.value->status != axiom::StatusCode::Ok || boolean_result.value->output.value == 0) {
+        std::cerr << "failed to create derived body for local tessellation\n";
+        return 1;
+    }
+    auto derived_body = boolean_result.value->output;
+    auto derived_faces = kernel.topology().query().faces_of_body(derived_body);
+    if (derived_faces.status != axiom::StatusCode::Ok || !derived_faces.value.has_value() || derived_faces.value->empty()) {
+        std::cerr << "expected derived body to have owned faces\n";
+        return 1;
+    }
+    std::array<axiom::FaceId, 1> dirty_faces{derived_faces.value->front()};
+    auto local_mesh = kernel.convert().brep_to_mesh_local(derived_body, dirty_faces, {0.2, 15.0, true});
+    if (local_mesh.status != axiom::StatusCode::Ok || !local_mesh.value.has_value()) {
+        std::cerr << "local brep to mesh tessellation failed\n";
+        return 1;
+    }
+    auto local_mesh_tris = kernel.convert().mesh_triangle_count(*local_mesh.value);
+    if (local_mesh_tris.status != axiom::StatusCode::Ok || !local_mesh_tris.value.has_value() || *local_mesh_tris.value == 0) {
+        std::cerr << "local tessellation should generate triangles\n";
         return 1;
     }
 

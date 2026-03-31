@@ -86,6 +86,7 @@ public:
     PCurveService& pcurve_service();
     SurfaceService& surface_service();
     GeometryTransformService& geometry_transform();
+    GeometryIntersectionService& geometry_intersection();
     LinearAlgebraService& linear_algebra();
     PredicateService& predicates();
     ToleranceService& tolerance();
@@ -114,6 +115,7 @@ private:
     PCurveService pcurve_service_;
     SurfaceService surface_service_;
     GeometryTransformService geometry_transform_service_;
+    GeometryIntersectionService geometry_intersection_service_;
     LinearAlgebraService linear_algebra_service_;
     PredicateService predicate_service_;
     ToleranceService tolerance_service_;

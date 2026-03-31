@@ -234,6 +234,15 @@
 | `AXM-TOPO-E-0007` | Error | 拓扑关系不一致 |
 | `AXM-TOPO-E-0008` | Error | 参数曲线与空间曲线不一致 |
 | `AXM-TOPO-E-0009` | Fatal | 拓扑不变量被破坏 |
+| `AXM-TOPO-E-0010` | Error | 壳内存在开放边界（边引用次数不足） |
+| `AXM-TOPO-E-0011` | Error | 壳内存在非流形边（边被过多拓扑面共享） |
+| `AXM-TOPO-E-0012` | Error | 派生/传播来源引用无效或丢失 |
+| `AXM-TOPO-E-0013` | Error | 面/壳/体的来源集合不一致 |
+| `AXM-TOPO-E-0014` | Error | 同一环内重复引用同一条拓扑边 |
+| `AXM-TOPO-E-0015` | Error | 修剪面外环与内环在 UV 空间方向不符合孔洞规则 |
+| `AXM-TOPO-E-0016` | Error | 定向边已归属其他环（共边跨环复用） |
+| `AXM-TOPO-E-0017` | Warning | 壳内存在重复面（相同曲面与边界环签名） |
+| `AXM-TOPO-E-0018` | Warning | 壳不连通（面集合存在多个连通分量） |
 
 ## 7.5 `BOOL` 布尔模块错误码
 
@@ -384,11 +393,19 @@
 
 | 诊断码 | 含义 |
 |---|---|
-| `AXM-BOOL-D-0001` | 已生成面级候选对 |
-| `AXM-BOOL-D-0002` | 已进入曲面求交阶段 |
-| `AXM-BOOL-D-0003` | 已识别近共面候选对 |
-| `AXM-BOOL-D-0004` | 已触发分类高精度回退 |
-| `AXM-BOOL-D-0005` | 输出壳体重建完成 |
+| `AXM-BOOL-D-0001` | 布尔候选构建阶段开始（`kBoolStageCandidates`） |
+| `AXM-BOOL-D-0002` | 布尔预处理候选片段统计已生成（`kBoolPrepCandidatesBuilt`） |
+| `AXM-BOOL-D-0003` | 布尔局部裁剪已应用于结果 bbox（`kBoolLocalClipApplied`） |
+| `AXM-BOOL-D-0004` | 布尔单次运行阶段与输入摘要（bbox 关系、预处理统计等，`kBoolRunStageSummary`） |
+| `AXM-BOOL-D-0005` | 布尔输出占位物化完成（`kBoolStageOutputMaterialized`） |
+| `AXM-BOOL-D-0006` | 布尔面级候选对已生成（`kBoolFaceCandidatesBuilt`） |
+| `AXM-BOOL-D-0007` | 布尔精确求交已生成交线/交曲线（解析入口，`kBoolIntersectionCurvesBuilt`） |
+| `AXM-BOOL-D-0008` | 布尔交线裁剪为面域内线段完成（`kBoolIntersectionSegmentsBuilt`） |
+| `AXM-BOOL-D-0009` | 布尔交线集合已保存（Intersection wires，`kBoolIntersectionWiresStored`） |
+| `AXM-BOOL-D-0010` | 布尔切分/imprint 已应用（占位：沿对角线切分矩形面，`kBoolImprintApplied`） |
+| `AXM-BOOL-D-0011` | 布尔切分/imprint 已应用（按交线段切分矩形面，`kBoolImprintSegmentApplied`） |
+| `AXM-BOOL-D-0012` | 布尔分类阶段完成（占位：分类统计，`kBoolClassificationCompleted`） |
+| `AXM-BOOL-D-0013` | 布尔重建阶段完成（占位：Strict 校验摘要，`kBoolRebuildCompleted`） |
 
 ## 9.2 `HEAL` 诊断码
 
@@ -435,8 +452,8 @@
     "AXM-BOOL-W-0001"
   ],
   "trace": [
-    "AXM-BOOL-D-0001",
     "AXM-BOOL-D-0002",
+    "AXM-BOOL-D-0003",
     "AXM-BOOL-D-0004"
   ],
   "relatedEntities": [

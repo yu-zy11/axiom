@@ -33,6 +33,8 @@ public:
     explicit RepresentationConversionService(std::shared_ptr<detail::KernelState> state);
 
     Result<MeshId> brep_to_mesh(BodyId body_id, const TessellationOptions& options);
+    // Local re-tessellation: only the provided faces are recomputed (Topo-driven) when body has owned topology.
+    Result<MeshId> brep_to_mesh_local(BodyId body_id, std::span<const FaceId> dirty_faces, const TessellationOptions& options);
     Result<BodyId> mesh_to_brep(MeshId mesh_id);
     Result<MeshId> implicit_to_mesh(ImplicitFieldId field_id, const TessellationOptions& options);
     Result<std::vector<MeshId>> brep_to_mesh_batch(std::span<const BodyId> body_ids, const TessellationOptions& options);
@@ -45,6 +47,8 @@ public:
     Result<bool> mesh_has_degenerate_triangles(MeshId mesh_id) const;
     Result<MeshInspectionReport> inspect_mesh(MeshId mesh_id) const;
     Result<void> export_mesh_report_json(MeshId mesh_id, std::string_view path) const;
+    Result<RoundTripReport> verify_brep_mesh_round_trip(BodyId body_id, const TessellationOptions& options);
+    Result<RoundTripReport> verify_mesh_brep_round_trip(MeshId mesh_id, const TessellationOptions& options);
 
 private:
     std::shared_ptr<detail::KernelState> state_;

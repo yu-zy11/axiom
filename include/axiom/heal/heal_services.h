@@ -52,6 +52,10 @@ class RepairService {
 public:
   explicit RepairService(std::shared_ptr<detail::KernelState> state);
 
+  // Trim bridge (Stage 3 minimal): rebuild / overwrite coedge pcurves from 3D edges by projection onto the face surface.
+  // Currently supports Plane faces (SurfaceKind::Plane).
+  Result<void> repair_face_trim_pcurves(FaceId face_id, RepairMode mode);
+
   Result<OpReport> sew_faces(std::span<const FaceId> faces, Scalar tolerance,
                              RepairMode mode);
   Result<OpReport> remove_small_edges(BodyId body_id, Scalar threshold,

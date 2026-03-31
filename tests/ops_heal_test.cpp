@@ -84,6 +84,32 @@ int main() {
         std::cerr << "unexpected extrude behavior\n";
         return 1;
     }
+    auto extrude_strict = kernel.validate().validate_topology(*sweep_ok.value, axiom::ValidationMode::Strict);
+    if (extrude_strict.status != axiom::StatusCode::Ok) {
+        std::cerr << "extrude result failed strict topology validation\n";
+        return 1;
+    }
+
+    auto box_shells = kernel.topology().query().shells_of_body(*box_a.value);
+    if (box_shells.status != axiom::StatusCode::Ok || !box_shells.value.has_value() || box_shells.value->empty()) {
+        std::cerr << "expected shells on box_a for thicken test\n";
+        return 1;
+    }
+    auto box_faces = kernel.topology().query().faces_of_shell(box_shells.value->front());
+    if (box_faces.status != axiom::StatusCode::Ok || !box_faces.value.has_value() || box_faces.value->empty()) {
+        std::cerr << "expected faces on box_a shell for thicken test\n";
+        return 1;
+    }
+    auto thicken_ok = kernel.sweeps().thicken(box_faces.value->front(), 1.0);
+    if (thicken_ok.status != axiom::StatusCode::Ok || !thicken_ok.value.has_value()) {
+        std::cerr << "unexpected thicken failure\n";
+        return 1;
+    }
+    auto thicken_strict = kernel.validate().validate_topology(*thicken_ok.value, axiom::ValidationMode::Strict);
+    if (thicken_strict.status != axiom::StatusCode::Ok) {
+        std::cerr << "thicken result failed strict topology validation\n";
+        return 1;
+    }
 
     auto plane0 = kernel.surfaces().make_plane({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0});
     auto plane1 = kernel.surfaces().make_plane({0.0, 0.0, 1.0}, {0.0, 0.0, 1.0});

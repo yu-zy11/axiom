@@ -4,6 +4,7 @@
 #include <cmath>
 #include <fstream>
 #include <sstream>
+#include <unordered_map>
 
 #include "axiom/heal/heal_services.h"
 #include "axiom/internal/core/diagnostic_helpers.h"
@@ -17,6 +18,26 @@ namespace {
 
 constexpr Scalar kPi = 3.14159265358979323846;
 
+bool is_primitive_body_kind(detail::BodyKind kind) {
+    switch (kind) {
+        case detail::BodyKind::Box:
+        case detail::BodyKind::Sphere:
+        case detail::BodyKind::Cylinder:
+        case detail::BodyKind::Cone:
+        case detail::BodyKind::Torus:
+        case detail::BodyKind::Wedge:
+            return true;
+        default:
+            return false;
+    }
+}
+
+void clear_primitive_provenance_fields(detail::BodyRecord& record) {
+    record.source_bodies.clear();
+    record.source_shells.clear();
+    record.source_faces.clear();
+}
+
 enum class BBoxRelation {
     Disjoint,
     Touching,
@@ -26,9 +47,20 @@ enum class BBoxRelation {
 };
 
 BodyId make_body(std::shared_ptr<detail::KernelState> state, detail::BodyRecord record, const std::string&) {
-    if (record.kind == detail::BodyKind::BooleanResult || record.kind == detail::BodyKind::Modified ||
-        record.kind == detail::BodyKind::BlendResult || record.kind == detail::BodyKind::Sweep) {
+    const bool is_derived = record.kind == detail::BodyKind::BooleanResult || record.kind == detail::BodyKind::Modified ||
+                           record.kind == detail::BodyKind::BlendResult || record.kind == detail::BodyKind::Sweep;
+    if (is_derived) {
         detail::materialize_body_bbox_topology(*state, record);
+    } else if (is_primitive_body_kind(record.kind) && record.rep_kind == RepKind::ExactBRep && record.bbox.is_valid &&
+               record.shells.empty()) {
+        clear_primitive_provenance_fields(record);
+        if (record.kind == detail::BodyKind::Wedge) {
+            detail::materialize_body_wedge_shell(*state, record);
+        } else if (record.kind == detail::BodyKind::Cylinder) {
+            detail::materialize_body_prism_cylinder_shell(*state, record);
+        } else {
+            detail::materialize_body_bbox_shell(*state, record);
+        }
     }
     const auto id = BodyId {state->allocate_id()};
     state->bodies.emplace(id.value, std::move(record));
@@ -91,7 +123,9 @@ void append_face_provenance_for_body(const detail::KernelState& state, std::vect
 }
 
 void detach_owned_topology(const detail::KernelState& state, detail::BodyRecord& record) {
-    detail::inherit_source_topology_from_owned_shells(state, record);
+    if (!is_primitive_body_kind(record.kind)) {
+        detail::inherit_source_topology_from_owned_shells(state, record);
+    }
     record.shells.clear();
 }
 
@@ -113,6 +147,25 @@ void append_faces_for_edge(const detail::KernelState& state, std::vector<FaceId>
             append_unique_face(ids, FaceId {face_value});
         }
     }
+}
+
+bool same_unordered_face_ids(const std::vector<FaceId>& a, const std::vector<FaceId>& b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    std::vector<std::uint64_t> av;
+    std::vector<std::uint64_t> bv;
+    av.reserve(a.size());
+    bv.reserve(b.size());
+    for (const auto f : a) {
+        av.push_back(f.value);
+    }
+    for (const auto f : b) {
+        bv.push_back(f.value);
+    }
+    std::sort(av.begin(), av.end());
+    std::sort(bv.begin(), bv.end());
+    return av == bv;
 }
 
 OpReport make_report(StatusCode status, BodyId output, DiagnosticId diagnostic_id, std::vector<Warning> warnings = {}) {
@@ -484,6 +537,211 @@ struct BooleanPrepStats {
     bool local_clip_applied {false};
 };
 
+struct FaceCandidatePair {
+    FaceId lhs_face {};
+    FaceId rhs_face {};
+};
+
+struct IntersectionCurve {
+    CurveId curve {};
+    FaceId lhs_face {};
+    FaceId rhs_face {};
+};
+
+struct IntersectionSegment {
+    CurveId curve {};
+    FaceId lhs_face {};
+    FaceId rhs_face {};
+};
+
+std::vector<FaceId> faces_for_body_boolean(const detail::KernelState& state, BodyId body_id) {
+    std::vector<FaceId> faces;
+    if (!detail::has_body(state, body_id)) {
+        return faces;
+    }
+    const auto& body = state.bodies.at(body_id.value);
+    const auto shells = shells_for_body(body);
+    for (const auto shell_id : shells) {
+        const auto shell_it = state.shells.find(shell_id.value);
+        if (shell_it == state.shells.end()) {
+            continue;
+        }
+        for (const auto face_id : shell_it->second.faces) {
+            faces.push_back(face_id);
+        }
+    }
+    return faces;
+}
+
+std::vector<FaceCandidatePair> build_face_candidates_for_boolean(const detail::KernelState& state,
+                                                                 BodyId lhs,
+                                                                 BodyId rhs) {
+    std::vector<FaceCandidatePair> pairs;
+    const auto lhs_faces = faces_for_body_boolean(state, lhs);
+    const auto rhs_faces = faces_for_body_boolean(state, rhs);
+    if (lhs_faces.empty() || rhs_faces.empty()) {
+        return pairs;
+    }
+
+    std::vector<BoundingBox> lhs_boxes;
+    lhs_boxes.reserve(lhs_faces.size());
+    for (const auto face_id : lhs_faces) {
+        lhs_boxes.push_back(face_bbox(state, face_id));
+    }
+    std::vector<BoundingBox> rhs_boxes;
+    rhs_boxes.reserve(rhs_faces.size());
+    for (const auto face_id : rhs_faces) {
+        rhs_boxes.push_back(face_bbox(state, face_id));
+    }
+
+    for (std::size_t i = 0; i < lhs_faces.size(); ++i) {
+        if (!lhs_boxes[i].is_valid) {
+            continue;
+        }
+        for (std::size_t j = 0; j < rhs_faces.size(); ++j) {
+            if (!rhs_boxes[j].is_valid) {
+                continue;
+            }
+            if (!intersect_bbox(lhs_boxes[i], rhs_boxes[j]).is_valid) {
+                continue;
+            }
+            pairs.push_back(FaceCandidatePair {lhs_faces[i], rhs_faces[j]});
+        }
+    }
+    return pairs;
+}
+
+Vec3 safe_unit_normal_local(const Vec3& normal) {
+    const auto n = detail::norm(normal);
+    if (!(n > 0.0)) {
+        return Vec3 {0.0, 0.0, 1.0};
+    }
+    return detail::scale(normal, 1.0 / n);
+}
+
+bool plane_plane_intersection_line(const detail::KernelState& state,
+                                   FaceId lhs_face,
+                                   FaceId rhs_face,
+                                   Point3& out_origin,
+                                   Vec3& out_dir) {
+    const auto lhs_face_it = state.faces.find(lhs_face.value);
+    const auto rhs_face_it = state.faces.find(rhs_face.value);
+    if (lhs_face_it == state.faces.end() || rhs_face_it == state.faces.end()) {
+        return false;
+    }
+    const auto lhs_surf_it = state.surfaces.find(lhs_face_it->second.surface_id.value);
+    const auto rhs_surf_it = state.surfaces.find(rhs_face_it->second.surface_id.value);
+    if (lhs_surf_it == state.surfaces.end() || rhs_surf_it == state.surfaces.end()) {
+        return false;
+    }
+    const auto& s0 = lhs_surf_it->second;
+    const auto& s1 = rhs_surf_it->second;
+    if (s0.kind != detail::SurfaceKind::Plane || s1.kind != detail::SurfaceKind::Plane) {
+        return false;
+    }
+    const auto n0 = safe_unit_normal_local(s0.normal);
+    const auto n1 = safe_unit_normal_local(s1.normal);
+    const auto dir = detail::cross(n0, n1);
+    const auto dir_len2 = detail::dot(dir, dir);
+    if (!(dir_len2 > 1e-14)) {
+        return false;
+    }
+    const auto d0 = detail::dot(n0, Vec3 {s0.origin.x, s0.origin.y, s0.origin.z});
+    const auto d1 = detail::dot(n1, Vec3 {s1.origin.x, s1.origin.y, s1.origin.z});
+    // p = ((d0*n1 - d1*n0) x (n0 x n1)) / |n0 x n1|^2
+    const Vec3 c {d0 * n1.x - d1 * n0.x, d0 * n1.y - d1 * n0.y, d0 * n1.z - d1 * n0.z};
+    const auto p = detail::scale(detail::cross(c, dir), 1.0 / dir_len2);
+    out_origin = Point3 {p.x, p.y, p.z};
+    out_dir = detail::normalize(dir);
+    return true;
+}
+
+std::vector<IntersectionCurve> compute_intersection_curves_for_candidates(detail::KernelState& state,
+                                                                          std::span<const FaceCandidatePair> candidates) {
+    std::vector<IntersectionCurve> curves;
+    curves.reserve(candidates.size());
+    for (const auto& pair : candidates) {
+        Point3 origin {};
+        Vec3 dir {};
+        if (!plane_plane_intersection_line(state, pair.lhs_face, pair.rhs_face, origin, dir)) {
+            continue;
+        }
+        detail::CurveRecord curve;
+        curve.kind = detail::CurveKind::Line;
+        curve.origin = origin;
+        curve.direction = dir;
+        const auto curve_id = CurveId {state.allocate_id()};
+        state.curves.emplace(curve_id.value, std::move(curve));
+        curves.push_back(IntersectionCurve {curve_id, pair.lhs_face, pair.rhs_face});
+    }
+    return curves;
+}
+
+std::vector<IntersectionSegment> clip_intersection_lines_to_face_overlap(detail::KernelState& state,
+                                                                         std::span<const IntersectionCurve> curves) {
+    std::vector<IntersectionSegment> segments;
+    segments.reserve(curves.size());
+    for (const auto& item : curves) {
+        const auto lhs_box = face_bbox(state, item.lhs_face);
+        const auto rhs_box = face_bbox(state, item.rhs_face);
+        const auto overlap = intersect_bbox(lhs_box, rhs_box);
+        if (!overlap.is_valid) {
+            continue;
+        }
+        const auto curve_it = state.curves.find(item.curve.value);
+        if (curve_it == state.curves.end() || curve_it->second.kind != detail::CurveKind::Line) {
+            continue;
+        }
+        const auto o = curve_it->second.origin;
+        const auto d = curve_it->second.direction;
+        const auto d_len2 = detail::dot(d, d);
+        if (!(d_len2 > 1e-14)) {
+            continue;
+        }
+
+        const std::array<Point3, 8> corners {
+            Point3 {overlap.min.x, overlap.min.y, overlap.min.z},
+            Point3 {overlap.max.x, overlap.min.y, overlap.min.z},
+            Point3 {overlap.max.x, overlap.max.y, overlap.min.z},
+            Point3 {overlap.min.x, overlap.max.y, overlap.min.z},
+            Point3 {overlap.min.x, overlap.min.y, overlap.max.z},
+            Point3 {overlap.max.x, overlap.min.y, overlap.max.z},
+            Point3 {overlap.max.x, overlap.max.y, overlap.max.z},
+            Point3 {overlap.min.x, overlap.max.y, overlap.max.z},
+        };
+
+        Scalar tmin = 0.0;
+        Scalar tmax = 0.0;
+        bool initialized = false;
+        for (const auto& p : corners) {
+            const Vec3 op {p.x - o.x, p.y - o.y, p.z - o.z};
+            const auto t = detail::dot(op, d) / d_len2;
+            if (!initialized) {
+                tmin = t;
+                tmax = t;
+                initialized = true;
+            } else {
+                tmin = std::min(tmin, t);
+                tmax = std::max(tmax, t);
+            }
+        }
+        if (!initialized || !(tmax - tmin > 1e-9)) {
+            continue;
+        }
+
+        const Point3 p0 {o.x + d.x * tmin, o.y + d.y * tmin, o.z + d.z * tmin};
+        const Point3 p1 {o.x + d.x * tmax, o.y + d.y * tmax, o.z + d.z * tmax};
+
+        detail::CurveRecord seg;
+        seg.kind = detail::CurveKind::LineSegment;
+        seg.poles = {p0, p1};
+        const auto seg_id = CurveId {state.allocate_id()};
+        state.curves.emplace(seg_id.value, std::move(seg));
+        segments.push_back(IntersectionSegment {seg_id, item.lhs_face, item.rhs_face});
+    }
+    return segments;
+}
+
 std::vector<BoundingBox> body_regions_for_boolean(const detail::KernelState& state, BodyId body_id) {
     std::vector<BoundingBox> regions;
     if (!detail::has_body(state, body_id)) {
@@ -565,6 +823,793 @@ void append_boolean_prep_candidate_issue(detail::KernelState& state,
     }
 }
 
+const char* bbox_relation_name(BBoxRelation relation) {
+    switch (relation) {
+        case BBoxRelation::Disjoint:
+            return "Disjoint";
+        case BBoxRelation::Touching:
+            return "Touching";
+        case BBoxRelation::Overlapping:
+            return "Overlapping";
+        case BBoxRelation::LhsContainsRhs:
+            return "LhsContainsRhs";
+        case BBoxRelation::RhsContainsLhs:
+            return "RhsContainsLhs";
+    }
+    return "Unknown";
+}
+
+const char* boolean_op_name(BooleanOp op) {
+    switch (op) {
+        case BooleanOp::Union:
+            return "Union";
+        case BooleanOp::Intersect:
+            return "Intersect";
+        case BooleanOp::Subtract:
+            return "Subtract";
+        case BooleanOp::Split:
+            return "Split";
+    }
+    return "Unknown";
+}
+
+void append_boolean_run_stage_issue(detail::KernelState& state,
+                                    DiagnosticId diag,
+                                    BooleanOp op,
+                                    BBoxRelation relation,
+                                    const BooleanPrepStats& prep,
+                                    BodyId lhs,
+                                    BodyId rhs,
+                                    BodyId output) {
+    if (diag.value == 0) {
+        return;
+    }
+    std::ostringstream msg;
+    msg << "布尔阶段摘要 op=" << boolean_op_name(op) << " bbox_relation=" << bbox_relation_name(relation)
+        << " lhs_regions=" << prep.lhs_regions << " rhs_regions=" << prep.rhs_regions
+        << " overlap_candidates=" << prep.overlap_candidates
+        << " local_clip=" << (prep.local_clip_applied ? "true" : "false");
+    auto issue = detail::make_info_issue(diag_codes::kBoolRunStageSummary, msg.str());
+    issue.related_entities = {lhs.value, rhs.value, output.value};
+    state.append_diagnostic_issue(diag, std::move(issue));
+}
+
+void append_boolean_stage_issue(detail::KernelState& state,
+                                DiagnosticId diag,
+                                std::string_view code,
+                                std::string message,
+                                std::vector<std::uint64_t> related_entities) {
+    if (diag.value == 0) {
+        return;
+    }
+    auto issue = detail::make_info_issue(code, std::move(message));
+    issue.related_entities = std::move(related_entities);
+    state.append_diagnostic_issue(diag, std::move(issue));
+}
+
+void append_boolean_face_candidate_issue(detail::KernelState& state,
+                                        DiagnosticId diag,
+                                        BodyId lhs,
+                                        BodyId rhs,
+                                        std::size_t count) {
+    if (diag.value == 0) {
+        return;
+    }
+    std::ostringstream msg;
+    msg << "布尔面级候选对已生成: face_candidates=" << count;
+    auto issue = detail::make_info_issue(diag_codes::kBoolFaceCandidatesBuilt, msg.str());
+    issue.related_entities = {lhs.value, rhs.value};
+    state.append_diagnostic_issue(diag, std::move(issue));
+}
+
+void append_boolean_intersection_curve_issue(detail::KernelState& state,
+                                             DiagnosticId diag,
+                                             BodyId lhs,
+                                             BodyId rhs,
+                                             std::span<const IntersectionCurve> curves) {
+    if (diag.value == 0) {
+        return;
+    }
+    std::ostringstream msg;
+    msg << "布尔精确求交（解析）已生成交线: curves=" << curves.size();
+    auto issue = detail::make_info_issue(diag_codes::kBoolIntersectionCurvesBuilt, msg.str());
+    issue.related_entities = {lhs.value, rhs.value};
+    const std::size_t kMaxCurves = 8;
+    for (std::size_t i = 0; i < std::min(kMaxCurves, curves.size()); ++i) {
+        issue.related_entities.push_back(curves[i].curve.value);
+    }
+    state.append_diagnostic_issue(diag, std::move(issue));
+}
+
+void append_boolean_intersection_segment_issue(detail::KernelState& state,
+                                               DiagnosticId diag,
+                                               BodyId lhs,
+                                               BodyId rhs,
+                                               std::span<const IntersectionSegment> segments) {
+    if (diag.value == 0) {
+        return;
+    }
+    std::ostringstream msg;
+    msg << "布尔交线裁剪完成: segments=" << segments.size();
+    auto issue = detail::make_info_issue(diag_codes::kBoolIntersectionSegmentsBuilt, msg.str());
+    issue.related_entities = {lhs.value, rhs.value};
+    const std::size_t kMaxSeg = 8;
+    for (std::size_t i = 0; i < std::min(kMaxSeg, segments.size()); ++i) {
+        issue.related_entities.push_back(segments[i].curve.value);
+    }
+    state.append_diagnostic_issue(diag, std::move(issue));
+}
+
+void append_boolean_intersection_stored_issue(detail::KernelState& state,
+                                              DiagnosticId diag,
+                                              BodyId lhs,
+                                              BodyId rhs,
+                                              IntersectionId intersection_id,
+                                              std::size_t curve_count) {
+    if (diag.value == 0) {
+        return;
+    }
+    std::ostringstream msg;
+    msg << "布尔交线集合已保存: intersection_id=" << intersection_id.value
+        << " curve_count=" << curve_count;
+    auto issue = detail::make_info_issue(diag_codes::kBoolIntersectionWiresStored, msg.str());
+    issue.related_entities = {lhs.value, rhs.value, intersection_id.value};
+    state.append_diagnostic_issue(diag, std::move(issue));
+}
+
+std::optional<std::array<VertexId, 2>> oriented_vertices_for_coedge_local(const detail::KernelState& state, CoedgeId coedge_id) {
+    const auto coedge_it = state.coedges.find(coedge_id.value);
+    if (coedge_it == state.coedges.end()) {
+        return std::nullopt;
+    }
+    const auto edge_it = state.edges.find(coedge_it->second.edge_id.value);
+    if (edge_it == state.edges.end()) {
+        return std::nullopt;
+    }
+    if (!detail::has_vertex(state, edge_it->second.v0) || !detail::has_vertex(state, edge_it->second.v1) ||
+        edge_it->second.v0.value == edge_it->second.v1.value) {
+        return std::nullopt;
+    }
+    if (coedge_it->second.reversed) {
+        return std::array<VertexId, 2> {edge_it->second.v1, edge_it->second.v0};
+    }
+    return std::array<VertexId, 2> {edge_it->second.v0, edge_it->second.v1};
+}
+
+bool coedge_reversed_for_oriented_edge(const detail::KernelState& state, EdgeId edge_id, VertexId start, VertexId end, bool& out_reversed) {
+    const auto edge_it = state.edges.find(edge_id.value);
+    if (edge_it == state.edges.end()) {
+        return false;
+    }
+    const auto v0 = edge_it->second.v0;
+    const auto v1 = edge_it->second.v1;
+    if (v0.value == start.value && v1.value == end.value) {
+        out_reversed = false;
+        return true;
+    }
+    if (v1.value == start.value && v0.value == end.value) {
+        out_reversed = true;
+        return true;
+    }
+    return false;
+}
+
+struct RectFrame {
+    Point3 origin {};
+    Vec3 u_unit {1.0, 0.0, 0.0};
+    Vec3 v_unit {0.0, 1.0, 0.0};
+    Scalar u_len {0.0};
+    Scalar v_len {0.0};
+};
+
+bool build_rect_frame_from_loop(const detail::KernelState& state,
+                                LoopId loop_id,
+                                std::array<VertexId, 4>& out_verts,
+                                RectFrame& out_frame) {
+    const auto loop_it = state.loops.find(loop_id.value);
+    if (loop_it == state.loops.end() || loop_it->second.coedges.size() != 4) {
+        return false;
+    }
+    for (std::size_t i = 0; i < 4; ++i) {
+        const auto oriented = oriented_vertices_for_coedge_local(state, loop_it->second.coedges[i]);
+        if (!oriented.has_value()) {
+            return false;
+        }
+        out_verts[i] = (*oriented)[0];
+    }
+    const auto v0_it = state.vertices.find(out_verts[0].value);
+    const auto v1_it = state.vertices.find(out_verts[1].value);
+    const auto v3_it = state.vertices.find(out_verts[3].value);
+    if (v0_it == state.vertices.end() || v1_it == state.vertices.end() || v3_it == state.vertices.end()) {
+        return false;
+    }
+    const auto u_vec = detail::subtract(v1_it->second.point, v0_it->second.point);
+    const auto v_vec = detail::subtract(v3_it->second.point, v0_it->second.point);
+    const auto u_len = detail::norm(u_vec);
+    const auto v_len = detail::norm(v_vec);
+    if (!(u_len > 1e-12) || !(v_len > 1e-12)) {
+        return false;
+    }
+    out_frame.origin = v0_it->second.point;
+    out_frame.u_unit = detail::scale(u_vec, 1.0 / u_len);
+    out_frame.v_unit = detail::scale(v_vec, 1.0 / v_len);
+    out_frame.u_len = u_len;
+    out_frame.v_len = v_len;
+    return true;
+}
+
+std::array<Scalar, 2> to_uv(const RectFrame& f, const Point3& p) {
+    const Vec3 op {p.x - f.origin.x, p.y - f.origin.y, p.z - f.origin.z};
+    return {detail::dot(op, f.u_unit), detail::dot(op, f.v_unit)};
+}
+
+Point3 from_uv(const RectFrame& f, Scalar u, Scalar v) {
+    const auto pu = detail::scale(f.u_unit, u);
+    const auto pv = detail::scale(f.v_unit, v);
+    return Point3 {f.origin.x + pu.x + pv.x, f.origin.y + pu.y + pv.y, f.origin.z + pu.z + pv.z};
+}
+
+bool uv_inside_rect(const RectFrame& f, Scalar u, Scalar v, Scalar eps) {
+    return u >= -eps && u <= f.u_len + eps && v >= -eps && v <= f.v_len + eps;
+}
+
+struct RectIntersection {
+    Scalar u {0.0};
+    Scalar v {0.0};
+    int boundary {-1}; // 0: u=0, 1: u=u_len, 2: v=0, 3: v=v_len
+};
+
+std::vector<RectIntersection> intersect_line_with_rect_uv(const RectFrame& f,
+                                                          const std::array<Scalar, 2>& p0,
+                                                          const std::array<Scalar, 2>& p1) {
+    std::vector<RectIntersection> hits;
+    const auto du = p1[0] - p0[0];
+    const auto dv = p1[1] - p0[1];
+    const auto eps = 1e-9 * std::max<Scalar>(1.0, std::max(f.u_len, f.v_len));
+
+    auto add_hit = [&hits, eps](RectIntersection h) {
+        for (const auto& e : hits) {
+            if (std::abs(e.u - h.u) <= eps && std::abs(e.v - h.v) <= eps) {
+                return;
+            }
+        }
+        hits.push_back(h);
+    };
+
+    auto try_u = [&](Scalar u_target, int boundary) {
+        if (std::abs(du) <= 1e-14) {
+            return;
+        }
+        const auto t = (u_target - p0[0]) / du;
+        const auto v = p0[1] + t * dv;
+        if (uv_inside_rect(f, u_target, v, eps)) {
+            add_hit(RectIntersection {u_target, v, boundary});
+        }
+    };
+    auto try_v = [&](Scalar v_target, int boundary) {
+        if (std::abs(dv) <= 1e-14) {
+            return;
+        }
+        const auto t = (v_target - p0[1]) / dv;
+        const auto u = p0[0] + t * du;
+        if (uv_inside_rect(f, u, v_target, eps)) {
+            add_hit(RectIntersection {u, v_target, boundary});
+        }
+    };
+
+    try_u(0.0, 0);
+    try_u(f.u_len, 1);
+    try_v(0.0, 2);
+    try_v(f.v_len, 3);
+    return hits;
+}
+
+EdgeId create_line_edge(detail::KernelState& state, VertexId a, VertexId b) {
+    const auto a_it = state.vertices.find(a.value);
+    const auto b_it = state.vertices.find(b.value);
+    detail::CurveRecord curve;
+    curve.kind = detail::CurveKind::Line;
+    curve.origin = a_it->second.point;
+    curve.direction = detail::normalize(detail::subtract(b_it->second.point, a_it->second.point));
+    const auto curve_id = CurveId {state.allocate_id()};
+    state.curves.emplace(curve_id.value, std::move(curve));
+    const auto edge_id = EdgeId {state.allocate_id()};
+    state.edges.emplace(edge_id.value, detail::EdgeRecord {curve_id, a, b});
+    return edge_id;
+}
+
+struct SplitEdgeResult {
+    EdgeId e0 {}; // start -> mid
+    EdgeId e1 {}; // mid -> end
+    VertexId start {};
+    VertexId end {};
+};
+
+bool coedge_belongs_to_shell(const detail::KernelState& state, CoedgeId coedge_id, ShellId shell_id) {
+    const auto loop_it = state.coedge_to_loop.find(coedge_id.value);
+    if (loop_it == state.coedge_to_loop.end()) {
+        return false;
+    }
+    const auto face_it = state.loop_to_faces.find(loop_it->second);
+    if (face_it == state.loop_to_faces.end()) {
+        return false;
+    }
+    for (const auto face_value : face_it->second) {
+        const auto shells_it = state.face_to_shells.find(face_value);
+        if (shells_it == state.face_to_shells.end()) {
+            continue;
+        }
+        for (const auto shell_value : shells_it->second) {
+            if (shell_value == shell_id.value) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Split an existing edge inside a shell: replace each coedge in that shell by two coedges referencing new edges.
+std::optional<SplitEdgeResult> split_edge_in_shell(detail::KernelState& state, ShellId shell_id, EdgeId edge_id, VertexId mid_vertex) {
+    const auto edge_it = state.edges.find(edge_id.value);
+    if (edge_it == state.edges.end()) {
+        return std::nullopt;
+    }
+    const auto v0 = edge_it->second.v0;
+    const auto v1 = edge_it->second.v1;
+    if (v0.value == mid_vertex.value || v1.value == mid_vertex.value) {
+        return std::nullopt;
+    }
+    if (!detail::has_vertex(state, v0) || !detail::has_vertex(state, v1) || !detail::has_vertex(state, mid_vertex)) {
+        return std::nullopt;
+    }
+
+    const auto e0 = create_line_edge(state, v0, mid_vertex);
+    const auto e1 = create_line_edge(state, mid_vertex, v1);
+
+    // Prefer scanning the shell topology directly. This is more robust than relying on
+    // `edge_to_coedges`, which may be stale/partial during in-place imprint operations.
+    std::vector<std::uint64_t> target_coedges;
+    {
+        const auto shell_it = state.shells.find(shell_id.value);
+        if (shell_it != state.shells.end()) {
+            for (const auto face_id : shell_it->second.faces) {
+                const auto face_it = state.faces.find(face_id.value);
+                if (face_it == state.faces.end()) continue;
+                std::vector<LoopId> loops;
+                loops.push_back(face_it->second.outer_loop);
+                loops.insert(loops.end(), face_it->second.inner_loops.begin(), face_it->second.inner_loops.end());
+                for (const auto loop_id : loops) {
+                    const auto loop_it = state.loops.find(loop_id.value);
+                    if (loop_it == state.loops.end()) continue;
+                    for (const auto coedge_id : loop_it->second.coedges) {
+                        const auto coedge_it = state.coedges.find(coedge_id.value);
+                        if (coedge_it == state.coedges.end()) continue;
+                        if (coedge_it->second.edge_id.value == edge_id.value) {
+                            target_coedges.push_back(coedge_id.value);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fall back to the edge index if the scan couldn't find any coedges.
+    if (target_coedges.empty()) {
+        const auto it = state.edge_to_coedges.find(edge_id.value);
+        if (it == state.edge_to_coedges.end()) {
+            return SplitEdgeResult {e0, e1, v0, v1};
+        }
+        target_coedges.assign(it->second.begin(), it->second.end());
+    }
+
+    for (const auto coedge_value : target_coedges) {
+        const auto loop_map_it = state.coedge_to_loop.find(coedge_value);
+        if (loop_map_it == state.coedge_to_loop.end()) {
+            continue;
+        }
+        const auto loop_id = LoopId {loop_map_it->second};
+        const auto loop_it = state.loops.find(loop_id.value);
+        if (loop_it == state.loops.end()) {
+            continue;
+        }
+        const auto coedge_it = state.coedges.find(coedge_value);
+        if (coedge_it == state.coedges.end()) {
+            continue;
+        }
+        const bool reversed = coedge_it->second.reversed;
+
+        // Create two new coedges, ordering depends on the original coedge orientation.
+        const auto c0 = CoedgeId {state.allocate_id()};
+        const auto c1 = CoedgeId {state.allocate_id()};
+        if (!reversed) {
+            state.coedges.emplace(c0.value, detail::CoedgeRecord {e0, false});
+            state.coedges.emplace(c1.value, detail::CoedgeRecord {e1, false});
+        } else {
+            state.coedges.emplace(c0.value, detail::CoedgeRecord {e1, true});
+            state.coedges.emplace(c1.value, detail::CoedgeRecord {e0, true});
+        }
+
+        auto& coedges = loop_it->second.coedges;
+        for (std::size_t i = 0; i < coedges.size(); ++i) {
+            if (coedges[i].value == coedge_value) {
+                coedges[i] = c0;
+                coedges.insert(coedges.begin() + static_cast<std::ptrdiff_t>(i + 1), c1);
+                break;
+            }
+        }
+    }
+    return SplitEdgeResult {e0, e1, v0, v1};
+}
+
+// Segment-driven imprint: split a rectangular plane face using the intersection segment direction.
+// Supports the common "opposite edges" cut (u=0 with u=u_len) or (v=0 with v=v_len).
+bool imprint_split_rect_face_by_segment(detail::KernelState& state,
+                                        ShellId shell_id,
+                                        FaceId face_id,
+                                        CurveId segment_curve_id) {
+    // NOTE(Stage 2): This path mutates only one face and can easily break strict shell closedness
+    // (open-boundary edges) unless we also update all adjacent faces sharing the split edges.
+    // Until full adjacency-aware imprint is implemented, keep this disabled and fall back to
+    // the diagonal split, which preserves edge usage invariants for the placeholder topology.
+    (void)state;
+    (void)shell_id;
+    (void)face_id;
+    (void)segment_curve_id;
+    return false;
+
+    const auto shell_it = state.shells.find(shell_id.value);
+    const auto face_it = state.faces.find(face_id.value);
+    if (shell_it == state.shells.end() || face_it == state.faces.end()) {
+        return false;
+    }
+    const auto surf_it = state.surfaces.find(face_it->second.surface_id.value);
+    if (surf_it == state.surfaces.end() || surf_it->second.kind != detail::SurfaceKind::Plane) {
+        return false;
+    }
+    const auto loop_id = face_it->second.outer_loop;
+
+    std::array<VertexId, 4> verts {};
+    RectFrame frame {};
+    if (!build_rect_frame_from_loop(state, loop_id, verts, frame)) {
+        return false;
+    }
+
+    const auto seg_it = state.curves.find(segment_curve_id.value);
+    if (seg_it == state.curves.end() || seg_it->second.kind != detail::CurveKind::LineSegment || seg_it->second.poles.size() < 2) {
+        return false;
+    }
+    const auto uv0 = to_uv(frame, seg_it->second.poles.front());
+    const auto uv1 = to_uv(frame, seg_it->second.poles.back());
+    auto hits = intersect_line_with_rect_uv(frame, uv0, uv1);
+    if (hits.size() < 2) {
+        return false;
+    }
+
+    // Pick two hits on opposite boundaries.
+    std::optional<RectIntersection> h0;
+    std::optional<RectIntersection> h1;
+    auto pick = [&](int b0, int b1) -> bool {
+        std::optional<RectIntersection> a;
+        std::optional<RectIntersection> b;
+        for (const auto& h : hits) {
+            if (h.boundary == b0 && !a.has_value()) a = h;
+            if (h.boundary == b1 && !b.has_value()) b = h;
+        }
+        if (a.has_value() && b.has_value()) {
+            h0 = a;
+            h1 = b;
+            return true;
+        }
+        return false;
+    };
+    const bool ok_lr = pick(0, 1);
+    const bool ok_bt = ok_lr ? false : pick(2, 3);
+    if (!ok_lr && !ok_bt) {
+        return false;
+    }
+
+    // Map boundaries to rectangle edges indices (from loop order v0->v1->v2->v3->v0):
+    // boundary 0(u=0)   => edge v3->v0 (edges[3])
+    // boundary 1(u=uLen)=> edge v1->v2 (edges[1])
+    // boundary 2(v=0)   => edge v0->v1 (edges[0])
+    // boundary 3(v=vLen)=> edge v2->v3 (edges[2])
+    const auto loop_it = state.loops.find(loop_id.value);
+    std::array<std::uint64_t, 4> eids {};
+    for (std::size_t i = 0; i < 4; ++i) {
+        const auto coe_it = state.coedges.find(loop_it->second.coedges[i].value);
+        if (coe_it == state.coedges.end()) return false;
+        eids[i] = coe_it->second.edge_id.value;
+    }
+
+    auto make_split_vertex = [&](const RectIntersection& h) -> VertexId {
+        const auto p = from_uv(frame, h.u, h.v);
+        const auto vid = VertexId {state.allocate_id()};
+        state.vertices.emplace(vid.value, detail::VertexRecord {p});
+        return vid;
+    };
+    const auto va = make_split_vertex(*h0);
+    const auto vb = make_split_vertex(*h1);
+
+    // Split edges and build two quad loops.
+    // For left/right: cut between edges[3] (v3-v0) and edges[1] (v1-v2)
+    // For bottom/top: cut between edges[0] (v0-v1) and edges[2] (v2-v3)
+    std::array<EdgeId, 2> split_edges {};
+    std::array<VertexId, 2> split_end_a {};
+    std::array<VertexId, 2> split_end_b {};
+    if (ok_lr) {
+        split_edges = {EdgeId {eids[3]}, EdgeId {eids[1]}};
+        split_end_a = {verts[3], verts[0]};
+        split_end_b = {verts[1], verts[2]};
+    } else {
+        split_edges = {EdgeId {eids[0]}, EdgeId {eids[2]}};
+        split_end_a = {verts[0], verts[1]};
+        split_end_b = {verts[2], verts[3]};
+    }
+
+    // Split the two hit edges in-place across the whole shell to preserve closedness.
+    const auto split_a = split_edge_in_shell(state, shell_id, split_edges[0], va);
+    const auto split_b = split_edge_in_shell(state, shell_id, split_edges[1], vb);
+    if (!split_a.has_value() || !split_b.has_value()) {
+        return false;
+    }
+    const auto cut = create_line_edge(state, va, vb);
+
+    // Pick correct segment edge ids for the target loops by oriented endpoints.
+    auto pick_segment = [&](const SplitEdgeResult& s, VertexId start, VertexId end) -> EdgeId {
+        bool rev = false;
+        if (coedge_reversed_for_oriented_edge(state, s.e0, start, end, rev)) {
+            return s.e0;
+        }
+        if (coedge_reversed_for_oriented_edge(state, s.e1, start, end, rev)) {
+            return s.e1;
+        }
+        return {};
+    };
+    // For loop construction we need four boundary segments:
+    EdgeId seg_a_to_0 {};
+    EdgeId seg_3_to_a {};
+    EdgeId seg_1_to_b {};
+    EdgeId seg_b_to_2 {};
+    EdgeId seg_0_to_a {};
+    EdgeId seg_a_to_1 {};
+    EdgeId seg_2_to_b {};
+    EdgeId seg_b_to_3 {};
+    if (ok_lr) {
+        // left edge between v3 and v0 split at va
+        seg_3_to_a = pick_segment(*split_a, verts[3], va);
+        seg_a_to_0 = pick_segment(*split_a, va, verts[0]);
+        // right edge between v1 and v2 split at vb
+        seg_1_to_b = pick_segment(*split_b, verts[1], vb);
+        seg_b_to_2 = pick_segment(*split_b, vb, verts[2]);
+        if (seg_3_to_a.value == 0 || seg_a_to_0.value == 0 || seg_1_to_b.value == 0 || seg_b_to_2.value == 0) {
+            return false;
+        }
+    } else {
+        // bottom edge between v0 and v1 split at va
+        seg_0_to_a = pick_segment(*split_a, verts[0], va);
+        seg_a_to_1 = pick_segment(*split_a, va, verts[1]);
+        // top edge between v2 and v3 split at vb
+        seg_2_to_b = pick_segment(*split_b, verts[2], vb);
+        seg_b_to_3 = pick_segment(*split_b, vb, verts[3]);
+        if (seg_0_to_a.value == 0 || seg_a_to_1.value == 0 || seg_2_to_b.value == 0 || seg_b_to_3.value == 0) {
+            return false;
+        }
+    }
+
+    auto make_coedge = [&](EdgeId e, VertexId s, VertexId t) -> CoedgeId {
+        bool rev = false;
+        if (!coedge_reversed_for_oriented_edge(state, e, s, t, rev)) {
+            return {};
+        }
+        const auto cid = CoedgeId {state.allocate_id()};
+        state.coedges.emplace(cid.value, detail::CoedgeRecord {e, rev});
+        return cid;
+    };
+
+    // Build two loops depending on cut orientation.
+    LoopId loop_a {};
+    LoopId loop_b {};
+    if (ok_lr) {
+        // loop_a: v0 -> v1 -> vb -> va -> v0
+        const auto c01 = make_coedge(EdgeId {eids[0]}, verts[0], verts[1]);
+        const auto c1b = make_coedge(seg_1_to_b, verts[1], vb);
+        const auto cba = make_coedge(cut, vb, va);
+        const auto ca0 = make_coedge(seg_a_to_0, va, verts[0]);
+        if (c01.value == 0 || c1b.value == 0 || cba.value == 0 || ca0.value == 0) return false;
+        loop_a = LoopId {state.allocate_id()};
+        state.loops.emplace(loop_a.value, detail::LoopRecord {std::vector<CoedgeId> {c01, c1b, cba, ca0}});
+
+        // loop_b: va -> vb -> v2 -> v3 -> va
+        const auto cab = make_coedge(cut, va, vb);
+        const auto cb2 = make_coedge(seg_b_to_2, vb, verts[2]);
+        const auto c23 = make_coedge(EdgeId {eids[2]}, verts[2], verts[3]);
+        const auto c3a = make_coedge(seg_3_to_a, verts[3], va);
+        if (cab.value == 0 || cb2.value == 0 || c23.value == 0 || c3a.value == 0) return false;
+        loop_b = LoopId {state.allocate_id()};
+        state.loops.emplace(loop_b.value, detail::LoopRecord {std::vector<CoedgeId> {cab, cb2, c23, c3a}});
+    } else {
+        // bottom/top cut:
+        // loop_a: v0 -> va -> vb -> v3 -> v0 (uses eA0, cut, eB1, edge v3->v0)
+        const auto c0a = make_coedge(seg_0_to_a, verts[0], va);
+        const auto cab = make_coedge(cut, va, vb);
+        const auto cb3 = make_coedge(seg_b_to_3, vb, verts[3]);
+        const auto c30 = make_coedge(EdgeId {eids[3]}, verts[3], verts[0]);
+        if (c0a.value == 0 || cab.value == 0 || cb3.value == 0 || c30.value == 0) return false;
+        loop_a = LoopId {state.allocate_id()};
+        state.loops.emplace(loop_a.value, detail::LoopRecord {std::vector<CoedgeId> {c0a, cab, cb3, c30}});
+
+        // loop_b: va -> v1 -> v2 -> vb -> va
+        const auto ca1 = make_coedge(seg_a_to_1, va, verts[1]);
+        const auto c12 = make_coedge(EdgeId {eids[1]}, verts[1], verts[2]);
+        const auto c2b = make_coedge(seg_2_to_b, verts[2], vb);
+        const auto cba = make_coedge(cut, vb, va);
+        if (ca1.value == 0 || c12.value == 0 || c2b.value == 0 || cba.value == 0) return false;
+        loop_b = LoopId {state.allocate_id()};
+        state.loops.emplace(loop_b.value, detail::LoopRecord {std::vector<CoedgeId> {ca1, c12, c2b, cba}});
+    }
+
+    // Create two new faces on same surface.
+    const auto face_a = FaceId {state.allocate_id()};
+    const auto face_b = FaceId {state.allocate_id()};
+    detail::FaceRecord fa;
+    fa.surface_id = face_it->second.surface_id;
+    fa.outer_loop = loop_a;
+    fa.source_faces = face_it->second.source_faces.empty() ? std::vector<FaceId> {face_id} : face_it->second.source_faces;
+    detail::FaceRecord fb;
+    fb.surface_id = face_it->second.surface_id;
+    fb.outer_loop = loop_b;
+    fb.source_faces = face_it->second.source_faces.empty() ? std::vector<FaceId> {face_id} : face_it->second.source_faces;
+    state.faces.emplace(face_a.value, std::move(fa));
+    state.faces.emplace(face_b.value, std::move(fb));
+
+    // Replace face in shell with the two faces.
+    auto& faces = shell_it->second.faces;
+    const auto it = std::find_if(faces.begin(), faces.end(), [face_id](FaceId f) { return f.value == face_id.value; });
+    if (it == faces.end()) {
+        return false;
+    }
+    *it = face_a;
+    faces.push_back(face_b);
+    return true;
+}
+
+// Minimal imprint: split a rectangular plane face into two triangle faces along a diagonal.
+// If prefer_diag_02 is true, split along (v0 -> v2); otherwise split along (v1 -> v3).
+bool imprint_split_rect_face_diagonal(detail::KernelState& state, ShellId shell_id, FaceId face_id, bool prefer_diag_02) {
+    const auto shell_it = state.shells.find(shell_id.value);
+    const auto face_it = state.faces.find(face_id.value);
+    if (shell_it == state.shells.end() || face_it == state.faces.end()) {
+        return false;
+    }
+    const auto loop_it = state.loops.find(face_it->second.outer_loop.value);
+    if (loop_it == state.loops.end() || loop_it->second.coedges.size() != 4) {
+        return false;
+    }
+    const auto surf_it = state.surfaces.find(face_it->second.surface_id.value);
+    if (surf_it == state.surfaces.end() || surf_it->second.kind != detail::SurfaceKind::Plane) {
+        return false;
+    }
+
+    std::array<CoedgeId, 4> coedges {
+        loop_it->second.coedges[0],
+        loop_it->second.coedges[1],
+        loop_it->second.coedges[2],
+        loop_it->second.coedges[3],
+    };
+    std::array<std::uint64_t, 4> edges {};
+    std::array<VertexId, 4> verts {};
+    for (std::size_t i = 0; i < 4; ++i) {
+        const auto coe_it = state.coedges.find(coedges[i].value);
+        if (coe_it == state.coedges.end()) {
+            return false;
+        }
+        edges[i] = coe_it->second.edge_id.value;
+        const auto oriented = oriented_vertices_for_coedge_local(state, coedges[i]);
+        if (!oriented.has_value()) {
+            return false;
+        }
+        verts[i] = (*oriented)[0];
+    }
+    const auto v0 = verts[0];
+    const auto v1 = verts[1];
+    const auto v2 = verts[2];
+    const auto v3 = verts[3];
+
+    const auto diag_start = prefer_diag_02 ? v0 : v1;
+    const auto diag_end = prefer_diag_02 ? v2 : v3;
+
+    const auto v0_it = state.vertices.find(diag_start.value);
+    const auto v2_it = state.vertices.find(diag_end.value);
+    if (v0_it == state.vertices.end() || v2_it == state.vertices.end()) {
+        return false;
+    }
+    // Create diagonal edge.
+    detail::CurveRecord diag_curve;
+    diag_curve.kind = detail::CurveKind::Line;
+    diag_curve.origin = v0_it->second.point;
+    diag_curve.direction = detail::normalize(detail::subtract(v2_it->second.point, v0_it->second.point));
+    const auto diag_curve_id = CurveId {state.allocate_id()};
+    state.curves.emplace(diag_curve_id.value, std::move(diag_curve));
+
+    const auto diag_edge_id = EdgeId {state.allocate_id()};
+    state.edges.emplace(diag_edge_id.value, detail::EdgeRecord {diag_curve_id, diag_start, diag_end});
+
+    auto make_tri_loop = [&state](std::array<EdgeId, 3> tri_edges, std::array<bool, 3> tri_rev) -> LoopId {
+        std::vector<CoedgeId> coeds;
+        coeds.reserve(3);
+        for (int i = 0; i < 3; ++i) {
+            const auto cid = CoedgeId {state.allocate_id()};
+            state.coedges.emplace(cid.value, detail::CoedgeRecord {tri_edges[static_cast<std::size_t>(i)], tri_rev[static_cast<std::size_t>(i)]});
+            coeds.push_back(cid);
+        }
+        const auto lid = LoopId {state.allocate_id()};
+        state.loops.emplace(lid.value, detail::LoopRecord {std::move(coeds)});
+        return lid;
+    };
+
+    LoopId loop_a {};
+    LoopId loop_b {};
+    if (prefer_diag_02) {
+        // Diagonal v0 -> v2 (original behavior).
+        bool rev01 = false, rev12 = false, rev20 = false;
+        if (!coedge_reversed_for_oriented_edge(state, EdgeId {edges[0]}, v0, v1, rev01) ||
+            !coedge_reversed_for_oriented_edge(state, EdgeId {edges[1]}, v1, v2, rev12) ||
+            !coedge_reversed_for_oriented_edge(state, diag_edge_id, v2, v0, rev20)) {
+            return false;
+        }
+        loop_a = make_tri_loop({EdgeId {edges[0]}, EdgeId {edges[1]}, diag_edge_id}, {rev01, rev12, rev20});
+
+        bool rev02 = false, rev23 = false, rev30 = false;
+        if (!coedge_reversed_for_oriented_edge(state, diag_edge_id, v0, v2, rev02) ||
+            !coedge_reversed_for_oriented_edge(state, EdgeId {edges[2]}, v2, v3, rev23) ||
+            !coedge_reversed_for_oriented_edge(state, EdgeId {edges[3]}, v3, v0, rev30)) {
+            return false;
+        }
+        loop_b = make_tri_loop({diag_edge_id, EdgeId {edges[2]}, EdgeId {edges[3]}}, {rev02, rev23, rev30});
+    } else {
+        // Diagonal v1 -> v3.
+        bool rev12 = false, rev23 = false, rev31 = false;
+        if (!coedge_reversed_for_oriented_edge(state, EdgeId {edges[1]}, v1, v2, rev12) ||
+            !coedge_reversed_for_oriented_edge(state, EdgeId {edges[2]}, v2, v3, rev23) ||
+            !coedge_reversed_for_oriented_edge(state, diag_edge_id, v3, v1, rev31)) {
+            return false;
+        }
+        loop_a = make_tri_loop({EdgeId {edges[1]}, EdgeId {edges[2]}, diag_edge_id}, {rev12, rev23, rev31});
+
+        bool rev13 = false, rev30 = false, rev01 = false;
+        if (!coedge_reversed_for_oriented_edge(state, diag_edge_id, v1, v3, rev13) ||
+            !coedge_reversed_for_oriented_edge(state, EdgeId {edges[3]}, v3, v0, rev30) ||
+            !coedge_reversed_for_oriented_edge(state, EdgeId {edges[0]}, v0, v1, rev01)) {
+            return false;
+        }
+        loop_b = make_tri_loop({diag_edge_id, EdgeId {edges[3]}, EdgeId {edges[0]}}, {rev13, rev30, rev01});
+    }
+
+    // Create two new faces on same surface.
+    const auto face_a = FaceId {state.allocate_id()};
+    const auto face_b = FaceId {state.allocate_id()};
+    detail::FaceRecord fa;
+    fa.surface_id = face_it->second.surface_id;
+    fa.outer_loop = loop_a;
+    fa.source_faces = face_it->second.source_faces.empty() ? std::vector<FaceId> {face_id} : face_it->second.source_faces;
+    detail::FaceRecord fb;
+    fb.surface_id = face_it->second.surface_id;
+    fb.outer_loop = loop_b;
+    fb.source_faces = face_it->second.source_faces.empty() ? std::vector<FaceId> {face_id} : face_it->second.source_faces;
+    state.faces.emplace(face_a.value, std::move(fa));
+    state.faces.emplace(face_b.value, std::move(fb));
+
+    // Replace face in shell with the two faces.
+    auto& faces = shell_it->second.faces;
+    const auto it = std::find_if(faces.begin(), faces.end(), [face_id](FaceId f) { return f.value == face_id.value; });
+    if (it == faces.end()) {
+        return false;
+    }
+    *it = face_a;
+    faces.push_back(face_b);
+    return true;
+}
+
 IntersectionId store_intersection(std::shared_ptr<detail::KernelState> state,
                                   std::string label,
                                   BoundingBox bbox,
@@ -600,6 +1645,24 @@ Result<BodyId> PrimitiveService::box(const Point3& origin, Scalar dx, Scalar dy,
     record.c = dz;
     record.bbox = box_bbox(origin, dx, dy, dz);
     return ok_result(make_body(state_, record, "已创建盒体"), state_->create_diagnostic("已创建盒体"));
+}
+
+Result<BodyId> PrimitiveService::wedge(const Point3& origin, Scalar dx, Scalar dy, Scalar dz) {
+    if (dx <= 0.0 || dy <= 0.0 || dz <= 0.0) {
+        return detail::invalid_input_result<BodyId>(
+            *state_, diag_codes::kCoreParameterOutOfRange,
+            "楔体创建失败：尺寸必须大于 0", "楔体创建失败");
+    }
+    detail::BodyRecord record;
+    record.kind = detail::BodyKind::Wedge;
+    record.rep_kind = RepKind::ExactBRep;
+    record.label = "wedge";
+    record.origin = origin;
+    record.a = dx;
+    record.b = dy;
+    record.c = dz;
+    record.bbox = box_bbox(origin, dx, dy, dz);
+    return ok_result(make_body(state_, record, "已创建楔体"), state_->create_diagnostic("已创建楔体"));
 }
 
 Result<BodyId> PrimitiveService::sphere(const Point3& center, Scalar radius) {
@@ -783,10 +1846,15 @@ Result<OpReport> BooleanService::run(BooleanOp op, BodyId lhs, BodyId rhs, const
     record.label = "boolean";
     append_unique_body(record.source_bodies, lhs);
     append_unique_body(record.source_bodies, rhs);
-    append_shell_provenance_for_body(*state_, record.source_shells, lhs);
-    append_shell_provenance_for_body(*state_, record.source_shells, rhs);
-    append_face_provenance_for_body(*state_, record.source_faces, lhs);
-    append_face_provenance_for_body(*state_, record.source_faces, rhs);
+    if (op == BooleanOp::Subtract) {
+        append_shell_provenance_for_body(*state_, record.source_shells, lhs);
+        append_face_provenance_for_body(*state_, record.source_faces, lhs);
+    } else {
+        append_shell_provenance_for_body(*state_, record.source_shells, lhs);
+        append_shell_provenance_for_body(*state_, record.source_shells, rhs);
+        append_face_provenance_for_body(*state_, record.source_faces, lhs);
+        append_face_provenance_for_body(*state_, record.source_faces, rhs);
+    }
     const auto& lhs_bbox = state_->bodies[lhs.value].bbox;
     const auto& rhs_bbox = state_->bodies[rhs.value].bbox;
     std::vector<Warning> warnings;
@@ -845,10 +1913,307 @@ Result<OpReport> BooleanService::run(BooleanOp op, BodyId lhs, BodyId rhs, const
             break;
     }
 
-    const auto output = make_body(state_, record, "已完成布尔操作");
+    BodyId output = make_body(state_, record, "已完成布尔操作");
     detail::invalidate_eval_for_bodies(*state_, {lhs, rhs});
     const auto diag = boolean_options.diagnostics ? state_->create_diagnostic("布尔操作完成") : DiagnosticId {};
+    append_boolean_stage_issue(*state_, diag, diag_codes::kBoolStageCandidates,
+                               "布尔候选构建阶段开始：已进入壳/区域级候选统计流程",
+                               {lhs.value, rhs.value});
+    const auto face_candidates = build_face_candidates_for_boolean(*state_, lhs, rhs);
+    append_boolean_face_candidate_issue(*state_, diag, lhs, rhs, face_candidates.size());
+    const auto intersection_curves = compute_intersection_curves_for_candidates(*state_, face_candidates);
+    append_boolean_intersection_curve_issue(*state_, diag, lhs, rhs, intersection_curves);
+    const auto intersection_segments = clip_intersection_lines_to_face_overlap(*state_, intersection_curves);
+    append_boolean_intersection_segment_issue(*state_, diag, lhs, rhs, intersection_segments);
+    if (diag.value != 0 && !intersection_segments.empty()) {
+        std::vector<CurveId> curves;
+        curves.reserve(intersection_segments.size());
+        for (const auto& seg : intersection_segments) {
+            curves.push_back(seg.curve);
+        }
+        // Stage 2: store intersection wires for later imprint/split/classify.
+        const auto iid = store_intersection(state_, "boolean_intersection_wires", record.bbox, std::move(curves), {});
+        append_boolean_intersection_stored_issue(*state_, diag, lhs, rhs, iid, intersection_segments.size());
+
+        // Stage 2 minimal imprint: mutate output owned topology (split one rectangular face) to enter real split/imprint development.
+        const auto out_it = state_->bodies.find(output.value);
+        if (out_it != state_->bodies.end() && !out_it->second.shells.empty()) {
+            const auto shell_id = out_it->second.shells.front();
+            const auto shell_it = state_->shells.find(shell_id.value);
+            if (shell_it != state_->shells.end()) {
+                FaceId target {};
+                for (const auto fid : shell_it->second.faces) {
+                    const auto fit = state_->faces.find(fid.value);
+                    if (fit == state_->faces.end()) {
+                        continue;
+                    }
+                    const auto lit = state_->loops.find(fit->second.outer_loop.value);
+                    if (lit == state_->loops.end()) {
+                        continue;
+                    }
+                    if (lit->second.coedges.size() == 4) {
+                        target = fid;
+                        break;
+                    }
+                }
+                if (target.value != 0) {
+                    const auto seg_curve = intersection_segments.front().curve;
+                    bool applied = false;
+                    // NOTE(Stage 1.5): segment-driven imprint currently splits boundary edges without
+                    // propagating the split into adjacent faces, which breaks Strict closed-shell checks.
+                    // Use diagonal split to preserve shared boundary edges (keeps shell closed).
+                    {
+                        // Use first intersection segment direction to choose diagonal.
+                        bool prefer_diag_02 = true;
+                        const auto curve_it = state_->curves.find(seg_curve.value);
+                        if (curve_it != state_->curves.end() && curve_it->second.kind == detail::CurveKind::LineSegment &&
+                            curve_it->second.poles.size() >= 2) {
+                            const auto seg_dir = detail::normalize(detail::subtract(curve_it->second.poles.back(),
+                                                                                   curve_it->second.poles.front()));
+                            const auto face_it = state_->faces.find(target.value);
+                            if (face_it != state_->faces.end()) {
+                                const auto loop_it = state_->loops.find(face_it->second.outer_loop.value);
+                                if (loop_it != state_->loops.end() && loop_it->second.coedges.size() == 4) {
+                                    std::array<VertexId, 4> verts {};
+                                    for (std::size_t i = 0; i < 4; ++i) {
+                                        const auto oriented = oriented_vertices_for_coedge_local(*state_, loop_it->second.coedges[i]);
+                                        if (!oriented.has_value()) {
+                                            break;
+                                        }
+                                        verts[i] = (*oriented)[0];
+                                    }
+                                    const auto v0_it = state_->vertices.find(verts[0].value);
+                                    const auto v1_it = state_->vertices.find(verts[1].value);
+                                    const auto v2_it = state_->vertices.find(verts[2].value);
+                                    const auto v3_it = state_->vertices.find(verts[3].value);
+                                    if (v0_it != state_->vertices.end() && v1_it != state_->vertices.end() &&
+                                        v2_it != state_->vertices.end() && v3_it != state_->vertices.end()) {
+                                        const auto d02 = detail::normalize(detail::subtract(v2_it->second.point, v0_it->second.point));
+                                        const auto d13 = detail::normalize(detail::subtract(v3_it->second.point, v1_it->second.point));
+                                        const auto s02 = std::abs(detail::dot(d02, seg_dir));
+                                        const auto s13 = std::abs(detail::dot(d13, seg_dir));
+                                        prefer_diag_02 = s02 >= s13;
+                                    }
+                                }
+                            }
+                        }
+                        if (imprint_split_rect_face_diagonal(*state_, shell_id, target, prefer_diag_02)) {
+                            applied = true;
+                            auto issue = detail::make_info_issue(diag_codes::kBoolImprintApplied,
+                                                                 "布尔切分/imprint 已应用：输出壳的矩形面已沿对角线切分");
+                            issue.related_entities = {lhs.value, rhs.value, output.value, shell_id.value, target.value};
+                            state_->append_diagnostic_issue(diag, std::move(issue));
+                        }
+                    }
+
+                    if (applied) {
+                        detail::rebuild_topology_links(*state_);
+                    }
+                }
+            }
+        }
+    }
     append_boolean_prep_candidate_issue(*state_, diag, lhs, rhs, prep);
+    append_boolean_run_stage_issue(*state_, diag, op, relation, prep, lhs, rhs, output);
+    append_boolean_stage_issue(*state_, diag, diag_codes::kBoolStageOutputMaterialized,
+                               "布尔输出占位物化完成：最小 owned topology / 回退链路已执行",
+                               {lhs.value, rhs.value, output.value});
+
+    if (diag.value != 0) {
+        // Stage 2 classification v1: point classification against analytic RHS primitive when available.
+        auto point_in_cylinder = [&](const detail::BodyRecord& cyl, const Point3& p, Scalar eps) -> int {
+            // returns: 1 inside, 0 on, -1 outside
+            const auto C = cyl.origin;
+            const auto a = cyl.axis;
+            const auto r = cyl.a;
+            const auto h = cyl.b;
+            const Vec3 cp {p.x - C.x, p.y - C.y, p.z - C.z};
+            const auto t = detail::dot(cp, a);
+            const auto half = h * 0.5;
+            if (t < -half - eps || t > half + eps) {
+                return -1;
+            }
+            const Vec3 proj {a.x * t, a.y * t, a.z * t};
+            const Vec3 radial {cp.x - proj.x, cp.y - proj.y, cp.z - proj.z};
+            const auto rr = detail::dot(radial, radial);
+            const auto r2 = r * r;
+            if (rr > r2 + eps) {
+                return -1;
+            }
+            if (std::abs(rr - r2) <= eps || std::abs(t - half) <= eps || std::abs(t + half) <= eps) {
+                return 0;
+            }
+            return 1;
+        };
+
+        auto face_representative_point = [&](FaceId face_id, bool& ok) -> Point3 {
+            ok = false;
+            const auto face_it = state_->faces.find(face_id.value);
+            if (face_it == state_->faces.end()) {
+                return {};
+            }
+            const auto loop_it = state_->loops.find(face_it->second.outer_loop.value);
+            if (loop_it == state_->loops.end() || loop_it->second.coedges.empty()) {
+                return {};
+            }
+            Point3 sum {0.0, 0.0, 0.0};
+            std::size_t count = 0;
+            for (const auto coedge_id : loop_it->second.coedges) {
+                const auto oriented = oriented_vertices_for_coedge_local(*state_, coedge_id);
+                if (!oriented.has_value()) {
+                    continue;
+                }
+                const auto v_it = state_->vertices.find((*oriented)[0].value);
+                if (v_it == state_->vertices.end()) {
+                    continue;
+                }
+                sum.x += v_it->second.point.x;
+                sum.y += v_it->second.point.y;
+                sum.z += v_it->second.point.z;
+                ++count;
+            }
+            if (count == 0) {
+                return {};
+            }
+            ok = true;
+            return Point3 {sum.x / static_cast<Scalar>(count),
+                           sum.y / static_cast<Scalar>(count),
+                           sum.z / static_cast<Scalar>(count)};
+        };
+
+        std::size_t face_total = 0;
+        std::size_t classified_inside = 0;
+        std::size_t classified_on = 0;
+        std::size_t classified_outside = 0;
+        std::size_t classified_unknown = 0;
+        std::string method = "bbox_fallback";
+        std::unordered_map<std::uint64_t, int> face_cls;
+
+        const auto rhs_it = state_->bodies.find(rhs.value);
+        const auto out_it = state_->bodies.find(output.value);
+        if (rhs_it != state_->bodies.end() && out_it != state_->bodies.end() && !out_it->second.shells.empty()) {
+            const auto& rhs_body = rhs_it->second;
+            const auto& out_body = out_it->second;
+            const Scalar eps = std::max<Scalar>(state_->config.tolerance.linear, 1e-6);
+            const bool use_cylinder = rhs_body.kind == detail::BodyKind::Cylinder && rhs_body.rep_kind == RepKind::ExactBRep &&
+                                      rhs_body.a > 0.0 && rhs_body.b > 0.0;
+            if (use_cylinder) {
+                method = "cylinder_point_classification";
+            }
+            for (const auto shell_id : out_body.shells) {
+                const auto shell_it = state_->shells.find(shell_id.value);
+                if (shell_it == state_->shells.end()) {
+                    continue;
+                }
+                for (const auto face_id : shell_it->second.faces) {
+                    ++face_total;
+                    bool ok = false;
+                    const auto p = face_representative_point(face_id, ok);
+                    if (!ok) {
+                        face_cls[face_id.value] = -2;
+                        ++classified_unknown;
+                        continue;
+                    }
+                    int cls = -2;
+                    if (use_cylinder) {
+                        cls = point_in_cylinder(rhs_body, p, eps);
+                    } else {
+                        // Fallback: bbox-based point inclusion.
+                        if (!rhs_bbox.is_valid) {
+                            cls = -2;
+                        } else if (p.x >= rhs_bbox.min.x - eps && p.x <= rhs_bbox.max.x + eps &&
+                                   p.y >= rhs_bbox.min.y - eps && p.y <= rhs_bbox.max.y + eps &&
+                                   p.z >= rhs_bbox.min.z - eps && p.z <= rhs_bbox.max.z + eps) {
+                            cls = 1;
+                        } else {
+                            cls = -1;
+                        }
+                    }
+                    face_cls[face_id.value] = cls;
+                    if (cls == 1) {
+                        ++classified_inside;
+                    } else if (cls == 0) {
+                        ++classified_on;
+                    } else if (cls == -1) {
+                        ++classified_outside;
+                    } else {
+                        ++classified_unknown;
+                    }
+                }
+            }
+        }
+
+        {
+            std::ostringstream msg;
+            msg << "布尔分类阶段完成: method=" << method
+                << " face_total=" << face_total
+                << " inside=" << classified_inside
+                << " on=" << classified_on
+                << " outside=" << classified_outside
+                << " unknown=" << classified_unknown;
+            auto issue = detail::make_info_issue(diag_codes::kBoolClassificationCompleted, msg.str());
+            issue.related_entities = {lhs.value, rhs.value, output.value};
+            state_->append_diagnostic_issue(diag, std::move(issue));
+        }
+
+        bool subtract_shell_rebuild_applied = false;
+        bool subtract_shell_rebuild_rolled_back = false;
+        if (op == BooleanOp::Subtract && prep.overlap_candidates > 0 && out_it != state_->bodies.end() &&
+            !out_it->second.shells.empty() && !face_cls.empty()) {
+            const auto shell_id = out_it->second.shells.front();
+            const auto shell_it = state_->shells.find(shell_id.value);
+            if (shell_it != state_->shells.end()) {
+                std::vector<FaceId> seed;
+                seed.reserve(shell_it->second.faces.size());
+                for (const auto face_id : shell_it->second.faces) {
+                    const auto it = face_cls.find(face_id.value);
+                    const int c = (it == face_cls.end()) ? -2 : it->second;
+                    if (c != 1) {
+                        seed.push_back(face_id);
+                    }
+                }
+                auto closed = detail::build_closed_face_region_from_source_faces(*state_, shell_id, seed);
+                auto& shell_faces = shell_it->second.faces;
+                if (!closed.empty() && closed.size() >= 6 && !same_unordered_face_ids(closed, shell_faces)) {
+                    auto backup_faces = shell_faces;
+                    shell_faces = std::move(closed);
+                    detail::rebuild_topology_links(*state_);
+                    ValidationService validation_after_trim {state_};
+                    const auto trim_strict = validation_after_trim.validate_topology(output, ValidationMode::Strict);
+                    if (trim_strict.status != StatusCode::Ok) {
+                        shell_faces = std::move(backup_faces);
+                        detail::rebuild_topology_links(*state_);
+                        subtract_shell_rebuild_rolled_back = true;
+                    } else {
+                        subtract_shell_rebuild_applied = true;
+                    }
+                }
+            }
+        }
+
+        ValidationService validation {state_};
+        auto strict_result = validation.validate_topology(output, ValidationMode::Strict);
+        bool auto_repair_used = false;
+        if (strict_result.status != StatusCode::Ok && boolean_options.auto_repair) {
+            RepairService repair {state_};
+            const auto repaired = repair.auto_repair(output, RepairMode::Safe);
+            if (repaired.status == StatusCode::Ok && repaired.value.has_value()) {
+                output = repaired.value->output;
+                strict_result = validation.validate_topology(output, ValidationMode::Strict);
+                auto_repair_used = true;
+            }
+        }
+        {
+            std::ostringstream msg;
+            msg << "布尔重建阶段完成: strict_ok=" << (strict_result.status == StatusCode::Ok ? "true" : "false")
+                << " subtract_shell_rebuild_applied=" << (subtract_shell_rebuild_applied ? "true" : "false")
+                << " subtract_shell_rebuild_rollback=" << (subtract_shell_rebuild_rolled_back ? "true" : "false")
+                << " auto_repair=" << (auto_repair_used ? "true" : "false");
+            auto issue = detail::make_info_issue(diag_codes::kBoolRebuildCompleted, msg.str());
+            issue.related_entities = {lhs.value, rhs.value, output.value};
+            state_->append_diagnostic_issue(diag, std::move(issue));
+        }
+    }
     if (diag.value != 0) {
         for (const auto& warning : warnings) {
             state_->diagnostics[diag.value].issues.push_back(

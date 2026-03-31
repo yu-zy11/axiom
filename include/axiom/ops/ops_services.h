@@ -20,6 +20,7 @@ public:
     Result<BodyId> cylinder(const Point3& center, const Vec3& axis, Scalar radius, Scalar height);
     Result<BodyId> cone(const Point3& apex, const Vec3& axis, Scalar semi_angle, Scalar height);
     Result<BodyId> torus(const Point3& center, const Vec3& axis, Scalar major_r, Scalar minor_r);
+    Result<BodyId> wedge(const Point3& origin, Scalar dx, Scalar dy, Scalar dz);
 
 private:
     std::shared_ptr<detail::KernelState> state_;

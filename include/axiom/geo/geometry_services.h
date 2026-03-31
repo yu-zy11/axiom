@@ -130,4 +130,22 @@ private:
     std::shared_ptr<detail::KernelState> state_;
 };
 
+struct CurveSurfaceIntersection {
+    Point3 point{};
+    Scalar curve_t{0.0};
+    Scalar surface_u{0.0};
+    Scalar surface_v{0.0};
+};
+
+class GeometryIntersectionService {
+public:
+    explicit GeometryIntersectionService(std::shared_ptr<detail::KernelState> state);
+
+    // Minimal intersection service for Stage 2/3: analytic pairs first (Line/Segment/Circle with Plane/Sphere/Cylinder).
+    Result<std::vector<CurveSurfaceIntersection>> intersect_curve_surface(CurveId curve_id, SurfaceId surface_id) const;
+
+private:
+    std::shared_ptr<detail::KernelState> state_;
+};
+
 }  // namespace axiom

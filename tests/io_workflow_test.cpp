@@ -1,6 +1,8 @@
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <string>
 
 #include "axiom/diag/error_codes.h"
 #include "axiom/sdk/kernel.h"
@@ -36,10 +38,13 @@ int main() {
         return 1;
     }
 
-    const auto out_path = std::filesystem::temp_directory_path() / "axiom_io_workflow_test.step";
-    const auto out_json_path = std::filesystem::temp_directory_path() / "axiom_io_workflow_test.axmjson";
-    const auto out_gltf_path = std::filesystem::temp_directory_path() / "axiom_io_workflow_test.gltf";
-    const auto out_stl_path = std::filesystem::temp_directory_path() / "axiom_io_workflow_test.stl";
+    const auto uniq = std::to_string(
+        static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+    const auto tmp = std::filesystem::temp_directory_path();
+    const auto out_path = tmp / ("axiom_io_workflow_test_" + uniq + ".step");
+    const auto out_json_path = tmp / ("axiom_io_workflow_test_" + uniq + ".axmjson");
+    const auto out_gltf_path = tmp / ("axiom_io_workflow_test_" + uniq + ".gltf");
+    const auto out_stl_path = tmp / ("axiom_io_workflow_test_" + uniq + ".stl");
 
     axiom::ExportOptions export_options;
     auto exported = kernel.io().export_step(*body.value, out_path.string(), export_options);

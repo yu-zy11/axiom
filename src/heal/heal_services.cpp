@@ -1,10 +1,13 @@
 #include "axiom/heal/heal_services.h"
 
 #include <algorithm>
+#include <cmath>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
+#include "axiom/geo/geometry_services.h"
 #include "axiom/topo/topology_service.h"
 #include "axiom/internal/core/diagnostic_helpers.h"
 #include "axiom/internal/core/eval_graph_invalidation.h"
@@ -115,17 +118,102 @@ bool validate_source_reference_consistency(const detail::KernelState& state,
     return true;
 }
 
+void fill_edge_adjacent_faces_and_outer_loops(
+    const detail::KernelState& state,
+    const std::unordered_map<std::uint64_t, std::vector<std::uint64_t>>& edge_to_faces,
+    std::uint64_t edge_value,
+    std::vector<std::uint64_t>* out) {
+    if (out == nullptr) {
+        return;
+    }
+    out->clear();
+    const auto it = edge_to_faces.find(edge_value);
+    if (it == edge_to_faces.end()) {
+        return;
+    }
+    std::vector<std::uint64_t> faces = it->second;
+    std::sort(faces.begin(), faces.end());
+    faces.erase(std::unique(faces.begin(), faces.end()), faces.end());
+    const std::size_t lim = std::min<std::size_t>(faces.size(), 3);
+    for (std::size_t i = 0; i < lim; ++i) {
+        out->push_back(faces[i]);
+        const auto fi = state.faces.find(faces[i]);
+        if (fi != state.faces.end()) {
+            out->push_back(fi->second.outer_loop.value);
+        }
+    }
+}
+
+bool validate_strict_owned_topology_edge_coedge_index(const detail::KernelState& state,
+                                                     BodyId body_id,
+                                                     std::string& reason,
+                                                     std::string_view& code,
+                                                     std::uint64_t& related_edge,
+                                                     std::uint64_t& related_shell) {
+    related_edge = 0;
+    related_shell = 0;
+    const auto body_it = state.bodies.find(body_id.value);
+    if (body_it == state.bodies.end()) {
+        return true;
+    }
+    for (const auto shell_id : body_it->second.shells) {
+        const auto shell_it = state.shells.find(shell_id.value);
+        if (shell_it == state.shells.end()) {
+            continue;
+        }
+        for (const auto face_id : shell_it->second.faces) {
+            const auto face_it = state.faces.find(face_id.value);
+            if (face_it == state.faces.end()) {
+                continue;
+            }
+            std::vector<LoopId> loops;
+            loops.push_back(face_it->second.outer_loop);
+            loops.insert(loops.end(), face_it->second.inner_loops.begin(), face_it->second.inner_loops.end());
+            for (const auto loop_id : loops) {
+                const auto loop_it = state.loops.find(loop_id.value);
+                if (loop_it == state.loops.end()) {
+                    continue;
+                }
+                for (const auto coedge_id : loop_it->second.coedges) {
+                    const auto coedge_it = state.coedges.find(coedge_id.value);
+                    if (coedge_it == state.coedges.end()) {
+                        reason = "环引用了不存在的定向边";
+                        code = diag_codes::kTopoInvariantBroken;
+                        related_shell = shell_id.value;
+                        return false;
+                    }
+                    const auto ev = coedge_it->second.edge_id.value;
+                    const auto eit = state.edge_to_coedges.find(ev);
+                    if (eit == state.edge_to_coedges.end() || eit->second.empty()) {
+                        reason =
+                            "owned 拓扑中边缺少共边反向索引（悬挂边或索引损坏）：edge=" + std::to_string(ev);
+                        code = diag_codes::kTopoDanglingEdge;
+                        related_edge = ev;
+                        related_shell = shell_id.value;
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
 bool validate_closed_shell_edge_usage(const detail::KernelState& state,
-                                      ShellId shell_id,
-                                      std::string& reason,
-                                      std::string_view& code) {
+                                     ShellId shell_id,
+                                     std::string& reason,
+                                     std::string_view& code,
+                                     std::uint64_t& related_edge,
+                                     std::vector<std::uint64_t>* related_extra_entities = nullptr) {
     const auto shell_it = state.shells.find(shell_id.value);
     if (shell_it == state.shells.end()) {
         reason = "目标壳不存在";
+        related_edge = 0;
         return false;
     }
 
     std::unordered_map<std::uint64_t, std::size_t> edge_use_count;
+    std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> edge_to_faces;
     for (const auto face_id : shell_it->second.faces) {
         const auto face_it = state.faces.find(face_id.value);
         if (face_it == state.faces.end()) {
@@ -148,6 +236,7 @@ bool validate_closed_shell_edge_usage(const detail::KernelState& state,
                     return false;
                 }
                 ++edge_use_count[coedge_it->second.edge_id.value];
+                edge_to_faces[coedge_it->second.edge_id.value].push_back(face_id.value);
             }
         }
     }
@@ -158,16 +247,175 @@ bool validate_closed_shell_edge_usage(const detail::KernelState& state,
     }
 
     for (const auto& [edge_value, use_count] : edge_use_count) {
+        auto fit = edge_to_faces.find(edge_value);
+        if (fit != edge_to_faces.end()) {
+            auto& faces = fit->second;
+            std::sort(faces.begin(), faces.end());
+            faces.erase(std::unique(faces.begin(), faces.end()), faces.end());
+            // Stronger closedness: each edge must be used by exactly 2 distinct faces.
+            // This catches "self-glued" cases even if coedge use_count happens to be 2.
+            if (faces.size() < 2) {
+                reason = "壳存在开放边界，边 " + std::to_string(edge_value) +
+                         " 未被两侧不同拓扑面使用（unique_faces=" + std::to_string(faces.size()) +
+                         ", use_count=" + std::to_string(use_count) + ")";
+                code = diag_codes::kTopoOpenBoundary;
+                related_edge = edge_value;
+                fill_edge_adjacent_faces_and_outer_loops(state, edge_to_faces, edge_value,
+                                                         related_extra_entities);
+                return false;
+            }
+            if (faces.size() > 2) {
+                reason = "壳存在非流形边，边 " + std::to_string(edge_value) +
+                         " 被超过两个拓扑面共享（unique_faces=" + std::to_string(faces.size()) +
+                         ", use_count=" + std::to_string(use_count) + ")";
+                code = diag_codes::kTopoNonManifoldEdge;
+                related_edge = edge_value;
+                fill_edge_adjacent_faces_and_outer_loops(state, edge_to_faces, edge_value,
+                                                         related_extra_entities);
+                return false;
+            }
+        }
         if (use_count < 2) {
             reason = "壳存在开放边界，边 " + std::to_string(edge_value) + " 仅被使用 " + std::to_string(use_count) + " 次";
             code = diag_codes::kTopoOpenBoundary;
+            related_edge = edge_value;
+            fill_edge_adjacent_faces_and_outer_loops(state, edge_to_faces, edge_value, related_extra_entities);
             return false;
         }
         if (use_count > 2) {
             reason = "壳存在非流形边，边 " + std::to_string(edge_value) + " 被使用 " + std::to_string(use_count) + " 次";
             code = diag_codes::kTopoNonManifoldEdge;
+            related_edge = edge_value;
+            fill_edge_adjacent_faces_and_outer_loops(state, edge_to_faces, edge_value, related_extra_entities);
             return false;
         }
+    }
+
+    return true;
+}
+
+bool strict_check_shell_duplicate_faces_and_connectivity(const detail::KernelState& state,
+                                                        ShellId shell_id,
+                                                        std::string_view& code,
+                                                        std::string& reason,
+                                                        std::vector<std::uint64_t>& related_entities) {
+    const auto shell_it = state.shells.find(shell_id.value);
+    if (shell_it == state.shells.end()) {
+        code = diag_codes::kTopoShellNotClosed;
+        reason = "目标壳不存在";
+        related_entities = {shell_id.value};
+        return false;
+    }
+    if (shell_it->second.faces.empty()) {
+        code = diag_codes::kTopoShellNotClosed;
+        reason = "壳不包含任何面";
+        related_entities = {shell_id.value};
+        return false;
+    }
+
+    // Duplicate face signature (same surface + same boundary loops).
+    std::unordered_map<std::string, FaceId> seen;
+    seen.reserve(shell_it->second.faces.size());
+    for (const auto face_id : shell_it->second.faces) {
+        const auto face_it = state.faces.find(face_id.value);
+        if (face_it == state.faces.end()) {
+            continue;
+        }
+        std::vector<std::uint64_t> inner;
+        inner.reserve(face_it->second.inner_loops.size());
+        for (const auto loop_id : face_it->second.inner_loops) {
+            inner.push_back(loop_id.value);
+        }
+        std::sort(inner.begin(), inner.end());
+        std::string sig;
+        sig.reserve(64 + inner.size() * 12);
+        sig += std::to_string(face_it->second.surface_id.value);
+        sig += "|o=";
+        sig += std::to_string(face_it->second.outer_loop.value);
+        sig += "|i=";
+        for (const auto v : inner) {
+            sig += std::to_string(v);
+            sig += ",";
+        }
+        const auto it = seen.find(sig);
+        if (it != seen.end() && it->second.value != face_id.value) {
+            code = diag_codes::kTopoDuplicateFaceInShell;
+            reason = "壳存在重复面（相同曲面与边界环签名）";
+            related_entities = {shell_id.value, it->second.value, face_id.value,
+                                face_it->second.outer_loop.value};
+            return false;
+        }
+        seen.emplace(std::move(sig), face_id);
+    }
+
+    // Connectivity by shared edges (face adjacency).
+    std::unordered_map<std::uint64_t, std::size_t> face_index;
+    face_index.reserve(shell_it->second.faces.size());
+    for (std::size_t i = 0; i < shell_it->second.faces.size(); ++i) {
+        face_index.emplace(shell_it->second.faces[i].value, i);
+    }
+    const auto n = shell_it->second.faces.size();
+    std::vector<std::vector<std::size_t>> adj(n);
+    for (auto& v : adj) v.reserve(4);
+
+    std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> edge_to_faces;
+    for (const auto face_id : shell_it->second.faces) {
+        const auto face_it = state.faces.find(face_id.value);
+        if (face_it == state.faces.end()) continue;
+        std::vector<LoopId> loops;
+        loops.push_back(face_it->second.outer_loop);
+        loops.insert(loops.end(), face_it->second.inner_loops.begin(), face_it->second.inner_loops.end());
+        for (const auto loop_id : loops) {
+            const auto loop_it = state.loops.find(loop_id.value);
+            if (loop_it == state.loops.end()) continue;
+            for (const auto coedge_id : loop_it->second.coedges) {
+                const auto coedge_it = state.coedges.find(coedge_id.value);
+                if (coedge_it == state.coedges.end()) continue;
+                edge_to_faces[coedge_it->second.edge_id.value].push_back(face_id.value);
+            }
+        }
+    }
+
+    for (auto& [edge_value, faces] : edge_to_faces) {
+        if (faces.size() < 2) continue;
+        std::sort(faces.begin(), faces.end());
+        faces.erase(std::unique(faces.begin(), faces.end()), faces.end());
+        for (std::size_t i = 0; i + 1 < faces.size(); ++i) {
+            for (std::size_t j = i + 1; j < faces.size(); ++j) {
+                const auto it_i = face_index.find(faces[i]);
+                const auto it_j = face_index.find(faces[j]);
+                if (it_i == face_index.end() || it_j == face_index.end()) continue;
+                adj[it_i->second].push_back(it_j->second);
+                adj[it_j->second].push_back(it_i->second);
+            }
+        }
+    }
+
+    std::vector<char> visited(n, 0);
+    std::size_t components = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        if (visited[i]) continue;
+        ++components;
+        std::vector<std::size_t> stack;
+        stack.push_back(i);
+        visited[i] = 1;
+        while (!stack.empty()) {
+            const auto u = stack.back();
+            stack.pop_back();
+            for (const auto v : adj[u]) {
+                if (!visited[v]) {
+                    visited[v] = 1;
+                    stack.push_back(v);
+                }
+            }
+        }
+    }
+    if (components > 1) {
+        code = diag_codes::kTopoShellDisconnected;
+        reason = "壳不连通：components=" + std::to_string(components) +
+                 ", face_count=" + std::to_string(n);
+        related_entities = {shell_id.value};
+        return false;
     }
 
     return true;
@@ -273,6 +521,26 @@ Result<void> ValidationService::validate_topology(BodyId body_id, ValidationMode
             return topology_result;
         }
     }
+    if (mode == ValidationMode::Strict && body.rep_kind == RepKind::ExactBRep && !body.shells.empty()) {
+        std::string dangle_reason;
+        std::string_view dangle_code = diag_codes::kTopoDanglingEdge;
+        std::uint64_t dangle_edge = 0;
+        std::uint64_t dangle_shell = 0;
+        if (!validate_strict_owned_topology_edge_coedge_index(*state_, body_id, dangle_reason, dangle_code,
+                                                                dangle_edge, dangle_shell)) {
+            std::vector<std::uint64_t> rel;
+            rel.push_back(body_id.value);
+            if (dangle_shell != 0) {
+                rel.push_back(dangle_shell);
+            }
+            if (dangle_edge != 0) {
+                rel.push_back(dangle_edge);
+            }
+            return detail::failed_void(*state_, StatusCode::InvalidTopology, dangle_code,
+                                       "拓扑验证失败：" + dangle_reason, "拓扑验证失败",
+                                       std::move(rel));
+        }
+    }
     if (mode == ValidationMode::Strict && body.rep_kind == RepKind::ExactBRep) {
         std::string reason;
         std::string_view issue_code = diag_codes::kTopoShellNotClosed;
@@ -313,9 +581,31 @@ Result<void> ValidationService::validate_topology(BodyId body_id, ValidationMode
             if (mode == ValidationMode::Strict) {
                 std::string reason;
                 std::string_view issue_code = diag_codes::kTopoShellNotClosed;
-                if (!validate_closed_shell_edge_usage(*state_, shell_id, reason, issue_code)) {
+                std::uint64_t related_edge = 0;
+                std::vector<std::uint64_t> edge_related_extra;
+                if (!validate_closed_shell_edge_usage(*state_, shell_id, reason, issue_code, related_edge,
+                                                      &edge_related_extra)) {
+                    std::vector<std::uint64_t> related;
+                    related.push_back(body_id.value);
+                    related.push_back(shell_id.value);
+                    if (related_edge != 0) {
+                        related.push_back(related_edge);
+                    }
+                    related.insert(related.end(), edge_related_extra.begin(), edge_related_extra.end());
                     return detail::failed_void(*state_, StatusCode::InvalidTopology, issue_code,
-                                               "拓扑验证失败：" + reason, "拓扑验证失败");
+                                               "拓扑验证失败：" + reason, "拓扑验证失败",
+                                               std::move(related));
+                }
+
+                // Stage 2+ strict relation consistency (after closedness/manifold checks).
+                std::string_view rel_code = diag_codes::kTopoShellNotClosed;
+                std::string rel_reason;
+                std::vector<std::uint64_t> rel_entities;
+                if (!strict_check_shell_duplicate_faces_and_connectivity(*state_, shell_id, rel_code, rel_reason, rel_entities)) {
+                    rel_entities.insert(rel_entities.begin(), body_id.value);
+                    return detail::failed_void(*state_, StatusCode::InvalidTopology, rel_code,
+                                               "拓扑验证失败：" + rel_reason, "拓扑验证失败",
+                                               std::move(rel_entities));
                 }
             }
         }
@@ -500,6 +790,216 @@ Result<std::vector<BodyId>> ValidationService::filter_invalid_bodies(
 }
 
 RepairService::RepairService(std::shared_ptr<detail::KernelState> state) : state_(std::move(state)) {}
+
+Result<void> RepairService::repair_face_trim_pcurves(FaceId face_id, RepairMode mode) {
+    if (!detail::has_face(*state_, face_id)) {
+        return detail::invalid_input_void(*state_, diag_codes::kHealAutoRepairFailure,
+                                          "修剪参数曲线修复失败：目标面不存在", "修剪参数曲线修复失败");
+    }
+    const auto& face = state_->faces.at(face_id.value);
+    if (!detail::has_surface(*state_, face.surface_id)) {
+        return detail::failed_void(*state_, StatusCode::InvalidTopology,
+                                   diag_codes::kTopoFaceOuterLoopInvalid,
+                                   "修剪参数曲线修复失败：面引用的曲面不存在", "修剪参数曲线修复失败",
+                                   {face_id.value, face.surface_id.value});
+    }
+    const auto& surf = state_->surfaces.at(face.surface_id.value);
+    if (surf.kind != detail::SurfaceKind::Plane &&
+        surf.kind != detail::SurfaceKind::Cylinder &&
+        surf.kind != detail::SurfaceKind::Sphere) {
+        return detail::failed_void(*state_, StatusCode::NotImplemented,
+                                   diag_codes::kCoreOperationUnsupported,
+                                   "修剪参数曲线修复失败：暂仅支持平面/圆柱/球面修剪面", "修剪参数曲线修复失败",
+                                   {face_id.value, face.surface_id.value});
+    }
+    if (mode == RepairMode::ReportOnly) {
+        return ok_void(state_->create_diagnostic("修剪参数曲线修复预检完成（ReportOnly）"));
+    }
+
+    SurfaceService surface_service{state_};
+    CurveService curve_service{state_};
+    TopologyValidationService topo_validation{state_};
+
+    auto oriented_vertices_for_coedge = [&](CoedgeId coedge_id) -> std::optional<std::array<VertexId, 2>> {
+        const auto ce_it = state_->coedges.find(coedge_id.value);
+        if (ce_it == state_->coedges.end()) return std::nullopt;
+        const auto e_it = state_->edges.find(ce_it->second.edge_id.value);
+        if (e_it == state_->edges.end()) return std::nullopt;
+        if (!detail::has_vertex(*state_, e_it->second.v0) || !detail::has_vertex(*state_, e_it->second.v1) ||
+            e_it->second.v0.value == e_it->second.v1.value) return std::nullopt;
+        if (ce_it->second.reversed) {
+            return std::array<VertexId, 2>{e_it->second.v1, e_it->second.v0};
+        }
+        return std::array<VertexId, 2>{e_it->second.v0, e_it->second.v1};
+    };
+
+    auto rebuild_loop = [&](LoopId loop_id) -> Result<void> {
+        const auto loop_it = state_->loops.find(loop_id.value);
+        if (loop_it == state_->loops.end()) {
+            return detail::failed_void(*state_, StatusCode::InvalidTopology,
+                                       diag_codes::kTopoLoopNotClosed,
+                                       "修剪参数曲线修复失败：面引用的环不存在", "修剪参数曲线修复失败",
+                                       {face_id.value, loop_id.value});
+        }
+        for (const auto coedge_id : loop_it->second.coedges) {
+            const auto oriented = oriented_vertices_for_coedge(coedge_id);
+            if (!oriented.has_value()) continue;
+            const auto v0_it = state_->vertices.find((*oriented)[0].value);
+            const auto v1_it = state_->vertices.find((*oriented)[1].value);
+            if (v0_it == state_->vertices.end() || v1_it == state_->vertices.end()) continue;
+            const auto ce_it = state_->coedges.find(coedge_id.value);
+            if (ce_it == state_->coedges.end()) continue;
+            const auto e_it = state_->edges.find(ce_it->second.edge_id.value);
+            if (e_it == state_->edges.end() || e_it->second.curve_id.value == 0) continue;
+
+            const auto curve_id = e_it->second.curve_id;
+            if (!detail::has_curve(*state_, curve_id)) continue;
+
+            // Estimate curve parameter interval between edge endpoints.
+            const auto t0r = curve_service.closest_parameter(curve_id, v0_it->second.point);
+            const auto t1r = curve_service.closest_parameter(curve_id, v1_it->second.point);
+            if (t0r.status != StatusCode::Ok || t1r.status != StatusCode::Ok ||
+                !t0r.value.has_value() || !t1r.value.has_value()) {
+                continue;
+            }
+            const auto t0 = *t0r.value;
+            const auto t1 = *t1r.value;
+
+            struct TrimSample {
+                Scalar t{};
+                Point3 p{};
+                Point2 uv{};
+            };
+            auto dist3_pt = [](const Point3& a, const Point3& b) -> Scalar {
+                const auto dx = a.x - b.x;
+                const auto dy = a.y - b.y;
+                const auto dz = a.z - b.z;
+                return std::sqrt(dx * dx + dy * dy + dz * dz);
+            };
+            auto lerp3 = [](const Point3& a, const Point3& b, Scalar s) -> Point3 {
+                return Point3{a.x + (b.x - a.x) * s, a.y + (b.y - a.y) * s,
+                              a.z + (b.z - a.z) * s};
+            };
+
+            std::vector<TrimSample> chain;
+            auto append_endpoint = [&](Scalar tt) -> bool {
+                const auto ev = curve_service.eval(curve_id, tt, 0);
+                if (ev.status != StatusCode::Ok || !ev.value.has_value()) {
+                    return false;
+                }
+                const auto uv = surface_service.closest_uv(face.surface_id, ev.value->point);
+                if (uv.status != StatusCode::Ok || !uv.value.has_value()) {
+                    return false;
+                }
+                chain.push_back(
+                    TrimSample{tt, ev.value->point, Point2{uv.value->first, uv.value->second}});
+                return true;
+            };
+            if (!append_endpoint(t0) || !append_endpoint(t1)) {
+                continue;
+            }
+
+            const Scalar chord_tol =
+                std::max(state_->config.tolerance.linear * Scalar(0.32), Scalar(1e-10));
+            const std::size_t max_pts =
+                mode == RepairMode::Aggressive ? std::size_t{384} : std::size_t{192};
+            bool changed = true;
+            int guard = 0;
+            while (changed && chain.size() < max_pts && guard < 64) {
+                changed = false;
+                ++guard;
+                for (std::size_t i = 0; i + 1 < chain.size(); ++i) {
+                    const auto& sa = chain[i];
+                    const auto& sb = chain[i + 1];
+                    const auto span = std::abs(sb.t - sa.t);
+                    if (span <= Scalar(1e-14)) {
+                        continue;
+                    }
+                    const Scalar tm = (sa.t + sb.t) * Scalar(0.5);
+                    const auto evm = curve_service.eval(curve_id, tm, 0);
+                    if (evm.status != StatusCode::Ok || !evm.value.has_value()) {
+                        continue;
+                    }
+                    const Point3& pm = evm.value->point;
+                    const Scalar err_c = dist3_pt(pm, lerp3(sa.p, sb.p, Scalar(0.5)));
+                    const Point2 uv_lin{(sa.uv.x + sb.uv.x) * Scalar(0.5),
+                                        (sa.uv.y + sb.uv.y) * Scalar(0.5)};
+                    const auto surf_mid =
+                        surface_service.eval(face.surface_id, uv_lin.x, uv_lin.y, 0);
+                    Scalar err_uv = Scalar(0);
+                    if (surf_mid.status == StatusCode::Ok && surf_mid.value.has_value()) {
+                        err_uv = dist3_pt(surf_mid.value->point, pm);
+                    }
+                    const Scalar err = std::max(err_c, err_uv);
+                    if (err <= chord_tol) {
+                        continue;
+                    }
+                    const auto uvm = surface_service.closest_uv(face.surface_id, pm);
+                    if (uvm.status != StatusCode::Ok || !uvm.value.has_value()) {
+                        continue;
+                    }
+                    TrimSample mid{tm, pm, Point2{uvm.value->first, uvm.value->second}};
+                    chain.insert(chain.begin() + static_cast<std::ptrdiff_t>(i + 1), mid);
+                    changed = true;
+                    break;
+                }
+            }
+
+            std::vector<Point2> uv_poly;
+            uv_poly.reserve(chain.size());
+            for (const auto& s : chain) {
+                if (!uv_poly.empty()) {
+                    const auto dx = uv_poly.back().x - s.uv.x;
+                    const auto dy = uv_poly.back().y - s.uv.y;
+                    if (std::sqrt(dx * dx + dy * dy) <=
+                        std::max<Scalar>(state_->config.tolerance.linear, 1e-12)) {
+                        continue;
+                    }
+                }
+                uv_poly.push_back(s.uv);
+            }
+            if (uv_poly.size() < 2) {
+                // Fall back to endpoints only.
+                const auto uv0 = surface_service.closest_uv(face.surface_id, v0_it->second.point);
+                const auto uv1 = surface_service.closest_uv(face.surface_id, v1_it->second.point);
+                if (uv0.status != StatusCode::Ok || uv1.status != StatusCode::Ok ||
+                    !uv0.value.has_value() || !uv1.value.has_value()) {
+                    continue;
+                }
+                uv_poly = {
+                    Point2{uv0.value->first, uv0.value->second},
+                    Point2{uv1.value->first, uv1.value->second},
+                };
+            }
+
+            detail::PCurveRecord pc;
+            pc.kind = detail::PCurveKind::Polyline;
+            pc.poles = std::move(uv_poly);
+            const auto pc_id = PCurveId{state_->allocate_id()};
+            state_->pcurves.emplace(pc_id.value, std::move(pc));
+            state_->coedges[coedge_id.value].pcurve_id = pc_id;
+        }
+        return ok_void(state_->create_diagnostic("已重建环参数曲线"));
+    };
+
+    auto r0 = rebuild_loop(face.outer_loop);
+    if (r0.status != StatusCode::Ok) return r0;
+    for (const auto inner : face.inner_loops) {
+        auto ri = rebuild_loop(inner);
+        if (ri.status != StatusCode::Ok) return ri;
+    }
+
+    detail::rebuild_topology_links(*state_);
+
+    const auto post = topo_validation.validate_face_trim_consistency(face_id);
+    if (post.status != StatusCode::Ok) {
+        return detail::failed_void(*state_, StatusCode::OperationFailed,
+                                   diag_codes::kHealAutoRepairFailure,
+                                   "修剪参数曲线修复失败：重建后仍未通过修剪一致性验证", "修剪参数曲线修复失败",
+                                   {face_id.value, face.surface_id.value});
+    }
+    return ok_void(state_->create_diagnostic("修剪参数曲线修复完成"));
+}
 
 Result<OpReport> RepairService::sew_faces(std::span<const FaceId> faces, Scalar, RepairMode) {
     if (faces.empty()) {

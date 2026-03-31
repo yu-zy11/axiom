@@ -163,6 +163,9 @@ public:
     // Trim bridge (Stage 2): face-level trim consistency.
     // Requires outer/inner loops to have complete coedge pcurves and each loop is UV-closed.
     Result<void> validate_face_trim_consistency(FaceId face_id) const;
+    // Trim bridge (batch): validate trim for every face in a shell / body's owned shells.
+    Result<void> validate_shell_trim_consistency(ShellId shell_id) const;
+    Result<void> validate_body_trim_consistency(BodyId body_id) const;
     Result<void> validate_face(FaceId face_id) const;
     Result<void> validate_face_sources(FaceId face_id) const;
     Result<void> validate_shell(ShellId shell_id) const;
