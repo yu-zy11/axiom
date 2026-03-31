@@ -17,11 +17,18 @@ public:
     explicit CurveFactory(std::shared_ptr<detail::KernelState> state);
 
     Result<CurveId> make_line(const Point3& origin, const Vec3& direction);
+    Result<CurveId> make_line_segment(const Point3& a, const Point3& b);
     Result<CurveId> make_circle(const Point3& center, const Vec3& normal, Scalar radius);
     Result<CurveId> make_ellipse(const Point3& center, const Vec3& axis_u, const Vec3& axis_v);
+    Result<CurveId> make_parabola(const Point3& origin, const Vec3& axis_u, const Vec3& axis_v, Scalar focal_param);
+    Result<CurveId> make_hyperbola(const Point3& origin, const Vec3& axis_u, const Vec3& axis_v, Scalar a, Scalar b);
     Result<CurveId> make_bezier(std::span<const Point3> poles);
     Result<CurveId> make_bspline(const BSplineCurveDesc& desc);
     Result<CurveId> make_nurbs(const NURBSCurveDesc& desc);
+    Result<CurveId> make_composite_polyline(std::span<const Point3> poles);
+    // Composite curve chain (Stage 2 minimal): concatenate child curves into a single parameter domain [0, n].
+    // Each child occupies one unit interval; evaluation maps t -> (child_index, local_t).
+    Result<CurveId> make_composite_chain(std::span<const CurveId> children);
 
 private:
     std::shared_ptr<detail::KernelState> state_;
@@ -47,6 +54,7 @@ public:
     Result<SurfaceId> make_cone(const Point3& apex, const Vec3& axis, Scalar semi_angle);
     Result<SurfaceId> make_sphere(const Point3& center, Scalar radius);
     Result<SurfaceId> make_torus(const Point3& center, const Vec3& axis, Scalar major_r, Scalar minor_r);
+    Result<SurfaceId> make_bezier(std::span<const Point3> poles);
     Result<SurfaceId> make_bspline(const BSplineSurfaceDesc& desc);
     Result<SurfaceId> make_nurbs(const NURBSSurfaceDesc& desc);
 

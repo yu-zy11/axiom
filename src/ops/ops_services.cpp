@@ -27,7 +27,7 @@ enum class BBoxRelation {
 
 BodyId make_body(std::shared_ptr<detail::KernelState> state, detail::BodyRecord record, const std::string&) {
     if (record.kind == detail::BodyKind::BooleanResult || record.kind == detail::BodyKind::Modified ||
-        record.kind == detail::BodyKind::BlendResult) {
+        record.kind == detail::BodyKind::BlendResult || record.kind == detail::BodyKind::Sweep) {
         detail::materialize_body_bbox_topology(*state, record);
     }
     const auto id = BodyId {state->allocate_id()};
@@ -128,6 +128,26 @@ BoundingBox box_bbox(const Point3& origin, Scalar dx, Scalar dy, Scalar dz) {
     return detail::make_bbox(origin, Point3 {origin.x + dx, origin.y + dy, origin.z + dz});
 }
 
+BoundingBox cylinder_bbox(const Point3& center, const Vec3& axis_unit, Scalar radius, Scalar height) {
+    const auto hx = std::abs(axis_unit.x) * height * 0.5;
+    const auto hy = std::abs(axis_unit.y) * height * 0.5;
+    const auto hz = std::abs(axis_unit.z) * height * 0.5;
+    return detail::make_bbox(
+        {center.x - radius - hx, center.y - radius - hy, center.z - radius - hz},
+        {center.x + radius + hx, center.y + radius + hy, center.z + radius + hz});
+}
+
+BoundingBox cone_bbox(const Point3& apex, const Vec3& axis_unit, Scalar semi_angle, Scalar height) {
+    const auto radius = std::max<Scalar>(0.0, height * std::tan(semi_angle));
+    const auto mid = detail::add_point_vec(apex, detail::scale(axis_unit, height * 0.5));
+    const auto hx = std::abs(axis_unit.x) * height * 0.5;
+    const auto hy = std::abs(axis_unit.y) * height * 0.5;
+    const auto hz = std::abs(axis_unit.z) * height * 0.5;
+    return detail::make_bbox(
+        {mid.x - radius - hx, mid.y - radius - hy, mid.z - radius - hz},
+        {mid.x + radius + hx, mid.y + radius + hy, mid.z + radius + hz});
+}
+
 MassProperties bbox_mass_properties(const BoundingBox& bbox) {
     MassProperties props {};
     if (!bbox.is_valid) {
@@ -186,10 +206,37 @@ BoundingBox curve_bbox_for_query(const detail::CurveRecord& curve) {
     switch (curve.kind) {
         case detail::CurveKind::Line:
             return detail::bbox_from_center_radius(curve.origin, 1000.0, 1000.0, 1000.0);
+        case detail::CurveKind::LineSegment: {
+            if (curve.poles.size() >= 2) {
+                const auto& a = curve.poles[0];
+                const auto& b = curve.poles[1];
+                return detail::make_bbox(
+                    {std::min(a.x, b.x), std::min(a.y, b.y), std::min(a.z, b.z)},
+                    {std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z)});
+            }
+            return detail::bbox_from_center_radius(curve.origin, 10.0, 10.0, 10.0);
+        }
         case detail::CurveKind::Circle:
             return detail::bbox_from_center_radius(curve.origin, curve.radius, curve.radius, curve.radius);
         case detail::CurveKind::Ellipse:
             return detail::bbox_from_center_radius(curve.origin, detail::norm(curve.axis_u), detail::norm(curve.axis_v), 1.0);
+        case detail::CurveKind::Parabola:
+        case detail::CurveKind::Hyperbola:
+        case detail::CurveKind::CompositePolyline:
+            if (!curve.poles.empty()) {
+                auto min = curve.poles.front();
+                auto max = curve.poles.front();
+                for (const auto& p : curve.poles) {
+                    min.x = std::min(min.x, p.x);
+                    min.y = std::min(min.y, p.y);
+                    min.z = std::min(min.z, p.z);
+                    max.x = std::max(max.x, p.x);
+                    max.y = std::max(max.y, p.y);
+                    max.z = std::max(max.z, p.z);
+                }
+                return detail::make_bbox(min, max);
+            }
+            return detail::bbox_from_center_radius(curve.origin, 10.0, 10.0, 10.0);
         default:
             return detail::bbox_from_center_radius(curve.origin, 10.0, 10.0, 10.0);
     }
@@ -203,9 +250,28 @@ BoundingBox surface_bbox_for_query(const detail::SurfaceRecord& surface) {
             return detail::bbox_from_center_radius(surface.origin, surface.radius_a, surface.radius_a, surface.radius_a);
         case detail::SurfaceKind::Cylinder:
             return detail::bbox_from_center_radius(surface.origin, surface.radius_a, surface.radius_a, 1000.0);
+        case detail::SurfaceKind::Cone:
+            return detail::bbox_from_center_radius(surface.origin, 1000.0, 1000.0, 1000.0);
         case detail::SurfaceKind::Torus:
             return detail::bbox_from_center_radius(surface.origin, surface.radius_a + surface.radius_b,
                                                    surface.radius_a + surface.radius_b, surface.radius_b);
+        case detail::SurfaceKind::Bezier:
+        case detail::SurfaceKind::BSpline:
+        case detail::SurfaceKind::Nurbs:
+            if (!surface.poles.empty()) {
+                auto min = surface.poles.front();
+                auto max = surface.poles.front();
+                for (const auto& p : surface.poles) {
+                    min.x = std::min(min.x, p.x);
+                    min.y = std::min(min.y, p.y);
+                    min.z = std::min(min.z, p.z);
+                    max.x = std::max(max.x, p.x);
+                    max.y = std::max(max.y, p.y);
+                    max.z = std::max(max.z, p.z);
+                }
+                return detail::make_bbox(min, max);
+            }
+            return detail::bbox_from_center_radius(surface.origin, 10.0, 10.0, 10.0);
         default:
             return detail::bbox_from_center_radius(surface.origin, 10.0, 10.0, 10.0);
     }
@@ -299,6 +365,54 @@ bool valid_edge_ids(const detail::KernelState& state, std::span<const EdgeId> ed
     return std::all_of(edges.begin(), edges.end(), [&state](const EdgeId edge_id) {
         return detail::has_edge(state, edge_id);
     });
+}
+
+BoundingBox face_bbox(const detail::KernelState& state, FaceId face_id) {
+    const auto face_it = state.faces.find(face_id.value);
+    if (face_it == state.faces.end()) {
+        return {};
+    }
+    std::vector<LoopId> loops;
+    loops.push_back(face_it->second.outer_loop);
+    loops.insert(loops.end(), face_it->second.inner_loops.begin(), face_it->second.inner_loops.end());
+
+    BoundingBox bbox;
+    bool initialized = false;
+    for (const auto loop_id : loops) {
+        const auto loop_it = state.loops.find(loop_id.value);
+        if (loop_it == state.loops.end()) {
+            return {};
+        }
+        for (const auto coedge_id : loop_it->second.coedges) {
+            const auto coedge_it = state.coedges.find(coedge_id.value);
+            if (coedge_it == state.coedges.end()) {
+                return {};
+            }
+            const auto edge_it = state.edges.find(coedge_it->second.edge_id.value);
+            if (edge_it == state.edges.end()) {
+                return {};
+            }
+            const auto v0_it = state.vertices.find(edge_it->second.v0.value);
+            const auto v1_it = state.vertices.find(edge_it->second.v1.value);
+            if (v0_it == state.vertices.end() || v1_it == state.vertices.end()) {
+                return {};
+            }
+            for (const auto& point : {v0_it->second.point, v1_it->second.point}) {
+                if (!initialized) {
+                    bbox = detail::make_bbox(point, point);
+                    initialized = true;
+                } else {
+                    bbox.min.x = std::min(bbox.min.x, point.x);
+                    bbox.min.y = std::min(bbox.min.y, point.y);
+                    bbox.min.z = std::min(bbox.min.z, point.z);
+                    bbox.max.x = std::max(bbox.max.x, point.x);
+                    bbox.max.y = std::max(bbox.max.y, point.y);
+                    bbox.max.z = std::max(bbox.max.z, point.z);
+                }
+            }
+        }
+    }
+    return initialized ? bbox : BoundingBox {};
 }
 
 BoundingBox shell_bbox(const detail::KernelState& state, ShellId shell_id) {
@@ -518,7 +632,7 @@ Result<BodyId> PrimitiveService::cylinder(const Point3& center, const Vec3& axis
     record.axis = detail::normalize(axis);
     record.a = radius;
     record.b = height;
-    record.bbox = detail::bbox_from_center_radius(center, radius, radius, height * 0.5);
+    record.bbox = cylinder_bbox(center, record.axis, radius, height);
     return ok_result(make_body(state_, record, "已创建圆柱体"), state_->create_diagnostic("已创建圆柱体"));
 }
 
@@ -536,7 +650,7 @@ Result<BodyId> PrimitiveService::cone(const Point3& apex, const Vec3& axis, Scal
     record.axis = detail::normalize(axis);
     record.a = semi_angle;
     record.b = height;
-    record.bbox = detail::bbox_from_center_radius(apex, height, height, height);
+    record.bbox = cone_bbox(apex, record.axis, semi_angle, height);
     return ok_result(make_body(state_, record, "已创建圆锥体"), state_->create_diagnostic("已创建圆锥体"));
 }
 
@@ -570,7 +684,17 @@ Result<BodyId> SweepService::extrude(const ProfileRef& profile, const Vec3& dire
     record.kind = detail::BodyKind::Sweep;
     record.rep_kind = RepKind::ExactBRep;
     record.label = "extrude:" + profile.label;
-    record.bbox = detail::make_bbox({0.0, 0.0, 0.0}, {1.0, 1.0, distance});
+    const auto dir = detail::normalize(direction);
+    const auto p0 = Point3{0.0, 0.0, 0.0};
+    const auto p1 = detail::add_point_vec(p0, detail::scale(dir, distance));
+    // minimal profile extent: unit square around origin
+    const auto minx = std::min(p0.x, p1.x) - 0.5;
+    const auto maxx = std::max(p0.x, p1.x) + 0.5;
+    const auto miny = std::min(p0.y, p1.y) - 0.5;
+    const auto maxy = std::max(p0.y, p1.y) + 0.5;
+    const auto minz = std::min(p0.z, p1.z) - 0.5;
+    const auto maxz = std::max(p0.z, p1.z) + 0.5;
+    record.bbox = detail::make_bbox({minx, miny, minz}, {maxx, maxy, maxz});
     return ok_result(make_body(state_, record, "已完成拉伸"), state_->create_diagnostic("已完成拉伸"));
 }
 
@@ -584,7 +708,8 @@ Result<BodyId> SweepService::revolve(const ProfileRef& profile, const Axis3& axi
     record.kind = detail::BodyKind::Sweep;
     record.rep_kind = RepKind::ExactBRep;
     record.label = "revolve:" + profile.label;
-    record.bbox = detail::make_bbox({-1.0, -1.0, -1.0}, {1.0, 1.0, 1.0});
+    // minimal revolve bbox: assume profile within unit radius around axis origin
+    record.bbox = detail::bbox_from_center_radius(axis.origin, 1.0, 1.0, 1.0);
     return ok_result(make_body(state_, record, "已完成旋转"), state_->create_diagnostic("已完成旋转"));
 }
 
@@ -598,7 +723,12 @@ Result<BodyId> SweepService::sweep(const ProfileRef& profile, CurveId rail) {
     record.kind = detail::BodyKind::Sweep;
     record.rep_kind = RepKind::ExactBRep;
     record.label = "sweep:" + profile.label;
-    record.bbox = detail::make_bbox({0.0, 0.0, 0.0}, {2.0, 2.0, 2.0});
+    const auto& curve = state_->curves.at(rail.value);
+    auto bbox = curve_bbox_for_query(curve);
+    if (bbox.is_valid) {
+        bbox = offset_bbox(bbox, 0.5);
+    }
+    record.bbox = bbox.is_valid ? bbox : detail::make_bbox({0.0, 0.0, 0.0}, {2.0, 2.0, 2.0});
     return ok_result(make_body(state_, record, "已完成扫描"), state_->create_diagnostic("已完成扫描"));
 }
 
@@ -612,7 +742,9 @@ Result<BodyId> SweepService::loft(std::span<const ProfileRef> profiles) {
     record.kind = detail::BodyKind::Sweep;
     record.rep_kind = RepKind::ExactBRep;
     record.label = "loft";
-    record.bbox = detail::make_bbox({0.0, 0.0, 0.0}, {2.0, 2.0, 2.0});
+    // minimal loft bbox: size scales with profile count
+    const auto extent = std::max<Scalar>(2.0, static_cast<Scalar>(profiles.size()));
+    record.bbox = detail::make_bbox({0.0, 0.0, 0.0}, {extent, extent, extent});
     return ok_result(make_body(state_, record, "已完成放样"), state_->create_diagnostic("已完成放样"));
 }
 
@@ -628,7 +760,11 @@ Result<BodyId> SweepService::thicken(FaceId face_id, Scalar distance) {
     record.label = "thicken";
     append_unique_face(record.source_faces, face_id);
     append_shells_for_face(*state_, record.source_shells, face_id);
-    record.bbox = detail::make_bbox({0.0, 0.0, 0.0}, {1.0, 1.0, distance});
+    auto bbox = face_bbox(*state_, face_id);
+    if (!bbox.is_valid) {
+        bbox = detail::make_bbox({0.0, 0.0, 0.0}, {1.0, 1.0, 1.0});
+    }
+    record.bbox = offset_bbox(bbox, distance);
     return ok_result(make_body(state_, record, "已完成加厚"), state_->create_diagnostic("已完成加厚"));
 }
 

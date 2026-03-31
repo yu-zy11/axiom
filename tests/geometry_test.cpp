@@ -57,6 +57,71 @@ int main() {
         return 1;
     }
 
+    // ---- Stage 2: missing curve types (line segment / parabola / hyperbola) ----
+    auto seg = kernel.curves().make_line_segment({0.0, 0.0, 0.0}, {2.0, 0.0, 0.0});
+    if (seg.status != axiom::StatusCode::Ok || !seg.value.has_value()) {
+        std::cerr << "failed to create segment\n";
+        return 1;
+    }
+    auto seg_domain = kernel.curve_service().domain(*seg.value);
+    if (seg_domain.status != axiom::StatusCode::Ok || !seg_domain.value.has_value() ||
+        !approx(seg_domain.value->min, 0.0) || !approx(seg_domain.value->max, 1.0)) {
+        std::cerr << "unexpected segment domain\n";
+        return 1;
+    }
+    auto seg_eval = kernel.curve_service().eval(*seg.value, 0.25, 1);
+    if (seg_eval.status != axiom::StatusCode::Ok || !seg_eval.value.has_value() ||
+        !approx(seg_eval.value->point.x, 0.5)) {
+        std::cerr << "unexpected segment eval\n";
+        return 1;
+    }
+    auto seg_cp = kernel.curve_service().closest_parameter(*seg.value, {100.0, 0.0, 0.0});
+    if (seg_cp.status != axiom::StatusCode::Ok || !seg_cp.value.has_value() ||
+        *seg_cp.value < 0.0 || *seg_cp.value > 1.0) {
+        std::cerr << "unexpected segment closest_parameter\n";
+        return 1;
+    }
+
+    auto parabola = kernel.curves().make_parabola({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, 0.5);
+    if (parabola.status != axiom::StatusCode::Ok || !parabola.value.has_value()) {
+        std::cerr << "failed to create parabola\n";
+        return 1;
+    }
+    auto parabola_domain = kernel.curve_service().domain(*parabola.value);
+    if (parabola_domain.status != axiom::StatusCode::Ok || !parabola_domain.value.has_value() ||
+        !approx(parabola_domain.value->min, -10.0) || !approx(parabola_domain.value->max, 10.0)) {
+        if (parabola_domain.value.has_value()) {
+            std::cerr << "unexpected parabola domain: [" << parabola_domain.value->min << ", " << parabola_domain.value->max << "]\n";
+        } else {
+            std::cerr << "unexpected parabola domain: no value\n";
+        }
+        return 1;
+    }
+    auto parabola_eval = kernel.curve_service().eval(*parabola.value, 0.5, 1);
+    if (parabola_eval.status != axiom::StatusCode::Ok || !parabola_eval.value.has_value() ||
+        !approx(parabola_eval.value->point.x, 0.5) || !approx(parabola_eval.value->point.y, 0.125)) {
+        std::cerr << "unexpected parabola eval\n";
+        return 1;
+    }
+
+    auto hyperbola = kernel.curves().make_hyperbola({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, 1.0, 0.5);
+    if (hyperbola.status != axiom::StatusCode::Ok || !hyperbola.value.has_value()) {
+        std::cerr << "failed to create hyperbola\n";
+        return 1;
+    }
+    auto hyperbola_domain = kernel.curve_service().domain(*hyperbola.value);
+    if (hyperbola_domain.status != axiom::StatusCode::Ok || !hyperbola_domain.value.has_value() ||
+        !approx(hyperbola_domain.value->min, -10.0) || !approx(hyperbola_domain.value->max, 10.0)) {
+        std::cerr << "unexpected hyperbola domain\n";
+        return 1;
+    }
+    auto hyperbola_eval = kernel.curve_service().eval(*hyperbola.value, 0.0, 1);
+    if (hyperbola_eval.status != axiom::StatusCode::Ok || !hyperbola_eval.value.has_value() ||
+        !approx(hyperbola_eval.value->point.x, 1.0) || !approx(hyperbola_eval.value->point.y, 0.0)) {
+        std::cerr << "unexpected hyperbola eval\n";
+        return 1;
+    }
+
     auto line_eval = kernel.curve_service().eval(*line.value, 2.0, 1);
     if (line_eval.status != axiom::StatusCode::Ok || !line_eval.value.has_value()) {
         std::cerr << "failed to eval line\n";
@@ -138,12 +203,55 @@ int main() {
         std::cerr << "failed to create ellipse\n";
         return 1;
     }
+    {
+        auto segment2 = kernel.curves().make_line_segment({0.0, 0.0, 0.0}, {1.0, 2.0, 0.0});
+        if (segment2.status != axiom::StatusCode::Ok || !segment2.value.has_value()) {
+            std::cerr << "failed to create segment\n";
+            return 1;
+        }
+        auto parabola2 = kernel.curves().make_parabola({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, 0.5);
+        if (parabola2.status != axiom::StatusCode::Ok || !parabola2.value.has_value()) {
+            std::cerr << "failed to create parabola\n";
+            return 1;
+        }
+        auto hyperbola2 = kernel.curves().make_hyperbola({0.0, 0.0, 0.0}, {2.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, 1.0, 0.5);
+        if (hyperbola2.status != axiom::StatusCode::Ok || !hyperbola2.value.has_value()) {
+            std::cerr << "failed to create hyperbola\n";
+            return 1;
+        }
+        const std::array<axiom::Point3, 3> composite_poly {{ {0.0, 0.0, 0.0}, {1.0, 2.0, 0.0}, {2.0, 2.0, 0.0} }};
+        auto composite2 = kernel.curves().make_composite_polyline(composite_poly);
+        if (composite2.status != axiom::StatusCode::Ok || !composite2.value.has_value()) {
+            std::cerr << "failed to create composite curve\n";
+            return 1;
+        }
 
     auto ellipse_eval = kernel.curve_service().eval(*ellipse.value, 0.0, 1);
     if (ellipse_eval.status != axiom::StatusCode::Ok || !ellipse_eval.value.has_value() ||
         !approx(ellipse_eval.value->point.x, 2.0) || !approx(ellipse_eval.value->point.y, 0.0)) {
         std::cerr << "unexpected ellipse eval result\n";
         return 1;
+    }
+        auto segment_eval = kernel.curve_service().eval(*segment2.value, 0.25, 1);
+        auto segment_closest = kernel.curve_service().closest_parameter(*segment2.value, {0.5, 1.0, 0.0});
+    if (segment_eval.status != axiom::StatusCode::Ok || !segment_eval.value.has_value() ||
+        segment_closest.status != axiom::StatusCode::Ok || !segment_closest.value.has_value()) {
+        std::cerr << "unexpected segment behavior\n";
+        return 1;
+    }
+    if (*segment_closest.value < 0.0 || *segment_closest.value > 1.0) {
+        std::cerr << "unexpected segment closest_parameter range\n";
+        return 1;
+    }
+        auto parabola_eval2 = kernel.curve_service().eval(*parabola2.value, 1.0, 1);
+        auto hyperbola_eval2 = kernel.curve_service().eval(*hyperbola2.value, 0.2, 1);
+        auto composite_eval2 = kernel.curve_service().eval(*composite2.value, 0.1, 1);
+        if (parabola_eval2.status != axiom::StatusCode::Ok || !parabola_eval2.value.has_value() ||
+            hyperbola_eval2.status != axiom::StatusCode::Ok || !hyperbola_eval2.value.has_value() ||
+            composite_eval2.status != axiom::StatusCode::Ok || !composite_eval2.value.has_value()) {
+        std::cerr << "unexpected new curve eval result\n";
+        return 1;
+    }
     }
     auto ellipse_domain = kernel.curve_service().domain(*ellipse.value);
     if (ellipse_domain.status != axiom::StatusCode::Ok || !ellipse_domain.value.has_value() ||
@@ -218,6 +326,124 @@ int main() {
         bspline_closest_t_batch.value->size() != 2 || bspline_closest_p_batch.value->size() != 2) {
         std::cerr << "unexpected curve closest batch result\n";
         return 1;
+    }
+
+    // ---- Missing curve types required by docs: line segment / parabola / hyperbola / composite ----
+    {
+        auto seg = kernel.curves().make_line_segment({0.0, 0.0, 0.0}, {2.0, 0.0, 0.0});
+        if (seg.status != axiom::StatusCode::Ok || !seg.value.has_value()) {
+            std::cerr << "failed to create line segment\n";
+            return 1;
+        }
+        auto seg_domain = kernel.curve_service().domain(*seg.value);
+        auto seg_eval = kernel.curve_service().eval(*seg.value, 0.5, 1);
+        auto seg_closest = kernel.curve_service().closest_parameter(*seg.value, {10.0, 0.0, 0.0});
+        if (seg_domain.status != axiom::StatusCode::Ok || !seg_domain.value.has_value() ||
+            !approx(seg_domain.value->min, 0.0) || !approx(seg_domain.value->max, 1.0) ||
+            seg_eval.status != axiom::StatusCode::Ok || !seg_eval.value.has_value() ||
+            !approx(seg_eval.value->point.x, 1.0) ||
+            seg_closest.status != axiom::StatusCode::Ok || !seg_closest.value.has_value() ||
+            !approx(*seg_closest.value, 1.0)) {
+            std::cerr << "unexpected line segment behavior\n";
+            return 1;
+        }
+    }
+
+    {
+        auto parabola = kernel.curves().make_parabola({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, 1.0);
+        if (parabola.status != axiom::StatusCode::Ok || !parabola.value.has_value()) {
+            std::cerr << "failed to create parabola\n";
+            return 1;
+        }
+        auto pe = kernel.curve_service().eval(*parabola.value, 2.0, 1);
+        if (pe.status != axiom::StatusCode::Ok || !pe.value.has_value() || pe.value->point.y <= 0.0) {
+            std::cerr << "unexpected parabola eval\n";
+            return 1;
+        }
+    }
+
+    {
+        auto hyperbola = kernel.curves().make_hyperbola({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, 2.0, 1.0);
+        if (hyperbola.status != axiom::StatusCode::Ok || !hyperbola.value.has_value()) {
+            std::cerr << "failed to create hyperbola\n";
+            return 1;
+        }
+        auto he = kernel.curve_service().eval(*hyperbola.value, 0.0, 1);
+        if (he.status != axiom::StatusCode::Ok || !he.value.has_value() || he.value->point.x < 2.0 - 1e-6) {
+            std::cerr << "unexpected hyperbola eval\n";
+            return 1;
+        }
+    }
+
+    {
+        const std::array<axiom::Point3, 3> pts{{{0.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {1.0, 1.0, 0.0}}};
+        auto composite = kernel.curves().make_composite_polyline(pts);
+        if (composite.status != axiom::StatusCode::Ok || !composite.value.has_value()) {
+            std::cerr << "failed to create composite polyline curve\n";
+            return 1;
+        }
+        auto cd = kernel.curve_service().domain(*composite.value);
+        auto ce = kernel.curve_service().eval(*composite.value, 1.0, 1);
+        if (cd.status != axiom::StatusCode::Ok || !cd.value.has_value() ||
+            !approx(cd.value->min, 0.0) || !approx(cd.value->max, 2.0) ||
+            ce.status != axiom::StatusCode::Ok || !ce.value.has_value() ||
+            !approx(ce.value->point.y, 1.0)) {
+            std::cerr << "unexpected composite polyline behavior\n";
+            return 1;
+        }
+    }
+
+    // ---- Missing curve type required by docs: composite curve (chain of existing curves) ----
+    {
+        auto a = kernel.curves().make_line_segment({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
+        auto b = kernel.curves().make_line_segment({1.0, 0.0, 0.0}, {1.0, 2.0, 0.0});
+        if (a.status != axiom::StatusCode::Ok || b.status != axiom::StatusCode::Ok ||
+            !a.value.has_value() || !b.value.has_value()) {
+            std::cerr << "failed to create child curves for composite chain\n";
+            return 1;
+        }
+        const std::array<axiom::CurveId, 2> children {*a.value, *b.value};
+        auto chain = kernel.curves().make_composite_chain(children);
+        if (chain.status != axiom::StatusCode::Ok || !chain.value.has_value()) {
+            std::cerr << "failed to create composite chain curve\n";
+            return 1;
+        }
+        auto d = kernel.curve_service().domain(*chain.value);
+        auto e0 = kernel.curve_service().eval(*chain.value, 0.25, 1);
+        auto e1 = kernel.curve_service().eval(*chain.value, 1.25, 1);
+        auto bb = kernel.curve_service().bbox(*chain.value);
+        if (d.status != axiom::StatusCode::Ok || !d.value.has_value() ||
+            !approx(d.value->min, 0.0) || !approx(d.value->max, 2.0) ||
+            e0.status != axiom::StatusCode::Ok || !e0.value.has_value() ||
+            e1.status != axiom::StatusCode::Ok || !e1.value.has_value() ||
+            bb.status != axiom::StatusCode::Ok || !bb.value.has_value() || !bb.value->is_valid) {
+            std::cerr << "unexpected composite chain behavior\n";
+            return 1;
+        }
+        if (!approx(e0.value->point.x, 0.25) || !approx(e0.value->point.y, 0.0) ||
+            !approx(e1.value->point.x, 1.0) || e1.value->point.y <= 0.0) {
+            std::cerr << "unexpected composite chain eval mapping\n";
+            return 1;
+        }
+    }
+
+    // ---- Missing surface type required by docs: Bezier surface (minimal semantics) ----
+    {
+        const std::array<axiom::Point3, 4> poles{{{0.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {1.0, 0.0, 0.0}, {1.0, 1.0, 0.0}}};
+        auto bez_surf = kernel.surfaces().make_bezier(poles);
+        if (bez_surf.status != axiom::StatusCode::Ok || !bez_surf.value.has_value()) {
+            std::cerr << "failed to create bezier surface\n";
+            return 1;
+        }
+        auto bd = kernel.surface_service().domain(*bez_surf.value);
+        auto be = kernel.surface_service().eval(*bez_surf.value, 0.5, 0.5, 1);
+        if (bd.status != axiom::StatusCode::Ok || !bd.value.has_value() ||
+            !approx(bd.value->u.min, 0.0) || !approx(bd.value->u.max, 1.0) ||
+            !approx(bd.value->v.min, 0.0) || !approx(bd.value->v.max, 1.0) ||
+            be.status != axiom::StatusCode::Ok || !be.value.has_value()) {
+            std::cerr << "unexpected bezier surface behavior\n";
+            return 1;
+        }
     }
     // closest_parameter for spline-like curves should stay within domain.
     auto bspline_single_t = kernel.curve_service().closest_parameter(*bspline.value, {100.0, 100.0, 0.0});

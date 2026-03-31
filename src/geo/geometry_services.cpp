@@ -340,11 +340,19 @@ Range1D curve_domain(const detail::CurveRecord &curve) {
   switch (curve.kind) {
   case detail::CurveKind::Line:
     return Range1D{-inf, inf};
+  case detail::CurveKind::LineSegment:
+    return Range1D{0.0, 1.0};
   case detail::CurveKind::Circle:
   case detail::CurveKind::Ellipse:
     return Range1D{0.0, two_pi};
+  case detail::CurveKind::Parabola:
+  case detail::CurveKind::Hyperbola:
+    return Range1D{-10.0, 10.0};
   case detail::CurveKind::BSpline:
+  case detail::CurveKind::CompositePolyline:
     return Range1D{0.0, std::max<Scalar>(1.0, static_cast<Scalar>(curve.poles.size() - 1))};
+  case detail::CurveKind::CompositeChain:
+    return Range1D{0.0, std::max<Scalar>(1.0, static_cast<Scalar>(curve.children.size()))};
   case detail::CurveKind::Bezier:
   case detail::CurveKind::Nurbs:
   default:
@@ -354,9 +362,34 @@ Range1D curve_domain(const detail::CurveRecord &curve) {
 
 Point3 evaluate_curve_point(const detail::CurveRecord &curve, Scalar t) {
   switch (curve.kind) {
+  case detail::CurveKind::LineSegment: {
+    if (curve.poles.size() >= 2) {
+      return lerp_point(curve.poles.front(), curve.poles.back(),
+                        std::clamp(t, 0.0, 1.0));
+    }
+    return curve.origin;
+  }
+  case detail::CurveKind::Parabola: {
+    const auto p = std::max(curve.param_a, 1e-9);
+    const auto x = t;
+    const auto y = (x * x) / (4.0 * p);
+    return Point3{curve.origin.x + curve.axis_u.x * x + curve.axis_v.x * y,
+                  curve.origin.y + curve.axis_u.y * x + curve.axis_v.y * y,
+                  curve.origin.z + curve.axis_u.z * x + curve.axis_v.z * y};
+  }
+  case detail::CurveKind::Hyperbola: {
+    const auto a = std::max(curve.param_a, 1e-9);
+    const auto b = std::max(curve.param_b, 1e-9);
+    const auto x = a * std::cosh(t);
+    const auto y = b * std::sinh(t);
+    return Point3{curve.origin.x + curve.axis_u.x * x + curve.axis_v.x * y,
+                  curve.origin.y + curve.axis_u.y * x + curve.axis_v.y * y,
+                  curve.origin.z + curve.axis_u.z * x + curve.axis_v.z * y};
+  }
   case detail::CurveKind::Bezier:
     return evaluate_bezier_point(std::vector<Point3>(curve.poles.begin(), curve.poles.end()), t);
   case detail::CurveKind::BSpline:
+  case detail::CurveKind::CompositePolyline:
     return evaluate_polyline_point(curve.poles, t);
   case detail::CurveKind::Nurbs:
     return evaluate_rational_bezier_point(curve.poles, curve.weights, t);
@@ -432,6 +465,8 @@ Range2D surface_domain(const detail::SurfaceRecord &surface) {
     return Range2D{Range1D{0.0, two_pi}, Range1D{0.0, inf}};
   case detail::SurfaceKind::Torus:
     return Range2D{Range1D{0.0, two_pi}, Range1D{0.0, two_pi}};
+  case detail::SurfaceKind::Bezier:
+    return Range2D{Range1D{0.0, 1.0}, Range1D{0.0, 1.0}};
   case detail::SurfaceKind::BSpline:
   case detail::SurfaceKind::Nurbs: {
     const auto [rows, cols] = infer_surface_grid_dims(surface.poles.size());
@@ -484,6 +519,25 @@ Point3 evaluate_surface_point(const detail::SurfaceRecord &surface, Scalar u,
   }
   if (rows == 1 || cols == 1) {
     return evaluate_polyline_point(surface.poles, cols == 1 ? u : v);
+  }
+  if (surface.kind == detail::SurfaceKind::Bezier) {
+    // Minimal Bezier surface support: fallback to bilinear over the inferred grid
+    // (industrial-grade implementation will use tensor-product de Casteljau).
+    const auto domain = surface_domain(surface);
+    const auto cu = std::clamp(u, domain.u.min, domain.u.max);
+    const auto cv = std::clamp(v, domain.v.min, domain.v.max);
+    const auto ru =
+        std::min<std::size_t>(static_cast<std::size_t>(std::floor(cu * (rows - 1))), rows - 2);
+    const auto rv =
+        std::min<std::size_t>(static_cast<std::size_t>(std::floor(cv * (cols - 1))), cols - 2);
+    const auto lu = cu * (rows - 1) - static_cast<Scalar>(ru);
+    const auto lv = cv * (cols - 1) - static_cast<Scalar>(rv);
+    const auto idx = [cols](std::size_t r, std::size_t c) { return r * cols + c; };
+    const auto &p00 = surface.poles[idx(ru, rv)];
+    const auto &p01 = surface.poles[idx(ru, rv + 1)];
+    const auto &p10 = surface.poles[idx(ru + 1, rv)];
+    const auto &p11 = surface.poles[idx(ru + 1, rv + 1)];
+    return bilinear_point(p00, p01, p10, p11, lu, lv);
   }
   const auto domain = surface_domain(surface);
   const auto cu = std::clamp(u, domain.u.min, domain.u.max);
@@ -538,15 +592,29 @@ BoundingBox make_curve_bbox(const detail::CurveRecord &curve) {
   switch (curve.kind) {
   case detail::CurveKind::Line:
     return detail::bbox_from_center_radius(curve.origin, 1.0, 1.0, 1.0);
+  case detail::CurveKind::LineSegment: {
+    if (curve.poles.size() >= 2) {
+      const auto &a = curve.poles.front();
+      const auto &b = curve.poles.back();
+      const Point3 min{std::min(a.x, b.x), std::min(a.y, b.y), std::min(a.z, b.z)};
+      const Point3 max{std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z)};
+      return detail::make_bbox(min, max);
+    }
+    return detail::bbox_from_center_radius(curve.origin, 1.0, 1.0, 1.0);
+  }
   case detail::CurveKind::Circle:
     return bbox_from_span_vectors(
         curve.origin, detail::scale(curve.axis_u, curve.radius),
         detail::scale(curve.axis_v, curve.radius));
   case detail::CurveKind::Ellipse:
     return bbox_from_span_vectors(curve.origin, curve.axis_u, curve.axis_v);
+  case detail::CurveKind::Parabola:
+  case detail::CurveKind::Hyperbola:
+    return detail::bbox_from_center_radius(curve.origin, 1000.0, 1000.0, 1000.0);
   case detail::CurveKind::Bezier:
   case detail::CurveKind::BSpline:
-  case detail::CurveKind::Nurbs: {
+  case detail::CurveKind::Nurbs:
+  case detail::CurveKind::CompositePolyline: {
     if (curve.poles.empty()) {
       return detail::bbox_from_center_radius(curve.origin, 1.0, 1.0, 1.0);
     }
@@ -599,6 +667,22 @@ BoundingBox make_surface_bbox(const detail::SurfaceRecord &surface) {
     }
     return detail::make_bbox(min, max);
   }
+  case detail::SurfaceKind::Bezier: {
+    if (surface.poles.empty()) {
+      return detail::bbox_from_center_radius(surface.origin, 10.0, 10.0, 10.0);
+    }
+    auto min = surface.poles.front();
+    auto max = surface.poles.front();
+    for (const auto &p : surface.poles) {
+      min.x = std::min(min.x, p.x);
+      min.y = std::min(min.y, p.y);
+      min.z = std::min(min.z, p.z);
+      max.x = std::max(max.x, p.x);
+      max.y = std::max(max.y, p.y);
+      max.z = std::max(max.z, p.z);
+    }
+    return detail::make_bbox(min, max);
+  }
   default:
     return detail::bbox_from_center_radius(surface.origin, 10.0, 10.0, 10.0);
   }
@@ -611,18 +695,24 @@ detail::CurveRecord make_curve_record(detail::CurveKind kind,
                                       const Vec3 &axis_v,
                                       std::vector<Point3> poles = {},
                                       std::vector<Scalar> weights = {},
-                                      std::vector<Scalar> knots_u = {}) {
+                                      std::vector<Scalar> knots_u = {},
+                                      Scalar param_a = 0.0,
+                                      Scalar param_b = 0.0,
+                                      std::vector<CurveId> children = {}) {
   detail::CurveRecord record;
   record.kind = kind;
   record.origin = origin;
   record.direction = direction;
   record.radius = radius;
+  record.param_a = param_a;
+  record.param_b = param_b;
   record.normal = normal;
   record.axis_u = axis_u;
   record.axis_v = axis_v;
   record.poles = std::move(poles);
   record.weights = std::move(weights);
   record.knots_u = std::move(knots_u);
+  record.children = std::move(children);
   return record;
 }
 
@@ -701,6 +791,26 @@ Result<CurveId> CurveFactory::make_line(const Point3 &origin,
   return ok_result(id, state_->create_diagnostic("已创建直线"));
 }
 
+Result<CurveId> CurveFactory::make_line_segment(const Point3 &a, const Point3 &b) {
+  if (!finite_point(a) || !finite_point(b)) {
+    return detail::invalid_input_result<CurveId>(
+        *state_, diag_codes::kGeoCurveCreationInvalid,
+        "线段创建失败：输入包含非法数值", "线段创建失败");
+  }
+  if (detail::norm(detail::subtract(b, a)) <= kEpsilon) {
+    return detail::invalid_input_result<CurveId>(
+        *state_, diag_codes::kGeoCurveCreationInvalid,
+        "线段创建失败：端点不能重合", "线段创建失败");
+  }
+  const auto id = CurveId{state_->allocate_id()};
+  state_->curves.emplace(
+      id.value,
+      make_curve_record(detail::CurveKind::LineSegment, a, {1.0, 0.0, 0.0}, 0.0,
+                        {0.0, 0.0, 1.0}, {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0},
+                        std::vector<Point3>{a, b}));
+  return ok_result(id, state_->create_diagnostic("已创建线段"));
+}
+
 Result<CurveId> CurveFactory::make_circle(const Point3 &center,
                                           const Vec3 &normal, Scalar radius) {
   if (!finite_point(center) || !finite_vec(normal) || !finite_scalar(radius)) {
@@ -752,6 +862,70 @@ Result<CurveId> CurveFactory::make_ellipse(const Point3 &center,
                         1.0, detail::normalize(detail::cross(axis_u, axis_v)),
                         axis_u, axis_v));
   return ok_result(id, state_->create_diagnostic("已创建椭圆"));
+}
+
+Result<CurveId> CurveFactory::make_parabola(const Point3 &origin, const Vec3 &axis_u,
+                                            const Vec3 &axis_v, Scalar focal_param) {
+  if (!finite_point(origin) || !finite_vec(axis_u) || !finite_vec(axis_v) ||
+      !finite_scalar(focal_param)) {
+    return detail::invalid_input_result<CurveId>(
+        *state_, diag_codes::kGeoCurveCreationInvalid,
+        "抛物线创建失败：输入包含非法数值", "抛物线创建失败");
+  }
+  if (detail::norm(axis_u) <= kEpsilon || detail::norm(axis_v) <= kEpsilon) {
+    return detail::invalid_input_result<CurveId>(
+        *state_, diag_codes::kGeoCurveCreationInvalid,
+        "抛物线创建失败：轴向量必须非零", "抛物线创建失败");
+  }
+  if (detail::norm(detail::cross(axis_u, axis_v)) <= kEpsilon) {
+    return detail::invalid_input_result<CurveId>(
+        *state_, diag_codes::kGeoCurveCreationInvalid,
+        "抛物线创建失败：轴向量不能共线", "抛物线创建失败");
+  }
+  if (focal_param <= 0.0) {
+    return detail::invalid_input_result<CurveId>(
+        *state_, diag_codes::kGeoCurveCreationInvalid,
+        "抛物线创建失败：焦参数必须大于 0", "抛物线创建失败");
+  }
+  const auto id = CurveId{state_->allocate_id()};
+  state_->curves.emplace(
+      id.value,
+      make_curve_record(detail::CurveKind::Parabola, origin, {1.0, 0.0, 0.0},
+                        0.0, detail::normalize(detail::cross(axis_u, axis_v)),
+                        axis_u, axis_v, {}, {}, {}, focal_param, 0.0));
+  return ok_result(id, state_->create_diagnostic("已创建抛物线"));
+}
+
+Result<CurveId> CurveFactory::make_hyperbola(const Point3 &origin, const Vec3 &axis_u,
+                                             const Vec3 &axis_v, Scalar a, Scalar b) {
+  if (!finite_point(origin) || !finite_vec(axis_u) || !finite_vec(axis_v) ||
+      !finite_scalar(a) || !finite_scalar(b)) {
+    return detail::invalid_input_result<CurveId>(
+        *state_, diag_codes::kGeoCurveCreationInvalid,
+        "双曲线创建失败：输入包含非法数值", "双曲线创建失败");
+  }
+  if (detail::norm(axis_u) <= kEpsilon || detail::norm(axis_v) <= kEpsilon) {
+    return detail::invalid_input_result<CurveId>(
+        *state_, diag_codes::kGeoCurveCreationInvalid,
+        "双曲线创建失败：轴向量必须非零", "双曲线创建失败");
+  }
+  if (detail::norm(detail::cross(axis_u, axis_v)) <= kEpsilon) {
+    return detail::invalid_input_result<CurveId>(
+        *state_, diag_codes::kGeoCurveCreationInvalid,
+        "双曲线创建失败：轴向量不能共线", "双曲线创建失败");
+  }
+  if (a <= 0.0 || b <= 0.0) {
+    return detail::invalid_input_result<CurveId>(
+        *state_, diag_codes::kGeoCurveCreationInvalid,
+        "双曲线创建失败：a 与 b 必须大于 0", "双曲线创建失败");
+  }
+  const auto id = CurveId{state_->allocate_id()};
+  state_->curves.emplace(
+      id.value,
+      make_curve_record(detail::CurveKind::Hyperbola, origin, {1.0, 0.0, 0.0},
+                        0.0, detail::normalize(detail::cross(axis_u, axis_v)),
+                        axis_u, axis_v, {}, {}, {}, a, b));
+  return ok_result(id, state_->create_diagnostic("已创建双曲线"));
 }
 
 Result<CurveId> CurveFactory::make_bezier(std::span<const Point3> poles) {
@@ -816,6 +990,56 @@ Result<CurveId> CurveFactory::make_nurbs(const NURBSCurveDesc &desc) {
                         std::move(normalized_weights),
                         uniform_knot_vector(desc.poles.size())));
   return ok_result(id, state_->create_diagnostic("已创建NURBS曲线"));
+}
+
+Result<CurveId> CurveFactory::make_composite_polyline(std::span<const Point3> poles) {
+  if (poles.size() < 2) {
+    return detail::invalid_input_result<CurveId>(
+        *state_, diag_codes::kGeoCurveCreationInvalid,
+        "复合曲线创建失败：polyline 至少需要两个点", "复合曲线创建失败");
+  }
+  for (const auto &p : poles) {
+    if (!finite_point(p)) {
+      return detail::invalid_input_result<CurveId>(
+          *state_, diag_codes::kGeoCurveCreationInvalid,
+          "复合曲线创建失败：输入点包含非法数值", "复合曲线创建失败");
+    }
+  }
+  const auto id = CurveId{state_->allocate_id()};
+  state_->curves.emplace(
+      id.value,
+      make_curve_record(detail::CurveKind::CompositePolyline, poles.front(),
+                        {1.0, 0.0, 0.0}, 0.0, {0.0, 0.0, 1.0},
+                        {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0},
+                        std::vector<Point3>(poles.begin(), poles.end())));
+  return ok_result(id, state_->create_diagnostic("已创建复合曲线(polyline)"));
+}
+
+Result<CurveId> CurveFactory::make_composite_chain(std::span<const CurveId> children) {
+  if (children.empty()) {
+    return detail::invalid_input_result<CurveId>(
+        *state_, diag_codes::kGeoCurveCreationInvalid,
+        "复合曲线创建失败：子曲线集合为空", "复合曲线创建失败");
+  }
+  std::vector<CurveId> ids;
+  ids.reserve(children.size());
+  for (const auto child : children) {
+    if (!detail::has_curve(*state_, child)) {
+      return detail::invalid_input_result<CurveId>(
+          *state_, diag_codes::kCoreInvalidHandle,
+          "复合曲线创建失败：子曲线句柄无效", "复合曲线创建失败");
+    }
+    ids.push_back(child);
+  }
+  const auto id = CurveId{state_->allocate_id()};
+  const auto origin = state_->curves.at(ids.front().value).origin;
+  state_->curves.emplace(
+      id.value,
+      make_curve_record(detail::CurveKind::CompositeChain, origin, {1.0, 0.0, 0.0},
+                        0.0, {0.0, 0.0, 1.0}, {1.0, 0.0, 0.0},
+                        {0.0, 1.0, 0.0}, {}, {}, {}, 0.0, 0.0,
+                        std::move(ids)));
+  return ok_result(id, state_->create_diagnostic("已创建复合曲线(chain)"));
 }
 
 SurfaceFactory::SurfaceFactory(std::shared_ptr<detail::KernelState> state)
@@ -943,6 +1167,28 @@ Result<SurfaceId> SurfaceFactory::make_torus(const Point3 &center,
                           detail::normalize(axis), detail::normalize(axis),
                           major_r, minor_r, 0.0));
   return ok_result(id, state_->create_diagnostic("已创建环面"));
+}
+
+Result<SurfaceId> SurfaceFactory::make_bezier(std::span<const Point3> poles) {
+  if (poles.empty()) {
+    return detail::invalid_input_result<SurfaceId>(
+        *state_, diag_codes::kGeoSurfaceCreationInvalid,
+        "Bezier 曲面创建失败：控制点不能为空", "Bezier 曲面创建失败");
+  }
+  for (const auto &p : poles) {
+    if (!finite_point(p)) {
+      return detail::invalid_input_result<SurfaceId>(
+          *state_, diag_codes::kGeoSurfaceCreationInvalid,
+          "Bezier 曲面创建失败：输入包含非法数值", "Bezier 曲面创建失败");
+    }
+  }
+  const auto id = SurfaceId{state_->allocate_id()};
+  state_->surfaces.emplace(
+      id.value,
+      make_surface_record(detail::SurfaceKind::Bezier, poles.front(),
+                          {0.0, 0.0, 1.0}, {0.0, 0.0, 1.0}, 0.0, 0.0, 0.0,
+                          std::vector<Point3>(poles.begin(), poles.end())));
+  return ok_result(id, state_->create_diagnostic("已创建Bezier曲面"));
 }
 
 Result<SurfaceId> SurfaceFactory::make_bspline(const BSplineSurfaceDesc &desc) {
@@ -1143,6 +1389,19 @@ Result<CurveEvalResult> CurveService::eval(CurveId curve_id, Scalar t,
         detail::add_point_vec(curve.origin, detail::scale(curve.direction, t));
     result.tangent = detail::normalize(curve.direction);
     break;
+  case detail::CurveKind::LineSegment: {
+    if (curve.poles.size() >= 2) {
+      const auto ct = std::clamp(t, 0.0, 1.0);
+      result.point = lerp_point(curve.poles.front(), curve.poles.back(), ct);
+      result.tangent =
+          normalize_or_default(detail::subtract(curve.poles.back(), curve.poles.front()),
+                               Vec3{1.0, 0.0, 0.0});
+    } else {
+      result.point = curve.origin;
+      result.tangent = {1.0, 0.0, 0.0};
+    }
+    break;
+  }
   case detail::CurveKind::Circle:
     result.point = point_from_local(
         curve.origin, OrthoFrame{curve.axis_u, curve.axis_v, curve.normal},
@@ -1179,6 +1438,39 @@ Result<CurveEvalResult> CurveService::eval(CurveId curve_id, Scalar t,
       result.point = curve.origin;
       result.tangent = {1.0, 0.0, 0.0};
     }
+    break;
+  }
+  case detail::CurveKind::Parabola:
+  case detail::CurveKind::Hyperbola:
+  case detail::CurveKind::CompositePolyline: {
+    const auto domain = curve_domain(curve);
+    const auto eval_fn = [&curve](Scalar value) {
+      return evaluate_curve_point(curve, value);
+    };
+    const auto clamped_t = std::clamp(t, domain.min, domain.max);
+    result.point = eval_fn(clamped_t);
+    result.tangent =
+        finite_difference_tangent(eval_fn, clamped_t, domain.min, domain.max);
+    break;
+  }
+  case detail::CurveKind::CompositeChain: {
+    if (curve.children.empty()) {
+      result.point = curve.origin;
+      result.tangent = {1.0, 0.0, 0.0};
+      break;
+    }
+    const auto domain = curve_domain(curve);
+    const auto ct = std::clamp(t, domain.min, domain.max);
+    const auto max_index = static_cast<Scalar>(curve.children.size());
+    const auto clamped = std::min(ct, std::nextafter(max_index, 0.0));
+    const auto idx = static_cast<std::size_t>(std::max<Scalar>(0.0, std::floor(clamped)));
+    const auto local_t = clamped - static_cast<Scalar>(idx);
+    const auto child_id = curve.children[std::min(idx, curve.children.size() - 1)];
+    const auto child_eval = eval(child_id, local_t, deriv_order);
+    if (child_eval.status != StatusCode::Ok || !child_eval.value.has_value()) {
+      return error_result<CurveEvalResult>(child_eval.status, child_eval.diagnostic_id);
+    }
+    result = *child_eval.value;
     break;
   }
   default:
@@ -1246,6 +1538,26 @@ Result<Scalar> CurveService::closest_parameter(CurveId curve_id,
     return ok_result<Scalar>(detail::dot(op, dir) / denom,
                              state_->create_diagnostic("曲线最近参数已求解"));
   }
+  case detail::CurveKind::LineSegment: {
+    if (curve.poles.size() < 2) {
+      return detail::failed_result<Scalar>(
+          *state_, StatusCode::OperationFailed, diag_codes::kGeoParameterSolveFailure,
+          "曲线最近参数求解失败：线段数据缺失", "曲线最近参数求解失败");
+    }
+    const auto a = curve.poles.front();
+    const auto b = curve.poles.back();
+    const auto ab = detail::subtract(b, a);
+    const auto denom = detail::dot(ab, ab);
+    if (denom <= kEpsilon) {
+      return detail::failed_result<Scalar>(
+          *state_, StatusCode::OperationFailed, diag_codes::kGeoParameterSolveFailure,
+          "曲线最近参数求解失败：线段退化", "曲线最近参数求解失败");
+    }
+    const auto ap = detail::subtract(point, a);
+    const auto tproj = detail::dot(ap, ab) / denom;
+    return ok_result<Scalar>(std::clamp(tproj, 0.0, 1.0),
+                             state_->create_diagnostic("曲线最近参数已求解"));
+  }
   case detail::CurveKind::Circle: {
     const auto rel = detail::subtract(point, curve.origin);
     const auto pu = detail::dot(rel, curve.axis_u);
@@ -1268,7 +1580,10 @@ Result<Scalar> CurveService::closest_parameter(CurveId curve_id,
 
   if (curve.kind == detail::CurveKind::Bezier ||
       curve.kind == detail::CurveKind::BSpline ||
-      curve.kind == detail::CurveKind::Nurbs) {
+      curve.kind == detail::CurveKind::Nurbs ||
+      curve.kind == detail::CurveKind::Parabola ||
+      curve.kind == detail::CurveKind::Hyperbola ||
+      curve.kind == detail::CurveKind::CompositePolyline) {
     const auto domain = curve_domain(curve);
     const auto t = std::clamp(approximate_curve_parameter(curve, point),
                               domain.min, domain.max);
@@ -1373,6 +1688,32 @@ Result<BoundingBox> CurveService::bbox(CurveId curve_id) const {
     return detail::invalid_input_result<BoundingBox>(
         *state_, diag_codes::kCoreInvalidHandle,
         "曲线包围盒查询失败：目标曲线不存在", "曲线包围盒查询失败");
+  }
+  if (it->second.kind == detail::CurveKind::CompositeChain) {
+    const auto &curve = it->second;
+    if (curve.children.empty()) {
+      return ok_result(detail::bbox_from_center_radius(curve.origin, 1.0, 1.0, 1.0),
+                       state_->create_diagnostic("已返回曲线包围盒"));
+    }
+    auto first_bbox = bbox(curve.children.front());
+    if (first_bbox.status != StatusCode::Ok || !first_bbox.value.has_value()) {
+      return error_result<BoundingBox>(first_bbox.status, first_bbox.diagnostic_id);
+    }
+    auto out = *first_bbox.value;
+    for (std::size_t i = 1; i < curve.children.size(); ++i) {
+      const auto b = bbox(curve.children[i]);
+      if (b.status != StatusCode::Ok || !b.value.has_value()) {
+        return error_result<BoundingBox>(b.status, b.diagnostic_id);
+      }
+      out.min.x = std::min(out.min.x, b.value->min.x);
+      out.min.y = std::min(out.min.y, b.value->min.y);
+      out.min.z = std::min(out.min.z, b.value->min.z);
+      out.max.x = std::max(out.max.x, b.value->max.x);
+      out.max.y = std::max(out.max.y, b.value->max.y);
+      out.max.z = std::max(out.max.z, b.value->max.z);
+      out.is_valid = out.is_valid && b.value->is_valid;
+    }
+    return ok_result(out, state_->create_diagnostic("已返回曲线包围盒"));
   }
   return ok_result(make_curve_bbox(it->second),
                    state_->create_diagnostic("已返回曲线包围盒"));
@@ -1500,6 +1841,30 @@ Result<SurfaceEvalResult> SurfaceService::eval(SurfaceId surface_id, Scalar u,
         frame.u);
     result.k1 = surface.radius_b > 0.0 ? 1.0 / surface.radius_b : 0.0;
     result.k2 = surface.radius_a > 0.0 ? 1.0 / surface.radius_a : 0.0;
+    break;
+  }
+  case detail::SurfaceKind::Bezier: {
+    const auto domain = surface_domain(surface);
+    const auto eval_fn = [&surface](Scalar uu, Scalar vv) {
+      return evaluate_surface_point(surface, uu, vv);
+    };
+    const auto cu = std::clamp(u, domain.u.min, domain.u.max);
+    const auto cv = std::clamp(v, domain.v.min, domain.v.max);
+    const auto step_u = std::max((domain.u.max - domain.u.min) * 1e-4, 1e-6);
+    const auto step_v = std::max((domain.v.max - domain.v.min) * 1e-4, 1e-6);
+    const auto u0 = std::clamp(cu - step_u, domain.u.min, domain.u.max);
+    const auto u1 = std::clamp(cu + step_u, domain.u.min, domain.u.max);
+    const auto v0 = std::clamp(cv - step_v, domain.v.min, domain.v.max);
+    const auto v1 = std::clamp(cv + step_v, domain.v.min, domain.v.max);
+    result.point = eval_fn(cu, cv);
+    result.du = normalize_or_default(detail::subtract(eval_fn(u1, cv), eval_fn(u0, cv)),
+                                     Vec3{1.0, 0.0, 0.0});
+    result.dv = normalize_or_default(detail::subtract(eval_fn(cu, v1), eval_fn(cu, v0)),
+                                     Vec3{0.0, 1.0, 0.0});
+    result.normal = normalize_or_default(detail::cross(result.du, result.dv),
+                                         Vec3{0.0, 0.0, 1.0});
+    result.k1 = 0.0;
+    result.k2 = 0.0;
     break;
   }
   case detail::SurfaceKind::BSpline:
@@ -1648,6 +2013,7 @@ Result<Point3> SurfaceService::closest_point(SurfaceId surface_id,
                      state_->create_diagnostic("已求出曲面最近点"));
   }
   if (surface.kind == detail::SurfaceKind::BSpline ||
+      surface.kind == detail::SurfaceKind::Bezier ||
       surface.kind == detail::SurfaceKind::Nurbs) {
     const auto uv = approximate_surface_uv(surface, point);
     const auto eval_result = eval(surface_id, uv.first, uv.second, 1);
@@ -1748,6 +2114,7 @@ SurfaceService::closest_uv(SurfaceId surface_id, const Point3 &point) const {
                      state_->create_diagnostic("已求出曲面最近参数"));
   }
   case detail::SurfaceKind::BSpline:
+  case detail::SurfaceKind::Bezier:
   case detail::SurfaceKind::Nurbs:
   {
     const auto domain = surface_domain(surface);

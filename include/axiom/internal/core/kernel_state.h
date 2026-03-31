@@ -15,11 +15,16 @@ namespace axiom::detail {
 
 enum class CurveKind {
     Line,
+    LineSegment,
     Circle,
     Ellipse,
+    Parabola,
+    Hyperbola,
     Bezier,
     BSpline,
-    Nurbs
+    Nurbs,
+    CompositePolyline,
+    CompositeChain
 };
 
 enum class PCurveKind {
@@ -32,6 +37,7 @@ enum class SurfaceKind {
     Cone,
     Sphere,
     Torus,
+    Bezier,
     BSpline,
     Nurbs
 };
@@ -55,12 +61,15 @@ struct CurveRecord {
     Point3 origin {};
     Vec3 direction {1.0, 0.0, 0.0};
     Scalar radius {0.0};
+    Scalar param_a {0.0};
+    Scalar param_b {0.0};
     Vec3 normal {0.0, 0.0, 1.0};
     Vec3 axis_u {1.0, 0.0, 0.0};
     Vec3 axis_v {0.0, 1.0, 0.0};
     std::vector<Point3> poles;
     std::vector<Scalar> weights;
     std::vector<Scalar> knots_u;
+    std::vector<CurveId> children;
 };
 
 struct PCurveRecord {
