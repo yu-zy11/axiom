@@ -1,0 +1,19 @@
+## Build artifacts
+build/
+build*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+
+## IDE / OS
+.vscode/
+.idea/
+.DS_Store
+
+## Tooling
+*.swp
+*.swo
+*~
