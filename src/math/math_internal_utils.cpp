@@ -200,6 +200,20 @@ bool point_equal_tol(const Point3& lhs, const Point3& rhs, Scalar tolerance) {
            std::abs(lhs.z - rhs.z) <= tol;
 }
 
+Scalar bbox_characteristic_length(const BoundingBox& bbox) {
+    if (!valid_bbox(bbox) || !finite_point3(bbox.min) || !finite_point3(bbox.max)) {
+        return 1.0;
+    }
+    const auto ex = std::max<Scalar>(0.0, bbox.max.x - bbox.min.x);
+    const auto ey = std::max<Scalar>(0.0, bbox.max.y - bbox.min.y);
+    const auto ez = std::max<Scalar>(0.0, bbox.max.z - bbox.min.z);
+    const auto diag = std::hypot(ex, ey, ez);
+    if (!std::isfinite(diag) || diag <= 0.0) {
+        return 1.0;
+    }
+    return diag;
+}
+
 Scalar effective_tolerance(Scalar requested, Scalar fallback) {
     if (requested > 0.0) {
         return requested;
@@ -208,11 +222,11 @@ Scalar effective_tolerance(Scalar requested, Scalar fallback) {
 }
 
 Scalar clamp_local_tolerance(Scalar value, const TolerancePolicy& policy) {
-    if (!std::isfinite(value)) {
-        return std::numeric_limits<Scalar>::infinity();
-    }
     const auto min_t = std::max(policy.min_local, 0.0);
     const auto max_t = std::max(policy.max_local, min_t);
+    if (!std::isfinite(value)) {
+        return max_t;
+    }
     return std::clamp(std::max(value, 0.0), min_t, max_t);
 }
 
@@ -236,6 +250,24 @@ Scalar resolve_angular_tolerance_for_scale(Scalar requested, const TolerancePoli
 
 bool within_tolerance(Scalar lhs, Scalar rhs, Scalar tolerance) {
     return std::abs(lhs - rhs) <= std::max(tolerance, 0.0);
+}
+
+bool nearly_equal_rel_abs(Scalar lhs, Scalar rhs, Scalar abs_tol, Scalar rel_tol) {
+    if (!std::isfinite(lhs) || !std::isfinite(rhs)) {
+        return false;
+    }
+    const auto a = std::max(abs_tol, 0.0);
+    const auto r = std::max(rel_tol, 0.0);
+    const auto diff = std::abs(lhs - rhs);
+    const auto scale = std::max(std::abs(lhs), std::abs(rhs));
+    return diff <= std::max(a, r * scale);
+}
+
+int compare_rel_abs(Scalar lhs, Scalar rhs, Scalar abs_tol, Scalar rel_tol) {
+    if (nearly_equal_rel_abs(lhs, rhs, abs_tol, rel_tol)) {
+        return 0;
+    }
+    return lhs < rhs ? -1 : 1;
 }
 
 TolerancePolicy clamp_tolerance_policy(const TolerancePolicy& base) {

@@ -676,11 +676,8 @@ TolerancePolicy ToleranceService::policy_for_body(BodyId body_id) const {
   if (!detail::valid_bbox(bbox)) {
     return policy;
   }
-  const auto ex = bbox.max.x - bbox.min.x;
-  const auto ey = bbox.max.y - bbox.min.y;
-  const auto ez = bbox.max.z - bbox.min.z;
-  const auto min_extent = std::max(0.0, std::min({ex, ey, ez}));
-  const auto scale = std::clamp(min_extent * 0.01, 0.1, 10.0);
+  const auto model_scale = detail::bbox_characteristic_length(bbox);
+  const auto scale = std::clamp(model_scale * 0.01, 0.1, 10.0);
   return detail::scale_tolerance_policy(policy, scale);
 }
 
@@ -709,12 +706,8 @@ ToleranceService::scale_policy_for_body_nonlinear(const TolerancePolicy &base,
     return clamp_policy(base);
   }
   const auto &bbox = it->second.bbox;
-  const auto ex = std::max(0.0, bbox.max.x - bbox.min.x);
-  const auto ey = std::max(0.0, bbox.max.y - bbox.min.y);
-  const auto ez = std::max(0.0, bbox.max.z - bbox.min.z);
-  const auto volume_scale = std::cbrt(std::max(ex * ey * ez, 0.0));
-  const auto factor =
-      std::clamp(std::sqrt(std::max(volume_scale, 0.0)) * 0.1, 0.1, 10.0);
+  const auto model_scale = detail::bbox_characteristic_length(bbox);
+  const auto factor = std::clamp(std::sqrt(std::max(model_scale, 0.0)) * 0.1, 0.1, 10.0);
   return detail::scale_tolerance_policy(base, factor);
 }
 

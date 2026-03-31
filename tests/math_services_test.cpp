@@ -124,11 +124,30 @@ int main() {
             return 1;
         }
     }
+    // Near-degenerate cases at large scale should be classified as Zero (scale-adaptive threshold).
+    {
+        const double s = 1e150;
+        const auto sign = kernel.predicates().orient2d_tol({0.0, 0.0}, {s, 0.0}, {s, 1e-100}, 0.0);
+        if (sign != axiom::Sign::Zero) {
+            std::cerr << "expected orient2d_tol to be Zero for near-collinear large-scale input\n";
+            return 1;
+        }
+        const auto sign3 = kernel.predicates().orient3d_tol({0.0, 0.0, 0.0}, {s, 0.0, 0.0}, {0.0, s, 0.0}, {0.0, 0.0, 1e-100}, 0.0);
+        if (sign3 != axiom::Sign::Zero) {
+            std::cerr << "expected orient3d_tol to be Zero for near-coplanar large-scale input\n";
+            return 1;
+        }
+    }
     // Non-finite inputs should not silently claim a sign.
     {
         const auto sign = kernel.predicates().orient2d_tol({0.0, 0.0}, {NAN, 0.0}, {0.0, 1.0}, 1e-12);
         if (sign != axiom::Sign::Uncertain) {
             std::cerr << "expected orient2d_tol to be Uncertain for NaN input\n";
+            return 1;
+        }
+        const auto sign3 = kernel.predicates().orient3d_tol({0.0, 0.0, 0.0}, {INFINITY, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}, 1e-12);
+        if (sign3 != axiom::Sign::Uncertain) {
+            std::cerr << "expected orient3d_tol to be Uncertain for Inf input\n";
             return 1;
         }
     }
@@ -212,6 +231,12 @@ int main() {
         if (!approx(k2.tolerance().resolve_linear_for_scale(1e-6, 10.0), 2e-4) ||
             !approx(k2.tolerance().resolve_angular_for_scale(1e-6, 10.0), 2e-4)) {
             std::cerr << "unexpected resolve_*_for_scale clamp behavior\n";
+            return 1;
+        }
+        // Non-finite scale should not escape the local clamp window.
+        if (!approx(k2.tolerance().resolve_linear_for_scale(1e-6, INFINITY), 2e-4) ||
+            !approx(k2.tolerance().resolve_angular_for_scale(1e-6, INFINITY), 2e-4)) {
+            std::cerr << "unexpected resolve_*_for_scale behavior for infinite scale\n";
             return 1;
         }
     }

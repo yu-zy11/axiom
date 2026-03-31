@@ -24,6 +24,7 @@ bool vec_orthogonal_tol(const Vec3& lhs, const Vec3& rhs, Scalar angular_toleran
 bool bbox_intersects_tol(const BoundingBox& lhs, const BoundingBox& rhs, Scalar tolerance);
 bool bbox_contains_tol(const BoundingBox& outer, const BoundingBox& inner, Scalar tolerance);
 bool point_equal_tol(const Point3& lhs, const Point3& rhs, Scalar tolerance);
+Scalar bbox_characteristic_length(const BoundingBox& bbox);
 Scalar effective_tolerance(Scalar requested, Scalar fallback);
 Scalar clamp_local_tolerance(Scalar value, const TolerancePolicy& policy);
 Scalar resolve_linear_tolerance(Scalar requested, const TolerancePolicy& policy);
@@ -31,6 +32,8 @@ Scalar resolve_angular_tolerance(Scalar requested, const TolerancePolicy& policy
 Scalar resolve_linear_tolerance_for_scale(Scalar requested, const TolerancePolicy& policy, Scalar model_scale);
 Scalar resolve_angular_tolerance_for_scale(Scalar requested, const TolerancePolicy& policy, Scalar model_scale);
 bool within_tolerance(Scalar lhs, Scalar rhs, Scalar tolerance);
+bool nearly_equal_rel_abs(Scalar lhs, Scalar rhs, Scalar abs_tol, Scalar rel_tol);
+int compare_rel_abs(Scalar lhs, Scalar rhs, Scalar abs_tol, Scalar rel_tol);
 TolerancePolicy clamp_tolerance_policy(const TolerancePolicy& base);
 TolerancePolicy scale_tolerance_policy(const TolerancePolicy& base, Scalar factor);
 TolerancePolicy merge_tolerance_policy(const TolerancePolicy& primary, const TolerancePolicy& fallback);
