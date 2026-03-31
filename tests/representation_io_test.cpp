@@ -116,6 +116,32 @@ int main() {
         return 1;
     }
 
+    // Optional display seam support: allow generating UVs for export pipelines.
+    // This is a display-oriented option and may intentionally keep seams.
+    auto uv_mesh = kernel.convert().brep_to_mesh(*box.value, {0.05, 5.0, true, true});
+    if (uv_mesh.status != axiom::StatusCode::Ok || !uv_mesh.value.has_value()) {
+        std::cerr << "failed to convert brep to mesh with generated texcoords\n";
+        std::filesystem::remove(mesh_report_path);
+        return 1;
+    }
+    const auto uv_report_path = std::filesystem::temp_directory_path() / "axiom_mesh_report_uv.json";
+    auto export_uv_report = kernel.convert().export_mesh_report_json(*uv_mesh.value, uv_report_path.string());
+    if (export_uv_report.status != axiom::StatusCode::Ok) {
+        std::cerr << "failed to export uv mesh report json\n";
+        std::filesystem::remove(mesh_report_path);
+        return 1;
+    }
+    std::ifstream uv_report_in {uv_report_path};
+    std::string uv_report_text((std::istreambuf_iterator<char>(uv_report_in)),
+                               std::istreambuf_iterator<char>());
+    if (uv_report_text.find("\"has_texcoords\":true") == std::string::npos) {
+        std::cerr << "uv mesh report should indicate has_texcoords=true\n";
+        std::filesystem::remove(mesh_report_path);
+        std::filesystem::remove(uv_report_path);
+        return 1;
+    }
+    std::filesystem::remove(uv_report_path);
+
     {
         auto pl = kernel.surfaces().make_plane({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0});
         auto trimmed_plane = kernel.surfaces().make_trimmed(*pl.value, 0.0, 10.0, 0.0, 20.0);
@@ -163,8 +189,10 @@ int main() {
             *tc0.value, *tc1.value, *tc2.value, *tc3.value};
         auto tloop = ttx.create_loop(trim_coedges);
         auto tface = ttx.create_face(*trimmed_plane.value, *tloop.value, {});
-        auto tshell = ttx.create_shell({*tface.value});
-        auto tbody = ttx.create_body({*tshell.value});
+        const std::array<axiom::FaceId, 1> trim_faces {*tface.value};
+        auto tshell = ttx.create_shell(trim_faces);
+        const std::array<axiom::ShellId, 1> trim_shells {*tshell.value};
+        auto tbody = ttx.create_body(trim_shells);
         if (tloop.status != axiom::StatusCode::Ok || tface.status != axiom::StatusCode::Ok ||
             tshell.status != axiom::StatusCode::Ok || tbody.status != axiom::StatusCode::Ok ||
             !tloop.value.has_value() || !tface.value.has_value() || !tshell.value.has_value() ||

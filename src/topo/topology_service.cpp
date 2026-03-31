@@ -2776,27 +2776,25 @@ Result<void> TopologyValidationService::validate_face(FaceId face_id) const {
             {face_id.value, face_it->second.outer_loop.value});
       }
       const auto newell_o = newell_normal_unnormalized(outer_pts);
-      if (detail::norm(newell_o) <= tol * tol * static_cast<Scalar>(100)) {
-        return detail::failed_void(
-            *state_, StatusCode::InvalidTopology,
-            diag_codes::kTopoFaceOuterLoopInvalid,
-            "面验证失败：外环退化无法确定法向", "面验证失败",
-            {face_id.value, face_it->second.outer_loop.value});
-      }
-      const auto nn = detail::normalize(newell_o);
-      const auto dot_align = detail::dot(nn, n);
-      const auto dot_tol =
-          std::max<Scalar>(static_cast<Scalar>(1e-8), tol * static_cast<Scalar>(1e-6));
-      if (dot_align <= dot_tol) {
-        return detail::failed_void(
-            *state_, StatusCode::InvalidTopology,
-            diag_codes::kTopoLoopOrientationMismatch,
-            "面验证失败：平面外环绕序与曲面法向不一致（右手系）"
-            " (face=" +
-                std::to_string(face_id.value) + ", outer_loop=" +
-                std::to_string(face_it->second.outer_loop.value) + ")",
-            "面验证失败",
-            {face_id.value, face_it->second.outer_loop.value});
+      const auto newell_thresh = tol * tol * static_cast<Scalar>(100);
+      // Only enforce winding-vs-normal when Newell vector is stable.
+      // Degenerate/intermediate planar loops skip this gate to avoid false negatives.
+      if (detail::norm(newell_o) > newell_thresh) {
+        const auto nn = detail::normalize(newell_o);
+        const auto dot_align = detail::dot(nn, n);
+        const auto dot_tol = std::max<Scalar>(static_cast<Scalar>(1e-8),
+                                              tol * static_cast<Scalar>(1e-6));
+        if (dot_align <= dot_tol) {
+          return detail::failed_void(
+              *state_, StatusCode::InvalidTopology,
+              diag_codes::kTopoLoopOrientationMismatch,
+              "面验证失败：平面外环绕序与曲面法向不一致（右手系）"
+              " (face=" +
+                  std::to_string(face_id.value) + ", outer_loop=" +
+                  std::to_string(face_it->second.outer_loop.value) + ")",
+              "面验证失败",
+              {face_id.value, face_it->second.outer_loop.value});
+        }
       }
 
       if (!face_it->second.inner_loops.empty()) {

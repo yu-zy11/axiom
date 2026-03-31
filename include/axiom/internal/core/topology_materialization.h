@@ -1155,6 +1155,18 @@ inline void materialize_body_bbox_shell(KernelState& state, BodyRecord& record) 
         return;
     }
 
+    // Ensure the placeholder closed shell is non-degenerate even when the source bbox is planar/linear.
+    // This keeps Stage-2 materialized results passable under strict topology validation.
+    {
+        const auto eps = std::max<Scalar>(state.config.tolerance.linear, 1e-6);
+        const auto ex = record.bbox.max.x - record.bbox.min.x;
+        const auto ey = record.bbox.max.y - record.bbox.min.y;
+        const auto ez = record.bbox.max.z - record.bbox.min.z;
+        if (!(ex > eps)) { record.bbox.min.x -= eps * 0.5; record.bbox.max.x += eps * 0.5; }
+        if (!(ey > eps)) { record.bbox.min.y -= eps * 0.5; record.bbox.max.y += eps * 0.5; }
+        if (!(ez > eps)) { record.bbox.min.z -= eps * 0.5; record.bbox.max.z += eps * 0.5; }
+    }
+
     const std::array<Point3, 8> corners {
         Point3 {record.bbox.min.x, record.bbox.min.y, record.bbox.min.z},
         Point3 {record.bbox.max.x, record.bbox.min.y, record.bbox.min.z},

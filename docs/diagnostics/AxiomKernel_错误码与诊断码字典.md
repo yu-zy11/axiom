@@ -275,6 +275,7 @@
 | `AXM-BLEND-E-0004` | Error | 角区求解失败 |
 | `AXM-BLEND-E-0005` | Warning | 局部圆角结果存在近自交风险 |
 | `AXM-BLEND-E-0006` | Error | 圆角修剪失败 |
+| `AXM-BLEND-W-0001` | Warning | 圆角/倒角为拓扑占位与参数门禁：工业级滚球、角区、变半径等未实现 |
 
 ## 7.7 `MOD` 修改模块错误码
 

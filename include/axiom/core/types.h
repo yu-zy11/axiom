@@ -276,6 +276,10 @@ struct TessellationOptions {
   Scalar chordal_error{0.1};
   Scalar angular_error{5.0};
   bool compute_normals{true};
+  /// If true, attempt to generate per-vertex UVs for display/export.
+  bool generate_texcoords{false};
+  /// Optional sharp-angle-based weld split for shading normals (degrees, validated in [0, 180]).
+  Scalar weld_shading_split_angle_deg{60.0};
 };
 
 struct CurveEvalResult {

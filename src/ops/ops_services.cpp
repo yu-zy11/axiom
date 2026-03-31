@@ -96,6 +96,27 @@ void append_shells_for_face(const detail::KernelState& state, std::vector<ShellI
     }
 }
 
+// When a Face is referenced by multiple shells, provenance for modify operations
+// should prefer shells owned by the source body.
+void append_shells_for_face_owned_by_body(const detail::KernelState& state, std::vector<ShellId>& ids,
+                                         FaceId face_id, BodyId body_id) {
+    const auto body_it = state.bodies.find(body_id.value);
+    if (body_it == state.bodies.end()) {
+        return;
+    }
+    for (const auto shell_id : body_it->second.shells) {
+        const auto sh_it = state.shells.find(shell_id.value);
+        if (sh_it == state.shells.end()) {
+            continue;
+        }
+        const auto& faces = sh_it->second.faces;
+        if (std::any_of(faces.begin(), faces.end(),
+                        [face_id](FaceId f) { return f.value == face_id.value; })) {
+            append_unique_shell(ids, shell_id);
+        }
+    }
+}
+
 void append_shell_provenance_for_body(const detail::KernelState& state, std::vector<ShellId>& ids, BodyId body_id) {
     const auto body_it = state.bodies.find(body_id.value);
     if (body_it == state.bodies.end()) {
@@ -742,6 +763,26 @@ std::vector<IntersectionSegment> clip_intersection_lines_to_face_overlap(detail:
     return segments;
 }
 
+CurveId longest_intersection_segment_curve(const detail::KernelState& state,
+                                           std::span<const IntersectionSegment> segments) {
+    CurveId best {};
+    Scalar best_len2 = -1.0;
+    for (const auto& s : segments) {
+        const auto it = state.curves.find(s.curve.value);
+        if (it == state.curves.end() || it->second.kind != detail::CurveKind::LineSegment ||
+            it->second.poles.size() < 2) {
+            continue;
+        }
+        const auto dv = detail::subtract(it->second.poles.back(), it->second.poles.front());
+        const auto l2 = detail::dot(dv, dv);
+        if (l2 > best_len2) {
+            best_len2 = l2;
+            best = s.curve;
+        }
+    }
+    return best;
+}
+
 std::vector<BoundingBox> body_regions_for_boolean(const detail::KernelState& state, BodyId body_id) {
     std::vector<BoundingBox> regions;
     if (!detail::has_body(state, body_id)) {
@@ -1125,29 +1166,6 @@ struct SplitEdgeResult {
     VertexId end {};
 };
 
-bool coedge_belongs_to_shell(const detail::KernelState& state, CoedgeId coedge_id, ShellId shell_id) {
-    const auto loop_it = state.coedge_to_loop.find(coedge_id.value);
-    if (loop_it == state.coedge_to_loop.end()) {
-        return false;
-    }
-    const auto face_it = state.loop_to_faces.find(loop_it->second);
-    if (face_it == state.loop_to_faces.end()) {
-        return false;
-    }
-    for (const auto face_value : face_it->second) {
-        const auto shells_it = state.face_to_shells.find(face_value);
-        if (shells_it == state.face_to_shells.end()) {
-            continue;
-        }
-        for (const auto shell_value : shells_it->second) {
-            if (shell_value == shell_id.value) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
 // Split an existing edge inside a shell: replace each coedge in that shell by two coedges referencing new edges.
 std::optional<SplitEdgeResult> split_edge_in_shell(detail::KernelState& state, ShellId shell_id, EdgeId edge_id, VertexId mid_vertex) {
     const auto edge_it = state.edges.find(edge_id.value);
@@ -1247,16 +1265,6 @@ bool imprint_split_rect_face_by_segment(detail::KernelState& state,
                                         ShellId shell_id,
                                         FaceId face_id,
                                         CurveId segment_curve_id) {
-    // NOTE(Stage 2): This path mutates only one face and can easily break strict shell closedness
-    // (open-boundary edges) unless we also update all adjacent faces sharing the split edges.
-    // Until full adjacency-aware imprint is implemented, keep this disabled and fall back to
-    // the diagonal split, which preserves edge usage invariants for the placeholder topology.
-    (void)state;
-    (void)shell_id;
-    (void)face_id;
-    (void)segment_curve_id;
-    return false;
-
     const auto shell_it = state.shells.find(shell_id.value);
     const auto face_it = state.faces.find(face_id.value);
     if (shell_it == state.shells.end() || face_it == state.faces.end()) {
@@ -1957,13 +1965,18 @@ Result<OpReport> BooleanService::run(BooleanOp op, BodyId lhs, BodyId rhs, const
                     }
                 }
                 if (target.value != 0) {
-                    const auto seg_curve = intersection_segments.front().curve;
+                    auto seg_curve = longest_intersection_segment_curve(*state_, intersection_segments);
+                    if (seg_curve.value == 0) {
+                        seg_curve = intersection_segments.front().curve;
+                    }
                     bool applied = false;
-                    // NOTE(Stage 1.5): segment-driven imprint currently splits boundary edges without
-                    // propagating the split into adjacent faces, which breaks Strict closed-shell checks.
-                    // Use diagonal split to preserve shared boundary edges (keeps shell closed).
-                    {
-                        // Use first intersection segment direction to choose diagonal.
+                    if (imprint_split_rect_face_by_segment(*state_, shell_id, target, seg_curve)) {
+                        applied = true;
+                        auto issue = detail::make_info_issue(diag_codes::kBoolImprintSegmentApplied,
+                                                             "布尔切分/imprint 已应用：输出壳的矩形面已按交线段切分为两四边形");
+                        issue.related_entities = {lhs.value, rhs.value, output.value, shell_id.value, target.value};
+                        state_->append_diagnostic_issue(diag, std::move(issue));
+                    } else {
                         bool prefer_diag_02 = true;
                         const auto curve_it = state_->curves.find(seg_curve.value);
                         if (curve_it != state_->curves.end() && curve_it->second.kind == detail::CurveKind::LineSegment &&
@@ -2364,6 +2377,7 @@ Result<OpReport> ModifyService::replace_face(BodyId body_id, FaceId target, Surf
     record.label = "replace_face";
     append_unique_body(record.source_bodies, body_id);
     append_unique_face(record.source_faces, target);
+    append_shells_for_face_owned_by_body(*state_, record.source_shells, target, body_id);
     const auto output = make_body(state_, record, "已完成替换面");
     detail::invalidate_eval_for_bodies(*state_, {body_id});
     const auto diag = state_->create_diagnostic("替换面操作完成");
@@ -2382,6 +2396,7 @@ Result<OpReport> ModifyService::delete_face_and_heal(BodyId body_id, FaceId targ
     record.label = "delete_face_and_heal";
     append_unique_body(record.source_bodies, body_id);
     append_unique_face(record.source_faces, target);
+    append_shells_for_face(*state_, record.source_shells, target);
     const auto output = make_body(state_, record, "已完成删除面补面");
     detail::invalidate_eval_for_bodies(*state_, {body_id});
     const auto diag = state_->create_diagnostic("删除面补面操作完成");
@@ -2419,7 +2434,11 @@ Result<OpReport> BlendService::fillet_edges(BodyId body_id, std::span<const Edge
     const auto output = make_body(state_, record, "已完成圆角");
     detail::invalidate_eval_for_bodies(*state_, {body_id});
     const auto diag = state_->create_diagnostic("圆角操作完成");
-    return ok_result(make_report(StatusCode::Ok, output, diag), diag);
+    return ok_result(
+        make_report(StatusCode::Ok, output, diag,
+                    {detail::make_warning(diag_codes::kBlendApproximatePlaceholder,
+                                          "圆角：当前为拓扑占位与参数门禁，工业级滚球/角区/变半径未实现")}),
+        diag);
 }
 
 Result<OpReport> BlendService::chamfer_edges(BodyId body_id, std::span<const EdgeId> edges, Scalar distance) {
@@ -2447,7 +2466,10 @@ Result<OpReport> BlendService::chamfer_edges(BodyId body_id, std::span<const Edg
     const auto output = make_body(state_, record, "已完成倒角");
     detail::invalidate_eval_for_bodies(*state_, {body_id});
     const auto diag = state_->create_diagnostic("倒角操作完成");
-    return ok_result(make_report(StatusCode::Ok, output, diag), diag);
+    auto report = make_report(StatusCode::Ok, output, diag,
+                              {detail::make_warning(diag_codes::kBlendApproximatePlaceholder,
+                                                    "倒角：当前为拓扑占位与参数门禁，工业级角区/变距几何未实现")});
+    return ok_result(std::move(report), diag);
 }
 
 QueryService::QueryService(std::shared_ptr<detail::KernelState> state) : state_(std::move(state)) {}

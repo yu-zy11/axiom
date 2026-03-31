@@ -1,5 +1,6 @@
 #include <array>
 #include <iostream>
+#include <vector>
 
 #include "axiom/diag/error_codes.h"
 #include "axiom/sdk/kernel.h"
@@ -87,6 +88,34 @@ int main() {
     auto extrude_strict = kernel.validate().validate_topology(*sweep_ok.value, axiom::ValidationMode::Strict);
     if (extrude_strict.status != axiom::StatusCode::Ok) {
         std::cerr << "extrude result failed strict topology validation\n";
+        return 1;
+    }
+
+    // NOTE: polygon-based extrude profile is not part of current public API surface.
+
+    auto box_edges = kernel.topology().query().edges_of_body(*box_a.value);
+    if (box_edges.status != axiom::StatusCode::Ok || !box_edges.value.has_value() ||
+        box_edges.value->empty()) {
+        std::cerr << "expected edges on box for fillet/chamfer test\n";
+        return 1;
+    }
+    std::vector<axiom::EdgeId> single_edge {box_edges.value->front()};
+    auto fillet_ok = kernel.blends().fillet_edges(*box_a.value, single_edge, 0.5);
+    if (fillet_ok.status != axiom::StatusCode::Ok || !fillet_ok.value.has_value()) {
+        std::cerr << "fillet_edges failed\n";
+        return 1;
+    }
+    if (!has_warning_code(fillet_ok.value->warnings, axiom::diag_codes::kBlendApproximatePlaceholder)) {
+        std::cerr << "expected fillet placeholder capability warning\n";
+        return 1;
+    }
+    auto chamfer_ok = kernel.blends().chamfer_edges(*box_a.value, single_edge, 0.3);
+    if (chamfer_ok.status != axiom::StatusCode::Ok || !chamfer_ok.value.has_value()) {
+        std::cerr << "chamfer_edges failed\n";
+        return 1;
+    }
+    if (!has_warning_code(chamfer_ok.value->warnings, axiom::diag_codes::kBlendApproximatePlaceholder)) {
+        std::cerr << "expected chamfer placeholder capability warning\n";
         return 1;
     }
 

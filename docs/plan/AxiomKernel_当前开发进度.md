@@ -52,7 +52,7 @@
 - 工程配置通过
 - 工程完整编译通过
 - 示例程序运行通过
-- 3 个基础测试通过
+- **多专项回归测试**接入 `ctest`（维持可重复门禁）
 
 当前测试包括：
 
@@ -66,6 +66,8 @@
 - `axiom_ops_heal_test`
 - `axiom_query_eval_test`
 - `axiom_boolean_prep_test`
+- `axiom_math_services_test`
+- `axiom_perf_baseline_test`（默认 30s 超时，可用环境变量调节负载）
 
 ## 3. 当前状态判断
 
@@ -118,6 +120,104 @@
 - 插件仍是骨架实现，求值图已具备基础状态能力但仍远未达到参数化求解级
 - 拓扑-BRep 桥接仍较弱，布尔结果仍主要停留在包围盒级表达
 
+### 3.2.1 各模块完成度一览（架构快照，相对「工业几何引擎」）
+
+说明：下表 **不等于接口是否齐全**，而是指在工业场景下可用的**算法深度、容差与可诊断闭环**是否到位。`Stage2 内可用度` 表示当前 Stage 1.5/2 过渡目标下支撑持续开发的便利程度。
+
+| 模块 | Stage2 内可用度 | 工业化差距 | 主要回归/证据（ctest） | 最突出不足 |
+|------|----------------|-----------|------------------------|------------|
+| **core** | 中 | 高 | `axiom_smoke_test` | `Kernel` 能力报告与 `IOService` 实际格式能力不一致；运行时 store 策略需持续收敛 |
+| **math** | 中 | 高 | `axiom_math_services_test` | 工业级鲁棒谓词、尺度自适应容差在全链路的一致解释仍未闭合 |
+| **geo** | 中 | 高 | `axiom_geometry_test` | 高质量 B-Spline/NURBS、曲率与鲁棒最近点、真实 trim 语义 |
+| **topo** | 中 | 高 | `axiom_topology_test` | 完整拓扑规则集、trim bridge（PCurve↔3D）工业闭环、事务可观测性 |
+| **rep** | 中 | 高 | `axiom_representation_io_test` | 全几何类型的误差预算三角化、工业 round-trip、显示/UV seam |
+| **io** | 中偏低 | 高 | `axiom_io_workflow_test` | 多格式导入（含 glTF/STL 等）、严格导出、输出验证报告；能力报告对齐 |
+| **ops** | 低 | **极高** | `axiom_boolean_workflow_test`、`axiom_boolean_prep_test`、`axiom_ops_heal_test` | **布尔真闭环**、特征建模真实拓扑、圆角倒角算法 |
+| **heal** | 中偏低 | 高 | `axiom_ops_heal_test`、`axiom_io_workflow_test` | 自交、流形性完备、容差冲突与小特征工业修复与回放 |
+| **eval** | 中 | 高 | `axiom_query_eval_test` | 与真实建模/重建深度耦合、缓存与指标门禁 |
+| **diag** | 中 | 中偏高 | `axiom_diagnostics_test` | BOOL/HEAL/IO **阶段化、全覆盖**绑定与批量导出策略 |
+| **plugin & sdk** | 低 | 高 | `axiom_smoke_test`（门面/插件查询） | 隔离与安全、示例插件、能力发现与兼容性策略 |
+
+### 3.2.2 模块完成度与不足（详细版，可转 backlog）
+
+说明：本节把“工业化差距”展开成**可执行缺口**。每条缺口建议具备 DoD：实现 + 诊断 + 回归（必要时含性能门禁）。
+
+- **core（Kernel/State/Result/Stores）**
+  - **已具备**：`Kernel` 门面、基础配置写入/查询、运行时 store 清理/重置、对象计数与能力报告框架
+  - **主要不足**：
+    - **能力报告一致性**：`Kernel::io_supported_formats/io_can_*` 与 `IOService::detect_format/import_auto/export_auto` 存在口径不一致风险（工业环境会导致“宣称不可用但实际可用/反之”）
+    - **工程化不变量门禁**：reset/clear 后的缓存/索引一致性、跨模块可观测性仍需更系统回归
+  - **建议测试入口**：`axiom_smoke_test`（新增“能力报告一致性断言”）、必要时新增 core 专项测试
+
+- **diag（Diagnostics）**
+  - **已具备**：错误码/诊断码常量、诊断报告、JSON 导出、按 related entity 检索（能力已进入回归）
+  - **主要不足**：
+    - **阶段化诊断全覆盖**：BOOL/HEAL/IO 等高风险链路还需把“阶段（prep/intersect/split/classify/rebuild/validate/repair）”固化为诊断结构与门禁
+    - **批量导出/聚合策略**：面向 CI/回归资产归档的批量导出与检索效率策略仍缺
+  - **建议测试入口**：`axiom_diagnostics_test` + 对应 workflow 测试中的失败分支断言
+
+- **math（Tolerance/Predicate/Linear Algebra）**
+  - **已具备**：容差解析与尺度策略雏形、线代统计/谓词与基础回归
+  - **主要不足**：
+    - **工业鲁棒谓词**：近退化/大尺度/NaN-Inf 传播的系统化行为定义与覆盖不足
+    - **容差“全链路一致解释”**：Geo/Topo/Ops/Heal/Rep 对同一容差概念的解释仍需要更严格统一与回归固化
+  - **建议测试入口**：`axiom_math_services_test`（增加退化与大尺度用例）
+
+- **geo（Curves/Surfaces/PCurve/Eval/Closest）**
+  - **已具备**：曲线/曲面/PCurve 的创建与最小 eval/domain/bbox/closest，含批量接口；派生曲面（revolved/swept/trimmed/offset）具备 stage2 minimal 语义
+  - **主要不足**：
+    - **高质量样条与曲率**：NURBS/BSpline 的导数/曲率、鲁棒反求（最近点/最近参数）与退化处理未工业化
+    - **真实 Trim 语义**：Trimmed 目前偏“参数域裁剪占位”，缺基于 loop/coedge/PCurve 的修剪边界
+  - **建议测试入口**：`axiom_geometry_test`（增加曲率/导数/退化场景后再逐步收紧）
+
+- **topo（Transaction/Query/Validation/Trim Bridge）**
+  - **已具备**：事务 begin/commit/rollback、反向索引查询、Strict 的闭合性/来源一致性一部分校验、trim bridge 的最小校验入口
+  - **主要不足**：
+    - **拓扑规则集不完整**：面环方向、重复/悬挂/非流形的系统化规则与诊断覆盖不足
+    - **PCurve↔3D 一致性闭环**：仍缺可用于工业修剪的强一致性约束与（可选）修复策略
+    - **事务可观测性/审计**：读写集、隔离级别、审计统计未落地
+  - **建议测试入口**：`axiom_topology_test`（按规则逐条加严并固化诊断码）
+
+- **rep（Tessellation/Conversion/Inspection/Reports）**
+  - **已具备**：primitive 解析三角化 + owned topo face 组装三角化、顶点焊接、tessellation cache/face-cache、网格检查与 JSON 报告、BRep↔Mesh round-trip 报告与回归
+  - **主要不足**：
+    - **全类型误差预算**：修剪面/高阶曲面/派生体的误差预算与细分策略仍不足
+    - **显示管线能力**：局部重三角化（patch）、UV seam/unwrap、增量更新与缓存指标门禁不足
+  - **建议测试入口**：`axiom_representation_io_test`（报告字段与密度单调性）+ `axiom_io_workflow_test`（导出链路不回归）
+
+- **io（STEP/AXMJSON/glTF/STL + workflow）**
+  - **已具备**：STEP/AXMJSON 导入导出主链路；glTF/STL 导出最小实现；导入后 validation/auto-repair 与诊断回流
+  - **主要不足**：
+    - **导入侧互操作**：glTF/STL 导入、IGES/BREP 等互操作缺口
+    - **严格/兼容模式与输出验证报告**：面向工业交付的导出策略与“输出验证闭环”缺失
+    - **能力报告对齐**：Kernel 与 IOService 的格式能力口径需要回归门禁
+  - **建议测试入口**：`axiom_io_workflow_test` + `axiom_diagnostics_test`
+
+- **ops（Primitive/Sweep/Boolean/Modify/Blend/Query）**
+  - **已具备**：前置分类、近似求交语义、来源传播、最小物化拓扑骨架与 Strict 回归闭环、部分修改/修复工作流语义
+  - **主要不足（最大缺口）**：
+    - **布尔真闭环**：精确求交/切分/分类/重建/验证修复闭环缺失
+    - **特征建模真实构造**：extrude/revolve/sweep/loft/thicken 的真实几何与拓扑生成缺失
+    - **圆角/倒角工业化**：含角区/变半径/失败分类与回归数据集缺失
+  - **建议测试入口**：`axiom_boolean_workflow_test`、`axiom_boolean_prep_test`、`axiom_ops_heal_test`
+
+- **heal（Validation/Repair）**
+  - **已具备**：Strict 拓扑与来源一致性校验、导入后验证与可选自动修复语义、部分 repair 策略与 related_entities 回流
+  - **主要不足**：
+    - **工业验证项缺失**：自交、流形性完备、容差冲突、参数域异常检查仍缺
+    - **工业修复策略缺失**：小特征/近重复/法向与退化处理策略与回放机制不足
+  - **建议测试入口**：`axiom_ops_heal_test`、`axiom_io_workflow_test`
+
+- **eval（EvalGraph）**
+  - **已具备**：循环保护、失效传播、重算计数与治理接口，已有专项回归
+  - **主要不足**：与真实建模/重建深度耦合与可度量指标（命中率/重算成本）门禁不足
+  - **建议测试入口**：`axiom_query_eval_test`
+
+- **plugin & sdk**
+  - **已具备**：注册/清单/门面骨架与基础查询
+  - **主要不足**：能力发现、隔离/安全、示例插件与回归、兼容性策略
+  - **建议测试入口**：`axiom_smoke_test`
+
 ## 3.3 对照《几何引擎功能需求文档》的差距清单（按模块）
 
 说明：本节用“已完成 / 部分完成 / 未开始”对齐 `docs/plan/AxiomKernel_几何引擎功能需求文档.md` 的一级需求模块，便于下一批迭代拆解。这里的“已完成”指**具备可回归的最小可用链路**，不等于工业级。
@@ -149,10 +249,11 @@
 ### 7.3 基础建模能力（OpsCore/TopoCore/GeoCore）
 
 - **基础体构造**
-  - **部分完成**：存在“最小可物化闭合壳骨架”用于派生结果体与工作流占位（用于验证/回归）
-  - **未开始/缺失**：真实几何意义的盒体/球体/圆柱体/圆锥体/环体/楔体实体构造（带准确几何与拓扑）
+  - **部分完成**：`PrimitiveService` 已提供 `box/wedge/sphere/cylinder/cone/torus` 等；物化层对部分 primitive 可走 **解析壳路径**（如 `Wedge` 专用壳、`Cylinder` 棱柱壳等），其余仍常退回 **bbox 壳** 以满足 Strict/闭环回归；派生结果体仍大量依赖最小物化骨架、`source_*` 推导与来源壳克隆
+  - **未开始/缺失（工业化）**：与工业内核一致的 **全 primitive 精确拓扑面环 + 与曲面参数域严格一致** 的 BRep；楔体/盒体等若仍部分依赖 bbox 占位壳，需升级为完整解析拓扑与几何
 - **特征构造**
-  - **未开始/缺失**：拉伸/旋转/扫掠/放样/加厚/封闭轮廓成面成体的真实实现
+  - **部分完成（接口/占位）**：`SweepService` 等接口存在，部分路径产出派生体与工作流语义
+  - **未开始/缺失（工业化）**：拉伸/旋转/扫掠/放样/加厚等 **真实几何求交 + 拓扑构造 + 失败可诊断** 的完整实现
 
 ### 7.4 布尔运算能力（OpsCore）
 
@@ -171,7 +272,7 @@
 
 ### 7.7 查询与分析（Query/Eval/Rep）
 
-- **部分完成**：bbox、点分类、部分距离/近似求交、截面（偏占位）与批量接口雏形
+- **部分完成**：bbox、点分类、部分距离/近似求交、截面（偏占位）与批量接口雏形；`QueryService::mass_properties` 等已存在，但对多数体仍偏 **bbox 近似**，非工业级物理属性
 - **未开始/缺失**：长度/面积/体积/重心/惯性矩的工业级正确性；曲率/厚度分析；稳定的曲线-曲面/曲面-曲面求交
 
 ### 7.8 验证与修复（HealCore/Validation）
@@ -188,6 +289,26 @@
 
 - **部分完成**：三角化语义与参数校验、基础检查报告雏形；已开始具备（1）primitive 的解析三角化（可曲率敏感，受 chordal/angular options 影响）（2）有 owned topo 的派生体按 face 组装三角化 + 顶点焊接（3）tessellation cache 与 face tessellation cache（含失效清理）
 - **未开始/缺失**：更完整的曲率敏感细分（覆盖更多曲面/修剪面/高阶曲面）；更可靠的局部重三角化（patch 级误差控制与 seam/weld 规则）；显示级缓存/增量更新；纹理参数（UV seam/unwrap）等完整输出
+
+### 7.11 版本/事务/增量更新（Core/EvalGraph）
+
+- **部分完成**：版本号与事务、EvalGraph 基础失效传播/重算计数/循环依赖保护
+- **未开始/缺失**：结构共享策略细化、跨模块增量重算接入真实建模链路、缓存命中指标体系
+
+### 7.12 插件扩展（PluginSDK）
+
+- **部分完成**：注册/清单/门面骨架
+- **未开始/缺失**：能力发现、隔离与安全策略、插件错误码/诊断与验证闭环、示例插件与回归
+
+### 7.13 诊断与日志（Diagnostics）
+
+- **部分完成**：错误码常量、诊断报告、JSON 导出、按相关实体检索、部分链路绑定
+- **未开始/缺失**：覆盖所有失败路径的系统化绑定；阶段化诊断（尤其 BOOL/HEAL/IO）；诊断聚合检索与批量导出策略
+
+### 7.14 混合表示与转换（RepCore）
+
+- **部分完成**：BRep/Mesh/Implicit 的基础语义与部分测试；BRep↔Mesh round-trip 报告与网格检查已有专项回归
+- **未开始/缺失**：高质量转换、工业级误差控制、混合建模策略与对外接口长期冻结
 
 ## 3.4 距离“工业几何引擎”的核心不足清单（架构视角）
 
@@ -231,33 +352,13 @@
 - **EvalGraph 未进入参数化求解级**：当前更像状态/依赖治理基础设施，尚未与真实建模/重建深度耦合。
 - **插件工程化不足**：能力发现、隔离/安全、示例插件与回归仍不足以支撑生态扩展。
 
-### 7.11 版本/事务/增量更新（Core/EvalGraph）
-
-- **部分完成**：版本号与事务、EvalGraph 基础失效传播/重算计数/循环依赖保护
-- **未开始/缺失**：结构共享策略细化、跨模块增量重算接入真实建模链路、缓存命中指标体系
-
-### 7.12 插件扩展（PluginSDK）
-
-- **部分完成**：注册/清单/门面骨架
-- **未开始/缺失**：能力发现、隔离与安全策略、插件错误码/诊断与验证闭环、示例插件与回归
-
-### 7.13 诊断与日志（Diagnostics）
-
-- **部分完成**：错误码常量、诊断报告、JSON 导出、部分链路绑定
-- **未开始/缺失**：覆盖所有失败路径的系统化绑定；阶段化诊断（尤其 BOOL/HEAL/IO）；诊断聚合检索与批量导出策略
-
-### 7.14 混合表示与转换（RepCore）
-
-- **部分完成**：BRep/Mesh/Implicit 的基础语义与部分测试
-- **未开始/缺失**：高质量转换、误差控制、round-trip 验证、混合建模策略与接口冻结
-
 ## 4. 当前主要风险
 
 - 当前 `OpsCore` 仍未进入真实工业算法阶段
 - 当前 `TopoCore` 尚未形成严格拓扑一致性规则集
 - 当前 `TopoCore` 虽已具备基础事务、验证、邻接查询和基础反向索引，但仍缺少更完整的稠密关联结构
 - 当前 `GeoCore` 还没有高质量样条和参数反求实现
-- 当前错误码虽然有文档，但尚未在代码中系统化绑定
+- 诊断码与错误码**已在主链路与多条回归中绑定**，但距离“所有失败路径可检索、可阶段化归类”的工业门禁仍有明显差距
 
 ## 5. 下一阶段重点
 

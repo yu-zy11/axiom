@@ -68,6 +68,8 @@ inline constexpr std::string_view kBoolRebuildCompleted = "AXM-BOOL-D-0013";
 
 inline constexpr std::string_view kBlendInvalidTarget = "AXM-BLEND-E-0001";
 inline constexpr std::string_view kBlendParameterTooLarge = "AXM-BLEND-E-0002";
+/// 圆角/倒角等混合特征当前仍为占位近似（拓扑骨架 + 参数门禁），未提供工业级几何生成。
+inline constexpr std::string_view kBlendApproximatePlaceholder = "AXM-BLEND-W-0001";
 
 inline constexpr std::string_view kModOffsetInvalid = "AXM-MOD-E-0001";
 inline constexpr std::string_view kModOffsetSelfIntersection = "AXM-MOD-E-0002";

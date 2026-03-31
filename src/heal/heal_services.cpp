@@ -468,6 +468,11 @@ BodyId clone_modified_body(std::shared_ptr<detail::KernelState> state, BodyId so
     record.bbox = bbox;
     detail::inherit_source_topology_from_owned_shells(*state, record);
     record.shells.clear();
+    if (record.source_shells.empty()) {
+        for (const auto shell_id : state->bodies.at(source.value).shells) {
+            record.source_shells.push_back(shell_id);
+        }
+    }
     if (std::none_of(record.source_bodies.begin(), record.source_bodies.end(),
                      [source](BodyId current) { return current.value == source.value; })) {
         record.source_bodies.push_back(source);

@@ -155,7 +155,8 @@ std::string tessellation_budget_digest_json(const TessellationOptions& options) 
     oss << std::setprecision(12);
     oss << "{\"chordal_error\":" << options.chordal_error
         << ",\"angular_error_deg\":" << options.angular_error
-        << ",\"compute_normals\":" << (options.compute_normals ? "true" : "false") << "}";
+        << ",\"compute_normals\":" << (options.compute_normals ? "true" : "false")
+        << "}";
     return oss.str();
 }
 
@@ -174,7 +175,8 @@ std::string face_tessellation_cache_key(const KernelState& state, FaceId face_id
     oss << std::setprecision(12);
     oss << "face=" << face_id.value
         << "|tess=" << options.chordal_error << "," << options.angular_error
-        << "," << (options.compute_normals ? 1 : 0);
+        << "," << (options.compute_normals ? 1 : 0)
+        << ",1";
     const auto face_it = state.faces.find(face_id.value);
     if (face_it != state.faces.end()) {
         oss << "|surf=" << face_it->second.surface_id.value
@@ -238,6 +240,7 @@ MeshRecord tessellate_box(const BodyRecord& body, const TessellationOptions& opt
                 const auto p = add_point_vec(add_point_vec(origin, scale(udir, ulen * tu)), scale(vdir, vlen * tv));
                 mesh.vertices.push_back(p);
                 if (options.compute_normals) mesh.normals.push_back(n);
+                mesh.texcoords.push_back(Point2{tu, tv});
             }
         }
         for (std::size_t j = 0; j < nv; ++j) {
@@ -263,8 +266,6 @@ MeshRecord tessellate_box(const BodyRecord& body, const TessellationOptions& opt
     emit_face_grid(Point3{o.x, o.y, o.z},      Vec3{0,1,0}, dy, Vec3{0,0,1}, dz, Vec3{-1,0,0}, ny, nz);
 
     weld_mesh_vertices(mesh, options.compute_normals);
-    mesh.texcoords.clear(); // no consistent UVs for welded box yet
-
     return mesh;
 }
 
