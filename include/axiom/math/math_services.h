@@ -60,6 +60,19 @@ private:
     std::shared_ptr<detail::KernelState> state_;
 };
 
+/// 几何/拓扑谓词（符号、包围盒、近似的点-体关系等）。
+///
+/// **定向谓词 `orient2d` / `orient3d`**（工业语义约定，供全链路一致实现与测试固化）：
+/// - 任一输入坐标非有限（NaN/Inf）→ `Sign::Uncertain`。
+/// - 行列式在浮点运算中非有限（上溢等）→ `Sign::Uncertain`。
+/// - 否则在 `|det| <= tol` 时 → `Sign::Zero`；其中 `tol = max(user_eps, scale_adaptive_eps)`，
+///   `user_eps` 对无后缀重载为内核 **`ToleranceService::effective_linear(0)`**（与 `resolve_linear_tolerance(0, policy)` 一致），
+///   对 `*_tol` 重载为调用方传入的 `eps`（负值按 0 处理）；`scale_adaptive_eps` 随边长尺度放大，抑制大坐标下的舍入噪声。
+/// - 否则按 `det` 符号返回 `Positive` / `Negative`。
+///
+/// **向量平行/正交**：任一向量非有限 → 视为不满足（返回 `false`）。
+///
+/// **点坐标类谓词**（如 `point_in_sphere`、经 `point_in_bbox` 的路径）：点非有限 → `false`。
 class PredicateService {
 public:
     explicit PredicateService(std::shared_ptr<detail::KernelState> state);
@@ -94,6 +107,8 @@ private:
     std::shared_ptr<detail::KernelState> state_;
 };
 
+/// 容差策略与解析入口。距离/角度类门控应通过 `effective_*` / `resolve_*_for_scale`（或内核内等价的
+/// `resolve_*_tolerance` 规则）合成，以便 `min_local`/`max_local` 钳制在全链路一致生效。
 class ToleranceService {
 public:
     explicit ToleranceService(std::shared_ptr<detail::KernelState> state);

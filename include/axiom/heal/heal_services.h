@@ -22,6 +22,16 @@ public:
   Result<void> validate_manifold(BodyId body_id, ValidationMode mode) const;
   Result<void> validate_self_intersection(BodyId body_id,
                                           ValidationMode mode) const;
+  /// Strict：对单壳做壳内网格三角化近似 SAT（不覆盖其它壳；**不**检测壳间穿透，体级仍用 `validate_self_intersection`）。
+  Result<void> validate_self_intersection_shell(BodyId body_id, ShellId shell_id,
+                                                ValidationMode mode) const;
+  /// 按顺序对多个壳执行 `validate_self_intersection_shell`，遇首个失败即返回。
+  Result<void> validate_self_intersection_shell_many(BodyId body_id,
+                                                     std::span<const ShellId> shell_ids,
+                                                     ValidationMode mode) const;
+  /// 对体的全部 owned 壳执行壳级自交检查（无壳则跳过）。
+  Result<void> validate_self_intersection_all_shells(BodyId body_id,
+                                                     ValidationMode mode) const;
   Result<void> validate_tolerance(BodyId body_id, ValidationMode mode) const;
   Result<void> validate_tolerance_many(std::span<const BodyId> body_ids,
                                        ValidationMode mode) const;
@@ -38,6 +48,8 @@ public:
                                  ValidationMode mode) const;
   Result<bool> is_geometry_valid(BodyId body_id, ValidationMode mode) const;
   Result<bool> is_topology_valid(BodyId body_id, ValidationMode mode) const;
+  /// 专项：与 `validate_manifold` 同口径的布尔查询（无 owned B-Rep 壳时视为通过）。
+  Result<bool> is_manifold_valid(BodyId body_id, ValidationMode mode) const;
   Result<bool> is_valid(BodyId body_id, ValidationMode mode) const;
   Result<void> validate_bbox(BodyId body_id) const;
   Result<void> validate_bbox_many(std::span<const BodyId> body_ids) const;

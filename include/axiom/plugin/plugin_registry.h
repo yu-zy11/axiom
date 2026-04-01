@@ -11,6 +11,7 @@
 namespace axiom {
 
 /// 判断已 trim 的声明版本是否与 `expected_sdk_api` 在给定模式下兼容（注册门禁与 `plugin_api_compatibility_report_lines` 共用语义）。
+/// `Exact`：整串相等；`SameMajor`/`SameMinor`：按 SemVer 惯例忽略 `-` 预发布与 `+` 构建元数据后，再解析 `X[.Y[.Z]]` 数值比较。
 bool plugin_api_version_declared_compatible(std::string_view declared_trimmed,
                                             std::string_view expected_sdk_api,
                                             PluginApiVersionMatchMode mode);
@@ -52,9 +53,17 @@ public:
     Result<void> validate_manifest(const PluginManifest& manifest) const;
 
     Result<void> register_curve_type(const PluginManifest& manifest, std::unique_ptr<ICurvePlugin> plugin);
+    /// 按已注册实现的 `type_name()`（去空白）调用 `ICurvePlugin::create`；`desc.type_name` 若为空则填为 `implementation_type_name`，若非空则须与之一致（去空白后）；未找到实现时 `InvalidInput` + `kPluginNotRegistered`。
+    Result<CurveId> invoke_registered_curve(std::string_view implementation_type_name, PluginCurveDesc desc);
     Result<void> register_repair_plugin(const PluginManifest& manifest, std::unique_ptr<IRepairPlugin> plugin);
     Result<void> register_importer(const PluginManifest& manifest, std::unique_ptr<IImporterPlugin> plugin);
+    /// 按已注册实现的 `type_name()`（去空白）调用 `IImporterPlugin::import_file`；未找到实现时 `InvalidInput` + `kPluginNotRegistered`。
+    Result<BodyId> invoke_registered_importer(std::string_view implementation_type_name, std::string_view path);
     Result<void> register_exporter(const PluginManifest& manifest, std::unique_ptr<IExporterPlugin> plugin);
+    /// 按已注册实现的 `type_name()`（去空白）调用 `IExporterPlugin::export_file`；未找到实现时 `InvalidInput` + `kPluginNotRegistered`。
+    Result<void> invoke_registered_exporter(std::string_view implementation_type_name, BodyId body_id, std::string_view path);
+    /// 按已注册实现的 `type_name()`（去空白）调用 `IRepairPlugin::run`；未找到实现时 `InvalidInput` + `kPluginNotRegistered`。
+    Result<OpReport> invoke_registered_repair(std::string_view implementation_type_name, BodyId body_id, RepairMode mode);
     Result<std::uint64_t> curve_plugin_count() const;
     Result<std::uint64_t> repair_plugin_count() const;
     Result<std::uint64_t> importer_count() const;

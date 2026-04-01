@@ -31,7 +31,7 @@ description: Develop and harden AxiomKernel GeoCore (curves/surfaces creation, e
 ## 快速定位：GeoCore 入口文件
 
 - Public API：`include/axiom/geo/geometry_services.h`
-- 实现：`src/geo/geometry_services.cpp`
+- 实现：`src/axiom/geo/geometry_services.cpp`
 - 记录结构：`include/axiom/internal/core/kernel_state.h`
 - 回归测试：`tests/geo/geometry_test.cpp`（ctest：`axiom_geometry_test`）
 - 阶段缺口：`docs/plan/AxiomKernel_当前开发进度.md`（重点看 7.1）

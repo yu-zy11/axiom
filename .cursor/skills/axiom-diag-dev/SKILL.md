@@ -19,8 +19,8 @@ description: Develop and harden AxiomKernel Diagnostics (error/diagnostic codes,
   - `include/axiom/diag/diagnostic_service.h`
 - 内部工具/实现：
   - `include/axiom/internal/diag/diagnostic_internal_utils.h`
-  - `src/diag/diagnostic_internal_utils.cpp`
-  - `src/diag/diagnostic_service.cpp`
+  - `src/axiom/diag/diagnostic_internal_utils.cpp`
+  - `src/axiom/diag/diagnostic_service.cpp`
 - 文档字典（改码必同步）：`docs/diagnostics/**`
 - 关键回归：`tests/diag/diagnostics_test.cpp`（以及受影响工作流测试）
 

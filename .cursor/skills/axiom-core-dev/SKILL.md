@@ -22,7 +22,7 @@ description: Develop and harden AxiomKernel Core (KernelState/KernelConfig, Resu
 ## 代码入口（先读这些）
 
 - `KernelState`：`include/axiom/internal/core/kernel_state.h`
-- 门面：`include/axiom/sdk/kernel.h` + `src/sdk/kernel.cpp`
+- 门面：`include/axiom/sdk/kernel.h` + `src/axiom/sdk/kernel.cpp`
 - `Result/Types`：`include/axiom/core/result.h`、`include/axiom/core/types.h`
 
 ## 默认工作流

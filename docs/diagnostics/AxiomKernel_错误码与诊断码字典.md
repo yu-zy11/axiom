@@ -232,7 +232,7 @@
 | `AXM-TOPO-E-0005` | Error | 壳未封闭（含：`validate_indices_consistency` 发现体记录中 `shells` 列表含重复壳 id） |
 | `AXM-TOPO-E-0006` | Error | 非法悬挂边（含：`validate_edge` 与 `validate_indices_consistency` 反向索引发现边无共边引用） |
 | `AXM-TOPO-E-0007` | Error | 拓扑关系不一致（含：`edge_to_coedges` 重复定向边、`face_to_shells`/`shell_to_bodies` 反向列表重复条目、`loop_to_faces` 重复面或同一环对应多面等索引自洽性失败） |
-| `AXM-TOPO-E-0008` | Error | 参数曲线与空间曲线不一致 |
+| `AXM-TOPO-E-0008` | Error | 参数曲线与空间曲线不一致（含 `validate_face_trim_consistency`：PCurve 绑定不完整、PCurve 控制点不足、边/曲线/顶点缺失时带 `face/loop/coedge/edge/pcurve` 等；**全量 trim 数据**下 `SurfaceService::closest_uv` 失败亦归此类；端点/曲面与 3D 边不一致时常含 `face/loop/coedge/edge/pcurve`；`validate_indices_consistency` 发现边记录引用不存在顶点时 `related_entities` 含 `edge` 与端点 id） |
 | `AXM-TOPO-E-0009` | Fatal | 拓扑不变量被破坏 |
 | `AXM-TOPO-E-0010` | Error | 壳内存在开放边界（边引用次数不足） |
 | `AXM-TOPO-E-0011` | Error | 壳内存在非流形边（边被过多拓扑面共享） |
@@ -244,8 +244,9 @@
 | `AXM-TOPO-E-0017` | Warning / Error | 壳内重复面：`validate_shell` 对同曲面同边界环签名给 **Warning**；`create_shell` / `validate_indices_consistency` 对壳 `faces` 列表中重复 `FaceId` 给 **Error** |
 | `AXM-TOPO-E-0018` | Warning | 壳不连通（面集合存在多个连通分量） |
 | `AXM-TOPO-E-0019` | Error | 定向边未被任何环引用（悬挂定向边） |
-| `AXM-TOPO-E-0020` | Error | 顶点未作为任何边的端点（悬挂顶点） |
+| `AXM-TOPO-E-0020` | Error | 顶点未作为任何边的端点（悬挂顶点；`validate_vertex` 与 `validate_indices_consistency`） |
 | `AXM-TOPO-E-0021` | Error | 环未被任何面引用（孤立环，例如删除面后残留） |
+| `AXM-TOPO-E-0022` | Error | 面未被任何壳引用（孤立面；`face_to_shells` 无条目或为空；`validate_indices_consistency`） |
 
 ## 7.5 `BOOL` 布尔模块错误码
 
@@ -279,6 +280,7 @@
 | `AXM-BLEND-E-0005` | Warning | 局部圆角结果存在近自交风险 |
 | `AXM-BLEND-E-0006` | Error | 圆角修剪失败 |
 | `AXM-BLEND-W-0001` | Warning | 圆角/倒角为拓扑占位与参数门禁：工业级滚球、角区、变半径等未实现 |
+| `AXM-BLEND-W-0002` | Warning | 一次处理多条边时角区/连续圆角或倒角/变半径仍为占位实现 |
 
 ## 7.7 `MOD` 修改模块错误码
 
@@ -394,6 +396,8 @@
 | `AXM-MATH-W-0001` | 谓词进入高精度回退 |
 | `AXM-GEO-W-0001` | 几何求值结果接近退化区域 |
 | `AXM-BOOL-W-0001` | 布尔操作遇到近共面情形 |
+| `AXM-BOOL-W-0003` | 布尔结果在重建后 Strict 验证仍残留问题（可审计告警） |
+| `AXM-BLEND-W-0002` | 圆角/倒角一次处理多条边时角区仍为占位实现 |
 | `AXM-HEAL-W-0001` | 修复时删除了局部小特征 |
 | `AXM-IO-W-0001` | 导入后部分属性未映射 |
 | `AXM-TES-W-0001` | 三角化误差达到上限边缘 |

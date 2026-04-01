@@ -20,16 +20,16 @@ description: Develop and harden AxiomKernel RepCore (industrial tessellation/tri
 
 - `rep` 主服务
   - `include/axiom/rep/representation_conversion_service.h`
-  - `src/rep/representation_conversion_service.cpp`
+  - `src/axiom/rep/representation_conversion_service.cpp`
   - `include/axiom/rep/representation_conversion_service.h`（RepresentationService/ConversionService）
 - `rep` 内部工具（网格检查、三角化帮助函数、primitive tessellation）
   - `include/axiom/internal/rep/representation_internal_utils.h`
-  - `src/rep/representation_internal_utils.cpp`
+  - `src/axiom/rep/representation_internal_utils.cpp`
 - `KernelState`（网格存储、缓存存储、诊断存储）
   - `include/axiom/internal/core/kernel_state.h`
-  - `src/sdk/kernel.cpp`（清理/重置 runtime stores）
+  - `src/axiom/sdk/kernel.cpp`（清理/重置 runtime stores）
 - IO 对 `rep` 的依赖（glTF/STL 导出会调用 `brep_to_mesh`）
-  - `src/io/io_service.cpp`
+  - `src/axiom/io/io_service.cpp`
 - 关键回归测试
   - `tests/rep/representation_io_test.cpp`
   - 视改动范围可能影响 `tests/io/io_workflow_test.cpp`（glTF 输出）

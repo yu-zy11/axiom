@@ -1,7 +1,9 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <span>
+#include <vector>
 
 #include "axiom/core/result.h"
 
@@ -10,6 +12,13 @@ namespace detail {
 struct KernelState;
 struct TopologyTransactionState;
 }
+
+/// 拓扑事务隔离/并发语义占位：当前内核为单写入者 + 快照回滚，不等价于数据库 SERIALIZABLE，但可用于宿主侧协议对齐。
+enum class TopologyIsolationLevel : std::uint8_t {
+  Unspecified = 0,
+  /// 单活动事务、修改前快照、回滚恢复（工程上接近「串行化」使用方式，但无跨进程锁）。
+  SnapshotSerializable = 1,
+};
 
 class TopologyQueryService {
 public:
@@ -80,6 +89,8 @@ public:
     /// Trim bridge：外环每条 coedge 均须绑定有效 PCurve；在 PCurve 控制点（折线顶点）上求 UV 轴对齐包围盒。
     /// 语义对齐 `validate_face_trim_consistency` 所用 UV（与 `SurfaceService::closest_uv(face_surface, …)` 同参空间）。
     Result<Range2D> face_outer_loop_uv_bounds(FaceId face_id) const;
+    /// 外环 PCurve（折线）按 coedge 顺序串联的 UV 折线（闭合环，已去重相邻重复点）；供 `make_trimmed_polygon`。
+    Result<std::vector<Point2>> face_outer_loop_uv_polyline(FaceId face_id) const;
     /// 返回该面引用曲面的「修剪基曲面」：`Trimmed` 则沿 `base_surface_id` 解引用直至非 Trimmed。
     Result<SurfaceId> underlying_surface_for_face_trim(FaceId face_id) const;
 
@@ -128,8 +139,14 @@ public:
     Result<std::uint64_t> deleted_body_count() const;
     /// Successful `replace_surface` calls in this transaction (audit/metrics). Reset on rollback / clear_tracking_records.
     Result<std::uint64_t> replaced_surface_count() const;
-    /// Successful `set_coedge_pcurve` calls (trim bridge). Reset on rollback / clear_tracking_records.
+    /// Successful `set_coedge_pcurve` with non-zero `PCurveId` (trim bridge bind). Reset on rollback / clear_tracking_records.
     Result<std::uint64_t> coedge_pcurve_bind_count() const;
+    /// Successful `set_coedge_pcurve` to `PCurveId{}` after a non-zero binding was present (trim bridge clear). Reset on rollback / clear_tracking_records.
+    Result<std::uint64_t> coedge_pcurve_clear_count() const;
+    /// 本事务内每次**成功**的拓扑写操作各计 1（创建/删除实体、`replace_surface`、每次 `set_coedge_pcurve` 含清除）。提交后仍可查询；回滚或 `clear_tracking_records` 归零。
+    Result<std::uint64_t> write_operation_count() const;
+    /// 报告当前实现的有效隔离级别（见 `TopologyIsolationLevel` 注释）。
+    Result<TopologyIsolationLevel> effective_isolation_level() const;
     Result<bool> has_created_vertex(VertexId vertex_id) const;
     Result<bool> has_created_edge(EdgeId edge_id) const;
     Result<bool> has_created_coedge(CoedgeId coedge_id) const;
@@ -166,6 +183,8 @@ private:
     std::uint64_t txn_deleted_bodies_{0};
     std::uint64_t txn_replaced_surfaces_{0};
     std::uint64_t txn_coedge_pcurve_binds_{0};
+    std::uint64_t txn_coedge_pcurve_clears_{0};
+    std::uint64_t txn_write_ops_{0};
     bool active_ {true};
 };
 

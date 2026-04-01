@@ -417,6 +417,8 @@ int main() {
 
     axiom::KernelConfig tolerant_config;
     tolerant_config.tolerance.linear = 0.1;
+    // resolve_linear_tolerance 会按 max_local 夹紧；默认 1e-3 会使 0.1 无法生效。
+    tolerant_config.tolerance.max_local = 1.0;
     axiom::Kernel tolerant_kernel(tolerant_config);
     auto tolerant_box = tolerant_kernel.primitives().box({0.0, 0.0, 0.0}, 1.0, 1.0, 1.0);
     if (tolerant_box.status != axiom::StatusCode::Ok || !tolerant_box.value.has_value()) {

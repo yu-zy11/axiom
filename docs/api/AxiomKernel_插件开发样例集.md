@@ -89,7 +89,7 @@ registry.register_repair_plugin(
 - 清单字段 **`PluginManifest::plugin_api_version`**：建议设为 `axiom::kPluginSdkApiVersion`（见 `include/axiom/plugin/plugin_sdk_version.h`），与 `Kernel::plugin_sdk_api_version()` 对齐。
 - 当 **`PluginHostPolicy::require_plugin_api_version_match`** 为真时，注册前必须声明非空，并按 **`PluginHostPolicy::plugin_api_version_match_mode`** 与宿主 SDK API 比对，否则失败码 **`AXM-PLUGIN-E-0002`**（`kPluginVersionIncompatible`）。模式说明：`Exact` 为去空白后与 `kPluginSdkApiVersion` 完全一致；`SameMinor` 要求 `major.minor` 与宿主一致（允许 patch，如宿主 `1.0` 可接受 `1.0.3`）；`SameMajor` 仅要求 `major` 一致（更宽松，慎用）。
 - **门禁/报告**：`Kernel::plugin_api_compatibility_report_lines()` 按清单输出 `state=ok|mismatch|unset`，便于 CI 检查未声明或过旧 API。
-- **验证闭环**：插件修改或产出 `Body` 后，建议调用 **`Kernel::validate_after_plugin_mutation(body_id, ValidationMode)`**（语义同 `validate().validate_all`）。
+- **验证闭环**：插件修改或产出 `Body` 后，建议调用 **`Kernel::validate_after_plugin_mutation(body_id, ValidationMode)`**（语义同 `validate().validate_all`）。若走 **`Kernel::plugin_import_file`**，可将 **`PluginHostPolicy::auto_validate_body_after_plugin_importer`** 设为真，以便导入成功后由宿主自动执行同一套全量验证；若走 **`Kernel::plugin_export_file`**，可将 **`auto_validate_body_before_plugin_exporter`** 设为真，在调用导出插件前先做全量验证；若走 **`Kernel::plugin_run_repair`**，可将 **`auto_validate_body_after_plugin_repair`** 设为真，在修复插件返回 Ok 后对结果体（见接口清单中 `OpReport::output` 与输入体的优先级规则）做全量验证；若走 **`Kernel::plugin_create_curve`**，默认 **`auto_verify_curve_after_plugin_curve`** 为真，在曲线插件返回 Ok 后校验 `CurveId` 已注册且参数域可用（可关闭以兼容特殊宿主流程）。其他路径仍建议显式调用 `validate_after_plugin_mutation` 或自行做几何一致性检查。
 
 ### 4.6 仓库内可运行示例
 

@@ -13,6 +13,9 @@ Testing/
 .idea/
 .DS_Store
 
+## Local artifacts
+a.out
+
 ## Tooling
 *.swp
 *.swo

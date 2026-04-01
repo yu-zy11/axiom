@@ -14,7 +14,7 @@ description: Develop and harden AxiomKernel EvalGraph (dependencies, invalidatio
 ## 代码入口
 
 - Public API：`include/axiom/eval/eval_services.h`
-- 实现：`src/eval/eval_services.cpp`
+- 实现：`src/axiom/eval/eval_services.cpp`
 - 内部工具：`include/axiom/internal/core/eval_graph_invalidation.h` 等
 - 关键回归：`tests/eval/query_eval_test.cpp`
 

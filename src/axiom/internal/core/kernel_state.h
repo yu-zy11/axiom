@@ -102,11 +102,16 @@ struct SurfaceRecord {
     Scalar trim_u_max {1.0};
     Scalar trim_v_min {0.0};
     Scalar trim_v_max {1.0};
+    /// 非空时：在轴对齐盒内的 **UV 多边形修剪**（折线顶点，首尾闭合隐含；与 PCurve 折线采样一致）。
+    std::vector<Point2> trim_uv_loop;
     Scalar offset_distance {0.0};
     std::vector<Point3> poles;
     std::vector<Scalar> weights;
     std::vector<Scalar> knots_u;
     std::vector<Scalar> knots_v;
+    /// BSpline/NURBS：u/v 向阶数；<0 表示由结点长度或控制点数量推断（兼容旧记录）。
+    int spline_degree_u{-1};
+    int spline_degree_v{-1};
 };
 
 struct VertexRecord {
@@ -168,6 +173,9 @@ struct BodyRecord {
     std::vector<BodyId> source_bodies;
     std::vector<ShellId> source_shells;
     std::vector<FaceId> source_faces;
+    /// 由 `BooleanService::run` 写入，供 `mass_properties` 等在 bbox 占位语义下区分 Union/Subtract/Intersect/Split。
+    bool has_boolean_op {false};
+    BooleanOp boolean_op {BooleanOp::Union};
 };
 
 struct MeshRecord {

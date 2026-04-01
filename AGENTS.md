@@ -47,7 +47,7 @@ ctest --test-dir build
 ### 目录约定（以当前仓库为准）
 
 - **`include/axiom/`**：对外公开头文件（Public API）
-- **`src/`**：实现（不应泄漏实现细节到 `include/`）
+- **`src/axiom/`**：实现（与 `include/axiom/` 同构；不应泄漏实现细节到 `include/`）
 - **`tests/`**：自动化测试（按模块子目录组织，见下）
 - **`cmake/`**：CMake 片段（模块库定义等）
 - **`examples/`**：示例程序（用于演示主链路可用）
@@ -73,7 +73,7 @@ ctest --test-dir build
   - `plugin/`：`plugin_registry.h`
   - `sdk/`：`kernel.h`
 - **Internal（内部实现细节头）**：`src/axiom/internal/`（模块私有，不安装；禁止上层/插件绕过 Public API 直接依赖）
-- **实现源码**：`src/<module>/...`（与 `include/axiom/<module>/...` 对应；internal 头通过 CMake 的 PRIVATE include 暴露给允许依赖的模块）
+- **实现源码**：`src/axiom/<module>/...`（与 `include/axiom/<module>/...` 对应；internal 头通过 CMake 的 PRIVATE include 暴露给允许依赖的模块）
 - **测试**：`tests/<模块>/*_test.cpp`（按模块分子目录；`ctest` 名称不变）
 - **示例**：`examples/basic_workflow.cpp`、`examples/minimal_plugin.cpp`（插件宿主与能力发现）
 
@@ -341,9 +341,9 @@ AXM_PERF_MAX_MS=2000 AXM_PERF_ITERATIONS=80 ctest --test-dir build -R axiom_perf
   - `docs/api/AxiomKernel_插件开发样例集.md`
   - `docs/api/AxiomKernel_REST与远程调用样例集.md`
 - **计划与进度**：
-  - `docs/plan/AxiomKernel_MVP实施蓝图.md`
-  - `docs/plan/AxiomKernel_主开发计划与阶段路线图.md`
-  - `docs/plan/AxiomKernel_当前开发进度.md`
+  - `docs/plan/AxiomKernel_当前开发进度.md`（**阶段与模块完成度的事实入口**，宜与代码/ctest 同步更新）
+  - `docs/plan/AxiomKernel_主开发计划与阶段路线图.md`（总阶段、里程碑与退出标准）
+  - `docs/plan/AxiomKernel_MVP实施蓝图.md`（MVP 交付拆解；阶段口径以主路线图 `§1` 为准）
   - `docs/plan/AxiomKernel_几何引擎功能需求文档.md`
   - `docs/plan/AxiomKernel_术语表与命名约定.md`
 

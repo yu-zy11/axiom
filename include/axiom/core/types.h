@@ -263,6 +263,14 @@ struct PluginHostPolicy {
   PluginApiVersionMatchMode plugin_api_version_match_mode{PluginApiVersionMatchMode::Exact};
   /// 安全/隔离策略占位（供能力发现、审计与未来扩展；当前不改变插件调用路径）。
   PluginSandboxLevel sandbox_level{PluginSandboxLevel::None};
+  /// 为真时：`Kernel::plugin_import_file` 在导入成功后对该 `BodyId` 调用 `ValidationService::validate_all`（默认 false）。
+  bool auto_validate_body_after_plugin_importer{false};
+  /// 为真时：`Kernel::plugin_export_file` 在调用导出插件之前对该 `BodyId` 调用 `validate_all`（默认 false）。
+  bool auto_validate_body_before_plugin_exporter{false};
+  /// 为真时：`Kernel::plugin_run_repair` 在修复插件返回 Ok 后，对结果体（`OpReport::output` 存在且仍注册则优先，否则为输入 `BodyId`）调用 `validate_all`（默认 false）。
+  bool auto_validate_body_after_plugin_repair{false};
+  /// 为真时：`Kernel::plugin_create_curve` 在曲线插件返回 Ok 后校验 `CurveId` 已在内核注册且 `CurveService::domain` 成功且为合法开区间（默认 true，用于拦截“悬空”返回值）。
+  bool auto_verify_curve_after_plugin_curve{true};
 };
 
 struct KernelConfig {
@@ -280,8 +288,12 @@ struct ImportOptions {
 };
 
 struct ExportOptions {
+  /// 为 false（默认）时：网格类导出（STL/glTF/OBJ/3MF）在写出前执行 `inspect_mesh` 门控，存在越界索引或退化三角形则拒绝导出（工业严格交付）。
+  /// 为 true 时：兼容模式，尽力写出（与历史行为一致，仅受网格生成本身失败约束）。
   bool compatibility_mode{false};
   bool embed_metadata{true};
+  /// 为 true 时：网格类导出成功后，将 `RepresentationConversionService::export_mesh_report_json` 写到与主文件同目录的 `stem + ".mesh_report.json"`。
+  bool write_mesh_validation_report{false};
 };
 
 struct BSplineCurveDesc {
@@ -295,11 +307,23 @@ struct NURBSCurveDesc {
 
 struct BSplineSurfaceDesc {
   std::vector<Point3> poles;
+  /// u 向阶数；<0 表示由控制点数量按内核默认策略推断（与开放均匀结点一致）。
+  int degree_u{-1};
+  /// v 向阶数；<0 表示自动推断。
+  int degree_v{-1};
+  /// 非空时作为 u 向结点向量（长度须为 n_u + degree_u + 1，degree 由向量长度隐含或与 degree_u 一致）；求值前会仿射归一化到与参数域 [0, max(1,n_u-1)] 对齐。
+  std::vector<Scalar> knots_u;
+  /// v 向结点；语义同 knots_u。
+  std::vector<Scalar> knots_v;
 };
 
 struct NURBSSurfaceDesc {
   std::vector<Point3> poles;
   std::vector<Scalar> weights;
+  int degree_u{-1};
+  int degree_v{-1};
+  std::vector<Scalar> knots_u;
+  std::vector<Scalar> knots_v;
 };
 
 struct PluginCurveDesc {

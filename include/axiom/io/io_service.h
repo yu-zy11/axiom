@@ -28,8 +28,22 @@ public:
                           const ExportOptions &options);
   Result<BodyId> import_axmjson(std::string_view path,
                                 const ImportOptions &options);
+  Result<BodyId> import_stl(std::string_view path, const ImportOptions &options);
+  Result<BodyId> import_gltf(std::string_view path, const ImportOptions &options);
+  Result<BodyId> import_iges(std::string_view path, const ImportOptions &options);
+  Result<BodyId> import_brep(std::string_view path, const ImportOptions &options);
+  Result<BodyId> import_obj(std::string_view path, const ImportOptions &options);
+  Result<BodyId> import_3mf(std::string_view path, const ImportOptions &options);
   Result<void> export_axmjson(BodyId body_id, std::string_view path,
                               const ExportOptions &options);
+  Result<void> export_iges(BodyId body_id, std::string_view path,
+                           const ExportOptions &options);
+  Result<void> export_brep(BodyId body_id, std::string_view path,
+                           const ExportOptions &options);
+  Result<void> export_obj(BodyId body_id, std::string_view path,
+                          const ExportOptions &options);
+  Result<void> export_3mf(BodyId body_id, std::string_view path,
+                          const ExportOptions &options);
   Result<bool> file_exists(std::string_view path) const;
   Result<bool> is_regular_file(std::string_view path) const;
   Result<std::uint64_t> file_size_bytes(std::string_view path) const;
@@ -42,10 +56,20 @@ public:
   Result<std::string> normalize_path(std::string_view path) const;
   Result<BodyId> import_step_default(std::string_view path);
   Result<BodyId> import_axmjson_default(std::string_view path);
+  Result<BodyId> import_stl_default(std::string_view path);
+  Result<BodyId> import_gltf_default(std::string_view path);
+  Result<BodyId> import_iges_default(std::string_view path);
+  Result<BodyId> import_brep_default(std::string_view path);
+  Result<BodyId> import_obj_default(std::string_view path);
+  Result<BodyId> import_3mf_default(std::string_view path);
   Result<void> export_step_default(BodyId body_id, std::string_view path);
   Result<void> export_axmjson_default(BodyId body_id, std::string_view path);
   Result<void> export_gltf_default(BodyId body_id, std::string_view path);
   Result<void> export_stl_default(BodyId body_id, std::string_view path);
+  Result<void> export_iges_default(BodyId body_id, std::string_view path);
+  Result<void> export_brep_default(BodyId body_id, std::string_view path);
+  Result<void> export_obj_default(BodyId body_id, std::string_view path);
+  Result<void> export_3mf_default(BodyId body_id, std::string_view path);
   Result<BodyId> import_auto(std::string_view path,
                              const ImportOptions &options);
   Result<void> export_auto(BodyId body_id, std::string_view path,

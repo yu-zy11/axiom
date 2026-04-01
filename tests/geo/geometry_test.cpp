@@ -500,6 +500,71 @@ int main() {
             std::cerr << "unexpected bezier surface behavior\n";
             return 1;
         }
+        if (!approx(be.value->point.x, 0.5) || !approx(be.value->point.y, 0.5) ||
+            !approx(be.value->point.z, 0.0, 1e-9)) {
+            std::cerr << "unexpected bezier tensor eval at bilinear patch center\n";
+            return 1;
+        }
+    }
+    // 张量积 Bézier：3x3 双二次，P_ij=(i/2,j/2,0) → S(u,v)≈(u,v,0)
+    {
+        auto surf = kernel.surfaces().make_bezier(
+            {{{0.0, 0.0, 0.0}, {0.0, 0.5, 0.0}, {0.0, 1.0, 0.0}, {0.5, 0.0, 0.0}, {0.5, 0.5, 0.0},
+              {0.5, 1.0, 0.0}, {1.0, 0.0, 0.0}, {1.0, 0.5, 0.0}, {1.0, 1.0, 0.0}}});
+        if (surf.status != axiom::StatusCode::Ok || !surf.value.has_value()) {
+            std::cerr << "failed to create 3x3 bezier surface\n";
+            return 1;
+        }
+        auto ev = kernel.surface_service().eval(*surf.value, 0.25, 0.75, 1);
+        if (ev.status != axiom::StatusCode::Ok || !ev.value.has_value() ||
+            !approx(ev.value->point.x, 0.25, 1e-5) || !approx(ev.value->point.y, 0.75, 1e-5) ||
+            !approx(ev.value->point.z, 0.0, 1e-5)) {
+            std::cerr << "unexpected 3x3 tensor bezier eval\n";
+            return 1;
+        }
+    }
+    // BSpline 曲面：可配置阶数（与默认开放均匀一致）
+    {
+        axiom::BSplineSurfaceDesc d;
+        d.degree_u = 1;
+        d.degree_v = 1;
+        d.poles = {{0.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 2.0, 0.0}, {1.0, 0.0, 0.0}, {1.0, 1.0, 0.0},
+                   {1.0, 2.0, 0.0}, {2.0, 0.0, 0.0}, {2.0, 1.0, 0.0}, {2.0, 2.0, 0.0}};
+        auto sid = kernel.surfaces().make_bspline(d);
+        if (sid.status != axiom::StatusCode::Ok || !sid.value.has_value()) {
+            std::cerr << "failed to create bspline with explicit degrees\n";
+            return 1;
+        }
+        auto ev = kernel.surface_service().eval(*sid.value, 1.0, 1.0, 1);
+        if (ev.status != axiom::StatusCode::Ok || !ev.value.has_value() ||
+            !approx(ev.value->point.x, 1.0, 1e-5) || !approx(ev.value->point.y, 1.0, 1e-5)) {
+            std::cerr << "unexpected bspline explicit-degree eval\n";
+            return 1;
+        }
+    }
+    // BSpline：结点长度与阶数不一致 → InvalidInput
+    {
+        axiom::BSplineSurfaceDesc bad;
+        bad.poles = {{0.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {1.0, 0.0, 0.0}, {1.0, 1.0, 0.0}};
+        bad.knots_u = {0.0, 1.0};
+        bad.knots_v = {0.0, 1.0};
+        auto sid = kernel.surfaces().make_bspline(bad);
+        if (sid.status != axiom::StatusCode::InvalidInput) {
+            std::cerr << "expected invalid bspline for bad knot vectors\n";
+            return 1;
+        }
+    }
+    // BSpline：显式阶数与结点隐含阶数冲突 → InvalidInput（2 个 u 控制点 ⇒ p=1）
+    {
+        axiom::BSplineSurfaceDesc bad;
+        bad.poles = {{0.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {1.0, 0.0, 0.0}, {1.0, 1.0, 0.0}};
+        bad.degree_u = 2;
+        bad.knots_u = {0.0, 0.0, 1.0, 1.0};
+        auto sid = kernel.surfaces().make_bspline(bad);
+        if (sid.status != axiom::StatusCode::InvalidInput) {
+            std::cerr << "expected invalid bspline for degree/knot mismatch\n";
+            return 1;
+        }
     }
     // closest_parameter for spline-like curves should stay within domain.
     auto bspline_single_t = kernel.curve_service().closest_parameter(*bspline.value, {100.0, 100.0, 0.0});
@@ -658,6 +723,34 @@ int main() {
     }
     if (std::abs(flat_bspline_eval.value->k1) > 0.08 || std::abs(flat_bspline_eval.value->k2) > 0.08) {
         std::cerr << "unexpected flat bspline surface curvature (expect near zero)\n";
+        return 1;
+    }
+
+    // 3x3 控制网 + 张量积 de Boor：开放均匀结点与域 [0,2]^2；控制点为 (i,j,0) 时应逼近 S(u,v)≈(u,v,0)
+    auto bspline_3x3 = kernel.surfaces().make_bspline(
+        {{{0.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 2.0, 0.0}, {1.0, 0.0, 0.0}, {1.0, 1.0, 0.0},
+          {1.0, 2.0, 0.0}, {2.0, 0.0, 0.0}, {2.0, 1.0, 0.0}, {2.0, 2.0, 0.0}}});
+    if (bspline_3x3.status != axiom::StatusCode::Ok || !bspline_3x3.value.has_value()) {
+        std::cerr << "failed to create 3x3 bspline surface\n";
+        return 1;
+    }
+    auto dom33 = kernel.surface_service().domain(*bspline_3x3.value);
+    if (dom33.status != axiom::StatusCode::Ok || !dom33.value.has_value() ||
+        !approx(dom33.value->u.min, 0.0) || !approx(dom33.value->u.max, 2.0) ||
+        !approx(dom33.value->v.min, 0.0) || !approx(dom33.value->v.max, 2.0)) {
+        std::cerr << "unexpected 3x3 bspline surface domain\n";
+        return 1;
+    }
+    auto ev33 = kernel.surface_service().eval(*bspline_3x3.value, 1.0, 1.0, 1);
+    if (ev33.status != axiom::StatusCode::Ok || !ev33.value.has_value() ||
+        !approx(ev33.value->point.x, 1.0, 1e-5) || !approx(ev33.value->point.y, 1.0, 1e-5) ||
+        !approx(ev33.value->point.z, 0.0, 1e-5)) {
+        std::cerr << "unexpected 3x3 tensor bspline eval at (1,1)\n";
+        return 1;
+    }
+    if (!approx(ev33.value->du.x, 1.0, 2e-3) || !approx(ev33.value->du.y, 0.0, 2e-3) ||
+        !approx(ev33.value->dv.x, 0.0, 2e-3) || !approx(ev33.value->dv.y, 1.0, 2e-3)) {
+        std::cerr << "unexpected 3x3 tensor bspline partials at (1,1)\n";
         return 1;
     }
 
@@ -989,6 +1082,38 @@ int main() {
             uv.value->first < 0.1 || uv.value->first > 1.0 ||
             uv.value->second < 0.2 || uv.value->second > 1.2) {
             std::cerr << "unexpected trimmed closest_uv clamping\n";
+            return 1;
+        }
+    }
+
+    // UV 多边形修剪：盒内但三角形外时求值应投影到环边界附近（与 PCurve 外环语义对齐的最小 Geo 侧实现）
+    {
+        auto pl = kernel.surfaces().make_plane({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0});
+        if (pl.status != axiom::StatusCode::Ok || !pl.value.has_value()) {
+            std::cerr << "failed plane for trim polygon test\n";
+            return 1;
+        }
+        const std::array<axiom::Point2, 3> tri{{{0.0, 0.0}, {2.0, 0.0}, {1.0, 2.0}}};
+        auto tr = kernel.surfaces().make_trimmed_polygon(*pl.value, 0.0, 2.0, 0.0, 2.0, tri);
+        if (tr.status != axiom::StatusCode::Ok || !tr.value.has_value()) {
+            std::cerr << "failed make_trimmed_polygon\n";
+            return 1;
+        }
+        auto ev_in = kernel.surface_service().eval(*tr.value, 0.5, 0.5, 0);
+        auto ev_out = kernel.surface_service().eval(*tr.value, 1.95, 0.08, 0);
+        if (ev_in.status != axiom::StatusCode::Ok || !ev_in.value.has_value() ||
+            ev_out.status != axiom::StatusCode::Ok || !ev_out.value.has_value()) {
+            std::cerr << "failed eval on polygon-trimmed plane\n";
+            return 1;
+        }
+        if (!approx(ev_in.value->point.z, 0.0, 1e-9) || !approx(ev_out.value->point.z, 0.0, 1e-9)) {
+            std::cerr << "unexpected plane trim eval z\n";
+            return 1;
+        }
+        auto bad = kernel.surfaces().make_trimmed_polygon(*pl.value, 0.0, 1.0, 0.0, 1.0,
+                                                            std::span<const axiom::Point2>(tri.data(), 2));
+        if (bad.status != axiom::StatusCode::InvalidInput) {
+            std::cerr << "expected invalid trim polygon with <3 points\n";
             return 1;
         }
     }

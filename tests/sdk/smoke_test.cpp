@@ -301,22 +301,73 @@ int main() {
     auto fmt = kernel.io_supported_formats();
     auto can_imp_step = kernel.io_can_import_format("step");
     auto can_imp_stl = kernel.io_can_import_format("stl");
+    auto can_imp_gltf = kernel.io_can_import_format("gltf");
+    auto can_imp_iges = kernel.io_can_import_format("iges");
+    auto can_imp_brep = kernel.io_can_import_format("brep");
+    auto can_imp_obj = kernel.io_can_import_format("obj");
+    auto can_imp_3mf = kernel.io_can_import_format("3mf");
     auto can_exp_axm = kernel.io_can_export_format("axmjson");
     auto can_exp_stl = kernel.io_can_export_format("stl");
     auto can_exp_gltf = kernel.io_can_export_format("gltf");
+    auto can_exp_iges = kernel.io_can_export_format("iges");
+    auto can_exp_brep = kernel.io_can_export_format("brep");
+    auto can_exp_obj = kernel.io_can_export_format("obj");
+    auto can_exp_3mf = kernel.io_can_export_format("3mf");
     auto cap_lines = kernel.capability_report_lines();
     auto cap_txt = kernel.capability_report_txt();
     if (services.status != axiom::StatusCode::Ok || !services.value.has_value() || services.value->empty() ||
         modules.status != axiom::StatusCode::Ok || !modules.value.has_value() || modules.value->empty() ||
-        fmt.status != axiom::StatusCode::Ok || !fmt.value.has_value() || fmt.value->size() != 4 ||
+        fmt.status != axiom::StatusCode::Ok || !fmt.value.has_value() || fmt.value->size() != 8 ||
         can_imp_step.status != axiom::StatusCode::Ok || !can_imp_step.value.has_value() || !*can_imp_step.value ||
-        can_imp_stl.status != axiom::StatusCode::Ok || !can_imp_stl.value.has_value() || *can_imp_stl.value ||
+        can_imp_stl.status != axiom::StatusCode::Ok || !can_imp_stl.value.has_value() || !*can_imp_stl.value ||
+        can_imp_gltf.status != axiom::StatusCode::Ok || !can_imp_gltf.value.has_value() || !*can_imp_gltf.value ||
+        can_imp_iges.status != axiom::StatusCode::Ok || !can_imp_iges.value.has_value() || !*can_imp_iges.value ||
+        can_imp_brep.status != axiom::StatusCode::Ok || !can_imp_brep.value.has_value() || !*can_imp_brep.value ||
+        can_imp_obj.status != axiom::StatusCode::Ok || !can_imp_obj.value.has_value() || !*can_imp_obj.value ||
+        can_imp_3mf.status != axiom::StatusCode::Ok || !can_imp_3mf.value.has_value() || !*can_imp_3mf.value ||
         can_exp_axm.status != axiom::StatusCode::Ok || !can_exp_axm.value.has_value() || !*can_exp_axm.value ||
         can_exp_stl.status != axiom::StatusCode::Ok || !can_exp_stl.value.has_value() || !*can_exp_stl.value ||
         can_exp_gltf.status != axiom::StatusCode::Ok || !can_exp_gltf.value.has_value() || !*can_exp_gltf.value ||
+        can_exp_iges.status != axiom::StatusCode::Ok || !can_exp_iges.value.has_value() || !*can_exp_iges.value ||
+        can_exp_brep.status != axiom::StatusCode::Ok || !can_exp_brep.value.has_value() || !*can_exp_brep.value ||
+        can_exp_obj.status != axiom::StatusCode::Ok || !can_exp_obj.value.has_value() || !*can_exp_obj.value ||
+        can_exp_3mf.status != axiom::StatusCode::Ok || !can_exp_3mf.value.has_value() || !*can_exp_3mf.value ||
         cap_lines.status != axiom::StatusCode::Ok || !cap_lines.value.has_value() || cap_lines.value->empty() ||
         cap_txt.status != axiom::StatusCode::Ok || !cap_txt.value.has_value() || cap_txt.value->empty()) {
         std::cerr << "kernel capability snapshot behavior failed\n";
+        return 1;
+    }
+    bool saw_plugin_import_svc = false;
+    for (const auto& sv : *services.value) {
+        if (sv == "plugin.import") {
+            saw_plugin_import_svc = true;
+            break;
+        }
+    }
+    if (!saw_plugin_import_svc) {
+        std::cerr << "services_available missing plugin.import\n";
+        return 1;
+    }
+    bool saw_plugin_export_svc = false;
+    for (const auto& sv : *services.value) {
+        if (sv == "plugin.export") {
+            saw_plugin_export_svc = true;
+            break;
+        }
+    }
+    if (!saw_plugin_export_svc) {
+        std::cerr << "services_available missing plugin.export\n";
+        return 1;
+    }
+    bool saw_plugin_repair_svc = false;
+    for (const auto& sv : *services.value) {
+        if (sv == "plugin.repair") {
+            saw_plugin_repair_svc = true;
+            break;
+        }
+    }
+    if (!saw_plugin_repair_svc) {
+        std::cerr << "services_available missing plugin.repair\n";
         return 1;
     }
 
@@ -325,12 +376,18 @@ int main() {
     auto pol = kernel.plugin_host_policy();
     auto has_plg = kernel.has_service_plugin_registry();
     auto has_pd = kernel.has_service_plugin_discovery();
+    auto has_pimp = kernel.has_service_plugin_import();
+    auto has_pexp = kernel.has_service_plugin_export();
+    auto has_prep = kernel.has_service_plugin_repair();
     auto pcap = kernel.plugin_capabilities();
     if (api_ver.status != axiom::StatusCode::Ok || !api_ver.value.has_value() || api_ver.value->empty() ||
         disc.status != axiom::StatusCode::Ok || !disc.value.has_value() || disc.value->empty() ||
         pol.status != axiom::StatusCode::Ok || !pol.value.has_value() ||
         has_plg.status != axiom::StatusCode::Ok || !has_plg.value.has_value() || !*has_plg.value ||
         has_pd.status != axiom::StatusCode::Ok || !has_pd.value.has_value() || !*has_pd.value ||
+        has_pimp.status != axiom::StatusCode::Ok || !has_pimp.value.has_value() || !*has_pimp.value ||
+        has_pexp.status != axiom::StatusCode::Ok || !has_pexp.value.has_value() || !*has_pexp.value ||
+        has_prep.status != axiom::StatusCode::Ok || !has_prep.value.has_value() || !*has_prep.value ||
         pcap.status != axiom::StatusCode::Ok || !pcap.value.has_value()) {
         std::cerr << "plugin discovery / policy facade failed\n";
         return 1;

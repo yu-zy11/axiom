@@ -229,6 +229,160 @@ int main() {
         return 1;
     }
 
+    // 不相交 盒 + 球：并集用两解析体组合；减（左球右盒）退化为左球解析量（7.7 扩展，非仅限双盒）。
+    const double pi_bs = 3.14159265358979323846;
+    auto ball_far = kernel.primitives().sphere({60.0, 5.0, 5.0}, 2.0);
+    if (ball_far.status != axiom::StatusCode::Ok || !ball_far.value.has_value()) {
+        std::cerr << "sphere for disjoint boolean mass test failed\n";
+        return 1;
+    }
+    const double v_ball = (4.0 / 3.0) * pi_bs * 8.0;
+    const double a_ball = 4.0 * pi_bs * 4.0;
+    auto union_box_sphere =
+        kernel.booleans().run(axiom::BooleanOp::Union, *box_a.value, *ball_far.value, bool_opts);
+    if (union_box_sphere.status != axiom::StatusCode::Ok || !union_box_sphere.value.has_value()) {
+        std::cerr << "disjoint union box+sphere failed\n";
+        return 1;
+    }
+    auto ubs_mp = kernel.query().mass_properties(union_box_sphere.value->output);
+    if (ubs_mp.status != axiom::StatusCode::Ok || !ubs_mp.value.has_value()) {
+        std::cerr << "union box+sphere mass_properties failed\n";
+        return 1;
+    }
+    const double exp_vol_bs = vol_a + v_ball;
+    const double exp_area_bs = area_a + a_ball;
+    const double cx_bs = (vol_a * 5.0 + v_ball * 60.0) / exp_vol_bs;
+    if (std::abs(ubs_mp.value->volume - exp_vol_bs) > 1e-5 || std::abs(ubs_mp.value->area - exp_area_bs) > 1e-4 ||
+        std::abs(ubs_mp.value->centroid.x - cx_bs) > 1e-4 || std::abs(ubs_mp.value->centroid.y - 5.0) > 1e-5 ||
+        std::abs(ubs_mp.value->centroid.z - 5.0) > 1e-5) {
+        std::cerr << "disjoint union box+sphere mass_properties mismatch\n";
+        return 1;
+    }
+    auto sub_sphere_box =
+        kernel.booleans().run(axiom::BooleanOp::Subtract, *ball_far.value, *box_a.value, bool_opts);
+    if (sub_sphere_box.status != axiom::StatusCode::Ok || !sub_sphere_box.value.has_value()) {
+        std::cerr << "disjoint subtract sphere-box failed\n";
+        return 1;
+    }
+    auto ssb_mp = kernel.query().mass_properties(sub_sphere_box.value->output);
+    if (ssb_mp.status != axiom::StatusCode::Ok || !ssb_mp.value.has_value()) {
+        std::cerr << "subtract sphere-box mass_properties failed\n";
+        return 1;
+    }
+    if (std::abs(ssb_mp.value->volume - v_ball) > 1e-5 || std::abs(ssb_mp.value->area - a_ball) > 1e-4 ||
+        std::abs(ssb_mp.value->centroid.x - 60.0) > 1e-5 || std::abs(ssb_mp.value->centroid.y - 5.0) > 1e-5 ||
+        std::abs(ssb_mp.value->centroid.z - 5.0) > 1e-5) {
+        std::cerr << "disjoint subtract (lhs sphere) mass_properties should match sphere only\n";
+        return 1;
+    }
+
+    // AABB 面接触两单位立方并集：union 长方体体积 = 2，与两体体积之和一致，可走 Touching 解析组合路径。
+    auto touch_c0 = kernel.primitives().box({0.0, 0.0, 0.0}, 1.0, 1.0, 1.0);
+    auto touch_c1 = kernel.primitives().box({1.0, 0.0, 0.0}, 1.0, 1.0, 1.0);
+    if (touch_c0.status != axiom::StatusCode::Ok || touch_c1.status != axiom::StatusCode::Ok ||
+        !touch_c0.value.has_value() || !touch_c1.value.has_value()) {
+        std::cerr << "touching cubes primitives failed\n";
+        return 1;
+    }
+    auto u_touch = kernel.booleans().run(axiom::BooleanOp::Union, *touch_c0.value, *touch_c1.value, bool_opts);
+    if (u_touch.status != axiom::StatusCode::Ok || !u_touch.value.has_value()) {
+        std::cerr << "touching cubes union failed\n";
+        return 1;
+    }
+    auto touch_mp = kernel.query().mass_properties(u_touch.value->output);
+    if (touch_mp.status != axiom::StatusCode::Ok || !touch_mp.value.has_value() ||
+        std::abs(touch_mp.value->volume - 2.0) > 1e-5) {
+        std::cerr << "touching union mass_properties should sum volumes when union AABB matches sum\n";
+        return 1;
+    }
+
+    // 大盒完全包含小盒：并集占位 bbox 为大盒，质量应取大盒解析量。
+    auto big_h = kernel.primitives().box({0.0, 0.0, 0.0}, 10.0, 10.0, 10.0);
+    auto small_h = kernel.primitives().box({4.0, 4.0, 4.0}, 2.0, 2.0, 2.0);
+    if (big_h.status != axiom::StatusCode::Ok || small_h.status != axiom::StatusCode::Ok ||
+        !big_h.value.has_value() || !small_h.value.has_value()) {
+        std::cerr << "contain-test boxes failed\n";
+        return 1;
+    }
+    auto u_hole = kernel.booleans().run(axiom::BooleanOp::Union, *big_h.value, *small_h.value, bool_opts);
+    if (u_hole.status != axiom::StatusCode::Ok || !u_hole.value.has_value()) {
+        std::cerr << "union big contains small failed\n";
+        return 1;
+    }
+    auto hole_mp = kernel.query().mass_properties(u_hole.value->output);
+    if (hole_mp.status != axiom::StatusCode::Ok || !hole_mp.value.has_value() ||
+        std::abs(hole_mp.value->volume - 1000.0) > 1e-3) {
+        std::cerr << "lhs-contains-rhs union mass_properties should match outer box\n";
+        return 1;
+    }
+
+    // 不相交 占位 extrude + 远距盒：操作数之一为 Sweep，体积为缓存之和。
+    auto sw_u = kernel.sweeps().extrude({"bool_sw"}, {0.0, 0.0, 1.0}, 3.0);
+    auto far_cube = kernel.primitives().box({80.0, 0.0, 0.0}, 2.0, 2.0, 2.0);
+    if (sw_u.status != axiom::StatusCode::Ok || far_cube.status != axiom::StatusCode::Ok ||
+        !sw_u.value.has_value() || !far_cube.value.has_value()) {
+        std::cerr << "extrude/far cube for boolean mass failed\n";
+        return 1;
+    }
+    auto u_sw_box = kernel.booleans().run(axiom::BooleanOp::Union, *sw_u.value, *far_cube.value, bool_opts);
+    if (u_sw_box.status != axiom::StatusCode::Ok || !u_sw_box.value.has_value()) {
+        std::cerr << "union extrude+box failed\n";
+        return 1;
+    }
+    auto sw_box_mp = kernel.query().mass_properties(u_sw_box.value->output);
+    if (sw_box_mp.status != axiom::StatusCode::Ok || !sw_box_mp.value.has_value() ||
+        std::abs(sw_box_mp.value->volume - 11.0) > 1e-4) {
+        std::cerr << "disjoint union extrude+box mass_properties should sum operand volumes\n";
+        return 1;
+    }
+
+    // 双盒 Intersect：结果 bbox 与 AABB 交一致时，质量属性按交叠长方体解析（依赖 BodyRecord.boolean_op）。
+    auto overlap_box = kernel.primitives().box({5.0, 0.0, 0.0}, 5.0, 5.0, 5.0);
+    if (overlap_box.status != axiom::StatusCode::Ok || !overlap_box.value.has_value()) {
+        std::cerr << "overlap box for intersect mass test failed\n";
+        return 1;
+    }
+    auto inter_ab =
+        kernel.booleans().run(axiom::BooleanOp::Intersect, *box_a.value, *overlap_box.value, bool_opts);
+    if (inter_ab.status != axiom::StatusCode::Ok || !inter_ab.value.has_value()) {
+        std::cerr << "box intersect for mass_properties failed\n";
+        return 1;
+    }
+    auto inter_mp = kernel.query().mass_properties(inter_ab.value->output);
+    if (inter_mp.status != axiom::StatusCode::Ok || !inter_mp.value.has_value() ||
+        std::abs(inter_mp.value->volume - 125.0) > 1e-3) {
+        std::cerr << "intersect mass_properties should use AABB overlap volume for two boxes\n";
+        return 1;
+    }
+
+    // Subtract + 左盒完全包含右盒：体积差（216 - 8 = 208），质心/惯性走差分占位。
+    auto shell_outer = kernel.primitives().box({0.0, 0.0, 0.0}, 6.0, 6.0, 6.0);
+    auto shell_inner = kernel.primitives().box({2.0, 2.0, 2.0}, 2.0, 2.0, 2.0);
+    if (shell_outer.status != axiom::StatusCode::Ok || shell_inner.status != axiom::StatusCode::Ok ||
+        !shell_outer.value.has_value() || !shell_inner.value.has_value()) {
+        std::cerr << "nested boxes for subtract mass failed\n";
+        return 1;
+    }
+    auto sub_nested =
+        kernel.booleans().run(axiom::BooleanOp::Subtract, *shell_outer.value, *shell_inner.value, bool_opts);
+    if (sub_nested.status != axiom::StatusCode::Ok || !sub_nested.value.has_value()) {
+        std::cerr << "subtract nested boxes failed\n";
+        return 1;
+    }
+    auto sub_n_mp = kernel.query().mass_properties(sub_nested.value->output);
+    if (sub_n_mp.status != axiom::StatusCode::Ok || !sub_n_mp.value.has_value() ||
+        std::abs(sub_n_mp.value->volume - 208.0) > 1e-3) {
+        std::cerr << "nested subtract mass_properties volume mismatch\n";
+        return 1;
+    }
+    const double exp_cx = (216.0 * 3.0 - 8.0 * 3.0) / 208.0;
+    if (std::abs(sub_n_mp.value->centroid.x - exp_cx) > 1e-4 ||
+        std::abs(sub_n_mp.value->centroid.y - exp_cx) > 1e-4 ||
+        std::abs(sub_n_mp.value->centroid.z - exp_cx) > 1e-4) {
+        std::cerr << "nested subtract mass_properties centroid mismatch\n";
+        return 1;
+    }
+
     auto bad_offset = kernel.modify().offset_body(*box_a.value, -6.0, {});
     if (bad_offset.status != axiom::StatusCode::OperationFailed) {
         std::cerr << "expected failed inward offset\n";
@@ -430,6 +584,42 @@ int main() {
         return 1;
     }
 
+    if (box_edges.value->size() < 2) {
+        std::cerr << "expected at least two edges for multi-edge blend diagnostic test\n";
+        return 1;
+    }
+    std::vector<axiom::EdgeId> two_edges {(*box_edges.value)[0], (*box_edges.value)[1]};
+    auto fillet_multi = kernel.blends().fillet_edges(*box_a.value, two_edges, 0.4);
+    if (fillet_multi.status != axiom::StatusCode::Ok || !fillet_multi.value.has_value()) {
+        std::cerr << "fillet_edges (multi) failed\n";
+        return 1;
+    }
+    if (!has_warning_code(fillet_multi.value->warnings, axiom::diag_codes::kBlendMultiEdgeCornerPlaceholder)) {
+        std::cerr << "expected multi-edge fillet corner placeholder warning\n";
+        return 1;
+    }
+    auto fillet_multi_diag = kernel.diagnostics().get(fillet_multi.value->diagnostic_id);
+    if (fillet_multi_diag.status != axiom::StatusCode::Ok || !fillet_multi_diag.value.has_value() ||
+        !has_issue_code(*fillet_multi_diag.value, axiom::diag_codes::kBlendMultiEdgeCornerPlaceholder)) {
+        std::cerr << "expected diagnostic issue kBlendMultiEdgeCornerPlaceholder for multi-edge fillet\n";
+        return 1;
+    }
+    auto chamfer_multi = kernel.blends().chamfer_edges(*box_a.value, two_edges, 0.25);
+    if (chamfer_multi.status != axiom::StatusCode::Ok || !chamfer_multi.value.has_value()) {
+        std::cerr << "chamfer_edges (multi) failed\n";
+        return 1;
+    }
+    if (!has_warning_code(chamfer_multi.value->warnings, axiom::diag_codes::kBlendMultiEdgeCornerPlaceholder)) {
+        std::cerr << "expected multi-edge chamfer corner placeholder warning\n";
+        return 1;
+    }
+    auto chamfer_multi_diag = kernel.diagnostics().get(chamfer_multi.value->diagnostic_id);
+    if (chamfer_multi_diag.status != axiom::StatusCode::Ok || !chamfer_multi_diag.value.has_value() ||
+        !has_issue_code(*chamfer_multi_diag.value, axiom::diag_codes::kBlendMultiEdgeCornerPlaceholder)) {
+        std::cerr << "expected diagnostic issue kBlendMultiEdgeCornerPlaceholder for multi-edge chamfer\n";
+        return 1;
+    }
+
     auto box_shells = kernel.topology().query().shells_of_body(*box_a.value);
     if (box_shells.status != axiom::StatusCode::Ok || !box_shells.value.has_value() || box_shells.value->empty()) {
         std::cerr << "expected shells on box_a for thicken test\n";
@@ -557,6 +747,15 @@ int main() {
         return 1;
     }
 
+    auto mp_box_a_ref = kernel.query().mass_properties(*box_a.value);
+    auto mp_replace_face_body = kernel.query().mass_properties(replace_face.value->output);
+    if (mp_box_a_ref.status != axiom::StatusCode::Ok || !mp_box_a_ref.value.has_value() ||
+        mp_replace_face_body.status != axiom::StatusCode::Ok || !mp_replace_face_body.value.has_value() ||
+        std::abs(mp_box_a_ref.value->volume - mp_replace_face_body.value->volume) > 1e-3) {
+        std::cerr << "replace_face Modified body should inherit source mass when bbox unchanged\n";
+        return 1;
+    }
+
     auto remove_small_edges = kernel.repair().remove_small_edges(*box_a.value, 0.5, axiom::RepairMode::Safe);
     auto remove_small_faces_adaptive =
         kernel.repair().remove_small_faces(*box_a.value, 1e-9, axiom::RepairMode::Aggressive);
@@ -606,7 +805,13 @@ int main() {
         std::cerr << "repair pipeline trace issue is unexpected\n";
         return 1;
     }
-    const auto* feature_removed_issue = find_issue(*repair_diag.value, axiom::diag_codes::kHealFeatureRemovedWarning);
+    const axiom::Issue* feature_removed_issue = nullptr;
+    for (const auto& iss : repair_diag.value->issues) {
+        if (iss.code == axiom::diag_codes::kHealFeatureRemovedWarning && iss.stage == "heal.auto_repair") {
+            feature_removed_issue = &iss;
+            break;
+        }
+    }
     const auto* validated_issue = find_issue(*repair_diag.value, axiom::diag_codes::kHealRepairValidated);
     if (feature_removed_issue == nullptr || validated_issue == nullptr ||
         feature_removed_issue->related_entities.size() != 2 ||
@@ -614,7 +819,9 @@ int main() {
         feature_removed_issue->related_entities.front() != box_a.value->value ||
         validated_issue->related_entities.front() != box_a.value->value ||
         feature_removed_issue->related_entities.back() != auto_repair.value->output.value ||
-        validated_issue->related_entities.back() != auto_repair.value->output.value) {
+        validated_issue->related_entities.back() != auto_repair.value->output.value ||
+        feature_removed_issue->stage != "heal.auto_repair" ||
+        validated_issue->stage != "heal.auto_repair.post_validate") {
         std::cerr << "auto repair diagnostic related entities are unexpected\n";
         return 1;
     }
@@ -660,6 +867,7 @@ int main() {
     auto invalid_filtered = kernel.validate().filter_invalid_bodies(body_pair, axiom::ValidationMode::Standard);
     auto geom_valid = kernel.validate().is_geometry_valid(*box_a.value, axiom::ValidationMode::Standard);
     auto topo_valid = kernel.validate().is_topology_valid(*box_a.value, axiom::ValidationMode::Standard);
+    auto manifold_valid = kernel.validate().is_manifold_valid(*box_a.value, axiom::ValidationMode::Standard);
     auto all_valid = kernel.validate().is_valid(*box_a.value, axiom::ValidationMode::Standard);
     if (validate_many.status != axiom::StatusCode::Ok || validate_geom_many.status != axiom::StatusCode::Ok ||
         validate_tol_many_std.status != axiom::StatusCode::Ok || validate_topo_many.status != axiom::StatusCode::Ok ||
@@ -670,6 +878,7 @@ int main() {
         invalid_filtered.status != axiom::StatusCode::Ok || !invalid_filtered.value.has_value() || !invalid_filtered.value->empty() ||
         geom_valid.status != axiom::StatusCode::Ok || !geom_valid.value.has_value() || !*geom_valid.value ||
         topo_valid.status != axiom::StatusCode::Ok || !topo_valid.value.has_value() || !*topo_valid.value ||
+        manifold_valid.status != axiom::StatusCode::Ok || !manifold_valid.value.has_value() || !*manifold_valid.value ||
         all_valid.status != axiom::StatusCode::Ok || !all_valid.value.has_value() || !*all_valid.value) {
         std::cerr << "extended validation service behavior is unexpected\n";
         return 1;
@@ -693,6 +902,36 @@ int main() {
         merge_default.status != axiom::StatusCode::Ok || !merge_default.value.has_value() ||
         auto_default.status != axiom::StatusCode::Ok || !auto_default.value.has_value()) {
         std::cerr << "extended repair default API behavior is unexpected\n";
+        return 1;
+    }
+    auto diag_rsf = kernel.diagnostics().get(remove_small_faces_default.value->diagnostic_id);
+    auto diag_rse = kernel.diagnostics().get(remove_small_edges_default.value->diagnostic_id);
+    auto diag_mrg = kernel.diagnostics().get(merge_default.value->diagnostic_id);
+    if (diag_rsf.status != axiom::StatusCode::Ok || !diag_rsf.value.has_value() ||
+        diag_rse.status != axiom::StatusCode::Ok || !diag_rse.value.has_value() ||
+        diag_mrg.status != axiom::StatusCode::Ok || !diag_mrg.value.has_value()) {
+        std::cerr << "repair diagnostics missing for stage regression\n";
+        return 1;
+    }
+    auto count_stage = [](const axiom::DiagnosticReport& rep, std::string_view code, std::string_view stage) -> int {
+        int n = 0;
+        for (const auto& iss : rep.issues) {
+            if (iss.code == code && iss.stage == stage) {
+                ++n;
+            }
+        }
+        return n;
+    };
+    if (count_stage(*diag_rsf.value, axiom::diag_codes::kHealFeatureRemovedWarning, "heal.remove_small_faces") < 1) {
+        std::cerr << "remove_small_faces issues should carry heal.remove_small_faces stage\n";
+        return 1;
+    }
+    if (count_stage(*diag_rse.value, axiom::diag_codes::kHealFeatureRemovedWarning, "heal.remove_small_edges") < 1) {
+        std::cerr << "remove_small_edges issues should carry heal.remove_small_edges stage\n";
+        return 1;
+    }
+    if (count_stage(*diag_mrg.value, axiom::diag_codes::kHealRepairPipelineTrace, "heal.repair_pipeline") < 1) {
+        std::cerr << "merge_near_coplanar should still emit repair pipeline trace\n";
         return 1;
     }
     std::array<axiom::BodyId, 1> only_box {*box_a.value};
@@ -895,6 +1134,200 @@ int main() {
             si_kernel.validate().validate_self_intersection(*fresh_box.value, axiom::ValidationMode::Strict);
         if (box_strict_si.status != axiom::StatusCode::Ok) {
             std::cerr << "fresh box should pass strict mesh-based self-intersection check\n";
+            return 1;
+        }
+        auto shells = si_kernel.topology().query().shells_of_body(*fresh_box.value);
+        if (shells.status != axiom::StatusCode::Ok || !shells.value.has_value() || shells.value->empty()) {
+            std::cerr << "fresh box should expose owned shells for shell self-intersection API\n";
+            return 1;
+        }
+        const axiom::ShellId shell0 = shells.value->front();
+        auto shell_strict_si = si_kernel.validate().validate_self_intersection_shell(
+            *fresh_box.value, shell0, axiom::ValidationMode::Strict);
+        if (shell_strict_si.status != axiom::StatusCode::Ok) {
+            std::cerr << "shell-level strict self-intersection should pass on fresh box\n";
+            return 1;
+        }
+        auto all_shells_si = si_kernel.validate().validate_self_intersection_all_shells(
+            *fresh_box.value, axiom::ValidationMode::Strict);
+        if (all_shells_si.status != axiom::StatusCode::Ok) {
+            std::cerr << "validate_self_intersection_all_shells should pass on fresh box\n";
+            return 1;
+        }
+        const std::span<const axiom::ShellId> empty_shell_span;
+        auto shell_many_empty = si_kernel.validate().validate_self_intersection_shell_many(
+            *fresh_box.value, empty_shell_span, axiom::ValidationMode::Strict);
+        if (shell_many_empty.status != axiom::StatusCode::InvalidInput) {
+            std::cerr << "empty shell span should yield InvalidInput for validate_self_intersection_shell_many\n";
+            return 1;
+        }
+    }
+
+    // Strict 几何：近重复顶点（不同 VertexId、间距 < linear_tol×1e-2）→ kValNearDuplicateVertices
+    {
+        axiom::Kernel ndk;
+        auto plane_z = ndk.surfaces().make_plane({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0});
+        auto line_x = ndk.curves().make_line({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
+        auto line_y = ndk.curves().make_line({1.0, 0.0, 0.0}, {0.0, 1.0, 0.0});
+        auto line_neg_x = ndk.curves().make_line({1.0, 1.0, 0.0}, {-1.0, 0.0, 0.0});
+        auto line_neg_y = ndk.curves().make_line({0.0, 1.0, 0.0}, {0.0, -1.0, 0.0});
+        if (plane_z.status != axiom::StatusCode::Ok || line_x.status != axiom::StatusCode::Ok ||
+            line_y.status != axiom::StatusCode::Ok || line_neg_x.status != axiom::StatusCode::Ok ||
+            line_neg_y.status != axiom::StatusCode::Ok || !plane_z.value.has_value() || !line_x.value.has_value() ||
+            !line_y.value.has_value() || !line_neg_x.value.has_value() || !line_neg_y.value.has_value()) {
+            std::cerr << "near-duplicate vertex test: plane/lines failed\n";
+            return 1;
+        }
+        auto txn_nd = ndk.topology().begin_transaction();
+        // vA=(0,0) 与 vB=(1e-10,0) 近重复；边 vA–vB 长度 1e-10 仍大于边退化门限（≈linear×1e-6）。
+        // 角点带极小 z 抬升，使体 bbox 最小厚度 >0，避免在 min_extent(bbox) 门控处提前失败。
+        const double zeps = 1e-9;
+        auto vA = txn_nd.create_vertex({0.0, 0.0, 0.0});
+        auto vB = txn_nd.create_vertex({1e-10, 0.0, 0.0});
+        auto v10 = txn_nd.create_vertex({1.0, 0.0, 0.0});
+        auto v11 = txn_nd.create_vertex({1.0, 1.0, zeps});
+        auto v01 = txn_nd.create_vertex({0.0, 1.0, zeps});
+        if (vA.status != axiom::StatusCode::Ok || vB.status != axiom::StatusCode::Ok ||
+            v10.status != axiom::StatusCode::Ok || v11.status != axiom::StatusCode::Ok ||
+            v01.status != axiom::StatusCode::Ok || !vA.value.has_value() || !vB.value.has_value() ||
+            !v10.value.has_value() || !v11.value.has_value() || !v01.value.has_value()) {
+            std::cerr << "near-duplicate vertex test: vertices failed\n";
+            return 1;
+        }
+        auto eAB = txn_nd.create_edge(*line_x.value, *vA.value, *vB.value);
+        auto eB10 = txn_nd.create_edge(*line_x.value, *vB.value, *v10.value);
+        auto e1011 = txn_nd.create_edge(*line_y.value, *v10.value, *v11.value);
+        auto e1101 = txn_nd.create_edge(*line_neg_x.value, *v11.value, *v01.value);
+        auto e01A = txn_nd.create_edge(*line_neg_y.value, *v01.value, *vA.value);
+        if (eAB.status != axiom::StatusCode::Ok || eB10.status != axiom::StatusCode::Ok ||
+            e1011.status != axiom::StatusCode::Ok || e1101.status != axiom::StatusCode::Ok ||
+            e01A.status != axiom::StatusCode::Ok || !eAB.value.has_value() || !eB10.value.has_value() ||
+            !e1011.value.has_value() || !e1101.value.has_value() || !e01A.value.has_value()) {
+            std::cerr << "near-duplicate vertex test: edges failed\n";
+            return 1;
+        }
+        auto c0 = txn_nd.create_coedge(*eAB.value, false);
+        auto c1 = txn_nd.create_coedge(*eB10.value, false);
+        auto c2 = txn_nd.create_coedge(*e1011.value, false);
+        auto c3 = txn_nd.create_coedge(*e1101.value, false);
+        auto c4 = txn_nd.create_coedge(*e01A.value, false);
+        if (c0.status != axiom::StatusCode::Ok || c1.status != axiom::StatusCode::Ok ||
+            c2.status != axiom::StatusCode::Ok || c3.status != axiom::StatusCode::Ok ||
+            c4.status != axiom::StatusCode::Ok || !c0.value.has_value() || !c1.value.has_value() ||
+            !c2.value.has_value() || !c3.value.has_value() || !c4.value.has_value()) {
+            std::cerr << "near-duplicate vertex test: coedges failed\n";
+            return 1;
+        }
+        const std::array<axiom::CoedgeId, 5> c_nd {*c0.value, *c1.value, *c2.value, *c3.value, *c4.value};
+        auto lp = txn_nd.create_loop(c_nd);
+        auto fc = txn_nd.create_face(*plane_z.value, *lp.value, {});
+        auto sh = txn_nd.create_shell(std::array<axiom::FaceId, 1> {*fc.value});
+        auto bd = txn_nd.create_body(std::array<axiom::ShellId, 1> {*sh.value});
+        if (lp.status != axiom::StatusCode::Ok || fc.status != axiom::StatusCode::Ok ||
+            sh.status != axiom::StatusCode::Ok || bd.status != axiom::StatusCode::Ok ||
+            !lp.value.has_value() || !fc.value.has_value() || !sh.value.has_value() || !bd.value.has_value()) {
+            std::cerr << "near-duplicate vertex test: topology assembly failed\n";
+            return 1;
+        }
+        if (txn_nd.commit().status != axiom::StatusCode::Ok) {
+            std::cerr << "near-duplicate vertex test: commit failed\n";
+            return 1;
+        }
+        auto nd_std = ndk.validate().validate_geometry(*bd.value, axiom::ValidationMode::Standard);
+        if (nd_std.status != axiom::StatusCode::Ok) {
+            std::cerr << "near-duplicate body should pass Standard geometry (no near-dup gate)\n";
+            return 1;
+        }
+        auto nd_strict = ndk.validate().validate_geometry(*bd.value, axiom::ValidationMode::Strict);
+        if (nd_strict.status != axiom::StatusCode::DegenerateGeometry) {
+            std::cerr << "expected Strict validate_geometry DegenerateGeometry on near-duplicate vertices body\n";
+            return 1;
+        }
+        auto nd_diag = ndk.diagnostics().get(nd_strict.diagnostic_id);
+        if (nd_diag.status != axiom::StatusCode::Ok || !nd_diag.value.has_value() ||
+            !has_issue_code(*nd_diag.value, axiom::diag_codes::kValNearDuplicateVertices)) {
+            std::cerr << "expected kValNearDuplicateVertices diagnostic for near-duplicate vertex body\n";
+            return 1;
+        }
+    }
+
+    // Strict：外环略倾（保证体包围盒 z 向厚度>0，避免早于法向门控退化），支撑平面法向为 +Y，环 Newell 法向主要为 ±Z → kValFaceNormalInconsistent
+    {
+        axiom::Kernel fnk;
+        auto plane_wrong = fnk.surfaces().make_plane({0.0, 0.0, 0.0}, {0.0, 1.0, 0.0});
+        auto line_x = fnk.curves().make_line({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
+        auto line_y = fnk.curves().make_line({1.0, 0.0, 0.0}, {0.0, 1.0, 0.0});
+        auto line_neg_x = fnk.curves().make_line({1.0, 1.0, 0.0}, {-1.0, 0.0, 0.0});
+        auto line_neg_y = fnk.curves().make_line({0.0, 1.0, 0.0}, {0.0, -1.0, 0.0});
+        if (plane_wrong.status != axiom::StatusCode::Ok || line_x.status != axiom::StatusCode::Ok ||
+            line_y.status != axiom::StatusCode::Ok || line_neg_x.status != axiom::StatusCode::Ok ||
+            line_neg_y.status != axiom::StatusCode::Ok || !plane_wrong.value.has_value() ||
+            !line_x.value.has_value() || !line_y.value.has_value() || !line_neg_x.value.has_value() ||
+            !line_neg_y.value.has_value()) {
+            std::cerr << "face-normal test: plane/lines failed\n";
+            return 1;
+        }
+        auto txn_fn = fnk.topology().begin_transaction();
+        // 全在 z=0 时包围盒 z 向厚度为 0，会在 validate_geometry 早期以 kValDegenerateGeometry 失败，无法覆盖法向门控。
+        const double z_hi = 1e-2;
+        auto fv0 = txn_fn.create_vertex({0.0, 0.0, 0.0});
+        auto fv1 = txn_fn.create_vertex({1.0, 0.0, 0.0});
+        auto fv2 = txn_fn.create_vertex({1.0, 1.0, z_hi});
+        auto fv3 = txn_fn.create_vertex({0.0, 1.0, z_hi});
+        if (fv0.status != axiom::StatusCode::Ok || fv1.status != axiom::StatusCode::Ok ||
+            fv2.status != axiom::StatusCode::Ok || fv3.status != axiom::StatusCode::Ok ||
+            !fv0.value.has_value() || !fv1.value.has_value() || !fv2.value.has_value() ||
+            !fv3.value.has_value()) {
+            std::cerr << "face-normal test: vertices failed\n";
+            return 1;
+        }
+        auto fe0 = txn_fn.create_edge(*line_x.value, *fv0.value, *fv1.value);
+        auto fe1 = txn_fn.create_edge(*line_y.value, *fv1.value, *fv2.value);
+        auto fe2 = txn_fn.create_edge(*line_neg_x.value, *fv2.value, *fv3.value);
+        auto fe3 = txn_fn.create_edge(*line_neg_y.value, *fv3.value, *fv0.value);
+        if (fe0.status != axiom::StatusCode::Ok || fe1.status != axiom::StatusCode::Ok ||
+            fe2.status != axiom::StatusCode::Ok || fe3.status != axiom::StatusCode::Ok ||
+            !fe0.value.has_value() || !fe1.value.has_value() || !fe2.value.has_value() ||
+            !fe3.value.has_value()) {
+            std::cerr << "face-normal test: edges failed\n";
+            return 1;
+        }
+        auto fco0 = txn_fn.create_coedge(*fe0.value, false);
+        auto fco1 = txn_fn.create_coedge(*fe1.value, false);
+        auto fco2 = txn_fn.create_coedge(*fe2.value, false);
+        auto fco3 = txn_fn.create_coedge(*fe3.value, false);
+        if (fco0.status != axiom::StatusCode::Ok || fco1.status != axiom::StatusCode::Ok ||
+            fco2.status != axiom::StatusCode::Ok || fco3.status != axiom::StatusCode::Ok ||
+            !fco0.value.has_value() || !fco1.value.has_value() || !fco2.value.has_value() ||
+            !fco3.value.has_value()) {
+            std::cerr << "face-normal test: coedges failed\n";
+            return 1;
+        }
+        const std::array<axiom::CoedgeId, 4> fco {*fco0.value, *fco1.value, *fco2.value, *fco3.value};
+        auto floop = txn_fn.create_loop(fco);
+        auto fface = txn_fn.create_face(*plane_wrong.value, *floop.value, {});
+        auto fshell = txn_fn.create_shell(std::array<axiom::FaceId, 1> {*fface.value});
+        auto fbody = txn_fn.create_body(std::array<axiom::ShellId, 1> {*fshell.value});
+        if (floop.status != axiom::StatusCode::Ok || fface.status != axiom::StatusCode::Ok ||
+            fshell.status != axiom::StatusCode::Ok || fbody.status != axiom::StatusCode::Ok ||
+            !floop.value.has_value() || !fface.value.has_value() || !fshell.value.has_value() ||
+            !fbody.value.has_value()) {
+            std::cerr << "face-normal test: topology failed\n";
+            return 1;
+        }
+        if (txn_fn.commit().status != axiom::StatusCode::Ok) {
+            std::cerr << "face-normal test: commit failed\n";
+            return 1;
+        }
+        auto fn_strict = fnk.validate().validate_geometry(*fbody.value, axiom::ValidationMode::Strict);
+        if (fn_strict.status != axiom::StatusCode::DegenerateGeometry) {
+            std::cerr << "expected Strict validate_geometry DegenerateGeometry on mismatched plane normal face\n";
+            return 1;
+        }
+        auto fn_diag = fnk.diagnostics().get(fn_strict.diagnostic_id);
+        if (fn_diag.status != axiom::StatusCode::Ok || !fn_diag.value.has_value() ||
+            !has_issue_code(*fn_diag.value, axiom::diag_codes::kValFaceNormalInconsistent)) {
+            std::cerr << "expected kValFaceNormalInconsistent diagnostic for wrong plane normal face\n";
             return 1;
         }
     }

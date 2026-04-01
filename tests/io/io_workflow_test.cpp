@@ -107,6 +107,69 @@ int main() {
         std::filesystem::remove(out_stl_path);
         return 1;
     }
+
+    auto imported_stl = kernel.io().import_auto(out_stl_path.string(), import_options);
+    if (imported_stl.status != axiom::StatusCode::Ok || !imported_stl.value.has_value()) {
+        std::cerr << "stl import failed\n";
+        std::filesystem::remove(out_path);
+        std::filesystem::remove(out_json_path);
+        std::filesystem::remove(out_gltf_path);
+        std::filesystem::remove(out_stl_path);
+        return 1;
+    }
+    auto imported_stl_bbox = kernel.representation().bbox_of_body(*imported_stl.value);
+    if (imported_stl_bbox.status != axiom::StatusCode::Ok || !imported_stl_bbox.value.has_value() ||
+        imported_stl_bbox.value->max.x < 9.9 || imported_stl_bbox.value->max.y < 19.9 ||
+        imported_stl_bbox.value->max.z < 29.9) {
+        std::cerr << "stl import bbox was not plausible for box body\n";
+        std::filesystem::remove(out_path);
+        std::filesystem::remove(out_json_path);
+        std::filesystem::remove(out_gltf_path);
+        std::filesystem::remove(out_stl_path);
+        return 1;
+    }
+    auto imported_stl_diag = kernel.diagnostics().get(imported_stl.diagnostic_id);
+    if (imported_stl_diag.status != axiom::StatusCode::Ok || !imported_stl_diag.value.has_value() ||
+        !has_issue_code(*imported_stl_diag.value, axiom::diag_codes::kIoPostImportValidation)) {
+        std::cerr << "missing stl import post-validation diagnostic\n";
+        std::filesystem::remove(out_path);
+        std::filesystem::remove(out_json_path);
+        std::filesystem::remove(out_gltf_path);
+        std::filesystem::remove(out_stl_path);
+        return 1;
+    }
+
+    auto imported_gltf = kernel.io().import_gltf(out_gltf_path.string(), import_options);
+    if (imported_gltf.status != axiom::StatusCode::Ok || !imported_gltf.value.has_value()) {
+        std::cerr << "gltf import failed\n";
+        std::filesystem::remove(out_path);
+        std::filesystem::remove(out_json_path);
+        std::filesystem::remove(out_gltf_path);
+        std::filesystem::remove(out_stl_path);
+        return 1;
+    }
+    auto imported_gltf_bbox = kernel.representation().bbox_of_body(*imported_gltf.value);
+    if (imported_gltf_bbox.status != axiom::StatusCode::Ok || !imported_gltf_bbox.value.has_value() ||
+        imported_gltf_bbox.value->max.x < 9.9 || imported_gltf_bbox.value->max.y < 19.9 ||
+        imported_gltf_bbox.value->max.z < 29.9) {
+        std::cerr << "gltf import bbox was not plausible for box body\n";
+        std::filesystem::remove(out_path);
+        std::filesystem::remove(out_json_path);
+        std::filesystem::remove(out_gltf_path);
+        std::filesystem::remove(out_stl_path);
+        return 1;
+    }
+    auto imported_gltf_diag = kernel.diagnostics().get(imported_gltf.diagnostic_id);
+    if (imported_gltf_diag.status != axiom::StatusCode::Ok || !imported_gltf_diag.value.has_value() ||
+        !has_issue_code(*imported_gltf_diag.value, axiom::diag_codes::kIoPostImportValidation)) {
+        std::cerr << "missing gltf import post-validation diagnostic\n";
+        std::filesystem::remove(out_path);
+        std::filesystem::remove(out_json_path);
+        std::filesystem::remove(out_gltf_path);
+        std::filesystem::remove(out_stl_path);
+        return 1;
+    }
+
     auto imported_json = kernel.io().import_axmjson(out_json_path.string(), import_options);
     if (imported_json.status != axiom::StatusCode::Ok || !imported_json.value.has_value()) {
         std::cerr << "axmjson import failed\n";
@@ -322,6 +385,12 @@ int main() {
         return 1;
     }
     const std::array<axiom::BodyId, 2> batch_bodies {*body.value, *imported.value};
+    auto batch_validate_all = kernel.validate().validate_all_many(batch_bodies, axiom::ValidationMode::Standard);
+    auto batch_validate_tol = kernel.validate().validate_tolerance_many(batch_bodies, axiom::ValidationMode::Standard);
+    if (batch_validate_all.status != axiom::StatusCode::Ok || batch_validate_tol.status != axiom::StatusCode::Ok) {
+        std::cerr << "batch bodies should pass Standard validate_all_many / validate_tolerance_many after io workflow\n";
+        return 1;
+    }
     const std::array<std::string, 2> batch_step_paths {*batch_step_1.value, *batch_step_2.value};
     const std::array<std::string, 2> batch_json_paths {*batch_json_1.value, *batch_json_2.value};
     if (kernel.io().export_many_step(batch_bodies, batch_step_paths, export_options).status != axiom::StatusCode::Ok ||
@@ -594,6 +663,96 @@ int main() {
         std::cerr << "extra io conditional export/truncate behavior is unexpected\n";
         return 1;
     }
+
+    const auto p_iges = tmp / ("axiom_io_interchange_" + uniq + ".iges");
+    const auto p_brep = tmp / ("axiom_io_interchange_" + uniq + ".brep");
+    const auto p_obj = tmp / ("axiom_io_interchange_" + uniq + ".obj");
+    const auto p_3mf = tmp / ("axiom_io_interchange_" + uniq + ".3mf");
+    const auto p_stl_report = tmp / ("axiom_io_mesh_report_" + uniq + ".stl");
+    const auto p_sidecar = tmp / ("axiom_io_mesh_report_" + uniq + ".mesh_report.json");
+    if (kernel.io().export_iges(*body.value, p_iges.string(), export_options).status != axiom::StatusCode::Ok ||
+        kernel.io().export_brep(*body.value, p_brep.string(), export_options).status != axiom::StatusCode::Ok ||
+        kernel.io().export_obj(*body.value, p_obj.string(), export_options).status != axiom::StatusCode::Ok ||
+        kernel.io().export_3mf(*body.value, p_3mf.string(), export_options).status != axiom::StatusCode::Ok) {
+        std::cerr << "interchange mesh export (iges/brep/obj/3mf) failed\n";
+        return 1;
+    }
+    auto fmt_iges = kernel.io().detect_format(p_iges.string());
+    auto fmt_brep = kernel.io().detect_format(p_brep.string());
+    auto fmt_obj = kernel.io().detect_format(p_obj.string());
+    auto fmt_3mf = kernel.io().detect_format(p_3mf.string());
+    if (fmt_iges.status != axiom::StatusCode::Ok || !fmt_iges.value.has_value() || *fmt_iges.value != "iges" ||
+        fmt_brep.status != axiom::StatusCode::Ok || !fmt_brep.value.has_value() || *fmt_brep.value != "brep" ||
+        fmt_obj.status != axiom::StatusCode::Ok || !fmt_obj.value.has_value() || *fmt_obj.value != "obj" ||
+        fmt_3mf.status != axiom::StatusCode::Ok || !fmt_3mf.value.has_value() || *fmt_3mf.value != "3mf") {
+        std::cerr << "detect_format for iges/brep/obj/3mf mismatch\n";
+        return 1;
+    }
+    auto imp_iges = kernel.io().import_auto(p_iges.string(), import_options);
+    auto imp_brep = kernel.io().import_auto(p_brep.string(), import_options);
+    auto imp_obj = kernel.io().import_auto(p_obj.string(), import_options);
+    auto imp_3mf = kernel.io().import_auto(p_3mf.string(), import_options);
+    if (imp_iges.status != axiom::StatusCode::Ok || !imp_iges.value.has_value() ||
+        imp_brep.status != axiom::StatusCode::Ok || !imp_brep.value.has_value() ||
+        imp_obj.status != axiom::StatusCode::Ok || !imp_obj.value.has_value() ||
+        imp_3mf.status != axiom::StatusCode::Ok || !imp_3mf.value.has_value()) {
+        std::cerr << "import_auto roundtrip for iges/brep/obj/3mf failed\n";
+        return 1;
+    }
+    auto bb_iges = kernel.representation().bbox_of_body(*imp_iges.value);
+    auto bb_brep = kernel.representation().bbox_of_body(*imp_brep.value);
+    auto bb_obj = kernel.representation().bbox_of_body(*imp_obj.value);
+    auto bb_3mf = kernel.representation().bbox_of_body(*imp_3mf.value);
+    if (bb_iges.status != axiom::StatusCode::Ok || !bb_iges.value.has_value() || bb_iges.value->max.x < 9.9 ||
+        bb_brep.status != axiom::StatusCode::Ok || !bb_brep.value.has_value() || bb_brep.value->max.x < 9.9 ||
+        bb_obj.status != axiom::StatusCode::Ok || !bb_obj.value.has_value() || bb_obj.value->max.x < 9.9 ||
+        bb_3mf.status != axiom::StatusCode::Ok || !bb_3mf.value.has_value() || bb_3mf.value->max.x < 9.9) {
+        std::cerr << "interchange import bbox not plausible for box body\n";
+        return 1;
+    }
+    std::ifstream iges_in {p_iges};
+    std::string iges_txt((std::istreambuf_iterator<char>(iges_in)), std::istreambuf_iterator<char>());
+    if (iges_txt.find("START") == std::string::npos || iges_txt.find("TERMINATE") == std::string::npos) {
+        std::cerr << "iges export missing expected markers\n";
+        return 1;
+    }
+    std::ifstream brep_in {p_brep};
+    std::string brep_txt((std::istreambuf_iterator<char>(brep_in)), std::istreambuf_iterator<char>());
+    if (brep_txt.find("AXIOM_BREP_INTERCHANGE") == std::string::npos ||
+        brep_txt.find("\"format\"") == std::string::npos || brep_txt.find("AXIOM_BREP") == std::string::npos) {
+        std::cerr << "brep export missing axiom interchange payload\n";
+        return 1;
+    }
+    std::ifstream obj_in {p_obj};
+    std::string obj_txt((std::istreambuf_iterator<char>(obj_in)), std::istreambuf_iterator<char>());
+    if (obj_txt.find("v ") == std::string::npos || obj_txt.find("f ") == std::string::npos) {
+        std::cerr << "obj export missing vertices/faces\n";
+        return 1;
+    }
+    axiom::ExportOptions report_opts = export_options;
+    report_opts.write_mesh_validation_report = true;
+    auto ex_stl_report = kernel.io().export_stl(*body.value, p_stl_report.string(), report_opts);
+    if (ex_stl_report.status != axiom::StatusCode::Ok) {
+        std::cerr << "stl export with mesh validation sidecar failed\n";
+        return 1;
+    }
+    if (!std::filesystem::exists(p_sidecar)) {
+        std::cerr << "expected mesh_report sidecar next to stl export\n";
+        return 1;
+    }
+    auto sidecar_diag = kernel.diagnostics().get(ex_stl_report.diagnostic_id);
+    if (sidecar_diag.status != axiom::StatusCode::Ok || !sidecar_diag.value.has_value() ||
+        !has_issue_code(*sidecar_diag.value, axiom::diag_codes::kIoExportMeshReportSidecar)) {
+        std::cerr << "missing mesh export sidecar diagnostic code\n";
+        return 1;
+    }
+    std::ifstream sidecar_in {p_sidecar};
+    std::string sidecar_json((std::istreambuf_iterator<char>(sidecar_in)), std::istreambuf_iterator<char>());
+    if (sidecar_json.find('{') == std::string::npos || sidecar_json.find('}') == std::string::npos) {
+        std::cerr << "mesh_report sidecar is not plausible json\n";
+        return 1;
+    }
+
     std::filesystem::remove(*rename_dst.value);
     std::filesystem::remove(scan_a);
     std::filesystem::remove(scan_b);
@@ -601,6 +760,12 @@ int main() {
     std::filesystem::remove(scan_dir);
     std::filesystem::remove(*line_file.value);
 
+    std::filesystem::remove(p_iges);
+    std::filesystem::remove(p_brep);
+    std::filesystem::remove(p_obj);
+    std::filesystem::remove(p_3mf);
+    std::filesystem::remove(p_stl_report);
+    std::filesystem::remove(p_sidecar);
     std::filesystem::remove(out_path);
     std::filesystem::remove(out_json_path);
     std::filesystem::remove(dirty_path);

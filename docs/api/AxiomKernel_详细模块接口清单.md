@@ -331,6 +331,11 @@ public:
 ### 6.2 拓扑事务接口
 
 ```cpp
+enum class TopologyIsolationLevel : std::uint8_t {
+  Unspecified = 0,
+  SnapshotSerializable = 1,
+};
+
 class TopologyTransaction {
 public:
   Result<VertexId> create_vertex(const Point3&);
@@ -346,8 +351,13 @@ public:
 
   Result<VersionId> commit();
   Result<void> rollback();
+
+  Result<std::uint64_t> write_operation_count() const;
+  Result<TopologyIsolationLevel> effective_isolation_level() const;
 };
 ```
+
+> 说明：`TopologyTransaction` 的完整签名见 `include/axiom/topo/topology_service.h`；另含 `set_coedge_pcurve`、删除壳/体、以及 trim 桥接审计读数 `coedge_pcurve_bind_count()` / `coedge_pcurve_clear_count()` 等。`write_operation_count()` 统计本事务内每次**成功**的写操作（创建/删除实体、`replace_surface`、每次 `set_coedge_pcurve` 含清除）；回滚或 `clear_tracking_records()` 归零。`effective_isolation_level()` 当前实现返回 `SnapshotSerializable`（单事务 + 快照回滚的工程占位，见头文件注释）。
 
 ### 6.3 拓扑验证接口
 
@@ -723,11 +733,15 @@ public:
 除 `PluginRegistry& plugins()` 外，`Kernel` 还提供：
 
 - **能力发现**：`plugin_manifest_names`、`plugin_total_count`、`has_any_plugins`、`plugin_vendors`、`plugin_capabilities`、`plugin_capabilities_histogram_lines`、`plugin_sdk_api_version`、`plugin_discovery_report_lines`、`plugin_discovery_report_json`（含 `manifests` 数组：`name`、`implementation_type_name`）、`plugin_api_compatibility_report_lines`。
-- **策略**：`plugin_host_policy`、`set_plugin_host_policy`、`has_service_plugin_registry`、`has_service_plugin_discovery`。
+- **策略**：`plugin_host_policy`、`set_plugin_host_policy`、`has_service_plugin_registry`、`has_service_plugin_discovery`、`has_service_plugin_import`、`has_service_plugin_export`、`has_service_plugin_repair`、`has_service_plugin_curve`；`PluginHostPolicy::auto_validate_body_after_plugin_importer`、`auto_validate_body_before_plugin_exporter`、`auto_validate_body_after_plugin_repair`、`auto_verify_curve_after_plugin_curve`（能力报告行/JSON 与 `plugin_discovery_report_lines` 对齐）。
+- **宿主导入封装**：`plugin_import_file(implementation_type_name, path, ValidationMode)`（可选在成功后按策略自动 `validate_all`）；注册表侧 `PluginRegistry::invoke_registered_importer` 仅调用插件、不做验证。
+- **宿主导出封装**：`plugin_export_file(implementation_type_name, body_id, path, ValidationMode)`（可选在调用插件前按策略先 `validate_all`；`Body` 不存在时失败）；注册表侧 `PluginRegistry::invoke_registered_exporter` 仅调用插件、不做验证。
+- **宿主修复封装**：`plugin_run_repair(implementation_type_name, body_id, RepairMode, ValidationMode)`（可选在插件返回 Ok 后按策略对结果体自动 `validate_all`：`OpReport::output` 若仍注册则优先，否则验证输入体；`Body` 不存在时失败）；注册表侧 `PluginRegistry::invoke_registered_repair` 仅调用插件、不做验证。
+- **宿主曲线封装**：`plugin_create_curve(implementation_type_name, PluginCurveDesc)`（可选在插件返回 Ok 后按策略校验 `CurveId` 已注册且 `CurveService::domain` 为合法开区间；`PluginCurveDesc::type_name` 若为空则视为与 `implementation_type_name` 一致，若非空则须与之一致）；注册表侧 `PluginRegistry::invoke_registered_curve` 仅调用插件、不做宿主校验。
 - **可诊断注册**（失败且 `enable_diagnostics` 时写入诊断存储，`diagnostic_id` 非零）：`register_plugin_curve`、`register_plugin_repair`、`register_plugin_importer`、`register_plugin_exporter`、`register_plugin_manifest_only`。  
   若仅需 `Result::warnings`、不写全局诊断，可直接使用 `plugins().register_*`。
 - **可诊断注销**：`unregister_plugin_curve`、`unregister_plugin_repair`、`unregister_plugin_importer`、`unregister_plugin_exporter`（按实现 `type_name`）、`unregister_plugin_manifest`（按清单 `name`）。`PluginRegistry::unregister_*` 在 `type_name` 为空或未命中实现时返回 **`AXM-PLUGIN-E-0003` / `AXM-PLUGIN-E-0008`**（见 `error_codes.h`）。
-- **验证**：`validate_after_plugin_mutation(BodyId, ValidationMode)`（语义同 `validate().validate_all`，非 `const` 成员因需访问 `ValidationService`）。
+- **验证**：`validate_after_plugin_mutation(BodyId, ValidationMode)`（语义同 `validate().validate_all`，非 `const` 成员因需访问 `ValidationService`）。开启 `auto_validate_body_after_plugin_importer` 时，`plugin_import_file` 成功返回前会先做同一套全量验证；开启 `auto_validate_body_before_plugin_exporter` 时，`plugin_export_file` 在调用导出插件前先验证；开启 `auto_validate_body_after_plugin_repair` 时，`plugin_run_repair` 在插件返回 Ok 后对结果体做全量验证；开启 `auto_verify_curve_after_plugin_curve` 时，`plugin_create_curve` 在插件返回 Ok 后做曲线句柄与参数域一致性校验；验证失败时返回非 Ok（`AXM-PLUGIN-E-0005` 等），导入场景下 Body 可能仍保留；修复场景下模型可能已被插件修改；曲线场景下无效 `CurveId` 仍可能已被插件登记或未登记（视插件实现而定）。
 
 ## 15. Kernel 门面接口
 

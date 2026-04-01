@@ -24,6 +24,15 @@ public:
     }
 };
 
+/// 与 `SampleCurvePlugin` 行为相同，但 `type_name` 不同，便于在同宿主策略下连续注册多条曲线插件回归用例。
+class SampleCurveAltPlugin final : public axiom::ICurvePlugin {
+public:
+    std::string type_name() const override { return "sample_curve_alt"; }
+    axiom::Result<axiom::CurveId> create(const axiom::PluginCurveDesc&) override {
+        return axiom::error_result<axiom::CurveId>(axiom::StatusCode::OperationFailed);
+    }
+};
+
 bool has_warning_code(const axiom::Result<void>& r, std::string_view code) {
     for (const auto& w : r.warnings) {
         if (w.code == code) {
@@ -189,6 +198,18 @@ int main() {
         std::cerr << "expected matching plugin_api_version to register\n";
         return 1;
     }
+    axiom::PluginManifest exact_plus;
+    exact_plus.name = "exact_plus";
+    exact_plus.version = "1";
+    exact_plus.vendor = "v";
+    exact_plus.capabilities = {"c"};
+    exact_plus.plugin_api_version = std::string(axiom::kPluginSdkApiVersion) + "+build";
+    auto epr = k_api.plugins().register_curve_type(exact_plus, std::make_unique<SampleCurvePlugin>());
+    if (epr.status != axiom::StatusCode::InvalidInput ||
+        !has_warning_code(epr, axiom::diag_codes::kPluginVersionIncompatible)) {
+        std::cerr << "expected Exact match to reject +build suffix on declared version\n";
+        return 1;
+    }
 
     auto compat = k_api.plugin_api_compatibility_report_lines();
     if (compat.status != axiom::StatusCode::Ok || !compat.value.has_value() || compat.value->size() < 2) {
@@ -248,6 +269,16 @@ int main() {
         std::cerr << "expected SameMinor to reject different minor\n";
         return 1;
     }
+    axiom::PluginManifest m_pre;
+    m_pre.name = "pre_rel";
+    m_pre.version = "1";
+    m_pre.vendor = "v";
+    m_pre.capabilities = {"c"};
+    m_pre.plugin_api_version = "1.0.12-rc.1";
+    if (k_minor.plugins().register_curve_type(m_pre, std::make_unique<SampleCurveAltPlugin>()).status != axiom::StatusCode::Ok) {
+        std::cerr << "expected SameMinor to accept SemVer pre-release on same major.minor core\n";
+        return 1;
+    }
 
     axiom::Kernel k_major_mode;
     axiom::PluginHostPolicy pol_major_mode;
@@ -265,6 +296,17 @@ int main() {
     m_smj.plugin_api_version = "1.9.9";
     if (k_major_mode.plugins().register_curve_type(m_smj, std::make_unique<SampleCurvePlugin>()).status != axiom::StatusCode::Ok) {
         std::cerr << "expected SameMajor to accept 1.9.9 vs host 1.0\n";
+        return 1;
+    }
+    axiom::PluginManifest m_build_meta;
+    m_build_meta.name = "build_meta";
+    m_build_meta.version = "1";
+    m_build_meta.vendor = "v";
+    m_build_meta.capabilities = {"c"};
+    m_build_meta.plugin_api_version = "1.8.0+beta";
+    if (k_major_mode.plugins().register_curve_type(m_build_meta, std::make_unique<SampleCurveAltPlugin>()).status !=
+        axiom::StatusCode::Ok) {
+        std::cerr << "expected SameMajor to accept +build metadata when major matches\n";
         return 1;
     }
     axiom::PluginManifest m_smj_bad;
@@ -399,6 +441,392 @@ int main() {
     if (hm.status != axiom::StatusCode::Ok || !hm.value.has_value() || *hm.value) {
         std::cerr << "manifest mf_only should be removed\n";
         return 1;
+    }
+
+    {
+        axiom::Kernel k_imp;
+        auto has_pi = k_imp.has_service_plugin_import();
+        if (has_pi.status != axiom::StatusCode::Ok || !has_pi.value.has_value() || !*has_pi.value) {
+            std::cerr << "has_service_plugin_import unexpected\n";
+            return 1;
+        }
+        auto miss = k_imp.plugin_import_file("no_such_importer_ever", "x.step");
+        if (miss.status != axiom::StatusCode::InvalidInput || miss.warnings.empty() ||
+            miss.warnings[0].code != axiom::diag_codes::kPluginNotRegistered) {
+            std::cerr << "plugin_import_file missing importer\n";
+            return 1;
+        }
+        auto empty_imp = k_imp.plugin_import_file("  \t  ", "x.step");
+        if (empty_imp.status != axiom::StatusCode::InvalidInput || empty_imp.warnings.empty() ||
+            empty_imp.warnings[0].code != axiom::diag_codes::kPluginCapabilityIncomplete) {
+            std::cerr << "plugin_import_file empty type_name\n";
+            return 1;
+        }
+
+        class KernelBoxImporter final : public axiom::IImporterPlugin {
+        public:
+            explicit KernelBoxImporter(axiom::Kernel* k) : k_(k) {}
+            std::string type_name() const override { return "kernel_box_importer"; }
+            axiom::Result<axiom::BodyId> import_file(std::string_view) override {
+                auto b = k_->primitives().box({0.0, 0.0, 0.0}, 1.0, 1.0, 1.0);
+                if (b.status != axiom::StatusCode::Ok || !b.value.has_value()) {
+                    return axiom::error_result<axiom::BodyId>(b.status, b.diagnostic_id, std::move(b.warnings));
+                }
+                return axiom::ok_result(*b.value);
+            }
+
+        private:
+            axiom::Kernel* k_;
+        };
+
+        class BogusBodyImporter final : public axiom::IImporterPlugin {
+        public:
+            std::string type_name() const override { return "bogus_body_importer"; }
+            axiom::Result<axiom::BodyId> import_file(std::string_view) override {
+                return axiom::ok_result(axiom::BodyId {999999999ull});
+            }
+        };
+
+        axiom::PluginManifest mf_imp;
+        mf_imp.name = "kb_imp";
+        mf_imp.version = "1";
+        mf_imp.vendor = "v";
+        mf_imp.capabilities = {"io", "import"};
+        if (k_imp.register_plugin_importer(mf_imp, std::make_unique<KernelBoxImporter>(&k_imp)).status !=
+            axiom::StatusCode::Ok) {
+            std::cerr << "register kernel_box_importer failed\n";
+            return 1;
+        }
+        auto got = k_imp.plugin_import_file("kernel_box_importer", "unused.path");
+        if (got.status != axiom::StatusCode::Ok || !got.value.has_value() || got.value->value == 0) {
+            std::cerr << "plugin_import_file should return body id\n";
+            return 1;
+        }
+
+        auto pol_r = k_imp.plugin_host_policy();
+        if (pol_r.status != axiom::StatusCode::Ok || !pol_r.value.has_value()) {
+            std::cerr << "plugin_host_policy for import test\n";
+            return 1;
+        }
+        axiom::PluginHostPolicy pol_val = *pol_r.value;
+        pol_val.auto_validate_body_after_plugin_importer = true;
+        if (k_imp.set_plugin_host_policy(pol_val).status != axiom::StatusCode::Ok) {
+            std::cerr << "set auto_validate policy failed\n";
+            return 1;
+        }
+        auto ok2 = k_imp.plugin_import_file("kernel_box_importer", "b.path");
+        if (ok2.status != axiom::StatusCode::Ok) {
+            std::cerr << "plugin_import_file with auto_validate should pass on valid box\n";
+            return 1;
+        }
+
+        axiom::PluginManifest mf_bad;
+        mf_bad.name = "bogus_mf";
+        mf_bad.version = "1";
+        mf_bad.vendor = "v";
+        mf_bad.capabilities = {"io"};
+        if (k_imp.register_plugin_importer(mf_bad, std::make_unique<BogusBodyImporter>()).status !=
+            axiom::StatusCode::Ok) {
+            std::cerr << "register bogus importer failed\n";
+            return 1;
+        }
+        auto bad_val = k_imp.plugin_import_file("bogus_body_importer", "c.path");
+        if (bad_val.status == axiom::StatusCode::Ok) {
+            std::cerr << "plugin_import_file expected post-import validate failure for invalid body id\n";
+            return 1;
+        }
+
+        auto jsn_pol = k_imp.plugin_discovery_report_json();
+        if (jsn_pol.status != axiom::StatusCode::Ok || !jsn_pol.value.has_value() ||
+            jsn_pol.value->find("auto_validate_body_after_plugin_importer") == std::string::npos ||
+            jsn_pol.value->find("auto_validate_body_before_plugin_exporter") == std::string::npos ||
+            jsn_pol.value->find("auto_validate_body_after_plugin_repair") == std::string::npos ||
+            jsn_pol.value->find("auto_verify_curve_after_plugin_curve") == std::string::npos) {
+            std::cerr << "plugin_discovery_report_json missing auto_validate policy fields\n";
+            return 1;
+        }
+    }
+
+    {
+        axiom::Kernel k_exp;
+        auto has_pe = k_exp.has_service_plugin_export();
+        if (has_pe.status != axiom::StatusCode::Ok || !has_pe.value.has_value() || !*has_pe.value) {
+            std::cerr << "has_service_plugin_export unexpected\n";
+            return 1;
+        }
+        auto no_body = k_exp.plugin_export_file("any_exporter", axiom::BodyId {888888888ull}, "out.bin");
+        if (no_body.status != axiom::StatusCode::InvalidInput || no_body.warnings.empty() ||
+            no_body.warnings[0].code != axiom::diag_codes::kPluginExecutionFailure) {
+            std::cerr << "plugin_export_file missing body should fail\n";
+            return 1;
+        }
+        auto bx = k_exp.primitives().box({0.0, 0.0, 0.0}, 1.0, 1.0, 1.0);
+        if (bx.status != axiom::StatusCode::Ok || !bx.value.has_value()) {
+            std::cerr << "box for export test failed\n";
+            return 1;
+        }
+        auto miss_exp = k_exp.plugin_export_file("no_such_exporter_ever", *bx.value, "p.bin");
+        if (miss_exp.status != axiom::StatusCode::InvalidInput || miss_exp.warnings.empty() ||
+            miss_exp.warnings[0].code != axiom::diag_codes::kPluginNotRegistered) {
+            std::cerr << "plugin_export_file missing exporter\n";
+            return 1;
+        }
+        auto empty_exp = k_exp.plugin_export_file("  \t  ", *bx.value, "p.bin");
+        if (empty_exp.status != axiom::StatusCode::InvalidInput || empty_exp.warnings.empty() ||
+            empty_exp.warnings[0].code != axiom::diag_codes::kPluginCapabilityIncomplete) {
+            std::cerr << "plugin_export_file empty type_name\n";
+            return 1;
+        }
+
+        class RecordingExporter final : public axiom::IExporterPlugin {
+        public:
+            RecordingExporter(std::string* path_out, axiom::BodyId* body_out) : path_out_(path_out), body_out_(body_out) {}
+            std::string type_name() const override { return "recording_exporter_test"; }
+            axiom::Result<void> export_file(axiom::BodyId bid, std::string_view path) override {
+                if (path_out_ != nullptr) {
+                    *path_out_ = std::string(path);
+                }
+                if (body_out_ != nullptr) {
+                    *body_out_ = bid;
+                }
+                return axiom::ok_void();
+            }
+
+        private:
+            std::string* path_out_{};
+            axiom::BodyId* body_out_{};
+        };
+
+        std::string last_path;
+        axiom::BodyId last_body {};
+        axiom::PluginManifest mex;
+        mex.name = "rec_exp_mf";
+        mex.version = "1";
+        mex.vendor = "v";
+        mex.capabilities = {"io", "export"};
+        if (k_exp.register_plugin_exporter(mex, std::make_unique<RecordingExporter>(&last_path, &last_body)).status !=
+            axiom::StatusCode::Ok) {
+            std::cerr << "register recording exporter failed\n";
+            return 1;
+        }
+        const std::string want_path = "/tmp/plugin_sdk_export_test.out";
+        if (k_exp.plugin_export_file("recording_exporter_test", *bx.value, want_path).status != axiom::StatusCode::Ok) {
+            std::cerr << "plugin_export_file should succeed\n";
+            return 1;
+        }
+        if (last_path != want_path || last_body.value != bx.value->value) {
+            std::cerr << "recording exporter did not receive path/body\n";
+            return 1;
+        }
+
+        auto pol_e = k_exp.plugin_host_policy();
+        if (pol_e.status != axiom::StatusCode::Ok || !pol_e.value.has_value()) {
+            std::cerr << "plugin_host_policy export test\n";
+            return 1;
+        }
+        axiom::PluginHostPolicy pol_pre = *pol_e.value;
+        pol_pre.auto_validate_body_before_plugin_exporter = true;
+        if (k_exp.set_plugin_host_policy(pol_pre).status != axiom::StatusCode::Ok) {
+            std::cerr << "set pre_export validate policy failed\n";
+            return 1;
+        }
+        last_path.clear();
+        if (k_exp.plugin_export_file("recording_exporter_test", *bx.value, want_path + "2").status !=
+            axiom::StatusCode::Ok) {
+            std::cerr << "plugin_export_file with pre_validate should pass on valid box\n";
+            return 1;
+        }
+        if (last_path != want_path + "2") {
+            std::cerr << "second export path mismatch\n";
+            return 1;
+        }
+    }
+
+    {
+        axiom::Kernel k_rep;
+        auto has_pr = k_rep.has_service_plugin_repair();
+        if (has_pr.status != axiom::StatusCode::Ok || !has_pr.value.has_value() || !*has_pr.value) {
+            std::cerr << "has_service_plugin_repair unexpected\n";
+            return 1;
+        }
+        auto no_body = k_rep.plugin_run_repair("any_repair", axiom::BodyId {777777777ull}, axiom::RepairMode::Safe);
+        if (no_body.status != axiom::StatusCode::InvalidInput || no_body.warnings.empty() ||
+            no_body.warnings[0].code != axiom::diag_codes::kPluginExecutionFailure) {
+            std::cerr << "plugin_run_repair missing body should fail\n";
+            return 1;
+        }
+        auto bx = k_rep.primitives().box({0.0, 0.0, 0.0}, 1.0, 1.0, 1.0);
+        if (bx.status != axiom::StatusCode::Ok || !bx.value.has_value()) {
+            std::cerr << "box for repair plugin test failed\n";
+            return 1;
+        }
+        auto miss_rep = k_rep.plugin_run_repair("no_such_repair_ever", *bx.value, axiom::RepairMode::Safe);
+        if (miss_rep.status != axiom::StatusCode::InvalidInput || miss_rep.warnings.empty() ||
+            miss_rep.warnings[0].code != axiom::diag_codes::kPluginNotRegistered) {
+            std::cerr << "plugin_run_repair missing repair plugin\n";
+            return 1;
+        }
+        auto empty_rep = k_rep.plugin_run_repair("  \t  ", *bx.value, axiom::RepairMode::Safe);
+        if (empty_rep.status != axiom::StatusCode::InvalidInput || empty_rep.warnings.empty() ||
+            empty_rep.warnings[0].code != axiom::diag_codes::kPluginCapabilityIncomplete) {
+            std::cerr << "plugin_run_repair empty type_name\n";
+            return 1;
+        }
+
+        class NoopRepairPlugin final : public axiom::IRepairPlugin {
+        public:
+            std::string type_name() const override { return "noop_repair_sdk_test"; }
+            axiom::Result<axiom::OpReport> run(axiom::BodyId bid, axiom::RepairMode) override {
+                return axiom::ok_result(axiom::OpReport {.status = axiom::StatusCode::Ok, .output = bid});
+            }
+        };
+
+        axiom::PluginManifest mrep;
+        mrep.name = "noop_rep_mf";
+        mrep.version = "1";
+        mrep.vendor = "v";
+        mrep.capabilities = {"heal", "repair"};
+        if (k_rep.register_plugin_repair(mrep, std::make_unique<NoopRepairPlugin>()).status != axiom::StatusCode::Ok) {
+            std::cerr << "register noop repair plugin failed\n";
+            return 1;
+        }
+        auto ran = k_rep.plugin_run_repair("noop_repair_sdk_test", *bx.value, axiom::RepairMode::ReportOnly);
+        if (ran.status != axiom::StatusCode::Ok || !ran.value.has_value() ||
+            ran.value->output.value != bx.value->value) {
+            std::cerr << "plugin_run_repair should succeed with noop plugin\n";
+            return 1;
+        }
+
+        auto pol_rep = k_rep.plugin_host_policy();
+        if (pol_rep.status != axiom::StatusCode::Ok || !pol_rep.value.has_value()) {
+            std::cerr << "plugin_host_policy repair test\n";
+            return 1;
+        }
+        axiom::PluginHostPolicy pol_ar = *pol_rep.value;
+        pol_ar.auto_validate_body_after_plugin_repair = true;
+        if (k_rep.set_plugin_host_policy(pol_ar).status != axiom::StatusCode::Ok) {
+            std::cerr << "set auto_validate after repair policy failed\n";
+            return 1;
+        }
+        if (k_rep.plugin_run_repair("noop_repair_sdk_test", *bx.value, axiom::RepairMode::Safe).status !=
+            axiom::StatusCode::Ok) {
+            std::cerr << "plugin_run_repair with post-repair validate should pass on valid box\n";
+            return 1;
+        }
+
+        auto jsn_r = k_rep.plugin_discovery_report_json();
+        if (jsn_r.status != axiom::StatusCode::Ok || !jsn_r.value.has_value() ||
+            jsn_r.value->find("auto_validate_body_after_plugin_repair") == std::string::npos ||
+            jsn_r.value->find("auto_verify_curve_after_plugin_curve") == std::string::npos) {
+            std::cerr << "plugin_discovery_report_json missing plugin repair/curve policy fields\n";
+            return 1;
+        }
+    }
+
+    {
+        axiom::Kernel k_cv;
+        auto has_pc = k_cv.has_service_plugin_curve();
+        if (has_pc.status != axiom::StatusCode::Ok || !has_pc.value.has_value() || !*has_pc.value) {
+            std::cerr << "has_service_plugin_curve unexpected\n";
+            return 1;
+        }
+        axiom::PluginCurveDesc empty_desc {};
+        auto miss_cv = k_cv.plugin_create_curve("no_such_curve_plugin_xyz", empty_desc);
+        if (miss_cv.status != axiom::StatusCode::InvalidInput || miss_cv.warnings.empty() ||
+            miss_cv.warnings[0].code != axiom::diag_codes::kPluginNotRegistered) {
+            std::cerr << "plugin_create_curve missing plugin\n";
+            return 1;
+        }
+        auto empty_cv = k_cv.plugin_create_curve("  \t  ", empty_desc);
+        if (empty_cv.status != axiom::StatusCode::InvalidInput || empty_cv.warnings.empty() ||
+            empty_cv.warnings[0].code != axiom::diag_codes::kPluginCapabilityIncomplete) {
+            std::cerr << "plugin_create_curve empty implementation_type_name\n";
+            return 1;
+        }
+
+        class KernelLineCurvePlugin final : public axiom::ICurvePlugin {
+        public:
+            explicit KernelLineCurvePlugin(axiom::Kernel* k) : k_(k) {}
+            std::string type_name() const override { return "kernel_line_curve_sdk_test"; }
+            axiom::Result<axiom::CurveId> create(const axiom::PluginCurveDesc&) override {
+                auto ln = k_->curves().make_line({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
+                if (ln.status != axiom::StatusCode::Ok || !ln.value.has_value()) {
+                    return axiom::error_result<axiom::CurveId>(ln.status, ln.diagnostic_id, std::move(ln.warnings));
+                }
+                return axiom::ok_result(*ln.value);
+            }
+
+        private:
+            axiom::Kernel* k_;
+        };
+
+        class BogusCurveIdPlugin final : public axiom::ICurvePlugin {
+        public:
+            std::string type_name() const override { return "bogus_curve_id_sdk_test"; }
+            axiom::Result<axiom::CurveId> create(const axiom::PluginCurveDesc&) override {
+                return axiom::ok_result(axiom::CurveId {888888888ull});
+            }
+        };
+
+        axiom::PluginManifest mcv;
+        mcv.name = "line_curve_mf";
+        mcv.version = "1";
+        mcv.vendor = "v";
+        mcv.capabilities = {"curve", "geo"};
+        if (k_cv.register_plugin_curve(mcv, std::make_unique<KernelLineCurvePlugin>(&k_cv)).status !=
+            axiom::StatusCode::Ok) {
+            std::cerr << "register kernel line curve plugin failed\n";
+            return 1;
+        }
+        axiom::PluginCurveDesc d {};
+        auto got_cv = k_cv.plugin_create_curve("kernel_line_curve_sdk_test", d);
+        if (got_cv.status != axiom::StatusCode::Ok || !got_cv.value.has_value() || got_cv.value->value == 0) {
+            std::cerr << "plugin_create_curve should return valid curve id\n";
+            return 1;
+        }
+
+        axiom::PluginManifest mbad;
+        mbad.name = "bogus_cv_mf";
+        mbad.version = "1";
+        mbad.vendor = "v";
+        mbad.capabilities = {"curve"};
+        if (k_cv.register_plugin_curve(mbad, std::make_unique<BogusCurveIdPlugin>()).status !=
+            axiom::StatusCode::Ok) {
+            std::cerr << "register bogus curve plugin failed\n";
+            return 1;
+        }
+        auto bad_cv = k_cv.plugin_create_curve("bogus_curve_id_sdk_test", axiom::PluginCurveDesc {});
+        if (bad_cv.status == axiom::StatusCode::Ok) {
+            std::cerr << "plugin_create_curve expected verify failure for bogus curve id\n";
+            return 1;
+        }
+
+        auto pol_c = k_cv.plugin_host_policy();
+        if (pol_c.status != axiom::StatusCode::Ok || !pol_c.value.has_value()) {
+            std::cerr << "plugin_host_policy curve test\n";
+            return 1;
+        }
+        axiom::PluginHostPolicy pol_off = *pol_c.value;
+        pol_off.auto_verify_curve_after_plugin_curve = false;
+        if (k_cv.set_plugin_host_policy(pol_off).status != axiom::StatusCode::Ok) {
+            std::cerr << "set auto_verify curve off failed\n";
+            return 1;
+        }
+        auto pass_bogus = k_cv.plugin_create_curve("bogus_curve_id_sdk_test", axiom::PluginCurveDesc {});
+        if (pass_bogus.status != axiom::StatusCode::Ok || !pass_bogus.value.has_value() ||
+            pass_bogus.value->value != 888888888ull) {
+            std::cerr << "plugin_create_curve with verify off should return plugin id\n";
+            return 1;
+        }
+
+        axiom::PluginCurveDesc mismatch {};
+        mismatch.type_name = "not_the_impl_name";
+        auto mm = k_cv.plugin_create_curve("kernel_line_curve_sdk_test", mismatch);
+        if (mm.status != axiom::StatusCode::InvalidInput || mm.warnings.empty() ||
+            mm.warnings[0].code != axiom::diag_codes::kPluginCapabilityIncomplete) {
+            std::cerr << "plugin_create_curve desc type_name mismatch expected\n";
+            return 1;
+        }
     }
 
     return 0;

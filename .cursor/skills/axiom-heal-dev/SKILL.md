@@ -14,7 +14,7 @@ description: Develop and harden AxiomKernel Heal (Validation/Repair) including s
 ## 代码入口
 
 - Public API：`include/axiom/heal/heal_services.h`
-- 实现：`src/heal/heal_services.cpp`
+- 实现：`src/axiom/heal/heal_services.cpp`
 - 关键回归：`tests/ops/ops_heal_test.cpp`、`tests/io/io_workflow_test.cpp`、`tests/diag/diagnostics_test.cpp`
 
 ## 硬规则（必须遵守）

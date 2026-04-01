@@ -19,72 +19,78 @@ if (AXM_ENABLE_STRICT_WARNINGS)
 endif()
 
 add_library(axiom_diag STATIC
-    src/diag/diagnostic_internal_utils.cpp
-    src/diag/diagnostic_service.cpp
+    src/axiom/diag/diagnostic_internal_utils.cpp
+    src/axiom/diag/diagnostic_service.cpp
 )
 target_link_libraries(axiom_diag PUBLIC axiom_core)
 target_include_directories(axiom_diag PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 add_library(axiom_math STATIC
-    src/math/math_internal_utils.cpp
-    src/math/math_services.cpp
+    src/axiom/math/math_internal_utils.cpp
+    src/axiom/math/math_services.cpp
 )
 target_link_libraries(axiom_math PUBLIC axiom_core)
 target_include_directories(axiom_math PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 add_library(axiom_geo STATIC
-    src/geo/geometry_services.cpp
+    src/axiom/geo/geometry_services.cpp
+    src/axiom/geo/geometry_detail_bezier.cpp
 )
 target_link_libraries(axiom_geo PUBLIC axiom_core axiom_math axiom_diag)
 target_include_directories(axiom_geo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 add_library(axiom_topo STATIC
-    src/topo/topology_service.cpp
+    src/axiom/topo/topology_service.cpp
+    src/axiom/topo/topo_service_internal.cpp
 )
 target_link_libraries(axiom_topo PUBLIC axiom_core axiom_geo axiom_math axiom_diag)
 target_include_directories(axiom_topo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 add_library(axiom_rep STATIC
-    src/rep/representation_conversion_service.cpp
-    src/rep/representation_internal_utils.cpp
+    src/axiom/rep/representation_conversion_service.cpp
+    src/axiom/rep/representation_internal_utils.cpp
 )
 target_link_libraries(axiom_rep PUBLIC axiom_core axiom_geo axiom_topo axiom_math axiom_diag)
 target_include_directories(axiom_rep PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 add_library(axiom_ops STATIC
-    src/ops/ops_services.cpp
+    src/axiom/ops/ops_services.cpp
+    src/axiom/ops/ops_service_internal.cpp
 )
 target_link_libraries(axiom_ops PUBLIC axiom_core axiom_math axiom_geo axiom_topo axiom_rep axiom_diag)
 target_include_directories(axiom_ops PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 add_library(axiom_heal STATIC
-    src/heal/heal_services.cpp
-    src/heal/mesh_self_intersection.cpp
+    src/axiom/heal/heal_services.cpp
+    src/axiom/heal/mesh_self_intersection.cpp
 )
 target_link_libraries(axiom_heal PUBLIC axiom_core axiom_math axiom_geo axiom_topo axiom_rep axiom_diag)
 target_include_directories(axiom_heal PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 add_library(axiom_eval STATIC
-    src/eval/eval_internal_utils.cpp
-    src/eval/eval_services.cpp
+    src/axiom/eval/eval_internal_utils.cpp
+    src/axiom/eval/eval_services.cpp
 )
 target_link_libraries(axiom_eval PUBLIC axiom_core axiom_diag)
 target_include_directories(axiom_eval PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 add_library(axiom_io STATIC
-    src/io/io_service.cpp
+    src/axiom/io/io_service.cpp
+    src/axiom/io/io_service_internal.cpp
 )
 target_link_libraries(axiom_io PUBLIC axiom_core axiom_rep axiom_geo axiom_topo axiom_diag axiom_heal)
 target_include_directories(axiom_io PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 add_library(axiom_plugin STATIC
-    src/plugin/plugin_registry.cpp
+    src/axiom/plugin/plugin_registry.cpp
 )
 target_link_libraries(axiom_plugin PUBLIC axiom_core axiom_diag)
 target_include_directories(axiom_plugin PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 add_library(axiom_sdk STATIC
-    src/sdk/kernel.cpp
+    src/axiom/sdk/kernel.cpp
+    src/axiom/sdk/kernel_plugin.cpp
+    src/axiom/internal/sdk/kernel_plugin_helpers.cpp
 )
 target_link_libraries(axiom_sdk
     PUBLIC

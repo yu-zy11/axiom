@@ -37,6 +37,7 @@ inline constexpr std::string_view kTopoLoopOrientationMismatch = "AXM-TOPO-E-001
 inline constexpr std::string_view kTopoDanglingCoedge = "AXM-TOPO-E-0019";
 inline constexpr std::string_view kTopoDanglingVertex = "AXM-TOPO-E-0020";
 inline constexpr std::string_view kTopoOrphanLoop = "AXM-TOPO-E-0021";
+inline constexpr std::string_view kTopoOrphanFace = "AXM-TOPO-E-0022";
 
 inline constexpr std::string_view kBoolInvalidInput = "AXM-BOOL-E-0001";
 inline constexpr std::string_view kBoolIntersectionFailure = "AXM-BOOL-E-0003";
@@ -44,6 +45,8 @@ inline constexpr std::string_view kBoolClassificationFailure = "AXM-BOOL-E-0005"
 inline constexpr std::string_view kBoolRebuildFailure = "AXM-BOOL-E-0006";
 inline constexpr std::string_view kBoolNearDegenerateWarning = "AXM-BOOL-W-0001";
 inline constexpr std::string_view kBoolPrepNoCandidateWarning = "AXM-BOOL-W-0002";
+/// 布尔管线结束后 Strict 仍失败（含已尝试 auto_repair）：标记工业闭环缺口，便于审计与后续 Heal。
+inline constexpr std::string_view kBoolStrictValidationResidual = "AXM-BOOL-W-0003";
 /// 已进入布尔候选构建阶段（占位实现：基于壳/包围盒区域统计）。
 inline constexpr std::string_view kBoolStageCandidates = "AXM-BOOL-D-0001";
 inline constexpr std::string_view kBoolPrepCandidatesBuilt = "AXM-BOOL-D-0002";
@@ -83,6 +86,8 @@ inline constexpr std::string_view kBlendInvalidTarget = "AXM-BLEND-E-0001";
 inline constexpr std::string_view kBlendParameterTooLarge = "AXM-BLEND-E-0002";
 /// 圆角/倒角等混合特征当前仍为占位近似（拓扑骨架 + 参数门禁），未提供工业级几何生成。
 inline constexpr std::string_view kBlendApproximatePlaceholder = "AXM-BLEND-W-0001";
+/// 一次处理多条边：角区/连续滚球/变半径未实现，与单边的拓扑占位同级提示。
+inline constexpr std::string_view kBlendMultiEdgeCornerPlaceholder = "AXM-BLEND-W-0002";
 
 inline constexpr std::string_view kModOffsetInvalid = "AXM-MOD-E-0001";
 inline constexpr std::string_view kModOffsetSelfIntersection = "AXM-MOD-E-0002";
@@ -106,6 +111,8 @@ inline constexpr std::string_view kHealRepairValidated = "AXM-HEAL-D-0005";
 inline constexpr std::string_view kHealRepairPipelineTrace = "AXM-HEAL-D-0006";
 /// 修复管线回放摘要（逗号分隔操作名，与 D-0006 顺序一致）；便于日志/CI 解析而不依赖 `summarize_repair` 文本。
 inline constexpr std::string_view kHealRepairReplaySummary = "AXM-HEAL-D-0007";
+/// 缝合已生成派生体（可检索 `Issue.stage=heal.sew_faces` 与 `related_entities` 追踪输入面/输出体）。
+inline constexpr std::string_view kHealSewCompleted = "AXM-HEAL-D-0008";
 
 inline constexpr std::string_view kValSelfIntersection = "AXM-VAL-E-0001";
 /// 与文档字典一致：拓扑非流形等“形状不可用”类验证失败（验证层语义，可与 TOPO 细分码并存）。
@@ -118,6 +125,12 @@ inline constexpr std::string_view kValParameterDomainInvalid = "AXM-VAL-E-0007";
 inline constexpr std::string_view kValSelfIntersectionMeshBudget = "AXM-VAL-E-0008";
 /// Strict：包围盒最小厚度相对当前线性容差过小，几何细节可能落在容差噪声尺度内（薄壁/薄片风险）。
 inline constexpr std::string_view kValModelFinerThanTolerance = "AXM-VAL-E-0009";
+/// 包围盒或 owned B-Rep 顶点坐标含 NaN/Inf，无法进行可靠的容差/求值/网格分析。
+inline constexpr std::string_view kValNonFiniteGeometry = "AXM-VAL-E-0010";
+/// Strict：同一 owned B-Rep 上出现多顶点世界坐标间距落在相对线性容差带内（近重复/应焊接），影响容差一致性与下游拓扑语义。
+inline constexpr std::string_view kValNearDuplicateVertices = "AXM-VAL-E-0011";
+/// Strict：平面拓扑面外环顶点多边形法向与支撑平面几何法向偏离过大（非法嵌入/法向语义不一致）。
+inline constexpr std::string_view kValFaceNormalInconsistent = "AXM-VAL-E-0012";
 
 inline constexpr std::string_view kIoFileNotFound = "AXM-IO-E-0001";
 inline constexpr std::string_view kIoUnknownFormat = "AXM-IO-E-0002";
@@ -126,6 +139,10 @@ inline constexpr std::string_view kIoImportFailure = "AXM-IO-E-0004";
 inline constexpr std::string_view kIoExportFailure = "AXM-IO-E-0005";
 inline constexpr std::string_view kIoPostImportValidation = "AXM-IO-D-0004";
 inline constexpr std::string_view kIoPostImportRepairMode = "AXM-IO-D-0005";
+/// 严格网格导出：`inspect_mesh` 未通过（越界索引/退化三角形等）。
+inline constexpr std::string_view kIoExportMeshStrictQaFailed = "AXM-IO-E-0006";
+/// 网格验证 JSON 侧车已写出（`stem.mesh_report.json`）。
+inline constexpr std::string_view kIoExportMeshReportSidecar = "AXM-IO-D-0008";
 
 inline constexpr std::string_view kTesFailure = "AXM-TES-E-0001";
 

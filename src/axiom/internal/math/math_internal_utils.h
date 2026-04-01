@@ -27,7 +27,10 @@ bool point_equal_tol(const Point3& lhs, const Point3& rhs, Scalar tolerance);
 Scalar bbox_characteristic_length(const BoundingBox& bbox);
 Scalar effective_tolerance(Scalar requested, Scalar fallback);
 Scalar clamp_local_tolerance(Scalar value, const TolerancePolicy& policy);
+/// 将调用方请求的线性容差与 `TolerancePolicy` 合成并钳制到 `[min_local,max_local]`。
+/// `requested <= 0` 时回退到 `policy.linear`（与 `ToleranceService::effective_linear` 一致）。
 Scalar resolve_linear_tolerance(Scalar requested, const TolerancePolicy& policy);
+/// 角度容差；语义同 `ToleranceService::effective_angular`。
 Scalar resolve_angular_tolerance(Scalar requested, const TolerancePolicy& policy);
 Scalar resolve_linear_tolerance_for_scale(Scalar requested, const TolerancePolicy& policy, Scalar model_scale);
 Scalar resolve_angular_tolerance_for_scale(Scalar requested, const TolerancePolicy& policy, Scalar model_scale);

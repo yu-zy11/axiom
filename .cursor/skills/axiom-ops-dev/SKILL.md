@@ -28,10 +28,10 @@ description: Develop and harden AxiomKernel OpsCore (primitives/sweep/boolean/mo
 ## 快速定位：OpsCore 关键入口
 
 - Public API：`include/axiom/ops/ops_services.h`
-- 实现：`src/ops/ops_services.cpp`
+- 实现：`src/axiom/ops/ops_services.cpp`
 - 最小物化：`include/axiom/internal/core/topology_materialization.h`
-- 验证/修复：`include/axiom/heal/heal_services.h` + `src/heal/heal_services.cpp`
-- IO 元数据（kind/origin/axis/params）：`src/io/io_service.cpp`
+- 验证/修复：`include/axiom/heal/heal_services.h` + `src/axiom/heal/heal_services.cpp`
+- IO 元数据（kind/origin/axis/params）：`src/axiom/io/io_service.cpp`
 - 关键回归测试（ctest 名称）：
   - `tests/ops/ops_heal_test.cpp`（`axiom_ops_heal_test`）
   - `tests/ops/boolean_workflow_test.cpp`（`axiom_boolean_workflow_test`）

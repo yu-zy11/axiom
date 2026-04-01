@@ -33,6 +33,8 @@ public:
     explicit RepresentationConversionService(std::shared_ptr<detail::KernelState> state);
 
     Result<MeshId> brep_to_mesh(BodyId body_id, const TessellationOptions& options);
+    /// 仅对指定壳上的拓扑面做面片三角化并焊接（工业验证：壳级网格/自交分析入口；不含其它壳的面）。
+    Result<MeshId> brep_to_mesh_shell(BodyId body_id, ShellId shell_id, const TessellationOptions& options);
     // Local re-tessellation: only the provided faces are recomputed (Topo-driven) when body has owned topology.
     Result<MeshId> brep_to_mesh_local(BodyId body_id, std::span<const FaceId> dirty_faces, const TessellationOptions& options);
     Result<BodyId> mesh_to_brep(MeshId mesh_id);

@@ -61,6 +61,9 @@ public:
     Result<SurfaceId> make_revolved(CurveId generatrix, const Axis3& axis, Scalar sweep_angle_radians);
     Result<SurfaceId> make_swept_linear(CurveId profile, const Vec3& direction, Scalar sweep_length);
     Result<SurfaceId> make_trimmed(SurfaceId base_surface, Scalar u_min, Scalar u_max, Scalar v_min, Scalar v_max);
+    /// 轴对齐盒 + UV 平面闭合折线环（≥3 点，有限）；用于 PCurve/外环驱动的真实修剪（Geo 侧不含 Topo 遍历）。
+    Result<SurfaceId> make_trimmed_polygon(SurfaceId base_surface, Scalar u_min, Scalar u_max, Scalar v_min,
+                                         Scalar v_max, std::span<const Point2> uv_boundary_loop);
     Result<SurfaceId> make_offset(SurfaceId base_surface, Scalar offset_distance);
 
 private:

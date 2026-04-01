@@ -151,9 +151,40 @@ int main() {
             return 1;
         }
     }
+    // Default orient2d/orient3d use kernel effective linear tolerance (not a hard-coded 1e-12).
+    {
+        axiom::KernelConfig cfg {};
+        cfg.tolerance.linear = 1e-4;
+        cfg.tolerance.min_local = 1e-9;
+        cfg.tolerance.max_local = 1e-2;
+        axiom::Kernel ko {cfg};
+        if (!approx(ko.tolerance().effective_linear(0.0), 1e-4)) {
+            std::cerr << "expected effective_linear(0) to match configured linear\n";
+            return 1;
+        }
+        // det = 5e-5; user_tol floor 1e-4 => classified as degenerate (Zero).
+        if (ko.predicates().orient2d({0.0, 0.0}, {1.0, 0.0}, {0.0, 5e-5}) != axiom::Sign::Zero) {
+            std::cerr << "expected orient2d to respect kernel linear tolerance as user eps floor\n";
+            return 1;
+        }
+        // Well-separated at unit scale remains Positive.
+        if (ko.predicates().orient2d({0.0, 0.0}, {1.0, 0.0}, {0.0, 1.0}) != axiom::Sign::Positive) {
+            std::cerr << "expected orient2d Positive for non-degenerate CCW triangle under widened tolerance\n";
+            return 1;
+        }
+    }
 
     const axiom::BoundingBox b0 {{0.0, 0.0, 0.0}, {1.0, 1.0, 1.0}, true};
     const axiom::BoundingBox b1 {{0.9, 0.9, 0.9}, {2.0, 2.0, 2.0}, true};
+    // Vector / point predicates: non-finite coordinates must not return true spuriously.
+    if (kernel.predicates().vec_parallel({NAN, 0.0, 0.0}, {1.0, 0.0, 0.0}, 1e-6) ||
+        kernel.predicates().vec_orthogonal({1.0, 0.0, INFINITY}, {0.0, 1.0, 0.0}, 1e-6) ||
+        kernel.predicates().point_equal_tol({0.0, 0.0, 0.0}, {NAN, 0.0, 0.0}, 1e-6) ||
+        kernel.predicates().point_in_bbox({NAN, 0.5, 0.5}, b0, 0.02) ||
+        kernel.predicates().point_in_sphere({0.0, 0.0, NAN}, {0.0, 0.0, 0.0}, 1.0, 1e-9)) {
+        std::cerr << "expected non-finite predicate inputs to yield false (or Uncertain for orient)\n";
+        return 1;
+    }
     if (!kernel.predicates().aabb_intersects(b0, b1, 0.0) ||
         !kernel.predicates().point_in_bbox({1.01, 0.5, 0.5}, b0, 0.02) ||
         !kernel.predicates().point_equal_tol({1.0, 1.0, 1.0}, {1.0 + 1e-7, 1.0, 1.0}, 1e-6) ||
@@ -304,6 +335,33 @@ int main() {
         body_policy.linear < tiny_policy.linear || body_policy_nl.linear < tiny_policy_nl.linear) {
         std::cerr << "unexpected policy_for_body behavior\n";
         return 1;
+    }
+
+    // Rep classify_point 与 Predicate point_in_body 对 bbox 门控使用同一套 resolve_linear_tolerance(0, policy)。
+    {
+        axiom::KernelConfig cfg {};
+        cfg.tolerance.linear = 0.02;
+        cfg.tolerance.min_local = 1e-9;
+        cfg.tolerance.max_local = 1.0;
+        axiom::Kernel k3 {cfg};
+        const axiom::Scalar tlin = k3.tolerance().effective_linear(0.0);
+        if (!approx(tlin, 0.02)) {
+            std::cerr << "cross-module tolerance: effective_linear mismatch\n";
+            return 1;
+        }
+        auto b = k3.primitives().box({0.0, 0.0, 0.0}, 1.0, 1.0, 1.0);
+        if (b.status != axiom::StatusCode::Ok || !b.value.has_value()) {
+            std::cerr << "cross-module tolerance: box creation failed\n";
+            return 1;
+        }
+        const axiom::Point3 near_out {1.0 + tlin * 0.5, 0.5, 0.5};
+        auto rep_cl = k3.representation().classify_point(*b.value, near_out);
+        auto pred_in = k3.predicates().point_in_body(near_out, *b.value, 0.0);
+        if (rep_cl.status != axiom::StatusCode::Ok || !rep_cl.value.has_value() || !*rep_cl.value ||
+            pred_in.status != axiom::StatusCode::Ok || !pred_in.value.has_value() || !*pred_in.value) {
+            std::cerr << "cross-module tolerance: Rep vs Predicate bbox gate mismatch\n";
+            return 1;
+        }
     }
 
     return 0;
