@@ -18,10 +18,18 @@ public:
 
   Result<void> validate_geometry(BodyId body_id, ValidationMode mode) const;
   Result<void> validate_topology(BodyId body_id, ValidationMode mode) const;
+  /// 专项：owned B-Rep 壳的边级闭合/流形（两侧各一拓扑面；Standard/Fast 即检；Strict 额外壳内重复面与不连通）。
+  Result<void> validate_manifold(BodyId body_id, ValidationMode mode) const;
   Result<void> validate_self_intersection(BodyId body_id,
                                           ValidationMode mode) const;
   Result<void> validate_tolerance(BodyId body_id, ValidationMode mode) const;
+  Result<void> validate_tolerance_many(std::span<const BodyId> body_ids,
+                                       ValidationMode mode) const;
   Result<void> validate_all(BodyId body_id, ValidationMode mode) const;
+  Result<void> validate_manifold_many(std::span<const BodyId> body_ids,
+                                      ValidationMode mode) const;
+  Result<void> validate_self_intersection_many(std::span<const BodyId> body_ids,
+                                               ValidationMode mode) const;
   Result<void> validate_geometry_many(std::span<const BodyId> body_ids,
                                       ValidationMode mode) const;
   Result<void> validate_topology_many(std::span<const BodyId> body_ids,

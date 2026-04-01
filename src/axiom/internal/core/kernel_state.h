@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <sstream>
@@ -149,6 +150,18 @@ struct BodyRecord {
     Scalar a {0.0};
     Scalar b {0.0};
     Scalar c {0.0};
+    /// 多边形/占位 `extrude`、`thicken`、多边形 `revolve`：`mass_properties` 等；`extrude_poly_cap_area<=0` 表示未缓存（`thicken` 为面面积估计；`revolve` 可为轮廓面积）。
+    Scalar extrude_poly_cap_area {0.0};
+    Scalar extrude_lateral_area {0.0};
+    Point3 extrude_mass_centroid {};
+    /// 多边形 `revolve`：子午面轮廓副本，供真实旋转体 BRep 物化（轴须在轮廓平面内，转角 `< 2π`）。
+    std::vector<Point3> revolve_profile_xyz;
+    /// 三角网格闭壳（ρ=1）质量：体积/质心/惯性（关于质心，世界系行主序 3×3）；与 `sweep_cached_surface_area` 在 `sweep_polyhedral_mass_valid` 时由物化写入。
+    bool sweep_polyhedral_mass_valid {false};
+    Scalar sweep_polyhedral_volume {0.0};
+    Scalar sweep_cached_surface_area {0.0};
+    Point3 sweep_polyhedral_centroid {};
+    std::array<Scalar, 9> sweep_inertia_about_centroid {};
     std::string label;
     BoundingBox bbox;
     std::vector<ShellId> shells;
@@ -179,7 +192,9 @@ struct IntersectionRecord {
 };
 
 struct KernelState {
-    explicit KernelState(const KernelConfig& in_config) : config(in_config) {}
+    explicit KernelState(const KernelConfig& in_config) : config(in_config) {
+        plugin_registry.set_host_policy(in_config.plugin_host_policy);
+    }
 
     KernelConfig config;
     std::uint64_t next_id {1};
@@ -309,7 +324,7 @@ inline bool has_surface(const KernelState& state, SurfaceId surface_id) {
 }
 
 inline Issue make_issue(std::string code, IssueSeverity severity, std::string message) {
-    return Issue {std::move(code), severity, std::move(message), {}};
+    return Issue {std::move(code), severity, std::move(message), {}, {}};
 }
 
 inline bool has_vertex(const KernelState& state, VertexId vertex_id) {

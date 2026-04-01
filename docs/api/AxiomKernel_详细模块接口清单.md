@@ -644,7 +644,9 @@ public:
 
 ## 14. `PluginSDK` 接口清单
 
-### 12.1 插件元信息
+> **对齐说明**：以下以仓库当前 `include/axiom/plugin/plugin_registry.h`、`include/axiom/sdk/kernel.h` 为准。`PluginRegistry` 还提供大量清单/能力统计/导出查询方法，此处仅列核心注册与类型入口。
+
+### 14.1 插件元信息与宿主策略
 
 ```cpp
 struct PluginManifest {
@@ -652,23 +654,53 @@ struct PluginManifest {
   std::string version;
   std::string vendor;
   std::vector<std::string> capabilities;
+  std::string plugin_api_version;  // 建议与 axiom::kPluginSdkApiVersion 一致（见 plugin_sdk_version.h）
+  std::string implementation_type_name;  // 与实现 type_name 绑定；带实现的 register 若为空则自动填充；按 type_name 注销实现时移除同字段匹配的清单
+};
+
+/// 进程内宿主策略（非 OS 级隔离）：注册前校验与容量门禁
+struct PluginHostPolicy {
+  std::uint32_t max_plugin_slots{};  // 0 表示不限制实例总数
+  bool enforce_unique_implementation_type_name{true};
+  bool require_non_empty_manifest_name{true};
+  bool require_unique_manifest_name{false};
+  bool require_non_empty_capabilities{false};
+  bool require_non_empty_plugin_type_name{true};
+  bool require_plugin_api_version_match{false};  // 为真时按 plugin_api_version_match_mode 校验清单字段
+  PluginApiVersionMatchMode plugin_api_version_match_mode{PluginApiVersionMatchMode::Exact};
+  PluginSandboxLevel sandbox_level{PluginSandboxLevel::None};  // 能力发现/审计占位，非 OS 沙箱
 };
 ```
 
-### 12.2 插件注册接口
+`PluginApiVersionMatchMode`：`Exact`（与 `kPluginSdkApiVersion` 字符串一致）、`SameMinor`（`major.minor` 一致，可带 patch）、`SameMajor`（仅 `major` 一致，更宽松）。
+
+`PluginSandboxLevel`：`None`（默认）、`Annotated`（报告中标注更高安全期望，执行模型仍为进程内共享）。
+
+`KernelConfig` 内含 `PluginHostPolicy plugin_host_policy`；`KernelState` 构造时会 `set_host_policy` 同步到 `PluginRegistry`。插件 SDK API 版本常量见 `include/axiom/plugin/plugin_sdk_version.h`（`kPluginSdkApiVersion`）。
+
+注册门禁与 `Kernel::plugin_api_compatibility_report_lines()` 共用 **`plugin_api_version_declared_compatible(declared_trimmed, expected_sdk_api, mode)`**（声明于 `include/axiom/plugin/plugin_registry.h`）。
+
+### 14.2 插件注册接口（`PluginRegistry`）
 
 ```cpp
 class PluginRegistry {
 public:
+  void set_host_policy(const PluginHostPolicy& policy);
+  Result<PluginHostPolicy> host_policy() const;
+  Result<void> validate_manifest(const PluginManifest& manifest) const;
+
   Result<void> register_curve_type(const PluginManifest&, std::unique_ptr<ICurvePlugin>);
-  Result<void> register_surface_type(const PluginManifest&, std::unique_ptr<ISurfacePlugin>);
   Result<void> register_repair_plugin(const PluginManifest&, std::unique_ptr<IRepairPlugin>);
   Result<void> register_importer(const PluginManifest&, std::unique_ptr<IImporterPlugin>);
   Result<void> register_exporter(const PluginManifest&, std::unique_ptr<IExporterPlugin>);
+  Result<void> register_manifest_only(const PluginManifest&);
+  // … 清单查询、能力直方图、按厂商/能力筛选、导出 txt 等
 };
 ```
 
-### 12.3 插件基类
+> **注**：曲面类型等扩展接口可作为后续版本增补；当前仓库未提供 `register_surface_type`。
+
+### 14.3 插件基类
 
 ```cpp
 class ICurvePlugin {
@@ -685,6 +717,17 @@ public:
   virtual Result<OpReport> run(BodyId, RepairMode) = 0;
 };
 ```
+
+### 14.4 `Kernel` 插件相关门面（摘要）
+
+除 `PluginRegistry& plugins()` 外，`Kernel` 还提供：
+
+- **能力发现**：`plugin_manifest_names`、`plugin_total_count`、`has_any_plugins`、`plugin_vendors`、`plugin_capabilities`、`plugin_capabilities_histogram_lines`、`plugin_sdk_api_version`、`plugin_discovery_report_lines`、`plugin_discovery_report_json`（含 `manifests` 数组：`name`、`implementation_type_name`）、`plugin_api_compatibility_report_lines`。
+- **策略**：`plugin_host_policy`、`set_plugin_host_policy`、`has_service_plugin_registry`、`has_service_plugin_discovery`。
+- **可诊断注册**（失败且 `enable_diagnostics` 时写入诊断存储，`diagnostic_id` 非零）：`register_plugin_curve`、`register_plugin_repair`、`register_plugin_importer`、`register_plugin_exporter`、`register_plugin_manifest_only`。  
+  若仅需 `Result::warnings`、不写全局诊断，可直接使用 `plugins().register_*`。
+- **可诊断注销**：`unregister_plugin_curve`、`unregister_plugin_repair`、`unregister_plugin_importer`、`unregister_plugin_exporter`（按实现 `type_name`）、`unregister_plugin_manifest`（按清单 `name`）。`PluginRegistry::unregister_*` 在 `type_name` 为空或未命中实现时返回 **`AXM-PLUGIN-E-0003` / `AXM-PLUGIN-E-0008`**（见 `error_codes.h`）。
+- **验证**：`validate_after_plugin_mutation(BodyId, ValidationMode)`（语义同 `validate().validate_all`，非 `const` 成员因需访问 `ValidationService`）。
 
 ## 15. Kernel 门面接口
 
@@ -713,6 +756,8 @@ public:
   IOService& io();
   DiagnosticService& diagnostics();
   EvalGraphService& eval_graph();
+  PluginRegistry& plugins();
+  // 另见 §14.4：配置/能力报告/插件发现与 register_plugin_* 等
 };
 ```
 

@@ -317,6 +317,15 @@ bool validate_loop_id(const detail::KernelState &state, LoopId loop_id,
   return validate_loop_record(state, loop_it->second, reason);
 }
 
+bool face_record_references_loop(const detail::FaceRecord &face,
+                                 std::uint64_t loop_value) {
+  if (face.outer_loop.value == loop_value) {
+    return true;
+  }
+  return std::any_of(face.inner_loops.begin(), face.inner_loops.end(),
+                     [loop_value](LoopId lid) { return lid.value == loop_value; });
+}
+
 void append_unique_raw(std::vector<std::uint64_t> &values,
                        std::uint64_t value) {
   if (std::find(values.begin(), values.end(), value) == values.end()) {
@@ -1270,6 +1279,160 @@ Result<PCurveId> TopologyQueryService::pcurve_of_coedge(CoedgeId coedge_id) cons
                    state_->create_diagnostic("已查询共边参数曲线"));
 }
 
+namespace {
+
+SurfaceId underlying_trim_base_surface_id(const detail::KernelState &state,
+                                            SurfaceId start) {
+  std::unordered_set<std::uint64_t> visited;
+  SurfaceId cur = start;
+  for (int guard = 0; guard < 64; ++guard) {
+    if (!detail::has_surface(state, cur)) {
+      return cur;
+    }
+    if (!visited.insert(cur.value).second) {
+      return cur;
+    }
+    const auto &rec = state.surfaces.at(cur.value);
+    if (rec.kind != detail::SurfaceKind::Trimmed) {
+      return cur;
+    }
+    if (rec.base_surface_id.value == 0 ||
+        !detail::has_surface(state, rec.base_surface_id)) {
+      return cur;
+    }
+    cur = rec.base_surface_id;
+  }
+  return start;
+}
+
+bool finite_scalar(Scalar s) { return std::isfinite(s); }
+
+bool accumulate_polyline_pcurve_uv_bounds(const detail::PCurveRecord &pc,
+                                            bool &initialized, Scalar &u_min,
+                                            Scalar &u_max, Scalar &v_min,
+                                            Scalar &v_max) {
+  if (pc.kind != detail::PCurveKind::Polyline || pc.poles.empty()) {
+    return false;
+  }
+  for (const auto &p : pc.poles) {
+    if (!finite_scalar(p.x) || !finite_scalar(p.y)) {
+      return false;
+    }
+    if (!initialized) {
+      u_min = u_max = p.x;
+      v_min = v_max = p.y;
+      initialized = true;
+    } else {
+      u_min = std::min(u_min, p.x);
+      u_max = std::max(u_max, p.x);
+      v_min = std::min(v_min, p.y);
+      v_max = std::max(v_max, p.y);
+    }
+  }
+  return initialized;
+}
+
+void ensure_strict_increasing_range(Scalar &lo, Scalar &hi) {
+  if (lo < hi) {
+    return;
+  }
+  const Scalar mid = 0.5 * (lo + hi);
+  const Scalar eps = static_cast<Scalar>(1e-9);
+  lo = mid - eps;
+  hi = mid + eps;
+}
+
+} // namespace
+
+Result<SurfaceId>
+TopologyQueryService::underlying_surface_for_face_trim(FaceId face_id) const {
+  if (!detail::has_face(*state_, face_id)) {
+    return detail::invalid_input_result<SurfaceId>(
+        *state_, diag_codes::kCoreInvalidHandle,
+        "面修剪基曲面查询失败：目标面不存在", "面修剪基曲面查询失败");
+  }
+  const auto &face = state_->faces.at(face_id.value);
+  if (!detail::has_surface(*state_, face.surface_id)) {
+    return error_result<SurfaceId>(
+        StatusCode::InvalidTopology,
+        detail::error_diag(
+            *state_, "面修剪基曲面查询失败", diag_codes::kTopoFaceOuterLoopInvalid,
+            "面修剪基曲面查询失败：面引用的曲面不存在",
+            std::vector<std::uint64_t>{face_id.value, face.surface_id.value}));
+  }
+  const SurfaceId base =
+      underlying_trim_base_surface_id(*state_, face.surface_id);
+  return ok_result(base, state_->create_diagnostic("已查询面修剪用底层曲面"));
+}
+
+Result<Range2D>
+TopologyQueryService::face_outer_loop_uv_bounds(FaceId face_id) const {
+  if (!detail::has_face(*state_, face_id)) {
+    return detail::invalid_input_result<Range2D>(
+        *state_, diag_codes::kCoreInvalidHandle,
+        "面外环 UV 包围查询失败：目标面不存在", "面外环 UV 包围查询失败");
+  }
+  const auto &face = state_->faces.at(face_id.value);
+  const auto loop_it = state_->loops.find(face.outer_loop.value);
+  if (loop_it == state_->loops.end() || loop_it->second.coedges.empty()) {
+    return error_result<Range2D>(
+        StatusCode::InvalidTopology,
+        detail::error_diag(
+            *state_, "面外环 UV 包围查询失败", diag_codes::kTopoFaceOuterLoopInvalid,
+            "面外环 UV 包围查询失败：外环不存在或为空",
+            std::vector<std::uint64_t>{face_id.value, face.outer_loop.value}));
+  }
+  bool initialized = false;
+  Scalar u_min = 0.0;
+  Scalar u_max = 0.0;
+  Scalar v_min = 0.0;
+  Scalar v_max = 0.0;
+  for (const auto coedge_id : loop_it->second.coedges) {
+    const auto ce_it = state_->coedges.find(coedge_id.value);
+    if (ce_it == state_->coedges.end()) {
+      return error_result<Range2D>(
+          StatusCode::InvalidTopology,
+          detail::error_diag(
+              *state_, "面外环 UV 包围查询失败", diag_codes::kTopoFaceOuterLoopInvalid,
+              "面外环 UV 包围查询失败：共边记录缺失",
+              std::vector<std::uint64_t>{face_id.value, coedge_id.value}));
+    }
+    const PCurveId pc_id = ce_it->second.pcurve_id;
+    if (pc_id.value == 0 || !detail::has_pcurve(*state_, pc_id)) {
+      return error_result<Range2D>(
+          StatusCode::InvalidTopology,
+          detail::error_diag(
+              *state_, "面外环 UV 包围查询失败", diag_codes::kTopoRelationInconsistent,
+              "面外环 UV 包围查询失败：共边未绑定有效 PCurve",
+              std::vector<std::uint64_t>{face_id.value, coedge_id.value,
+                                           pc_id.value}));
+    }
+    const auto &pc = state_->pcurves.at(pc_id.value);
+    if (!accumulate_polyline_pcurve_uv_bounds(pc, initialized, u_min, u_max,
+                                               v_min, v_max)) {
+      return error_result<Range2D>(
+          StatusCode::NotImplemented,
+          detail::error_diag(
+              *state_, "面外环 UV 包围查询失败", diag_codes::kCoreOperationUnsupported,
+              "面外环 UV 包围查询失败：暂仅支持折线型 PCurve 且须含有效顶点",
+              std::vector<std::uint64_t>{face_id.value, coedge_id.value,
+                                           pc_id.value}));
+    }
+  }
+  if (!initialized) {
+    return error_result<Range2D>(
+        StatusCode::DegenerateGeometry,
+        detail::error_diag(
+            *state_, "面外环 UV 包围查询失败", diag_codes::kGeoDegenerateGeometry,
+            "面外环 UV 包围查询失败：未能从 PCurve 得到有效范围",
+            std::vector<std::uint64_t>{face_id.value}));
+  }
+  ensure_strict_increasing_range(u_min, u_max);
+  ensure_strict_increasing_range(v_min, v_max);
+  return ok_result(Range2D{Range1D{u_min, u_max}, Range1D{v_min, v_max}},
+                   state_->create_diagnostic("已计算面外环 UV 轴对齐包围"));
+}
+
 TopologyTransaction::TopologyTransaction(
     std::shared_ptr<detail::KernelState> state)
     : state_(std::move(state)),
@@ -1339,6 +1502,7 @@ Result<void> TopologyTransaction::set_coedge_pcurve(CoedgeId coedge_id,
   }
   it->second.pcurve_id = pcurve_id;
   rebuild_topology_indices(*state_);
+  ++txn_coedge_pcurve_binds_;
   return ok_void(state_->create_diagnostic("已绑定共边参数曲线"));
 }
 
@@ -1434,6 +1598,31 @@ TopologyTransaction::create_face(SurfaceId surface_id, LoopId outer_loop,
           "创建面失败：内环非法，" + reason, "创建面失败");
     }
   }
+  // 7.2: each LoopId may belong to at most one Face (outer or inner lists).
+  const auto outer_used = state_->loop_to_faces.find(outer_loop.value);
+  if (outer_used != state_->loop_to_faces.end() &&
+      !outer_used->second.empty()) {
+    return error_result<FaceId>(
+        StatusCode::InvalidTopology,
+        detail::error_diag(
+            *state_, "创建面失败", diag_codes::kTopoFaceOuterLoopInvalid,
+            "创建面失败：外环已被其他面引用",
+            std::vector<std::uint64_t>{outer_loop.value,
+                                       outer_used->second.front()}));
+  }
+  for (const auto loop_id : inner_loops) {
+    const auto inner_used = state_->loop_to_faces.find(loop_id.value);
+    if (inner_used != state_->loop_to_faces.end() &&
+        !inner_used->second.empty()) {
+      return error_result<FaceId>(
+          StatusCode::InvalidTopology,
+          detail::error_diag(
+              *state_, "创建面失败", diag_codes::kTopoFaceInnerLoopInvalid,
+              "创建面失败：内环已被其他面引用",
+              std::vector<std::uint64_t>{loop_id.value,
+                                         inner_used->second.front()}));
+    }
+  }
   const auto id = FaceId{state_->allocate_id()};
   detail::FaceRecord face_record;
   face_record.surface_id = surface_id;
@@ -1463,7 +1652,7 @@ TopologyTransaction::create_shell(std::span<const FaceId> faces) {
   }
   if (has_duplicate_ids(faces)) {
     return detail::failed_result<ShellId>(
-        *state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
+        *state_, StatusCode::InvalidTopology, diag_codes::kTopoDuplicateFaceInShell,
         "创建壳失败：面列表包含重复引用", "创建壳失败");
   }
   for (const auto face_id : faces) {
@@ -1658,6 +1847,7 @@ Result<void> TopologyTransaction::delete_face(FaceId face_id) {
 
   state_->faces.erase(face_id.value);
   rebuild_topology_indices(*state_);
+  ++txn_deleted_faces_;
   return ok_void(state_->create_diagnostic("已删除面"));
 }
 
@@ -1706,6 +1896,7 @@ Result<void> TopologyTransaction::delete_shell(ShellId shell_id) {
   }
   state_->shells.erase(shell_id.value);
   rebuild_topology_indices(*state_);
+  ++txn_deleted_shells_;
   return ok_void(state_->create_diagnostic("已删除壳"));
 }
 
@@ -1727,6 +1918,7 @@ Result<void> TopologyTransaction::delete_body(BodyId body_id) {
   // shells can be shared by multiple bodies (e.g. boolean provenance tests).
   state_->bodies.erase(body_id.value);
   rebuild_topology_indices(*state_);
+  ++txn_deleted_bodies_;
   return ok_void(state_->create_diagnostic("已删除体"));
 }
 
@@ -1746,6 +1938,7 @@ Result<void> TopologyTransaction::replace_surface(FaceId face_id,
   transaction_state_->snapshot_face(*state_, face_id);
   it->second.surface_id = replacement;
   rebuild_topology_indices(*state_);
+  ++txn_replaced_surfaces_;
   return ok_void(state_->create_diagnostic("已替换面曲面"));
 }
 
@@ -1775,18 +1968,6 @@ Result<void> TopologyTransaction::rollback() {
   for (const auto id : created_faces_) {
     state_->faces.erase(id);
   }
-  for (const auto id : created_loops_) {
-    state_->loops.erase(id);
-  }
-  for (const auto id : created_coedges_) {
-    state_->coedges.erase(id);
-  }
-  for (const auto id : created_edges_) {
-    state_->edges.erase(id);
-  }
-  for (const auto id : created_vertices_) {
-    state_->vertices.erase(id);
-  }
   for (const auto &[id, record] : transaction_state_->original_faces) {
     state_->faces[id] = record;
   }
@@ -1796,7 +1977,76 @@ Result<void> TopologyTransaction::rollback() {
   for (const auto &[id, record] : transaction_state_->original_bodies) {
     state_->bodies[id] = record;
   }
+
+  // 恢复面/壳/体之后再删除本事务创建的环/共边/边/顶点，且仅删除已不再被当前状态引用的项，
+  // 否则会出现“面仍引用环 id，但环记录已被擦除”的断裂（例如同事务内 delete_face 后 rollback）。
+  auto loop_referenced = [this](std::uint64_t loop_id) {
+    for (const auto &[fid, face] : state_->faces) {
+      (void)fid;
+      if (face.outer_loop.value == loop_id) {
+        return true;
+      }
+      if (std::any_of(face.inner_loops.begin(), face.inner_loops.end(),
+                      [loop_id](LoopId inner) { return inner.value == loop_id; })) {
+        return true;
+      }
+    }
+    return false;
+  };
+  for (const auto id : created_loops_) {
+    if (!loop_referenced(id)) {
+      state_->loops.erase(id);
+    }
+  }
+  auto coedge_referenced = [this](std::uint64_t coedge_id) {
+    for (const auto &[lid, loop] : state_->loops) {
+      (void)lid;
+      if (std::any_of(loop.coedges.begin(), loop.coedges.end(),
+                      [coedge_id](CoedgeId c) { return c.value == coedge_id; })) {
+        return true;
+      }
+    }
+    return false;
+  };
+  for (const auto id : created_coedges_) {
+    if (!coedge_referenced(id)) {
+      state_->coedges.erase(id);
+    }
+  }
+  auto edge_referenced = [this](std::uint64_t edge_id) {
+    for (const auto &[cid, co] : state_->coedges) {
+      (void)cid;
+      if (co.edge_id.value == edge_id) {
+        return true;
+      }
+    }
+    return false;
+  };
+  for (const auto id : created_edges_) {
+    if (!edge_referenced(id)) {
+      state_->edges.erase(id);
+    }
+  }
+  auto vertex_referenced = [this](std::uint64_t vertex_id) {
+    for (const auto &[eid, edge] : state_->edges) {
+      (void)eid;
+      if (edge.v0.value == vertex_id || edge.v1.value == vertex_id) {
+        return true;
+      }
+    }
+    return false;
+  };
+  for (const auto id : created_vertices_) {
+    if (!vertex_referenced(id)) {
+      state_->vertices.erase(id);
+    }
+  }
   rebuild_topology_indices(*state_);
+  txn_deleted_faces_ = 0;
+  txn_deleted_shells_ = 0;
+  txn_deleted_bodies_ = 0;
+  txn_replaced_surfaces_ = 0;
+  txn_coedge_pcurve_binds_ = 0;
   active_ = false;
   return ok_void(state_->create_diagnostic("事务已回滚"));
 }
@@ -1873,6 +2123,33 @@ Result<std::uint64_t> TopologyTransaction::touched_body_count() const {
   return ok_result<std::uint64_t>(
       static_cast<std::uint64_t>(transaction_state_->original_bodies.size()),
       state_->create_diagnostic("已查询事务触达体数量"));
+}
+
+Result<std::uint64_t> TopologyTransaction::deleted_face_count() const {
+  return ok_result<std::uint64_t>(txn_deleted_faces_,
+                                  state_->create_diagnostic("已查询事务删除面数量"));
+}
+
+Result<std::uint64_t> TopologyTransaction::deleted_shell_count() const {
+  return ok_result<std::uint64_t>(txn_deleted_shells_,
+                                  state_->create_diagnostic("已查询事务删除壳数量"));
+}
+
+Result<std::uint64_t> TopologyTransaction::deleted_body_count() const {
+  return ok_result<std::uint64_t>(txn_deleted_bodies_,
+                                  state_->create_diagnostic("已查询事务删除体数量"));
+}
+
+Result<std::uint64_t> TopologyTransaction::replaced_surface_count() const {
+  return ok_result<std::uint64_t>(
+      txn_replaced_surfaces_,
+      state_->create_diagnostic("已查询事务替换曲面次数"));
+}
+
+Result<std::uint64_t> TopologyTransaction::coedge_pcurve_bind_count() const {
+  return ok_result<std::uint64_t>(
+      txn_coedge_pcurve_binds_,
+      state_->create_diagnostic("已查询事务共边 PCurve 绑定次数"));
 }
 
 Result<bool> TopologyTransaction::has_created_vertex(VertexId vertex_id) const {
@@ -1957,6 +2234,11 @@ Result<void> TopologyTransaction::clear_tracking_records() {
   created_faces_.clear();
   created_shells_.clear();
   created_bodies_.clear();
+  txn_deleted_faces_ = 0;
+  txn_deleted_shells_ = 0;
+  txn_deleted_bodies_ = 0;
+  txn_replaced_surfaces_ = 0;
+  txn_coedge_pcurve_binds_ = 0;
   transaction_state_->original_faces.clear();
   transaction_state_->original_shells.clear();
   transaction_state_->original_bodies.clear();
@@ -1981,6 +2263,26 @@ Result<std::vector<EdgeId>> TopologyTransaction::created_edges() const {
   }
   return ok_result(std::move(out),
                    state_->create_diagnostic("已查询事务创建边列表"));
+}
+
+Result<std::vector<CoedgeId>> TopologyTransaction::created_coedges() const {
+  std::vector<CoedgeId> out;
+  out.reserve(created_coedges_.size());
+  for (const auto id : created_coedges_) {
+    out.push_back(CoedgeId{id});
+  }
+  return ok_result(std::move(out),
+                   state_->create_diagnostic("已查询事务创建定向边列表"));
+}
+
+Result<std::vector<LoopId>> TopologyTransaction::created_loops() const {
+  std::vector<LoopId> out;
+  out.reserve(created_loops_.size());
+  for (const auto id : created_loops_) {
+    out.push_back(LoopId{id});
+  }
+  return ok_result(std::move(out),
+                   state_->create_diagnostic("已查询事务创建环列表"));
 }
 
 Result<std::vector<FaceId>> TopologyTransaction::created_faces() const {
@@ -2030,6 +2332,18 @@ TopologyValidationService::validate_vertex(VertexId vertex_id) const {
     return detail::failed_void(*state_, StatusCode::InvalidTopology,
                                diag_codes::kCoreParameterOutOfRange,
                                "顶点验证失败：顶点坐标非法", "顶点验证失败");
+  }
+  const bool used_by_edge = std::any_of(
+      state_->edges.begin(), state_->edges.end(),
+      [vid = vertex_id.value](const auto &entry) {
+        const auto &e = entry.second;
+        return e.v0.value == vid || e.v1.value == vid;
+      });
+  if (!used_by_edge) {
+    return detail::failed_void(*state_, StatusCode::InvalidTopology,
+                               diag_codes::kTopoDanglingVertex,
+                               "顶点验证失败：悬挂顶点（未作为任何边的端点）",
+                               "顶点验证失败", {vertex_id.value});
   }
   return ok_void(state_->create_diagnostic("顶点验证通过"));
 }
@@ -2949,8 +3263,36 @@ Result<void> TopologyValidationService::validate_shell(ShellId shell_id) const {
   }
   if (has_duplicate_ids(std::span<const FaceId>(shell_it->second.faces))) {
     return detail::failed_void(*state_, StatusCode::InvalidTopology,
-                               diag_codes::kTopoShellNotClosed,
-                               "壳验证失败：壳包含重复面引用", "壳验证失败");
+                               diag_codes::kTopoDuplicateFaceInShell,
+                               "壳验证失败：壳包含重复面引用", "壳验证失败",
+                               {shell_id.value});
+  }
+  // Shell ↔ face_to_shells: every face listed by the shell must reverse-index this shell.
+  for (const auto face_id : shell_it->second.faces) {
+    if (!detail::has_face(*state_, face_id)) {
+      return detail::failed_void(
+          *state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
+          "壳验证失败：壳引用了不存在的面", "壳验证失败",
+          {shell_id.value, face_id.value});
+    }
+    const auto fts_it = state_->face_to_shells.find(face_id.value);
+    if (fts_it == state_->face_to_shells.end()) {
+      return detail::failed_void(
+          *state_, StatusCode::InvalidTopology,
+          diag_codes::kTopoRelationInconsistent,
+          "壳验证失败：面在 face_to_shells 中缺少反向索引条目", "壳验证失败",
+          {shell_id.value, face_id.value});
+    }
+    const bool lists_this_shell =
+        std::any_of(fts_it->second.begin(), fts_it->second.end(),
+                    [sv = shell_id.value](std::uint64_t x) { return x == sv; });
+    if (!lists_this_shell) {
+      return detail::failed_void(
+          *state_, StatusCode::InvalidTopology,
+          diag_codes::kTopoRelationInconsistent,
+          "壳验证失败：face_to_shells 未列出本壳（索引与壳成员不一致）",
+          "壳验证失败", {shell_id.value, face_id.value});
+    }
   }
   for (const auto face_id : shell_it->second.faces) {
     const auto result = validate_face(face_id);
@@ -3300,6 +3642,33 @@ Result<void> TopologyValidationService::validate_body(BodyId body_id) const {
                                diag_codes::kTopoShellNotClosed,
                                "体验证失败：体包含重复壳引用", "体验证失败");
   }
+  // Body ↔ shell_to_bodies: each shell owned by the body must reverse-index this body.
+  for (const auto shell_id : body_it->second.shells) {
+    if (!detail::has_shell(*state_, shell_id)) {
+      return detail::failed_void(
+          *state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
+          "体验证失败：体引用了不存在的壳", "体验证失败",
+          {body_id.value, shell_id.value});
+    }
+    const auto stb_it = state_->shell_to_bodies.find(shell_id.value);
+    if (stb_it == state_->shell_to_bodies.end()) {
+      return detail::failed_void(
+          *state_, StatusCode::InvalidTopology,
+          diag_codes::kTopoRelationInconsistent,
+          "体验证失败：壳在 shell_to_bodies 中缺少反向索引条目", "体验证失败",
+          {body_id.value, shell_id.value});
+    }
+    const bool lists_this_body =
+        std::any_of(stb_it->second.begin(), stb_it->second.end(),
+                    [bv = body_id.value](std::uint64_t x) { return x == bv; });
+    if (!lists_this_body) {
+      return detail::failed_void(
+          *state_, StatusCode::InvalidTopology,
+          diag_codes::kTopoRelationInconsistent,
+          "体验证失败：shell_to_bodies 未列出本体（索引与体成员不一致）",
+          "体验证失败", {body_id.value, shell_id.value});
+    }
+  }
   for (const auto shell_id : body_it->second.shells) {
     const auto result = validate_shell(shell_id);
     if (result.status != StatusCode::Ok) {
@@ -3315,7 +3684,195 @@ Result<void> TopologyValidationService::validate_body(BodyId body_id) const {
   if (bbox_valid.status != StatusCode::Ok) {
     return bbox_valid;
   }
+  const auto idx_valid = validate_body_topology_indices(body_id);
+  if (idx_valid.status != StatusCode::Ok) {
+    return idx_valid;
+  }
   return ok_void(state_->create_diagnostic("体验证通过"));
+}
+
+Result<void>
+TopologyValidationService::validate_body_topology_indices(BodyId body_id) const {
+  const auto body_it = state_->bodies.find(body_id.value);
+  if (body_it == state_->bodies.end()) {
+    return detail::failed_void(*state_, StatusCode::InvalidTopology,
+                               diag_codes::kTopoShellNotClosed,
+                               "体索引验证失败：目标实体不存在", "体索引验证失败");
+  }
+  std::unordered_set<std::uint64_t> face_ids;
+  for (const auto shell_id : body_it->second.shells) {
+    const auto shell_it = state_->shells.find(shell_id.value);
+    if (shell_it == state_->shells.end()) {
+      continue;
+    }
+    for (const auto face_id : shell_it->second.faces) {
+      face_ids.insert(face_id.value);
+    }
+  }
+  if (face_ids.empty()) {
+    return ok_void(state_->create_diagnostic("体索引验证跳过（无拓扑面）"));
+  }
+  std::unordered_set<std::uint64_t> loop_ids;
+  for (const auto face_value : face_ids) {
+    const auto fit = state_->faces.find(face_value);
+    if (fit == state_->faces.end()) {
+      return detail::failed_void(
+          *state_, StatusCode::InvalidTopology, diag_codes::kTopoInvariantBroken,
+          "体索引验证失败：壳引用了不存在的面", "体索引验证失败",
+          {body_id.value, face_value});
+    }
+    loop_ids.insert(fit->second.outer_loop.value);
+    for (const auto inner : fit->second.inner_loops) {
+      loop_ids.insert(inner.value);
+    }
+  }
+  std::unordered_set<std::uint64_t> coedge_ids;
+  std::unordered_set<std::uint64_t> edge_ids;
+  for (const auto loop_value : loop_ids) {
+    const auto lit = state_->loops.find(loop_value);
+    if (lit == state_->loops.end()) {
+      return detail::failed_void(
+          *state_, StatusCode::InvalidTopology, diag_codes::kTopoInvariantBroken,
+          "体索引验证失败：面引用了不存在的环", "体索引验证失败",
+          {body_id.value, loop_value});
+    }
+    for (const auto coedge_id : lit->second.coedges) {
+      coedge_ids.insert(coedge_id.value);
+      const auto cit = state_->coedges.find(coedge_id.value);
+      if (cit == state_->coedges.end()) {
+        return detail::failed_void(
+            *state_, StatusCode::InvalidTopology, diag_codes::kTopoInvariantBroken,
+            "体索引验证失败：环引用了不存在的定向边", "体索引验证失败",
+            {loop_value, coedge_id.value});
+      }
+      const auto cl = state_->coedge_to_loop.find(coedge_id.value);
+      if (cl == state_->coedge_to_loop.end() || cl->second != loop_value) {
+        return detail::failed_void(
+            *state_, StatusCode::InvalidTopology,
+            diag_codes::kTopoRelationInconsistent,
+            "体索引验证失败：coedge_to_loop 与环成员不一致", "体索引验证失败",
+            {coedge_id.value, loop_value});
+      }
+      edge_ids.insert(cit->second.edge_id.value);
+    }
+  }
+  for (const auto loop_value : loop_ids) {
+    std::uint64_t owner_face = 0;
+    unsigned owner_count = 0;
+    for (const auto face_value : face_ids) {
+      const auto& fr = state_->faces.at(face_value);
+      if (face_record_references_loop(fr, loop_value)) {
+        ++owner_count;
+        owner_face = face_value;
+      }
+    }
+    if (owner_count != 1U) {
+      return detail::failed_void(
+          *state_, StatusCode::InvalidTopology,
+          owner_count == 0 ? diag_codes::kTopoOrphanLoop
+                           : diag_codes::kTopoInvariantBroken,
+          "体索引验证失败：环在体的面集合中缺少唯一所属面", "体索引验证失败",
+          {body_id.value, loop_value});
+    }
+    const auto ltf = state_->loop_to_faces.find(loop_value);
+    if (ltf == state_->loop_to_faces.end() || ltf->second.empty()) {
+      return detail::failed_void(
+          *state_, StatusCode::InvalidTopology, diag_codes::kTopoOrphanLoop,
+          "体索引验证失败：loop_to_faces 缺少环条目", "体索引验证失败",
+          {loop_value});
+    }
+    std::unordered_set<std::uint64_t> listed;
+    for (const auto fv : ltf->second) {
+      if (!listed.insert(fv).second) {
+        return detail::failed_void(
+            *state_, StatusCode::InvalidTopology,
+            diag_codes::kTopoRelationInconsistent,
+            "体索引验证失败：loop_to_faces 存在重复面", "体索引验证失败",
+            {loop_value, fv});
+      }
+    }
+    if (listed.size() != 1U || listed.count(owner_face) == 0U) {
+      return detail::failed_void(
+          *state_, StatusCode::InvalidTopology,
+          diag_codes::kTopoRelationInconsistent,
+          "体索引验证失败：loop_to_faces 与体的所属面不一致", "体索引验证失败",
+          {loop_value, owner_face});
+    }
+  }
+  for (const auto edge_value : edge_ids) {
+    if (state_->edges.find(edge_value) == state_->edges.end()) {
+      return detail::failed_void(
+          *state_, StatusCode::InvalidTopology, diag_codes::kTopoCurveTopologyMismatch,
+          "体索引验证失败：定向边引用了不存在的边", "体索引验证失败",
+          {edge_value});
+    }
+    const auto ec_it = state_->edge_to_coedges.find(edge_value);
+    if (ec_it == state_->edge_to_coedges.end() || ec_it->second.empty()) {
+      return detail::failed_void(
+          *state_, StatusCode::InvalidTopology, diag_codes::kTopoDanglingEdge,
+          "体索引验证失败：边缺少 edge_to_coedges 反向索引", "体索引验证失败",
+          {edge_value, body_id.value});
+    }
+    std::unordered_set<std::uint64_t> rev_seen;
+    rev_seen.reserve(ec_it->second.size());
+    for (const auto co_value : ec_it->second) {
+      if (!rev_seen.insert(co_value).second) {
+        return detail::failed_void(
+            *state_, StatusCode::InvalidTopology,
+            diag_codes::kTopoRelationInconsistent,
+            "体索引验证失败：edge_to_coedges 存在重复定向边", "体索引验证失败",
+            {edge_value, co_value});
+      }
+    }
+    for (const auto co_value : coedge_ids) {
+      const auto cit = state_->coedges.find(co_value);
+      if (cit == state_->coedges.end() ||
+          cit->second.edge_id.value != edge_value) {
+        continue;
+      }
+      if (rev_seen.count(co_value) == 0U) {
+        return detail::failed_void(
+            *state_, StatusCode::InvalidTopology,
+            diag_codes::kTopoRelationInconsistent,
+            "体索引验证失败：体的共边未列入 edge_to_coedges", "体索引验证失败",
+            {edge_value, co_value});
+      }
+    }
+  }
+  // Shell ↔ face_to_shells: every (body shell, face) membership must appear in reverse index.
+  for (const auto face_value : face_ids) {
+    for (const auto shell_id : body_it->second.shells) {
+      const auto shell_it = state_->shells.find(shell_id.value);
+      if (shell_it == state_->shells.end()) {
+        continue;
+      }
+      const bool shell_has_face = std::any_of(
+          shell_it->second.faces.begin(), shell_it->second.faces.end(),
+          [face_value](FaceId fid) { return fid.value == face_value; });
+      if (!shell_has_face) {
+        continue;
+      }
+      const auto fts_it = state_->face_to_shells.find(face_value);
+      if (fts_it == state_->face_to_shells.end()) {
+        return detail::failed_void(
+            *state_, StatusCode::InvalidTopology,
+            diag_codes::kTopoRelationInconsistent,
+            "体索引验证失败：face_to_shells 缺少面条目（壳已引用该面）",
+            "体索引验证失败", {body_id.value, face_value, shell_id.value});
+      }
+      const bool lists_shell = std::any_of(
+          fts_it->second.begin(), fts_it->second.end(),
+          [sv = shell_id.value](std::uint64_t x) { return x == sv; });
+      if (!lists_shell) {
+        return detail::failed_void(
+            *state_, StatusCode::InvalidTopology,
+            diag_codes::kTopoRelationInconsistent,
+            "体索引验证失败：face_to_shells 未列出体的壳", "体索引验证失败",
+            {body_id.value, face_value, shell_id.value});
+      }
+    }
+  }
+  return ok_void(state_->create_diagnostic("体拓扑索引验证通过"));
 }
 
 Result<void>
@@ -3362,7 +3919,16 @@ Result<void> TopologyValidationService::validate_indices_consistency() const {
           *state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
           "索引验证失败：face_to_shells 包含失效面", "拓扑索引验证失败");
     }
+    std::unordered_set<std::uint64_t> seen_shell;
+    seen_shell.reserve(shell_values.size());
     for (const auto shell_value : shell_values) {
+      if (!seen_shell.insert(shell_value).second) {
+        return detail::failed_void(
+            *state_, StatusCode::InvalidTopology,
+            diag_codes::kTopoRelationInconsistent,
+            "索引验证失败：face_to_shells 存在重复壳条目", "拓扑索引验证失败",
+            {face_value, shell_value});
+      }
       const auto shell_it = state_->shells.find(shell_value);
       if (shell_it == state_->shells.end() ||
           std::none_of(
@@ -3382,7 +3948,16 @@ Result<void> TopologyValidationService::validate_indices_consistency() const {
           *state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
           "索引验证失败：shell_to_bodies 包含失效壳", "拓扑索引验证失败");
     }
+    std::unordered_set<std::uint64_t> seen_body;
+    seen_body.reserve(body_values.size());
     for (const auto body_value : body_values) {
+      if (!seen_body.insert(body_value).second) {
+        return detail::failed_void(
+            *state_, StatusCode::InvalidTopology,
+            diag_codes::kTopoRelationInconsistent,
+            "索引验证失败：shell_to_bodies 存在重复体条目", "拓扑索引验证失败",
+            {shell_value, body_value});
+      }
       const auto body_it = state_->bodies.find(body_value);
       if (body_it == state_->bodies.end() ||
           std::none_of(
@@ -3396,6 +3971,146 @@ Result<void> TopologyValidationService::validate_indices_consistency() const {
       }
     }
   }
+
+  // Forward containment: duplicate FaceId in shell.faces / ShellId in body.shells
+  // (index corruption or partial writes; mirrors validate_shell / validate_body).
+  for (const auto &[shell_value, shell] : state_->shells) {
+    if (has_duplicate_ids(std::span<const FaceId>(shell.faces))) {
+      return detail::failed_void(
+          *state_, StatusCode::InvalidTopology, diag_codes::kTopoDuplicateFaceInShell,
+          "索引验证失败：壳的面列表存在重复条目", "拓扑索引验证失败",
+          {shell_value});
+    }
+  }
+  for (const auto &[body_value, body] : state_->bodies) {
+    if (has_duplicate_ids(std::span<const ShellId>(body.shells))) {
+      return detail::failed_void(
+          *state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
+          "索引验证失败：体的壳列表存在重复条目", "拓扑索引验证失败",
+          {body_value});
+    }
+  }
+
+  for (const auto &[coedge_value, loop_value] : state_->coedge_to_loop) {
+    if (state_->coedges.find(coedge_value) == state_->coedges.end()) {
+      return detail::failed_void(
+          *state_, StatusCode::InvalidTopology, diag_codes::kTopoInvariantBroken,
+          "索引验证失败：coedge_to_loop 包含失效定向边", "拓扑索引验证失败",
+          {coedge_value, loop_value});
+    }
+    const auto lit = state_->loops.find(loop_value);
+    if (lit == state_->loops.end()) {
+      return detail::failed_void(
+          *state_, StatusCode::InvalidTopology, diag_codes::kTopoInvariantBroken,
+          "索引验证失败：coedge_to_loop 指向不存在的环", "拓扑索引验证失败",
+          {coedge_value, loop_value});
+    }
+    const bool listed = std::any_of(
+        lit->second.coedges.begin(), lit->second.coedges.end(),
+        [coedge_value](CoedgeId cid) { return cid.value == coedge_value; });
+    if (!listed) {
+      return detail::failed_void(
+          *state_, StatusCode::InvalidTopology,
+          diag_codes::kTopoRelationInconsistent,
+          "索引验证失败：定向边索引与环成员列表不一致", "拓扑索引验证失败",
+          {coedge_value, loop_value});
+    }
+  }
+
+  for (const auto &[coedge_value, coedge] : state_->coedges) {
+    (void)coedge;
+    if (state_->coedge_to_loop.find(coedge_value) ==
+        state_->coedge_to_loop.end()) {
+      return detail::failed_void(
+          *state_, StatusCode::InvalidTopology, diag_codes::kTopoDanglingCoedge,
+          "索引验证失败：定向边未被任何环引用", "拓扑索引验证失败",
+          {coedge_value});
+    }
+  }
+
+  // Reverse index: every Edge record must be referenced by at least one Coedge
+  // (edge_to_coedges rebuilt from coedges). Catches committed "edge-only" writes
+  // and index corruption after partial updates.
+  for (const auto &[edge_value, edge] : state_->edges) {
+    (void)edge;
+    const auto owners_it = state_->edge_to_coedges.find(edge_value);
+    if (owners_it == state_->edge_to_coedges.end() ||
+        owners_it->second.empty()) {
+      return detail::failed_void(
+          *state_, StatusCode::InvalidTopology, diag_codes::kTopoDanglingEdge,
+          "索引验证失败：边在 edge_to_coedges 中无定向边引用（悬挂边）",
+          "拓扑索引验证失败", {edge_value});
+    }
+    std::unordered_set<std::uint64_t> seen_coedge;
+    seen_coedge.reserve(owners_it->second.size());
+    for (const auto coedge_value : owners_it->second) {
+      if (!seen_coedge.insert(coedge_value).second) {
+        return detail::failed_void(
+            *state_, StatusCode::InvalidTopology,
+            diag_codes::kTopoRelationInconsistent,
+            "索引验证失败：edge_to_coedges 存在重复定向边条目",
+            "拓扑索引验证失败", {edge_value, coedge_value});
+      }
+    }
+  }
+
+  for (const auto &[loop_value, loop] : state_->loops) {
+    (void)loop;
+    const auto ltf = state_->loop_to_faces.find(loop_value);
+    if (ltf == state_->loop_to_faces.end() || ltf->second.empty()) {
+      return detail::failed_void(
+          *state_, StatusCode::InvalidTopology, diag_codes::kTopoOrphanLoop,
+          "索引验证失败：环未被任何面引用", "拓扑索引验证失败",
+          {loop_value});
+    }
+  }
+
+  for (const auto &[loop_value, face_values] : state_->loop_to_faces) {
+    if (state_->loops.find(loop_value) == state_->loops.end()) {
+      return detail::failed_void(
+          *state_, StatusCode::InvalidTopology, diag_codes::kTopoInvariantBroken,
+          "索引验证失败：loop_to_faces 包含失效环", "拓扑索引验证失败",
+          {loop_value});
+    }
+    std::unordered_set<std::uint64_t> loop_face_owners;
+    loop_face_owners.reserve(face_values.size());
+    for (const auto face_value : face_values) {
+      if (!loop_face_owners.insert(face_value).second) {
+        return detail::failed_void(
+            *state_, StatusCode::InvalidTopology,
+            diag_codes::kTopoRelationInconsistent,
+            "索引验证失败：loop_to_faces 存在重复面条目", "拓扑索引验证失败",
+            {loop_value, face_value});
+      }
+    }
+    if (loop_face_owners.size() > 1U) {
+      auto it = loop_face_owners.begin();
+      const std::uint64_t fa = *it++;
+      const std::uint64_t fb = *it;
+      return detail::failed_void(
+          *state_, StatusCode::InvalidTopology,
+          diag_codes::kTopoRelationInconsistent,
+          "索引验证失败：同一环被多个面引用（loop_to_faces）", "拓扑索引验证失败",
+          {loop_value, fa, fb});
+    }
+    for (const auto face_value : face_values) {
+      const auto fit = state_->faces.find(face_value);
+      if (fit == state_->faces.end()) {
+        return detail::failed_void(
+            *state_, StatusCode::InvalidTopology, diag_codes::kTopoInvariantBroken,
+            "索引验证失败：loop_to_faces 引用不存在的面", "拓扑索引验证失败",
+            {loop_value, face_value});
+      }
+      if (!face_record_references_loop(fit->second, loop_value)) {
+        return detail::failed_void(
+            *state_, StatusCode::InvalidTopology,
+            diag_codes::kTopoRelationInconsistent,
+            "索引验证失败：loop_to_faces 与面记录不一致", "拓扑索引验证失败",
+            {loop_value, face_value});
+      }
+    }
+  }
+
   return ok_void(state_->create_diagnostic("拓扑索引验证通过"));
 }
 

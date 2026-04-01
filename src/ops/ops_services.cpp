@@ -1,8 +1,11 @@
 #include "axiom/ops/ops_services.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <fstream>
+#include <optional>
+#include <span>
 #include <sstream>
 #include <unordered_map>
 
@@ -242,6 +245,167 @@ MassProperties bbox_mass_properties(const BoundingBox& bbox) {
     return props;
 }
 
+/// 均质密度 rho=1（m 与 volume 数值相同）。惯性张量关于质心，世界坐标系行主序 3x3。
+void set_box_inertia_about_centroid(MassProperties& props, Scalar dx, Scalar dy, Scalar dz) {
+    const auto m = props.volume;
+    if (m <= 0.0 || dx <= 0.0 || dy <= 0.0 || dz <= 0.0) {
+        return;
+    }
+    const auto ixx = m / 12.0 * (dy * dy + dz * dz);
+    const auto iyy = m / 12.0 * (dx * dx + dz * dz);
+    const auto izz = m / 12.0 * (dx * dx + dy * dy);
+    props.inertia = {
+        ixx, 0.0, 0.0,
+        0.0, iyy, 0.0,
+        0.0, 0.0, izz};
+}
+
+bool bbox_corners_almost_equal(const BoundingBox& a, const BoundingBox& b, Scalar eps) {
+    if (!a.is_valid || !b.is_valid) {
+        return false;
+    }
+    return std::abs(a.min.x - b.min.x) <= eps && std::abs(a.min.y - b.min.y) <= eps &&
+           std::abs(a.min.z - b.min.z) <= eps && std::abs(a.max.x - b.max.x) <= eps &&
+           std::abs(a.max.y - b.max.y) <= eps && std::abs(a.max.z - b.max.z) <= eps;
+}
+
+MassProperties mass_properties_from_box_body_record(const detail::BodyRecord& b) {
+    MassProperties props {};
+    props.volume = b.a * b.b * b.c;
+    props.area = 2.0 * (b.a * b.b + b.b * b.c + b.a * b.c);
+    props.centroid =
+        Point3 {b.origin.x + b.a * 0.5, b.origin.y + b.b * 0.5, b.origin.z + b.c * 0.5};
+    set_box_inertia_about_centroid(props, b.a, b.b, b.c);
+    return props;
+}
+
+/// 将关于 `cm` 的惯性张量平移到参考点 `ref`（均质 m，世界坐标、行主序 3x3）：I_ref += I_cm + m((d·d)I - d⊗d)，d = cm - ref。
+void add_inertia_parallel_axis(std::array<Scalar, 9>& I, Scalar m, const Point3& cm, const Point3& ref) {
+    if (m <= 0.0) {
+        return;
+    }
+    const Scalar dx = cm.x - ref.x;
+    const Scalar dy = cm.y - ref.y;
+    const Scalar dz = cm.z - ref.z;
+    const Scalar r2 = dx * dx + dy * dy + dz * dz;
+    I[0] += m * (r2 - dx * dx);
+    I[1] += m * (-dx * dy);
+    I[2] += m * (-dx * dz);
+    I[3] += m * (-dx * dy);
+    I[4] += m * (r2 - dy * dy);
+    I[5] += m * (-dy * dz);
+    I[6] += m * (-dx * dz);
+    I[7] += m * (-dy * dz);
+    I[8] += m * (r2 - dz * dz);
+}
+
+/// 直角三棱柱：XY 内直角三角形 (0,0),(+dx,0),(0,+dy)，沿 +Z 拉伸 dz；均质 rho=1，张量关于质心，与世界轴对齐。
+void set_wedge_inertia_about_centroid(MassProperties& props, Scalar dx, Scalar dy, Scalar dz) {
+    const auto m = props.volume;
+    if (m <= 0.0 || dx <= 0.0 || dy <= 0.0 || dz <= 0.0) {
+        return;
+    }
+    const auto dx2 = dx * dx;
+    const auto dy2 = dy * dy;
+    const auto dz2 = dz * dz;
+    const auto i_o_xx = m * dy2 / 6.0 + m * dz2 / 3.0;
+    const auto i_o_yy = m * dx2 / 6.0 + m * dz2 / 3.0;
+    const auto i_o_zz = m * (dx2 + dy2) / 6.0;
+    const auto i_o_xy = -m * dx * dy / 12.0;
+    const auto i_o_xz = -m * dx * dz / 6.0;
+    const auto i_o_yz = -m * dy * dz / 6.0;
+    const auto cx = dx / 3.0;
+    const auto cy = dy / 3.0;
+    const auto cz = dz * 0.5;
+    const auto i_c_xx = i_o_xx - m * (cy * cy + cz * cz);
+    const auto i_c_yy = i_o_yy - m * (cx * cx + cz * cz);
+    const auto i_c_zz = i_o_zz - m * (cx * cx + cy * cy);
+    const auto i_c_xy = i_o_xy + m * cx * cy;
+    const auto i_c_xz = i_o_xz + m * cx * cz;
+    const auto i_c_yz = i_o_yz + m * cy * cz;
+    props.inertia = {
+        i_c_xx, i_c_xy, i_c_xz,
+        i_c_xy, i_c_yy, i_c_yz,
+        i_c_xz, i_c_yz, i_c_zz};
+}
+
+void set_sphere_inertia_about_center(MassProperties& props, Scalar radius) {
+    const auto m = props.volume;
+    if (m <= 0.0 || radius <= 0.0) {
+        return;
+    }
+    const auto ii = 2.0 / 5.0 * m * radius * radius;
+    props.inertia = {ii, 0.0, 0.0, 0.0, ii, 0.0, 0.0, 0.0, ii};
+}
+
+/// 回转体：局部惯性 diag(`i_transverse`,`i_transverse`,`i_axial`)，局部 z 与 `axis`（单位向量）对齐。
+void set_axisymmetric_inertia_world(MassProperties& props, const Vec3& axis, Scalar i_transverse, Scalar i_axial) {
+    Vec3 t {1.0, 0.0, 0.0};
+    if (std::abs(axis.x) > 0.85) {
+        t = {0.0, 1.0, 0.0};
+    }
+    auto v = detail::cross(t, axis);
+    const auto vn = detail::norm(v);
+    if (vn <= 1e-24) {
+        return;
+    }
+    v = detail::scale(v, 1.0 / vn);
+    const auto w = detail::cross(axis, v);
+    const std::array<Scalar, 3> e0 {v.x, v.y, v.z};
+    const std::array<Scalar, 3> e1 {w.x, w.y, w.z};
+    const std::array<Scalar, 3> e2 {axis.x, axis.y, axis.z};
+    const std::array<Scalar, 3> diag {i_transverse, i_transverse, i_axial};
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            Scalar s = 0.0;
+            for (int k = 0; k < 3; ++k) {
+                const std::array<Scalar, 3>* ek = (k == 0) ? &e0 : (k == 1) ? &e1 : &e2;
+                s += diag[static_cast<std::size_t>(k)] * (*ek)[static_cast<std::size_t>(i)] * (*ek)[static_cast<std::size_t>(j)];
+            }
+            props.inertia[static_cast<std::size_t>(i * 3 + j)] = s;
+        }
+    }
+}
+
+void set_cylinder_inertia_about_center(MassProperties& props, const Vec3& axis, Scalar radius, Scalar height) {
+    const auto m = props.volume;
+    if (m <= 0.0 || radius <= 0.0 || height <= 0.0) {
+        return;
+    }
+    const auto r2 = radius * radius;
+    const auto h2 = height * height;
+    const auto i_axial = 0.5 * m * r2;
+    const auto i_perp = m * (3.0 * r2 + h2) / 12.0;
+    set_axisymmetric_inertia_world(props, axis, i_perp, i_axial);
+}
+
+/// 实心圆锥关于质心：对称轴与 `axis`（单位，由顶点指向底）一致；`semi_angle` 为半角，`height` 为沿轴高度。
+void set_cone_inertia_about_centroid(MassProperties& props, const Vec3& axis, Scalar semi_angle, Scalar height) {
+    const auto m = props.volume;
+    if (m <= 0.0 || height <= 0.0) {
+        return;
+    }
+    const auto radius = height * std::tan(semi_angle);
+    const auto r2 = radius * radius;
+    const auto h2 = height * height;
+    const auto i_axial = 0.3 * m * r2;
+    const auto i_perp = m * (0.15 * r2 + 0.0125 * h2);
+    set_axisymmetric_inertia_world(props, axis, i_perp, i_axial);
+}
+
+/// 实心环体：主半径 `major_r`（管中心到回转轴）、副半径 `minor_r`（截面圆半径），对称轴为 `axis`（单位向量）。
+void set_torus_inertia_about_center(MassProperties& props, const Vec3& axis, Scalar major_r, Scalar minor_r) {
+    const auto m = props.volume;
+    if (m <= 0.0 || major_r <= 0.0 || minor_r <= 0.0) {
+        return;
+    }
+    const auto R = major_r;
+    const auto r = minor_r;
+    const auto i_axial = m * (R * R + 0.75 * r * r);
+    const auto i_transverse = m * (0.5 * R * R + 0.625 * r * r);
+    set_axisymmetric_inertia_world(props, axis, i_transverse, i_axial);
+}
+
 Scalar interval_gap(Scalar a_min, Scalar a_max, Scalar b_min, Scalar b_max) {
     if (a_max < b_min) {
         return b_min - a_max;
@@ -423,6 +587,111 @@ BoundingBox offset_bbox(const BoundingBox& bbox, Scalar distance) {
     return detail::make_bbox(
         {bbox.min.x - distance, bbox.min.y - distance, bbox.min.z - distance},
         {bbox.max.x + distance, bbox.max.y + distance, bbox.max.z + distance});
+}
+
+/// 由面顶点 AABB 估计平面片在轴对齐投影上的最大矩形面积（Stage-2 占位；轴对齐矩形面精确）。
+Scalar bbox_max_axis_rectangle_area(const BoundingBox& fb) {
+    if (!fb.is_valid) {
+        return 0.0;
+    }
+    const Scalar dx = std::max<Scalar>(0.0, fb.max.x - fb.min.x);
+    const Scalar dy = std::max<Scalar>(0.0, fb.max.y - fb.min.y);
+    const Scalar dz = std::max<Scalar>(0.0, fb.max.z - fb.min.z);
+    return std::max({dx * dy, dy * dz, dz * dx});
+}
+
+/// 点到无限直线（`origin` + t * `u`，`u` 单位）的最短距离。
+Scalar distance_point_to_unit_axis(const Point3& p, const Point3& origin, const Vec3& u) {
+    const Vec3 v {p.x - origin.x, p.y - origin.y, p.z - origin.z};
+    const auto t = detail::dot(u, v);
+    const auto px = v.x - u.x * t;
+    const auto py = v.y - u.y * t;
+    const auto pz = v.z - u.z * t;
+    return std::sqrt(px * px + py * py + pz * pz);
+}
+
+struct PappusRevolveMass {
+    Scalar volume {};
+    Scalar profile_area {};
+};
+
+std::optional<PappusRevolveMass> try_pappus_revolve_mass(std::span<const Point3> poly, const Point3& O,
+                                                         const Vec3& axis_u, Scalar angle) {
+    if (poly.size() < 3 || !(angle > 0.0)) {
+        return std::nullopt;
+    }
+    const auto u = detail::normalize(axis_u);
+    const auto& v0p = poly.front();
+    Vec3 accn {0.0, 0.0, 0.0};
+    const auto nv = poly.size();
+    for (std::size_t i = 0; i < nv; ++i) {
+        const auto& vi = poly[i];
+        const auto& vj = poly[(i + 1) % nv];
+        const auto ei = detail::subtract(vi, v0p);
+        const auto ej = detail::subtract(vj, v0p);
+        const auto cr = detail::cross(ei, ej);
+        accn = Vec3 {accn.x + cr.x, accn.y + cr.y, accn.z + cr.z};
+    }
+    const auto acc_len = detail::norm(accn);
+    const auto poly_area = 0.5 * acc_len;
+    if (poly_area <= 1e-18 || acc_len <= 1e-18) {
+        return std::nullopt;
+    }
+    Point3 csum {0.0, 0.0, 0.0};
+    Scalar wsum = 0.0;
+    if (nv == 3) {
+        const auto e1 = detail::subtract(poly[1], poly[0]);
+        const auto e2 = detail::subtract(poly[2], poly[0]);
+        const auto cp = detail::cross(e1, e2);
+        wsum = 0.5 * detail::norm(cp);
+        if (wsum <= 1e-30) {
+            return std::nullopt;
+        }
+        csum.x = (poly[0].x + poly[1].x + poly[2].x) / 3.0;
+        csum.y = (poly[0].y + poly[1].y + poly[2].y) / 3.0;
+        csum.z = (poly[0].z + poly[1].z + poly[2].z) / 3.0;
+    } else {
+        for (std::size_t i = 1; i + 1 < static_cast<std::size_t>(nv); ++i) {
+            const auto& vi = poly[i];
+            const auto& vj = poly[i + 1];
+            const auto e1 = detail::subtract(vi, v0p);
+            const auto e2 = detail::subtract(vj, v0p);
+            const auto cp = detail::cross(e1, e2);
+            const auto ta = 0.5 * detail::norm(cp);
+            if (ta <= 1e-30) {
+                continue;
+            }
+            csum.x += (v0p.x + vi.x + vj.x) * ta / 3.0;
+            csum.y += (v0p.y + vi.y + vj.y) * ta / 3.0;
+            csum.z += (v0p.z + vi.z + vj.z) * ta / 3.0;
+            wsum += ta;
+        }
+        if (wsum <= 1e-30) {
+            return std::nullopt;
+        }
+        csum.x /= wsum;
+        csum.y /= wsum;
+        csum.z /= wsum;
+    }
+    const Point3 c_poly {csum.x, csum.y, csum.z};
+    const auto r_bar = distance_point_to_unit_axis(c_poly, O, u);
+    if (r_bar <= 1e-30 || !std::isfinite(r_bar)) {
+        return std::nullopt;
+    }
+    return PappusRevolveMass {poly_area * r_bar * angle, poly_area};
+}
+
+/// Rodrigues：绕单位轴 `u` 过 `origin` 旋转角度 θ，`cos_t=cos(θ)`，`sin_t=sin(θ)`。
+Point3 rotate_point_around_unit_axis(const Point3& p, const Point3& origin, const Vec3& u, Scalar cos_t,
+                                     Scalar sin_t) {
+    const Vec3 v {p.x - origin.x, p.y - origin.y, p.z - origin.z};
+    const auto uxv = detail::cross(u, v);
+    const auto udotv = detail::dot(u, v);
+    const auto omc = 1.0 - cos_t;
+    const Vec3 vr {v.x * cos_t + uxv.x * sin_t + u.x * udotv * omc,
+                   v.y * cos_t + uxv.y * sin_t + u.y * udotv * omc,
+                   v.z * cos_t + uxv.z * sin_t + u.z * udotv * omc};
+    return detail::add_point_vec(origin, vr);
 }
 
 bool valid_axis(const Vec3& axis) {
@@ -838,6 +1107,42 @@ BooleanPrepStats compute_boolean_prep_stats(const detail::KernelState& state, Bo
     return stats;
 }
 
+/// 为布尔工作流诊断问题绑定稳定阶段标签，供 JSON 导出与 CI 聚合（与 error_codes 中 BOOL 码一致）。
+void set_boolean_diagnostic_stage(Issue& issue, std::string_view code) {
+    using namespace diag_codes;
+    if (code == kBoolPrepCandidatesBuilt || code == kBoolLocalClipApplied || code == kBoolFaceCandidatesBuilt) {
+        issue.stage = "bool.prep";
+    } else if (code == kBoolRunStageSummary) {
+        issue.stage = "bool.summary";
+    } else if (code == kBoolIntersectionCurvesBuilt) {
+        issue.stage = "bool.intersect";
+    } else if (code == kBoolIntersectionSegmentsBuilt) {
+        issue.stage = "bool.intersect.trim";
+    } else if (code == kBoolIntersectionWiresStored) {
+        issue.stage = "bool.intersect.store";
+    } else if (code == kBoolImprintApplied || code == kBoolImprintSegmentApplied) {
+        issue.stage = "bool.split.imprint";
+    } else if (code == kBoolClassificationCompleted) {
+        issue.stage = "bool.classify.result";
+    } else if (code == kBoolRebuildCompleted) {
+        issue.stage = "bool.rebuild.result";
+    } else if (code == kBoolStageCandidates) {
+        issue.stage = "bool.prep.candidates";
+    } else if (code == kBoolStageSplit) {
+        issue.stage = "bool.split";
+    } else if (code == kBoolStageOutputMaterialized) {
+        issue.stage = "bool.output_materialized";
+    } else if (code == kBoolStageClassify) {
+        issue.stage = "bool.classify";
+    } else if (code == kBoolStageRebuild) {
+        issue.stage = "bool.rebuild";
+    } else if (code == kBoolStageValidate) {
+        issue.stage = "bool.validate";
+    } else if (code == kBoolStageRepair) {
+        issue.stage = "bool.repair";
+    }
+}
+
 void append_boolean_prep_candidate_issue(detail::KernelState& state,
                                          DiagnosticId diag,
                                          BodyId lhs,
@@ -853,6 +1158,7 @@ void append_boolean_prep_candidate_issue(detail::KernelState& state,
             << ", overlap_volume_sum=" << prep.overlap_volume_sum;
     auto issue = detail::make_info_issue(diag_codes::kBoolPrepCandidatesBuilt, message.str());
     issue.related_entities = {lhs.value, rhs.value};
+    set_boolean_diagnostic_stage(issue, diag_codes::kBoolPrepCandidatesBuilt);
     state.append_diagnostic_issue(diag, std::move(issue));
 
     if (prep.local_clip_applied) {
@@ -860,6 +1166,7 @@ void append_boolean_prep_candidate_issue(detail::KernelState& state,
             diag_codes::kBoolLocalClipApplied,
             "布尔局部裁剪已应用：结果 bbox 已按候选重叠区域收缩");
         clip_issue.related_entities = {lhs.value, rhs.value};
+        set_boolean_diagnostic_stage(clip_issue, diag_codes::kBoolLocalClipApplied);
         state.append_diagnostic_issue(diag, std::move(clip_issue));
     }
 }
@@ -912,6 +1219,7 @@ void append_boolean_run_stage_issue(detail::KernelState& state,
         << " local_clip=" << (prep.local_clip_applied ? "true" : "false");
     auto issue = detail::make_info_issue(diag_codes::kBoolRunStageSummary, msg.str());
     issue.related_entities = {lhs.value, rhs.value, output.value};
+    set_boolean_diagnostic_stage(issue, diag_codes::kBoolRunStageSummary);
     state.append_diagnostic_issue(diag, std::move(issue));
 }
 
@@ -925,6 +1233,7 @@ void append_boolean_stage_issue(detail::KernelState& state,
     }
     auto issue = detail::make_info_issue(code, std::move(message));
     issue.related_entities = std::move(related_entities);
+    set_boolean_diagnostic_stage(issue, code);
     state.append_diagnostic_issue(diag, std::move(issue));
 }
 
@@ -940,6 +1249,7 @@ void append_boolean_face_candidate_issue(detail::KernelState& state,
     msg << "布尔面级候选对已生成: face_candidates=" << count;
     auto issue = detail::make_info_issue(diag_codes::kBoolFaceCandidatesBuilt, msg.str());
     issue.related_entities = {lhs.value, rhs.value};
+    set_boolean_diagnostic_stage(issue, diag_codes::kBoolFaceCandidatesBuilt);
     state.append_diagnostic_issue(diag, std::move(issue));
 }
 
@@ -955,6 +1265,7 @@ void append_boolean_intersection_curve_issue(detail::KernelState& state,
     msg << "布尔精确求交（解析）已生成交线: curves=" << curves.size();
     auto issue = detail::make_info_issue(diag_codes::kBoolIntersectionCurvesBuilt, msg.str());
     issue.related_entities = {lhs.value, rhs.value};
+    set_boolean_diagnostic_stage(issue, diag_codes::kBoolIntersectionCurvesBuilt);
     const std::size_t kMaxCurves = 8;
     for (std::size_t i = 0; i < std::min(kMaxCurves, curves.size()); ++i) {
         issue.related_entities.push_back(curves[i].curve.value);
@@ -974,6 +1285,7 @@ void append_boolean_intersection_segment_issue(detail::KernelState& state,
     msg << "布尔交线裁剪完成: segments=" << segments.size();
     auto issue = detail::make_info_issue(diag_codes::kBoolIntersectionSegmentsBuilt, msg.str());
     issue.related_entities = {lhs.value, rhs.value};
+    set_boolean_diagnostic_stage(issue, diag_codes::kBoolIntersectionSegmentsBuilt);
     const std::size_t kMaxSeg = 8;
     for (std::size_t i = 0; i < std::min(kMaxSeg, segments.size()); ++i) {
         issue.related_entities.push_back(segments[i].curve.value);
@@ -995,6 +1307,7 @@ void append_boolean_intersection_stored_issue(detail::KernelState& state,
         << " curve_count=" << curve_count;
     auto issue = detail::make_info_issue(diag_codes::kBoolIntersectionWiresStored, msg.str());
     issue.related_entities = {lhs.value, rhs.value, intersection_id.value};
+    set_boolean_diagnostic_stage(issue, diag_codes::kBoolIntersectionWiresStored);
     state.append_diagnostic_issue(diag, std::move(issue));
 }
 
@@ -1789,9 +2102,64 @@ Result<BodyId> SweepService::extrude(const ProfileRef& profile, const Vec3& dire
                 "拉伸失败：polygon 轮廓点非法，无法形成有效包围盒", "拉伸失败");
         }
         record.bbox = bbox;
+        // `BodyKind::Sweep` 的 `record.a`：多边形拉伸棱柱体积缓存（供 `mass_properties` 非纯 bbox 口径）。
+        const auto& v0p = profile.polygon_xyz.front();
+        Vec3 accn {0.0, 0.0, 0.0};
+        const auto nv = profile.polygon_xyz.size();
+        for (std::size_t i = 0; i < nv; ++i) {
+            const auto& vi = profile.polygon_xyz[i];
+            const auto& vj = profile.polygon_xyz[(i + 1) % nv];
+            const auto ei = detail::subtract(vi, v0p);
+            const auto ej = detail::subtract(vj, v0p);
+            const auto cr = detail::cross(ei, ej);
+            accn = Vec3 {accn.x + cr.x, accn.y + cr.y, accn.z + cr.z};
+        }
+        const auto acc_len = detail::norm(accn);
+        const auto poly_area = 0.5 * acc_len;
+        if (poly_area > 1e-18 && acc_len > 1e-18) {
+            const auto n_unit = detail::scale(accn, 1.0 / acc_len);
+            const auto h_eff = std::abs(detail::dot(n_unit, dir)) * distance;
+            record.a = poly_area * h_eff;
+            const Vec3 D = detail::scale(dir, distance);
+            Scalar lateral = 0.0;
+            for (std::size_t i = 0; i < nv; ++i) {
+                const auto& vi = profile.polygon_xyz[i];
+                const auto& vj = profile.polygon_xyz[(i + 1) % nv];
+                const auto dv = detail::subtract(vj, vi);
+                lateral += detail::norm(detail::cross(dv, D));
+            }
+            record.extrude_poly_cap_area = poly_area;
+            record.extrude_lateral_area = lateral;
+            Point3 csum {0.0, 0.0, 0.0};
+            Scalar wsum = 0.0;
+            for (std::size_t i = 1; i + 1 < nv; ++i) {
+                const auto& vi = profile.polygon_xyz[i];
+                const auto& vj = profile.polygon_xyz[i + 1];
+                const auto e1 = detail::subtract(vi, v0p);
+                const auto e2 = detail::subtract(vj, v0p);
+                const auto cp = detail::cross(e1, e2);
+                const auto ta = 0.5 * detail::norm(cp);
+                if (ta <= 1e-30) {
+                    continue;
+                }
+                csum.x += (v0p.x + vi.x + vj.x) * ta / 3.0;
+                csum.y += (v0p.y + vi.y + vj.y) * ta / 3.0;
+                csum.z += (v0p.z + vi.z + vj.z) * ta / 3.0;
+                wsum += ta;
+            }
+            if (wsum > 1e-30) {
+                const Point3 c_base {csum.x / wsum, csum.y / wsum, csum.z / wsum};
+                record.extrude_mass_centroid = detail::add_point_vec(c_base, detail::scale(D, 0.5));
+            }
+        }
     } else {
         const auto p0 = Point3{0.0, 0.0, 0.0};
         const auto p1 = detail::add_point_vec(p0, detail::scale(dir, distance));
+        // 占位轮廓约定：原点附近 1×1 单位正方形截面，沿 `dir` 拉伸 `distance`（与 bbox  padding 一致）。
+        record.a = distance;
+        record.extrude_poly_cap_area = 1.0;
+        record.extrude_lateral_area = 4.0 * distance;
+        record.extrude_mass_centroid = detail::add_point_vec(p0, detail::scale(dir, distance * 0.5));
         // minimal profile extent: unit square around origin
         const auto minx = std::min(p0.x, p1.x) - 0.5;
         const auto maxx = std::max(p0.x, p1.x) + 0.5;
@@ -1814,8 +2182,57 @@ Result<BodyId> SweepService::revolve(const ProfileRef& profile, const Axis3& axi
     record.kind = detail::BodyKind::Sweep;
     record.rep_kind = RepKind::ExactBRep;
     record.label = "revolve:" + profile.label;
-    // minimal revolve bbox: assume profile within unit radius around axis origin
-    record.bbox = detail::bbox_from_center_radius(axis.origin, 1.0, 1.0, 1.0);
+    const auto u = detail::normalize(axis.direction);
+    record.axis = u;
+    const auto& O = axis.origin;
+    record.origin = O;
+
+    if (!profile.polygon_xyz.empty()) {
+        if (profile.polygon_xyz.size() < 3) {
+            return detail::invalid_input_result<BodyId>(
+                *state_, diag_codes::kCoreParameterOutOfRange,
+                "旋转失败：polygon 轮廓点数不足（至少 3 个点）", "旋转失败");
+        }
+        record.revolve_profile_xyz = profile.polygon_xyz;
+        const auto ct = std::cos(angle);
+        const auto st = std::sin(angle);
+        BoundingBox bbox {};
+        auto extend_point = [&](const Point3& p) {
+            if (!bbox.is_valid) {
+                bbox.min = p;
+                bbox.max = p;
+                bbox.is_valid = true;
+                return;
+            }
+            bbox.min.x = std::min(bbox.min.x, p.x);
+            bbox.min.y = std::min(bbox.min.y, p.y);
+            bbox.min.z = std::min(bbox.min.z, p.z);
+            bbox.max.x = std::max(bbox.max.x, p.x);
+            bbox.max.y = std::max(bbox.max.y, p.y);
+            bbox.max.z = std::max(bbox.max.z, p.z);
+        };
+        for (const auto& p : profile.polygon_xyz) {
+            extend_point(p);
+            extend_point(rotate_point_around_unit_axis(p, O, u, ct, st));
+        }
+        if (!bbox.is_valid) {
+            return detail::invalid_input_result<BodyId>(
+                *state_, diag_codes::kCoreParameterOutOfRange,
+                "旋转失败：polygon 轮廓无法形成有效包围盒", "旋转失败");
+        }
+        record.bbox = bbox;
+        record.b = angle;
+        // Pappus：体积 = 轮廓面积 × 质心到轴距离 × 转角（弧度）。
+        if (const auto pm = try_pappus_revolve_mass(std::span<const Point3>(profile.polygon_xyz.data(),
+                                                                            profile.polygon_xyz.size()),
+                                                    O, u, angle)) {
+            record.a = pm->volume;
+            record.extrude_poly_cap_area = pm->profile_area;
+        }
+    } else {
+        // 无 polygon：沿用单位尺度占位包围盒
+        record.bbox = detail::bbox_from_center_radius(axis.origin, 1.0, 1.0, 1.0);
+    }
     return ok_result(make_body(state_, record, "已完成旋转"), state_->create_diagnostic("已完成旋转"));
 }
 
@@ -1835,6 +2252,9 @@ Result<BodyId> SweepService::sweep(const ProfileRef& profile, CurveId rail) {
         bbox = offset_bbox(bbox, 0.5);
     }
     record.bbox = bbox.is_valid ? bbox : detail::make_bbox({0.0, 0.0, 0.0}, {2.0, 2.0, 2.0});
+    if (record.bbox.is_valid) {
+        record.a = bbox_mass_properties(record.bbox).volume;
+    }
     return ok_result(make_body(state_, record, "已完成扫描"), state_->create_diagnostic("已完成扫描"));
 }
 
@@ -1851,6 +2271,7 @@ Result<BodyId> SweepService::loft(std::span<const ProfileRef> profiles) {
     // minimal loft bbox: size scales with profile count
     const auto extent = std::max<Scalar>(2.0, static_cast<Scalar>(profiles.size()));
     record.bbox = detail::make_bbox({0.0, 0.0, 0.0}, {extent, extent, extent});
+    record.a = extent * extent * extent;
     return ok_result(make_body(state_, record, "已完成放样"), state_->create_diagnostic("已完成放样"));
 }
 
@@ -1869,6 +2290,12 @@ Result<BodyId> SweepService::thicken(FaceId face_id, Scalar distance) {
     auto bbox = face_bbox(*state_, face_id);
     if (!bbox.is_valid) {
         bbox = detail::make_bbox({0.0, 0.0, 0.0}, {1.0, 1.0, 1.0});
+    }
+    record.b = distance;
+    const auto face_area_est = bbox_max_axis_rectangle_area(bbox);
+    if (face_area_est > 1e-30) {
+        record.extrude_poly_cap_area = face_area_est;
+        record.a = face_area_est * distance;
     }
     record.bbox = offset_bbox(bbox, distance);
     return ok_result(make_body(state_, record, "已完成加厚"), state_->create_diagnostic("已完成加厚"));
@@ -2013,6 +2440,7 @@ Result<OpReport> BooleanService::run(BooleanOp op, BodyId lhs, BodyId rhs, const
                         auto issue = detail::make_info_issue(diag_codes::kBoolImprintSegmentApplied,
                                                              "布尔切分/imprint 已应用：输出壳的矩形面已按交线段切分为两四边形");
                         issue.related_entities = {lhs.value, rhs.value, output.value, shell_id.value, target.value};
+                        set_boolean_diagnostic_stage(issue, diag_codes::kBoolImprintSegmentApplied);
                         state_->append_diagnostic_issue(diag, std::move(issue));
                     } else {
                         bool prefer_diag_02 = true;
@@ -2053,6 +2481,7 @@ Result<OpReport> BooleanService::run(BooleanOp op, BodyId lhs, BodyId rhs, const
                             auto issue = detail::make_info_issue(diag_codes::kBoolImprintApplied,
                                                                  "布尔切分/imprint 已应用：输出壳的矩形面已沿对角线切分");
                             issue.related_entities = {lhs.value, rhs.value, output.value, shell_id.value, target.value};
+                            set_boolean_diagnostic_stage(issue, diag_codes::kBoolImprintApplied);
                             state_->append_diagnostic_issue(diag, std::move(issue));
                         }
                     }
@@ -2207,6 +2636,7 @@ Result<OpReport> BooleanService::run(BooleanOp op, BodyId lhs, BodyId rhs, const
                 << " unknown=" << classified_unknown;
             auto issue = detail::make_info_issue(diag_codes::kBoolClassificationCompleted, msg.str());
             issue.related_entities = {lhs.value, rhs.value, output.value};
+            set_boolean_diagnostic_stage(issue, diag_codes::kBoolClassificationCompleted);
             state_->append_diagnostic_issue(diag, std::move(issue));
         }
 
@@ -2274,6 +2704,7 @@ Result<OpReport> BooleanService::run(BooleanOp op, BodyId lhs, BodyId rhs, const
                 << " auto_repair=" << (auto_repair_used ? "true" : "false");
             auto issue = detail::make_info_issue(diag_codes::kBoolRebuildCompleted, msg.str());
             issue.related_entities = {lhs.value, rhs.value, output.value};
+            set_boolean_diagnostic_stage(issue, diag_codes::kBoolRebuildCompleted);
             state_->append_diagnostic_issue(diag, std::move(issue));
         }
     }
@@ -2385,7 +2816,7 @@ Result<OpReport> ModifyService::shell_body(BodyId body_id, std::span<const FaceI
         state_->bodies.erase(output.value);
         detail::rebuild_topology_links(*state_);
         return detail::failed_result<OpReport>(
-            *state_, StatusCode::OperationFailed, diag_codes::kTxRollbackFailure,
+            *state_, StatusCode::OperationFailed, diag_codes::kModShellValidateFailed,
             "抽壳失败：结果校验未通过，已执行回滚", "抽壳失败");
     }
     detail::invalidate_eval_for_bodies(*state_, {body_id});
@@ -2669,16 +3100,31 @@ Result<MassProperties> QueryService::mass_properties(BodyId body_id) const {
             props.volume = body.a * body.b * body.c;
             props.area = 2.0 * (body.a * body.b + body.b * body.c + body.a * body.c);
             props.centroid = Point3 {body.origin.x + body.a * 0.5, body.origin.y + body.b * 0.5, body.origin.z + body.c * 0.5};
+            set_box_inertia_about_centroid(props, body.a, body.b, body.c);
             break;
+        case detail::BodyKind::Wedge: {
+            const auto dx = body.a;
+            const auto dy = body.b;
+            const auto dz = body.c;
+            props.volume = 0.5 * dx * dy * dz;
+            const auto hyp = std::sqrt(dx * dx + dy * dy);
+            props.area = dx * dy + dx * dz + dy * dz + hyp * dz;
+            props.centroid =
+                Point3 {body.origin.x + dx / 3.0, body.origin.y + dy / 3.0, body.origin.z + dz * 0.5};
+            set_wedge_inertia_about_centroid(props, dx, dy, dz);
+            break;
+        }
         case detail::BodyKind::Sphere:
             props.volume = 4.0 / 3.0 * kPi * body.a * body.a * body.a;
             props.area = 4.0 * kPi * body.a * body.a;
             props.centroid = body.origin;
+            set_sphere_inertia_about_center(props, body.a);
             break;
         case detail::BodyKind::Cylinder:
             props.volume = kPi * body.a * body.a * body.b;
             props.area = 2.0 * kPi * body.a * (body.b + body.a);
             props.centroid = body.origin;
+            set_cylinder_inertia_about_center(props, body.axis, body.a, body.b);
             break;
         case detail::BodyKind::Cone: {
             const auto radius = body.b * std::tan(body.a);
@@ -2686,12 +3132,128 @@ Result<MassProperties> QueryService::mass_properties(BodyId body_id) const {
             props.volume = kPi * radius * radius * body.b / 3.0;
             props.area = kPi * radius * (radius + slant);
             props.centroid = detail::add_point_vec(body.origin, detail::scale(body.axis, body.b * 0.75));
+            set_cone_inertia_about_centroid(props, body.axis, body.a, body.b);
             break;
         }
         case detail::BodyKind::Torus:
             props.volume = 2.0 * kPi * kPi * body.a * body.b * body.b;
             props.area = 4.0 * kPi * kPi * body.a * body.b;
             props.centroid = body.origin;
+            set_torus_inertia_about_center(props, body.axis, body.a, body.b);
+            break;
+        case detail::BodyKind::Sweep:
+            if (body.label == "thicken" && body.a > 0.0) {
+                props.volume = body.a;
+                if (body.bbox.is_valid) {
+                    props.centroid = Point3 {
+                        (body.bbox.min.x + body.bbox.max.x) * 0.5,
+                        (body.bbox.min.y + body.bbox.max.y) * 0.5,
+                        (body.bbox.min.z + body.bbox.max.z) * 0.5};
+                    const auto bboxp = bbox_mass_properties(body.bbox);
+                    props.area = bboxp.area;
+                }
+                break;
+            }
+            if (body.label.size() >= 8 && body.label.compare(0, 8, "revolve:") == 0) {
+                if (body.sweep_polyhedral_mass_valid) {
+                    props.volume = body.sweep_polyhedral_volume;
+                    props.area = body.sweep_cached_surface_area;
+                    props.centroid = body.sweep_polyhedral_centroid;
+                    props.inertia = body.sweep_inertia_about_centroid;
+                    // 子午面旋转体：多面体体积积分偶发数值/取向退化；Pappus 与轮廓一致时优先修正体积。
+                    if (body.b > 0.0 && !body.revolve_profile_xyz.empty()) {
+                        if (const auto pm = try_pappus_revolve_mass(
+                                std::span<const Point3>(body.revolve_profile_xyz.data(),
+                                                        body.revolve_profile_xyz.size()),
+                                body.origin, body.axis, body.b)) {
+                            const auto pp = std::abs(pm->volume);
+                            const auto pv = std::abs(props.volume);
+                            if (pp > 1e-12 && pv < 1e-4 * pp) {
+                                props.volume = pm->volume;
+                                if (body.bbox.is_valid &&
+                                    (props.area <= 0.0 || props.inertia[0] <= 0.0 || props.inertia[4] <= 0.0 ||
+                                     props.inertia[8] <= 0.0)) {
+                                    const auto bboxp = bbox_mass_properties(body.bbox);
+                                    props.area = bboxp.area;
+                                    props.centroid = bboxp.centroid;
+                                    const auto dx = std::max<Scalar>(0.0, body.bbox.max.x - body.bbox.min.x);
+                                    const auto dy = std::max<Scalar>(0.0, body.bbox.max.y - body.bbox.min.y);
+                                    const auto dz = std::max<Scalar>(0.0, body.bbox.max.z - body.bbox.min.z);
+                                    set_box_inertia_about_centroid(props, dx, dy, dz);
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+                if (body.a > 0.0) {
+                    props.volume = body.a;
+                    if (body.bbox.is_valid) {
+                        props.centroid = Point3 {
+                            (body.bbox.min.x + body.bbox.max.x) * 0.5,
+                            (body.bbox.min.y + body.bbox.max.y) * 0.5,
+                            (body.bbox.min.z + body.bbox.max.z) * 0.5};
+                        const auto bboxp = bbox_mass_properties(body.bbox);
+                        props.area = bboxp.area;
+                    }
+                    break;
+                }
+            }
+            if (body.label == "loft" && body.a > 0.0) {
+                props.volume = body.a;
+                if (body.bbox.is_valid) {
+                    props.centroid = Point3 {
+                        (body.bbox.min.x + body.bbox.max.x) * 0.5,
+                        (body.bbox.min.y + body.bbox.max.y) * 0.5,
+                        (body.bbox.min.z + body.bbox.max.z) * 0.5};
+                    const auto bboxp = bbox_mass_properties(body.bbox);
+                    props.area = bboxp.area;
+                }
+                break;
+            }
+            if (body.label.size() >= 6 && body.label.compare(0, 6, "sweep:") == 0 && body.a > 0.0) {
+                props.volume = body.a;
+                if (body.bbox.is_valid) {
+                    props.centroid = Point3 {
+                        (body.bbox.min.x + body.bbox.max.x) * 0.5,
+                        (body.bbox.min.y + body.bbox.max.y) * 0.5,
+                        (body.bbox.min.z + body.bbox.max.z) * 0.5};
+                    const auto bboxp = bbox_mass_properties(body.bbox);
+                    props.area = bboxp.area;
+                }
+                break;
+            }
+            if (body.label.size() >= 8 && body.label.compare(0, 8, "extrude:") == 0 && body.a > 0.0) {
+                props.volume = body.a;
+                if (body.extrude_poly_cap_area > 0.0) {
+                    props.area = 2.0 * body.extrude_poly_cap_area + body.extrude_lateral_area;
+                    props.centroid = body.extrude_mass_centroid;
+                } else if (body.bbox.is_valid) {
+                    props.centroid = Point3 {
+                        (body.bbox.min.x + body.bbox.max.x) * 0.5,
+                        (body.bbox.min.y + body.bbox.max.y) * 0.5,
+                        (body.bbox.min.z + body.bbox.max.z) * 0.5};
+                    const auto bboxp = bbox_mass_properties(body.bbox);
+                    props.area = bboxp.area;
+                }
+                break;
+            }
+            props = bbox_mass_properties(body.bbox);
+            if (body.label.size() >= 8 && body.label.compare(0, 8, "revolve:") == 0 && body.b > 0.0 &&
+                !body.revolve_profile_xyz.empty()) {
+                if (const auto pm = try_pappus_revolve_mass(
+                        std::span<const Point3>(body.revolve_profile_xyz.data(), body.revolve_profile_xyz.size()),
+                        body.origin, body.axis, body.b)) {
+                    if (pm->volume > 1e-18) {
+                        props.volume = pm->volume;
+                    }
+                }
+            }
+            break;
+        case detail::BodyKind::BooleanResult:
+            // 注：`try_disjoint_boolean_two_box_mass_properties` 曾放在首个匿名命名空间内，而 `QueryService`
+            // 定义在其外，无法链接；完整组合逻辑需在非匿名作用域重接或经门面转发（见布尔质量属性 TODO）。
+            props = bbox_mass_properties(body.bbox);
             break;
         default:
             props = bbox_mass_properties(body.bbox);

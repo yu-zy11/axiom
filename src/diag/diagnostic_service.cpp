@@ -99,6 +99,9 @@ Result<void> DiagnosticService::export_report(DiagnosticId id, std::string_view 
     for (const auto& issue : it->second.issues) {
         out << "- [" << issue_severity_name(issue.severity) << "] "
             << issue.code << ": " << issue.message;
+        if (!issue.stage.empty()) {
+            out << " | Stage:" << issue.stage;
+        }
         if (!issue.related_entities.empty()) {
             out << " | RelatedEntities:";
             for (const auto entity : issue.related_entities) {
@@ -139,6 +142,7 @@ Result<void> DiagnosticService::export_report_json(DiagnosticId id, std::string_
         out << "\"code\":\"" << json_escape(issue.code) << "\",";
         out << "\"severity\":\"" << json_escape(issue_severity_name(issue.severity)) << "\",";
         out << "\"message\":\"" << json_escape(issue.message) << "\",";
+        out << "\"stage\":\"" << json_escape(issue.stage) << "\",";
         out << "\"related_entities\":[";
         for (std::size_t j = 0; j < issue.related_entities.size(); ++j) {
             out << issue.related_entities[j];

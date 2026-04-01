@@ -15,13 +15,15 @@ description: Develop and harden AxiomKernel Plugin/SDK surface (Kernel facade st
 
 - SDK：`include/axiom/sdk/kernel.h` + `src/sdk/kernel.cpp`
 - Plugin：`include/axiom/plugin/plugin_registry.h` + `src/plugin/plugin_registry.cpp`
-- 关键回归：`tests/sdk/smoke_test.cpp`、`tests/diag/diagnostics_test.cpp`（以及任何新增的 E2E 测试）
+- 插件 SDK API 版本常量：`include/axiom/plugin/plugin_sdk_version.h`（`kPluginSdkApiVersion`，与 `Kernel::plugin_sdk_api_version` 一致）
+- 关键回归：`tests/sdk/smoke_test.cpp`、`tests/sdk/plugin_sdk_test.cpp`、`tests/diag/diagnostics_test.cpp`
+- 宿主策略扩展：`PluginSandboxLevel`、`PluginApiVersionMatchMode`（`types.h`）；`sandbox_level` 与 `plugin_api_version_match_mode` 在能力报告/JSON 可见；执行仍为进程内
 
 ## 硬规则（必须遵守）
 
 - **门面稳定**：能不破坏现有 public API 就不要破坏；确需变更要提供迁移路径并补回归。
 - **能力报告真实**：对外宣称“支持/可用”的服务与格式必须与实现一致（否则修正或显式标注为“实验性”并测试固化）。
-- **插件失败可诊断**：注册/加载/查询失败必须可定位（status + 诊断）。
+- **插件失败可诊断**：注册/注销/加载/查询失败必须可定位（status + 诊断）。
 
 ## 默认工作流
 

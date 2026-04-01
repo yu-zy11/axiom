@@ -34,6 +34,9 @@ inline constexpr std::string_view kTopoSourceRefInvalid = "AXM-TOPO-E-0012";
 inline constexpr std::string_view kTopoSourceRefMismatch = "AXM-TOPO-E-0013";
 inline constexpr std::string_view kTopoLoopDuplicateEdge = "AXM-TOPO-E-0014";
 inline constexpr std::string_view kTopoLoopOrientationMismatch = "AXM-TOPO-E-0015";
+inline constexpr std::string_view kTopoDanglingCoedge = "AXM-TOPO-E-0019";
+inline constexpr std::string_view kTopoDanglingVertex = "AXM-TOPO-E-0020";
+inline constexpr std::string_view kTopoOrphanLoop = "AXM-TOPO-E-0021";
 
 inline constexpr std::string_view kBoolInvalidInput = "AXM-BOOL-E-0001";
 inline constexpr std::string_view kBoolIntersectionFailure = "AXM-BOOL-E-0003";
@@ -86,6 +89,8 @@ inline constexpr std::string_view kModOffsetSelfIntersection = "AXM-MOD-E-0002";
 inline constexpr std::string_view kModShellFailure = "AXM-MOD-E-0003";
 inline constexpr std::string_view kModReplaceFaceIncompatible = "AXM-MOD-E-0005";
 inline constexpr std::string_view kModDeleteFaceHealFailure = "AXM-MOD-E-0006";
+/// 抽壳等修改已生成结果体，但后验校验未通过并已回滚（结果体未保留）。
+inline constexpr std::string_view kModShellValidateFailed = "AXM-MOD-E-0008";
 
 inline constexpr std::string_view kQueryClosestPointFailure = "AXM-QUERY-E-0001";
 inline constexpr std::string_view kQuerySectionFailure = "AXM-QUERY-E-0002";
@@ -97,10 +102,22 @@ inline constexpr std::string_view kHealSmallFaceFailure = "AXM-HEAL-E-0003";
 inline constexpr std::string_view kHealAutoRepairFailure = "AXM-HEAL-E-0006";
 inline constexpr std::string_view kHealFeatureRemovedWarning = "AXM-HEAL-W-0001";
 inline constexpr std::string_view kHealRepairValidated = "AXM-HEAL-D-0005";
+/// 修复管线阶段标记（可检索/聚合，用于回放与导入闭环追踪）；`Issue::message` 为操作名（如 `auto_repair`）。
+inline constexpr std::string_view kHealRepairPipelineTrace = "AXM-HEAL-D-0006";
+/// 修复管线回放摘要（逗号分隔操作名，与 D-0006 顺序一致）；便于日志/CI 解析而不依赖 `summarize_repair` 文本。
+inline constexpr std::string_view kHealRepairReplaySummary = "AXM-HEAL-D-0007";
 
 inline constexpr std::string_view kValSelfIntersection = "AXM-VAL-E-0001";
+/// 与文档字典一致：拓扑非流形等“形状不可用”类验证失败（验证层语义，可与 TOPO 细分码并存）。
+inline constexpr std::string_view kValNonManifoldGeometry = "AXM-VAL-E-0002";
 inline constexpr std::string_view kValToleranceConflict = "AXM-VAL-E-0003";
 inline constexpr std::string_view kValDegenerateGeometry = "AXM-VAL-E-0004";
+/// 支撑曲面参数域退化/无效（如修剪域反转、扫掠角为零），Strict 几何验证可定位。
+inline constexpr std::string_view kValParameterDomainInvalid = "AXM-VAL-E-0007";
+/// 自交检测：三角化规模超出预算（可调大 chordal_error 或后续引入加速结构后重试）。
+inline constexpr std::string_view kValSelfIntersectionMeshBudget = "AXM-VAL-E-0008";
+/// Strict：包围盒最小厚度相对当前线性容差过小，几何细节可能落在容差噪声尺度内（薄壁/薄片风险）。
+inline constexpr std::string_view kValModelFinerThanTolerance = "AXM-VAL-E-0009";
 
 inline constexpr std::string_view kIoFileNotFound = "AXM-IO-E-0001";
 inline constexpr std::string_view kIoUnknownFormat = "AXM-IO-E-0002";
@@ -115,6 +132,20 @@ inline constexpr std::string_view kTesFailure = "AXM-TES-E-0001";
 inline constexpr std::string_view kEvalCycleDetected = "AXM-EVAL-E-0001";
 
 inline constexpr std::string_view kPluginLoadFailure = "AXM-PLUGIN-E-0001";
+inline constexpr std::string_view kPluginVersionIncompatible = "AXM-PLUGIN-E-0002";
+inline constexpr std::string_view kPluginCapabilityManifestIncomplete = "AXM-PLUGIN-E-0003";
+inline constexpr std::string_view kPluginExecutionFailure = "AXM-PLUGIN-E-0004";
+inline constexpr std::string_view kPluginResultValidationWarning = "AXM-PLUGIN-E-0005";
+inline constexpr std::string_view kPluginDuplicateManifestName = "AXM-PLUGIN-E-0006";
+inline constexpr std::string_view kPluginRegistryQuotaExceeded = "AXM-PLUGIN-E-0007";
+inline constexpr std::string_view kPluginNotRegistered = "AXM-PLUGIN-E-0008";
+
+// 与字典/注册路径别名一致（避免重复字面量定义）。
+inline constexpr std::string_view kPluginCapabilityIncomplete = kPluginCapabilityManifestIncomplete;
+inline constexpr std::string_view kPluginDuplicateImplementation = kPluginDuplicateManifestName;
+inline constexpr std::string_view kPluginHostCapacityExceeded = kPluginRegistryQuotaExceeded;
+
+inline constexpr std::string_view kPluginDiscoveryReport = "AXM-PLUGIN-D-0001";
 
 inline constexpr std::string_view kTxCommitFailure = "AXM-TX-E-0001";
 inline constexpr std::string_view kTxRollbackFailure = "AXM-TX-E-0002";

@@ -227,11 +227,11 @@
 |---|---|---|
 | `AXM-TOPO-E-0001` | Error | 边缺少合法端点 |
 | `AXM-TOPO-E-0002` | Error | 环未闭合 |
-| `AXM-TOPO-E-0003` | Error | 面外环非法 |
-| `AXM-TOPO-E-0004` | Error | 面内环非法 |
-| `AXM-TOPO-E-0005` | Error | 壳未封闭 |
-| `AXM-TOPO-E-0006` | Error | 非法悬挂边 |
-| `AXM-TOPO-E-0007` | Error | 拓扑关系不一致 |
+| `AXM-TOPO-E-0003` | Error | 面外环非法（含：外环已被其他面引用时 `create_face` 拒绝） |
+| `AXM-TOPO-E-0004` | Error | 面内环非法（含：内环已被其他面引用时 `create_face` 拒绝） |
+| `AXM-TOPO-E-0005` | Error | 壳未封闭（含：`validate_indices_consistency` 发现体记录中 `shells` 列表含重复壳 id） |
+| `AXM-TOPO-E-0006` | Error | 非法悬挂边（含：`validate_edge` 与 `validate_indices_consistency` 反向索引发现边无共边引用） |
+| `AXM-TOPO-E-0007` | Error | 拓扑关系不一致（含：`edge_to_coedges` 重复定向边、`face_to_shells`/`shell_to_bodies` 反向列表重复条目、`loop_to_faces` 重复面或同一环对应多面等索引自洽性失败） |
 | `AXM-TOPO-E-0008` | Error | 参数曲线与空间曲线不一致 |
 | `AXM-TOPO-E-0009` | Fatal | 拓扑不变量被破坏 |
 | `AXM-TOPO-E-0010` | Error | 壳内存在开放边界（边引用次数不足） |
@@ -241,8 +241,11 @@
 | `AXM-TOPO-E-0014` | Error | 同一环内重复引用同一条拓扑边 |
 | `AXM-TOPO-E-0015` | Error | 修剪面外环与内环在 UV 空间方向不符合孔洞规则 |
 | `AXM-TOPO-E-0016` | Error | 定向边已归属其他环（共边跨环复用） |
-| `AXM-TOPO-E-0017` | Warning | 壳内存在重复面（相同曲面与边界环签名） |
+| `AXM-TOPO-E-0017` | Warning / Error | 壳内重复面：`validate_shell` 对同曲面同边界环签名给 **Warning**；`create_shell` / `validate_indices_consistency` 对壳 `faces` 列表中重复 `FaceId` 给 **Error** |
 | `AXM-TOPO-E-0018` | Warning | 壳不连通（面集合存在多个连通分量） |
+| `AXM-TOPO-E-0019` | Error | 定向边未被任何环引用（悬挂定向边） |
+| `AXM-TOPO-E-0020` | Error | 顶点未作为任何边的端点（悬挂顶点） |
+| `AXM-TOPO-E-0021` | Error | 环未被任何面引用（孤立环，例如删除面后残留） |
 
 ## 7.5 `BOOL` 布尔模块错误码
 
@@ -357,10 +360,19 @@
 | 错误码 | 严重级别 | 含义 |
 |---|---|---|
 | `AXM-PLUGIN-E-0001` | Error | 插件加载失败 |
-| `AXM-PLUGIN-E-0002` | Error | 插件版本不兼容 |
+| `AXM-PLUGIN-E-0002` | Error | 插件 `plugin_api_version` 与宿主不兼容（未声明，或不符合 `PluginApiVersionMatchMode` 规则） |
 | `AXM-PLUGIN-E-0003` | Error | 插件能力声明不完整 |
 | `AXM-PLUGIN-E-0004` | Error | 插件执行失败 |
 | `AXM-PLUGIN-E-0005` | Warning | 插件返回结果未通过验证 |
+| `AXM-PLUGIN-E-0006` | Error | 重复注册（清单 `name` 重复，或同类插件 `type_name` 冲突） |
+| `AXM-PLUGIN-E-0007` | Error | 插件实例数超过宿主策略上限 |
+| `AXM-PLUGIN-E-0008` | Error | 注销/卸载目标不存在（如 `type_name` 未注册，或清单 `name` 未命中） |
+
+### 7.14.1 `PLUGIN` 插件模块诊断码
+
+| 诊断码 | 严重级别 | 含义 |
+|---|---|---|
+| `AXM-PLUGIN-D-0001` | Info | 插件能力发现快照已生成 |
 
 ## 7.15 `TX` 事务与版本模块错误码
 

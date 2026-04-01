@@ -59,6 +59,7 @@ target_include_directories(axiom_ops PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 add_library(axiom_heal STATIC
     src/heal/heal_services.cpp
+    src/heal/mesh_self_intersection.cpp
 )
 target_link_libraries(axiom_heal PUBLIC axiom_core axiom_math axiom_geo axiom_topo axiom_rep axiom_diag)
 target_include_directories(axiom_heal PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)

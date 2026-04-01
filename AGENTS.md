@@ -75,7 +75,7 @@ ctest --test-dir build
 - **Internal（内部实现细节头）**：`src/axiom/internal/`（模块私有，不安装；禁止上层/插件绕过 Public API 直接依赖）
 - **实现源码**：`src/<module>/...`（与 `include/axiom/<module>/...` 对应；internal 头通过 CMake 的 PRIVATE include 暴露给允许依赖的模块）
 - **测试**：`tests/<模块>/*_test.cpp`（按模块分子目录；`ctest` 名称不变）
-- **示例**：`examples/basic_workflow.cpp`
+- **示例**：`examples/basic_workflow.cpp`、`examples/minimal_plugin.cpp`（插件宿主与能力发现）
 
 ### 模块分层（核心约束）
 
@@ -189,6 +189,7 @@ ctest --test-dir build
 这些名字可以直接用于 `ctest -R`：
 
 - **smoke**：`axiom_smoke_test`
+- **plugin / sdk**：`axiom_plugin_sdk_test`（宿主策略、能力发现 JSON、`register_plugin_*` 诊断闭环）
 - **diagnostics**：`axiom_diagnostics_test`
 - **geometry**：`axiom_geometry_test`
 - **topology**：`axiom_topology_test`

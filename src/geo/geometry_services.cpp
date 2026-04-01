@@ -592,6 +592,282 @@ Range1D curve_domain(const detail::CurveRecord &curve) {
   }
 }
 
+Scalar curve_curvature_from_rp_rpp(const Vec3 &rp, const Vec3 &rpp) {
+  const Vec3 cr = detail::cross(rp, rpp);
+  const Scalar lp = detail::norm(rp);
+  if (!(lp > 1e-24) || !std::isfinite(lp)) {
+    return 0.0;
+  }
+  const Scalar denom = lp * lp * lp;
+  if (!(std::abs(denom) > 1e-40)) {
+    return 0.0;
+  }
+  const Scalar k = detail::norm(cr) / denom;
+  return std::isfinite(k) ? k : 0.0;
+}
+
+Scalar pcurve_curvature_signed(const Vec2 &rp, const Vec2 &rpp) {
+  const Scalar num = rp.x * rpp.y - rp.y * rpp.x;
+  const Scalar lp = std::hypot(rp.x, rp.y);
+  if (!(lp > 1e-24) || !std::isfinite(lp)) {
+    return 0.0;
+  }
+  const Scalar denom = lp * lp * lp;
+  if (!(std::abs(denom) > 1e-40)) {
+    return 0.0;
+  }
+  const Scalar k = num / denom;
+  return std::isfinite(k) ? k : 0.0;
+}
+
+void curve_finite_diff_r12(const std::function<Point3(Scalar)> &f, Scalar t, Scalar tmin,
+                           Scalar tmax, Vec3 &r1, Vec3 &r2) {
+  const Scalar span = tmax - tmin;
+  const Scalar h = std::max(span * 1e-4, 1e-6);
+  const Scalar tm = std::clamp(t, tmin, tmax);
+  const Scalar ta = std::clamp(tm - h, tmin, tmax);
+  const Scalar tb = std::clamp(tm + h, tmin, tmax);
+  const Point3 pa = f(ta);
+  const Point3 pb = f(tb);
+  const Scalar den = tb - ta;
+  if (std::abs(den) > 1e-30) {
+    r1 = detail::scale(detail::subtract(pb, pa), 1.0 / den);
+  } else {
+    r1 = Vec3{1.0, 0.0, 0.0};
+  }
+  const Scalar hh = std::max(span * 1e-3, 1e-5);
+  const Scalar t0 = std::clamp(tm - hh, tmin, tmax);
+  const Scalar t2 = std::clamp(tm + hh, tmin, tmax);
+  const Point3 p0 = f(t0);
+  const Point3 pm = f(tm);
+  const Point3 p2b = f(t2);
+  const Scalar d_left = tm - t0;
+  const Scalar d_right = t2 - tm;
+  const Scalar denom2 = d_left * d_right;
+  if (std::abs(denom2) > 1e-30) {
+    r2.x = (p2b.x - 2.0 * pm.x + p0.x) / denom2;
+    r2.y = (p2b.y - 2.0 * pm.y + p0.y) / denom2;
+    r2.z = (p2b.z - 2.0 * pm.z + p0.z) / denom2;
+  } else {
+    r2 = Vec3{0.0, 0.0, 0.0};
+  }
+}
+
+int bspline_degree_for_control_count(std::size_t n) {
+  if (n <= 1) {
+    return 0;
+  }
+  if (n <= 3) {
+    return 1;
+  }
+  return std::min(3, static_cast<int>(n) - 1);
+}
+
+std::vector<Scalar> bspline_open_uniform_knots(std::size_t n, int p) {
+  const int ni = static_cast<int>(n);
+  const int m = ni + p + 1;
+  std::vector<Scalar> U(static_cast<std::size_t>(m));
+  for (int j = 0; j <= p; ++j) {
+    U[static_cast<std::size_t>(j)] = 0.0;
+  }
+  for (int j = ni; j < m; ++j) {
+    U[static_cast<std::size_t>(j)] = static_cast<Scalar>(ni - p);
+  }
+  for (int j = p + 1; j < ni; ++j) {
+    U[static_cast<std::size_t>(j)] = static_cast<Scalar>(j - p);
+  }
+  return U;
+}
+
+void bspline_affine_scale_knots_to_span(std::vector<Scalar> &U, int p, std::size_t n,
+                                        Scalar target_end) {
+  if (U.empty()) {
+    return;
+  }
+  const Scalar u0 = U[static_cast<std::size_t>(p)];
+  const Scalar u1 = U[n];
+  const Scalar den = u1 - u0;
+  if (!(std::abs(den) > 1e-24)) {
+    return;
+  }
+  const Scalar s = target_end / den;
+  for (auto &x : U) {
+    x = (x - u0) * s;
+  }
+}
+
+int bspline_find_span(std::size_t n, int p, Scalar u, const std::vector<Scalar> &U) {
+  const int ni = static_cast<int>(n);
+  if (ni <= 0 || static_cast<int>(U.size()) < ni + p + 1) {
+    return p;
+  }
+  const Scalar ulo = U[static_cast<std::size_t>(p)];
+  const Scalar uhi = U[n];
+  if (u <= ulo) {
+    return p;
+  }
+  if (u >= uhi) {
+    return ni - 1;
+  }
+  int low = p;
+  int high = ni;
+  int mid = (low + high) / 2;
+  while (u < U[static_cast<std::size_t>(mid)] ||
+         u >= U[static_cast<std::size_t>(mid + 1)]) {
+    if (u < U[static_cast<std::size_t>(mid)]) {
+      high = mid;
+    } else {
+      low = mid;
+    }
+    mid = (low + high) / 2;
+  }
+  return mid;
+}
+
+Vec3 lerp_vec3(const Vec3 &a, const Vec3 &b, Scalar alpha) {
+  return Vec3{a.x + (b.x - a.x) * alpha, a.y + (b.y - a.y) * alpha,
+              a.z + (b.z - a.z) * alpha};
+}
+
+Point3 bspline_de_boor_point(std::span<const Point3> poles, const std::vector<Scalar> &U, int p,
+                             int k, Scalar u) {
+  if (p == 0) {
+    return poles[static_cast<std::size_t>(k)];
+  }
+  std::vector<Point3> d(static_cast<std::size_t>(p + 1));
+  for (int i = 0; i <= p; ++i) {
+    d[static_cast<std::size_t>(i)] = poles[static_cast<std::size_t>(k - p + i)];
+  }
+  for (int r = 1; r <= p; ++r) {
+    for (int i = p; i >= r; --i) {
+      const int idx = k - p + i;
+      const Scalar left = U[static_cast<std::size_t>(idx)];
+      const Scalar right = U[static_cast<std::size_t>(idx + p - r + 1)];
+      const Scalar denom = right - left;
+      Scalar alpha = 0.0;
+      if (std::abs(denom) > 1e-24) {
+        alpha = (u - left) / denom;
+      }
+      d[static_cast<std::size_t>(i)] =
+          lerp_point(d[static_cast<std::size_t>(i - 1)], d[static_cast<std::size_t>(i)], alpha);
+    }
+  }
+  return d[static_cast<std::size_t>(p)];
+}
+
+Vec3 bspline_de_boor_vec(std::span<const Vec3> coeffs, const std::vector<Scalar> &U, int p, int k,
+                         Scalar u) {
+  if (p == 0) {
+    return coeffs[static_cast<std::size_t>(k)];
+  }
+  std::vector<Vec3> d(static_cast<std::size_t>(p + 1));
+  for (int i = 0; i <= p; ++i) {
+    d[static_cast<std::size_t>(i)] = coeffs[static_cast<std::size_t>(k - p + i)];
+  }
+  for (int r = 1; r <= p; ++r) {
+    for (int i = p; i >= r; --i) {
+      const int idx = k - p + i;
+      const Scalar left = U[static_cast<std::size_t>(idx)];
+      const Scalar right = U[static_cast<std::size_t>(idx + p - r + 1)];
+      const Scalar denom = right - left;
+      Scalar alpha = 0.0;
+      if (std::abs(denom) > 1e-24) {
+        alpha = (u - left) / denom;
+      }
+      d[static_cast<std::size_t>(i)] =
+          lerp_vec3(d[static_cast<std::size_t>(i - 1)], d[static_cast<std::size_t>(i)], alpha);
+    }
+  }
+  return d[static_cast<std::size_t>(p)];
+}
+
+std::vector<Scalar> bspline_trim_knots_for_derivative(const std::vector<Scalar> &U) {
+  std::vector<Scalar> out;
+  if (U.size() < 3) {
+    return out;
+  }
+  out.reserve(U.size() - 2);
+  for (std::size_t i = 1; i + 1 < U.size(); ++i) {
+    out.push_back(U[i]);
+  }
+  return out;
+}
+
+void bspline_curve_eval_all(std::span<const Point3> poles, Scalar t, Point3 &out_p, Vec3 &out_d1,
+                            Vec3 &out_d2) {
+  out_d1 = Vec3{0.0, 0.0, 0.0};
+  out_d2 = Vec3{0.0, 0.0, 0.0};
+  const std::size_t n = poles.size();
+  if (n == 0) {
+    out_p = Point3{};
+    return;
+  }
+  if (n == 1) {
+    out_p = poles[0];
+    return;
+  }
+  const int p = bspline_degree_for_control_count(n);
+  std::vector<Scalar> U = bspline_open_uniform_knots(n, p);
+  const Scalar target_end = std::max<Scalar>(1.0, static_cast<Scalar>(n - 1));
+  bspline_affine_scale_knots_to_span(U, p, n, target_end);
+  const Scalar ulo = U[static_cast<std::size_t>(p)];
+  const Scalar uhi = U[n];
+  const Scalar uu = std::clamp(t, ulo, uhi);
+  const int k = bspline_find_span(n, p, uu, U);
+  out_p = bspline_de_boor_point(poles, U, p, k, uu);
+  if (p < 1) {
+    return;
+  }
+  std::vector<Vec3> qw;
+  qw.reserve(n - 1);
+  for (std::size_t i = 0; i + 1 < n; ++i) {
+    const Scalar den = U[i + static_cast<std::size_t>(p) + 1] - U[i + 1];
+    if (std::abs(den) < 1e-24) {
+      qw.push_back(Vec3{0.0, 0.0, 0.0});
+    } else {
+      const Point3 &P0 = poles[i];
+      const Point3 &P1 = poles[i + 1];
+      const Vec3 diff{P1.x - P0.x, P1.y - P0.y, P1.z - P0.z};
+      qw.push_back(detail::scale(diff, static_cast<Scalar>(p) / den));
+    }
+  }
+  std::vector<Scalar> Uk = bspline_trim_knots_for_derivative(U);
+  const int p1 = p - 1;
+  const int n1 = static_cast<int>(n) - 1;
+  const int k1 = bspline_find_span(static_cast<std::size_t>(n1), p1, uu, Uk);
+  out_d1 = bspline_de_boor_vec(std::span<const Vec3>(qw.data(), qw.size()), Uk, p1, k1, uu);
+  if (p < 2) {
+    return;
+  }
+  std::vector<Vec3> rw;
+  rw.reserve(static_cast<std::size_t>(n1 - 1));
+  for (int i = 0; i < n1 - 1; ++i) {
+    const Scalar den =
+        Uk[static_cast<std::size_t>(i + p1 + 1)] - Uk[static_cast<std::size_t>(i + 1)];
+    if (std::abs(den) < 1e-24) {
+      rw.push_back(Vec3{0.0, 0.0, 0.0});
+    } else {
+      const Vec3 &Q0 = qw[static_cast<std::size_t>(i)];
+      const Vec3 &Q1 = qw[static_cast<std::size_t>(i + 1)];
+      const Vec3 ddiff{Q1.x - Q0.x, Q1.y - Q0.y, Q1.z - Q0.z};
+      rw.push_back(detail::scale(ddiff, static_cast<Scalar>(p1) / den));
+    }
+  }
+  std::vector<Scalar> Uk2 = bspline_trim_knots_for_derivative(Uk);
+  const int p2 = p - 2;
+  const int n2 = n1 - 1;
+  const int k2 = bspline_find_span(static_cast<std::size_t>(n2), p2, uu, Uk2);
+  out_d2 = bspline_de_boor_vec(std::span<const Vec3>(rw.data(), rw.size()), Uk2, p2, k2, uu);
+}
+
+Point3 evaluate_bspline_curve_point(std::span<const Point3> poles, Scalar t) {
+  Point3 p{};
+  Vec3 d1{};
+  Vec3 d2{};
+  bspline_curve_eval_all(poles, t, p, d1, d2);
+  return p;
+}
+
 Point3 evaluate_curve_point(const detail::CurveRecord &curve, Scalar t) {
   switch (curve.kind) {
   case detail::CurveKind::LineSegment: {
@@ -621,6 +897,11 @@ Point3 evaluate_curve_point(const detail::CurveRecord &curve, Scalar t) {
   case detail::CurveKind::Bezier:
     return evaluate_bezier_point(std::vector<Point3>(curve.poles.begin(), curve.poles.end()), t);
   case detail::CurveKind::BSpline:
+    if (curve.poles.empty()) {
+      return curve.origin;
+    }
+    return evaluate_bspline_curve_point(
+        std::span<const Point3>(curve.poles.data(), curve.poles.size()), t);
   case detail::CurveKind::CompositePolyline:
     return evaluate_polyline_point(curve.poles, t);
   case detail::CurveKind::Nurbs:
@@ -715,7 +996,7 @@ Range2D surface_domain(const detail::SurfaceRecord &surface) {
     return Range2D{Range1D{surface.trim_u_min, surface.trim_u_max},
                    Range1D{surface.trim_v_min, surface.trim_v_max}};
   case detail::SurfaceKind::Offset:
-    // Domain is inherited from base surface; fallback to [0,1] if missing.
+    // Record-only path: true domain matches base surface (see SurfaceService::domain).
     return Range2D{Range1D{0.0, 1.0}, Range1D{0.0, 1.0}};
   default:
     return Range2D{Range1D{0.0, 1.0}, Range1D{0.0, 1.0}};
@@ -830,6 +1111,165 @@ std::pair<Scalar, Scalar> approximate_surface_uv(
   }
   return {best_u, best_v};
 }
+
+// Principal curvatures from first/second fundamental forms: W = I^{-1} II, k1/k2 = eig(W).
+bool principal_curvatures_from_fundamental(Scalar E, Scalar F, Scalar G, Scalar L,
+                                           Scalar M_coef, Scalar N, Scalar &k1,
+                                           Scalar &k2) {
+  k1 = k2 = 0.0;
+  const Scalar det_I = E * G - F * F;
+  if (!(det_I > 1e-30) || !std::isfinite(det_I)) {
+    return false;
+  }
+  const Scalar inv00 = G / det_I;
+  const Scalar inv01 = -F / det_I;
+  const Scalar inv10 = -F / det_I;
+  const Scalar inv11 = E / det_I;
+  const Scalar w00 = inv00 * L + inv01 * M_coef;
+  const Scalar w01 = inv00 * M_coef + inv01 * N;
+  const Scalar w10 = inv10 * L + inv11 * M_coef;
+  const Scalar w11 = inv10 * M_coef + inv11 * N;
+  const Scalar trace = w00 + w11;
+  const Scalar detW = w00 * w11 - w01 * w10;
+  const Scalar half_trace = trace * 0.5;
+  const Scalar disc = half_trace * half_trace - detW;
+  const Scalar sdisc = disc > 0.0 ? std::sqrt(disc) : 0.0;
+  k1 = half_trace + sdisc;
+  k2 = half_trace - sdisc;
+  return std::isfinite(k1) && std::isfinite(k2);
+}
+
+// Central FD on a parametric surface S(u,v) clamped to `domain`, then first/second fundamental
+// forms → principal curvatures. Used for tensor patches and for revolved/swept/offset embeddings.
+void parametric_surface_principal_curvature_fd(
+    const std::function<Point3(Scalar, Scalar)> &S_in, Scalar u, Scalar v,
+    const Range2D &domain, Scalar &k1, Scalar &k2) {
+  k1 = k2 = 0.0;
+  const auto umin = domain.u.min;
+  const auto umax = domain.u.max;
+  const auto vmin = domain.v.min;
+  const auto vmax = domain.v.max;
+  const Scalar span_u = umax - umin;
+  const Scalar span_v = vmax - vmin;
+  if (!(span_u > 1e-18) || !(span_v > 1e-18)) {
+    return;
+  }
+  Scalar hu = std::max(span_u * 1e-4, 1e-6);
+  Scalar hv = std::max(span_v * 1e-4, 1e-6);
+  hu = std::min(hu, span_u * 0.25);
+  hv = std::min(hv, span_v * 0.25);
+
+  const auto S = [&S_in, umin, umax, vmin, vmax](Scalar uu, Scalar vv) -> Point3 {
+    return S_in(std::clamp(uu, umin, umax), std::clamp(vv, vmin, vmax));
+  };
+
+  const Scalar cu = std::clamp(u, umin, umax);
+  const Scalar cv = std::clamp(v, vmin, vmax);
+
+  const Point3 p = S(cu, cv);
+  const Point3 pu_p = S(cu + hu, cv);
+  const Point3 pu_m = S(cu - hu, cv);
+  const Point3 pv_p = S(cu, cv + hv);
+  const Point3 pv_m = S(cu, cv - hv);
+
+  const Vec3 ru = detail::scale(detail::subtract(pu_p, pu_m), 1.0 / (2.0 * hu));
+  const Vec3 rv = detail::scale(detail::subtract(pv_p, pv_m), 1.0 / (2.0 * hv));
+  Vec3 n_raw = detail::cross(ru, rv);
+  const Scalar n_len = detail::norm(n_raw);
+  if (!(n_len > 1e-18) || !std::isfinite(n_len)) {
+    return;
+  }
+  const Vec3 n_vec = detail::scale(n_raw, 1.0 / n_len);
+
+  const Vec3 ruu_vec{
+      (pu_p.x - 2.0 * p.x + pu_m.x) / (hu * hu),
+      (pu_p.y - 2.0 * p.y + pu_m.y) / (hu * hu),
+      (pu_p.z - 2.0 * p.z + pu_m.z) / (hu * hu),
+  };
+  const Vec3 rvv_vec{
+      (pv_p.x - 2.0 * p.x + pv_m.x) / (hv * hv),
+      (pv_p.y - 2.0 * p.y + pv_m.y) / (hv * hv),
+      (pv_p.z - 2.0 * p.z + pv_m.z) / (hv * hv),
+  };
+  const Point3 p_pp = S(cu + hu, cv + hv);
+  const Point3 p_pm = S(cu + hu, cv - hv);
+  const Point3 p_mp = S(cu - hu, cv + hv);
+  const Point3 p_mm = S(cu - hu, cv - hv);
+  const Vec3 ruv_vec{
+      (p_pp.x - p_pm.x - p_mp.x + p_mm.x) / (4.0 * hu * hv),
+      (p_pp.y - p_pm.y - p_mp.y + p_mm.y) / (4.0 * hu * hv),
+      (p_pp.z - p_pm.z - p_mp.z + p_mm.z) / (4.0 * hu * hv),
+  };
+
+  const Scalar E = detail::dot(ru, ru);
+  const Scalar Fp = detail::dot(ru, rv);
+  const Scalar G = detail::dot(rv, rv);
+  const Scalar L = detail::dot(ruu_vec, n_vec);
+  const Scalar M_coef = detail::dot(ruv_vec, n_vec);
+  const Scalar Nn = detail::dot(rvv_vec, n_vec);
+
+  principal_curvatures_from_fundamental(E, Fp, G, L, M_coef, Nn, k1, k2);
+}
+
+// Engineering-grade principal curvatures for spline-like tensor patches (Bezier/BSpline/NURBS
+// control-grid sampling): central FD on position, then I/II → Weingarten eigenvalues.
+void spline_surface_principal_curvature_fd(const detail::SurfaceRecord &surface, Scalar u,
+                                           Scalar v, const Range2D &domain, Scalar &k1,
+                                           Scalar &k2) {
+  k1 = k2 = 0.0;
+  if (surface.poles.empty()) {
+    return;
+  }
+  parametric_surface_principal_curvature_fd(
+      [&surface](Scalar uu, Scalar vv) {
+        return evaluate_surface_point(surface, uu, vv);
+      },
+      u, v, domain, k1, k2);
+}
+
+namespace {
+template <typename F>
+Vec3 surface_partial_u_from_eval(const F &eval_fn, Scalar cu, Scalar cv,
+                                 const Range2D &domain) {
+  const auto step_u =
+      std::max((domain.u.max - domain.u.min) * 1e-4, Scalar{1e-6});
+  const auto u0 = std::clamp(cu - step_u, domain.u.min, domain.u.max);
+  const auto u1 = std::clamp(cu + step_u, domain.u.min, domain.u.max);
+  const Scalar denom = u1 - u0;
+  if (!(std::abs(denom) > 1e-18)) {
+    return Vec3{0.0, 0.0, 0.0};
+  }
+  return detail::scale(detail::subtract(eval_fn(u1, cv), eval_fn(u0, cv)),
+                       1.0 / denom);
+}
+
+template <typename F>
+Vec3 surface_partial_v_from_eval(const F &eval_fn, Scalar cu, Scalar cv,
+                                 const Range2D &domain) {
+  const auto step_v =
+      std::max((domain.v.max - domain.v.min) * 1e-4, Scalar{1e-6});
+  const auto v0 = std::clamp(cv - step_v, domain.v.min, domain.v.max);
+  const auto v1 = std::clamp(cv + step_v, domain.v.min, domain.v.max);
+  const Scalar denom = v1 - v0;
+  if (!(std::abs(denom) > 1e-18)) {
+    return Vec3{0.0, 0.0, 0.0};
+  }
+  return detail::scale(detail::subtract(eval_fn(cu, v1), eval_fn(cu, v0)),
+                       1.0 / denom);
+}
+
+// 1D 最近参数阻尼 GN 需要 ∂C/∂t 的**真实速度**；`tangent` 常为归一化方向，CompositeChain 等会错标度步长。
+Vec3 curve_velocity_for_closest(const CurveEvalResult &r) {
+  if (!r.derivatives.empty()) {
+    const auto &d0 = r.derivatives[0];
+    if (std::isfinite(d0.x) && std::isfinite(d0.y) && std::isfinite(d0.z) &&
+        detail::dot(d0, d0) > 1e-36) {
+      return d0;
+    }
+  }
+  return r.tangent;
+}
+}  // namespace
 
 BoundingBox make_curve_bbox(const detail::CurveRecord &curve) {
   switch (curve.kind) {
@@ -1647,16 +2087,39 @@ Result<PCurveEvalResult> PCurveService::eval(PCurveId pcurve_id, Scalar t,
   const auto ct = std::clamp(t, domain.min, domain.max);
   PCurveEvalResult out{};
   out.point = evaluate_pcurve_point(pc, ct);
-  const auto step = std::max((domain.max - domain.min) * 1e-4, 1e-6);
-  const auto t0 = std::clamp(ct - step, domain.min, domain.max);
-  const auto t1 = std::clamp(ct + step, domain.min, domain.max);
+  const auto span = domain.max - domain.min;
+  const auto step = std::max(span * 1e-4, 1e-6);
+  const auto ta = std::clamp(ct - step, domain.min, domain.max);
+  const auto tb = std::clamp(ct + step, domain.min, domain.max);
+  const auto pa = evaluate_pcurve_point(pc, ta);
+  const auto pb = evaluate_pcurve_point(pc, tb);
+  const Scalar den = tb - ta;
+  Vec2 r1{1.0, 0.0};
+  if (std::abs(den) > 1e-30) {
+    r1 = Vec2{(pb.x - pa.x) / den, (pb.y - pa.y) / den};
+  }
+  const auto hh = std::max(span * 1e-3, 1e-5);
+  const auto t0 = std::clamp(ct - hh, domain.min, domain.max);
+  const auto t2 = std::clamp(ct + hh, domain.min, domain.max);
   const auto p0 = evaluate_pcurve_point(pc, t0);
-  const auto p1 = evaluate_pcurve_point(pc, t1);
-  out.tangent = normalize2_or_default(subtract2(p1, p0), Vec2{1.0, 0.0});
+  const auto p2 = evaluate_pcurve_point(pc, t2);
+  const Scalar d_left = ct - t0;
+  const Scalar d_right = t2 - ct;
+  const Scalar denom2 = d_left * d_right;
+  Vec2 r2{0.0, 0.0};
+  if (std::abs(denom2) > 1e-30) {
+    r2 = Vec2{(p2.x - 2.0 * out.point.x + p0.x) / denom2,
+              (p2.y - 2.0 * out.point.y + p0.y) / denom2};
+  }
+  out.tangent = normalize2_or_default(r1, Vec2{1.0, 0.0});
+  out.curvature = pcurve_curvature_signed(r1, r2);
   const auto order = std::max(0, deriv_order);
   out.derivatives.resize(static_cast<std::size_t>(order), Vec2{0.0, 0.0});
   if (order > 0) {
-    out.derivatives[0] = out.tangent;
+    out.derivatives[0] = r1;
+  }
+  if (order > 1) {
+    out.derivatives[1] = r2;
   }
   return ok_result(out, state_->create_diagnostic("参数曲线求值完成"));
 }
@@ -1761,44 +2224,52 @@ Result<CurveEvalResult> CurveService::eval(CurveId curve_id, Scalar t,
 
   CurveEvalResult result{};
   const auto &curve = it->second;
+  Vec3 r1_raw{1.0, 0.0, 0.0};
+  Vec3 r2_raw{0.0, 0.0, 0.0};
+  bool have_r2 = false;
+  bool skip_post = false;
+
   switch (curve.kind) {
   case detail::CurveKind::Line:
     result.point =
         detail::add_point_vec(curve.origin, detail::scale(curve.direction, t));
-    result.tangent = detail::normalize(curve.direction);
+    r1_raw = curve.direction;
+    have_r2 = true;
     break;
   case detail::CurveKind::LineSegment: {
     if (curve.poles.size() >= 2) {
       const auto ct = std::clamp(t, 0.0, 1.0);
       result.point = lerp_point(curve.poles.front(), curve.poles.back(), ct);
-      result.tangent =
-          normalize_or_default(detail::subtract(curve.poles.back(), curve.poles.front()),
-                               Vec3{1.0, 0.0, 0.0});
+      r1_raw = detail::subtract(curve.poles.back(), curve.poles.front());
     } else {
       result.point = curve.origin;
-      result.tangent = {1.0, 0.0, 0.0};
+      r1_raw = Vec3{1.0, 0.0, 0.0};
     }
+    have_r2 = true;
     break;
   }
   case detail::CurveKind::Circle:
     result.point = point_from_local(
         curve.origin, OrthoFrame{curve.axis_u, curve.axis_v, curve.normal},
         curve.radius * std::cos(t), curve.radius * std::sin(t), 0.0);
-    result.tangent = normalize_or_default(
-        vec_from_local(OrthoFrame{curve.axis_u, curve.axis_v, curve.normal},
-                       -curve.radius * std::sin(t),
-                       curve.radius * std::cos(t), 0.0),
-        curve.axis_u);
+    r1_raw = vec_from_local(OrthoFrame{curve.axis_u, curve.axis_v, curve.normal},
+                            -curve.radius * std::sin(t), curve.radius * std::cos(t), 0.0);
+    r2_raw = vec_from_local(OrthoFrame{curve.axis_u, curve.axis_v, curve.normal},
+                            -curve.radius * std::cos(t), -curve.radius * std::sin(t), 0.0);
+    have_r2 = true;
     break;
   case detail::CurveKind::Ellipse:
     result.point = Point3{
         curve.origin.x + curve.axis_u.x * std::cos(t) + curve.axis_v.x * std::sin(t),
         curve.origin.y + curve.axis_u.y * std::cos(t) + curve.axis_v.y * std::sin(t),
         curve.origin.z + curve.axis_u.z * std::cos(t) + curve.axis_v.z * std::sin(t)};
-    result.tangent = detail::normalize(
-        Vec3{-curve.axis_u.x * std::sin(t) + curve.axis_v.x * std::cos(t),
-             -curve.axis_u.y * std::sin(t) + curve.axis_v.y * std::cos(t),
-             -curve.axis_u.z * std::sin(t) + curve.axis_v.z * std::cos(t)});
+    r1_raw = Vec3{-curve.axis_u.x * std::sin(t) + curve.axis_v.x * std::cos(t),
+                  -curve.axis_u.y * std::sin(t) + curve.axis_v.y * std::cos(t),
+                  -curve.axis_u.z * std::sin(t) + curve.axis_v.z * std::cos(t)};
+    r2_raw = Vec3{-curve.axis_u.x * std::cos(t) - curve.axis_v.x * std::sin(t),
+                  -curve.axis_u.y * std::cos(t) - curve.axis_v.y * std::sin(t),
+                  -curve.axis_u.z * std::cos(t) - curve.axis_v.z * std::sin(t)};
+    have_r2 = true;
     break;
   case detail::CurveKind::Bezier:
   case detail::CurveKind::BSpline:
@@ -1809,27 +2280,68 @@ Result<CurveEvalResult> CurveService::eval(CurveId curve_id, Scalar t,
       if (curve.kind == detail::CurveKind::Bezier) {
         result.point = evaluate_bezier_point(
             std::vector<Point3>(curve.poles.begin(), curve.poles.end()), clamped_t);
-        const auto d1 = bezier_first_derivative(curve.poles, clamped_t);
-        result.tangent = normalize_or_default(d1, Vec3{1.0, 0.0, 0.0});
+        r1_raw = bezier_first_derivative(curve.poles, clamped_t);
+        r2_raw = bezier_second_derivative(curve.poles, clamped_t);
+        have_r2 = true;
       } else if (curve.kind == detail::CurveKind::BSpline) {
-        result.point = evaluate_polyline_point(curve.poles, clamped_t);
-        const auto d1 = polyline_first_derivative(curve.poles, clamped_t);
-        result.tangent = normalize_or_default(d1, Vec3{1.0, 0.0, 0.0});
+        bspline_curve_eval_all(
+            std::span<const Point3>(curve.poles.data(), curve.poles.size()), clamped_t,
+            result.point, r1_raw, r2_raw);
+        have_r2 = true;
       } else {
-        Vec3 d1{};
-        Vec3 d2{};
-        detail::rational_bezier_eval_all(curve.poles, curve.weights, clamped_t, result.point, d1, d2);
-        result.tangent = normalize_or_default(d1, Vec3{1.0, 0.0, 0.0});
-        (void)d2;
+        detail::rational_bezier_eval_all(curve.poles, curve.weights, clamped_t, result.point,
+                                         r1_raw, r2_raw);
+        have_r2 = true;
       }
     } else {
       result.point = curve.origin;
-      result.tangent = {1.0, 0.0, 0.0};
+      r1_raw = Vec3{1.0, 0.0, 0.0};
+      have_r2 = true;
     }
     break;
   }
-  case detail::CurveKind::Parabola:
-  case detail::CurveKind::Hyperbola:
+  case detail::CurveKind::Parabola: {
+    const auto domain = curve_domain(curve);
+    const auto ct = std::clamp(t, domain.min, domain.max);
+    const auto focal = std::max(curve.param_a, 1e-9);
+    const Scalar x = ct;
+    const Scalar y = (x * x) / (4.0 * focal);
+    result.point = Point3{curve.origin.x + curve.axis_u.x * x + curve.axis_v.x * y,
+                           curve.origin.y + curve.axis_u.y * x + curve.axis_v.y * y,
+                           curve.origin.z + curve.axis_u.z * x + curve.axis_v.z * y};
+    const Scalar dydx = x / (2.0 * focal);
+    r1_raw = Vec3{curve.axis_u.x + curve.axis_v.x * dydx,
+                  curve.axis_u.y + curve.axis_v.y * dydx,
+                  curve.axis_u.z + curve.axis_v.z * dydx};
+    const Scalar d2ydx2 = 1.0 / (2.0 * focal);
+    r2_raw = Vec3{curve.axis_v.x * d2ydx2, curve.axis_v.y * d2ydx2,
+                  curve.axis_v.z * d2ydx2};
+    have_r2 = true;
+    break;
+  }
+  case detail::CurveKind::Hyperbola: {
+    const auto domain = curve_domain(curve);
+    const auto ct = std::clamp(t, domain.min, domain.max);
+    const auto a = std::max(curve.param_a, 1e-9);
+    const auto b = std::max(curve.param_b, 1e-9);
+    const Scalar xh = a * std::cosh(ct);
+    const Scalar yh = b * std::sinh(ct);
+    result.point = Point3{curve.origin.x + curve.axis_u.x * xh + curve.axis_v.x * yh,
+                           curve.origin.y + curve.axis_u.y * xh + curve.axis_v.y * yh,
+                           curve.origin.z + curve.axis_u.z * xh + curve.axis_v.z * yh};
+    const Scalar dx = a * std::sinh(ct);
+    const Scalar dy = b * std::cosh(ct);
+    r1_raw = Vec3{curve.axis_u.x * dx + curve.axis_v.x * dy,
+                  curve.axis_u.y * dx + curve.axis_v.y * dy,
+                  curve.axis_u.z * dx + curve.axis_v.z * dy};
+    const Scalar ddx = a * std::cosh(ct);
+    const Scalar ddy = b * std::sinh(ct);
+    r2_raw = Vec3{curve.axis_u.x * ddx + curve.axis_v.x * ddy,
+                  curve.axis_u.y * ddx + curve.axis_v.y * ddy,
+                  curve.axis_u.z * ddx + curve.axis_v.z * ddy};
+    have_r2 = true;
+    break;
+  }
   case detail::CurveKind::CompositePolyline: {
     const auto domain = curve_domain(curve);
     const auto eval_fn = [&curve](Scalar value) {
@@ -1837,14 +2349,15 @@ Result<CurveEvalResult> CurveService::eval(CurveId curve_id, Scalar t,
     };
     const auto clamped_t = std::clamp(t, domain.min, domain.max);
     result.point = eval_fn(clamped_t);
-    result.tangent =
-        finite_difference_tangent(eval_fn, clamped_t, domain.min, domain.max);
+    curve_finite_diff_r12(eval_fn, clamped_t, domain.min, domain.max, r1_raw, r2_raw);
+    have_r2 = true;
     break;
   }
   case detail::CurveKind::CompositeChain: {
     if (curve.children.empty()) {
       result.point = curve.origin;
-      result.tangent = {1.0, 0.0, 0.0};
+      r1_raw = Vec3{1.0, 0.0, 0.0};
+      have_r2 = true;
       break;
     }
     const auto domain = curve_domain(curve);
@@ -1859,36 +2372,28 @@ Result<CurveEvalResult> CurveService::eval(CurveId curve_id, Scalar t,
       return error_result<CurveEvalResult>(child_eval.status, child_eval.diagnostic_id);
     }
     result = *child_eval.value;
+    skip_post = true;
     break;
   }
   default:
     result.point = curve.origin;
-    result.tangent = {1.0, 0.0, 0.0};
+    r1_raw = Vec3{1.0, 0.0, 0.0};
+    have_r2 = true;
     break;
   }
 
   const auto order = std::max(0, deriv_order);
-  result.derivatives.resize(static_cast<std::size_t>(order), Vec3{0.0, 0.0, 0.0});
-  if (order > 0) {
-    result.derivatives[0] = result.tangent;
-  }
-  if (order > 1 && curve.kind == detail::CurveKind::Bezier && !curve.poles.empty()) {
-    const auto domain = curve_domain(curve);
-    const auto clamped_t = std::clamp(t, domain.min, domain.max);
-    result.derivatives[1] = bezier_second_derivative(curve.poles, clamped_t);
-  }
-  if (order > 1 && curve.kind == detail::CurveKind::BSpline && !curve.poles.empty()) {
-    // C1 polyline: second derivative is 0 on segment interiors (kink model).
-    result.derivatives[1] = {0.0, 0.0, 0.0};
-  }
-  if (order > 1 && curve.kind == detail::CurveKind::Nurbs && !curve.poles.empty()) {
-    const auto domain = curve_domain(curve);
-    const auto clamped_t = std::clamp(t, domain.min, domain.max);
-    Point3 p0{};
-    Vec3 d1{};
-    Vec3 d2{};
-    detail::rational_bezier_eval_all(curve.poles, curve.weights, clamped_t, p0, d1, d2);
-    result.derivatives[1] = d2;
+  if (!skip_post) {
+    result.tangent = normalize_or_default(r1_raw, Vec3{1.0, 0.0, 0.0});
+    result.curvature =
+        curve_curvature_from_rp_rpp(r1_raw, have_r2 ? r2_raw : Vec3{0.0, 0.0, 0.0});
+    result.derivatives.resize(static_cast<std::size_t>(order), Vec3{0.0, 0.0, 0.0});
+    if (order > 0) {
+      result.derivatives[0] = r1_raw;
+    }
+    if (order > 1 && have_r2) {
+      result.derivatives[1] = r2_raw;
+    }
   }
   if (state_->config.enable_cache) {
     state_->curve_eval_cache.emplace(
@@ -2011,8 +2516,9 @@ Result<Scalar> CurveService::closest_parameter(CurveId curve_id,
       }
       const auto &r = *ev.value;
       const Vec3 err = detail::subtract(r.point, point);
-      const auto jtj = detail::dot(r.tangent, r.tangent);
-      const auto g = detail::dot(r.tangent, err);
+      const Vec3 vel = curve_velocity_for_closest(r);
+      const auto jtj = detail::dot(vel, vel);
+      const auto g = detail::dot(vel, err);
       if (!(jtj > 1e-18) || !std::isfinite(jtj) || !std::isfinite(g)) {
         break;
       }
@@ -2099,8 +2605,9 @@ Result<Scalar> CurveService::closest_parameter(CurveId curve_id,
       }
       const auto &r = *ev.value;
       const Vec3 err = detail::subtract(r.point, point);
-      const auto jtj = detail::dot(r.tangent, r.tangent);
-      const auto g = detail::dot(r.tangent, err);
+      const Vec3 vel = curve_velocity_for_closest(r);
+      const auto jtj = detail::dot(vel, vel);
+      const auto g = detail::dot(vel, err);
       if (!(jtj > 1e-18) || !std::isfinite(jtj) || !std::isfinite(g)) {
         break;
       }
@@ -2427,21 +2934,13 @@ Result<SurfaceEvalResult> SurfaceService::eval(SurfaceId surface_id, Scalar u,
     };
     const auto cu = std::clamp(u, domain.u.min, domain.u.max);
     const auto cv = std::clamp(v, domain.v.min, domain.v.max);
-    const auto step_u = std::max((domain.u.max - domain.u.min) * 1e-4, 1e-6);
-    const auto step_v = std::max((domain.v.max - domain.v.min) * 1e-4, 1e-6);
-    const auto u0 = std::clamp(cu - step_u, domain.u.min, domain.u.max);
-    const auto u1 = std::clamp(cu + step_u, domain.u.min, domain.u.max);
-    const auto v0 = std::clamp(cv - step_v, domain.v.min, domain.v.max);
-    const auto v1 = std::clamp(cv + step_v, domain.v.min, domain.v.max);
     result.point = eval_fn(cu, cv);
-    result.du = normalize_or_default(detail::subtract(eval_fn(u1, cv), eval_fn(u0, cv)),
-                                     Vec3{1.0, 0.0, 0.0});
-    result.dv = normalize_or_default(detail::subtract(eval_fn(cu, v1), eval_fn(cu, v0)),
-                                     Vec3{0.0, 1.0, 0.0});
+    result.du = surface_partial_u_from_eval(eval_fn, cu, cv, domain);
+    result.dv = surface_partial_v_from_eval(eval_fn, cu, cv, domain);
     result.normal = normalize_or_default(detail::cross(result.du, result.dv),
                                          Vec3{0.0, 0.0, 1.0});
-    result.k1 = 0.0;
-    result.k2 = 0.0;
+    spline_surface_principal_curvature_fd(surface, cu, cv, domain, result.k1,
+                                          result.k2);
     break;
   }
   case detail::SurfaceKind::BSpline:
@@ -2452,21 +2951,13 @@ Result<SurfaceEvalResult> SurfaceService::eval(SurfaceId surface_id, Scalar u,
     };
     const auto cu = std::clamp(u, domain.u.min, domain.u.max);
     const auto cv = std::clamp(v, domain.v.min, domain.v.max);
-    const auto step_u = std::max((domain.u.max - domain.u.min) * 1e-4, 1e-6);
-    const auto step_v = std::max((domain.v.max - domain.v.min) * 1e-4, 1e-6);
-    const auto u0 = std::clamp(cu - step_u, domain.u.min, domain.u.max);
-    const auto u1 = std::clamp(cu + step_u, domain.u.min, domain.u.max);
-    const auto v0 = std::clamp(cv - step_v, domain.v.min, domain.v.max);
-    const auto v1 = std::clamp(cv + step_v, domain.v.min, domain.v.max);
     result.point = eval_fn(cu, cv);
-    result.du = normalize_or_default(detail::subtract(eval_fn(u1, cv), eval_fn(u0, cv)),
-                                     Vec3{1.0, 0.0, 0.0});
-    result.dv = normalize_or_default(detail::subtract(eval_fn(cu, v1), eval_fn(cu, v0)),
-                                     Vec3{0.0, 1.0, 0.0});
+    result.du = surface_partial_u_from_eval(eval_fn, cu, cv, domain);
+    result.dv = surface_partial_v_from_eval(eval_fn, cu, cv, domain);
     result.normal = normalize_or_default(detail::cross(result.du, result.dv),
                                          Vec3{0.0, 0.0, 1.0});
-    result.k1 = 0.0;
-    result.k2 = 0.0;
+    spline_surface_principal_curvature_fd(surface, cu, cv, domain, result.k1,
+                                          result.k2);
     break;
   }
   case detail::SurfaceKind::Revolved: {
@@ -2504,8 +2995,6 @@ Result<SurfaceEvalResult> SurfaceService::eval(SurfaceId surface_id, Scalar u,
     const auto r_rot = rotate_vec_around_axis(k, rv, cu);
     result.point = detail::add_point_vec(O, {r_rot.x, r_rot.y, r_rot.z});
 
-    const auto step_u = std::max((dom.u.max - dom.u.min) * 1e-5, 1e-7);
-    const auto step_v = std::max((dom.v.max - dom.v.min) * 1e-5, 1e-7);
     const auto eval_pt = [&](Scalar uu, Scalar vv) -> Point3 {
       const auto cuu = std::clamp(uu, dom.u.min, dom.u.max);
       const auto cvv = std::clamp(vv, dom.v.min, dom.v.max);
@@ -2520,18 +3009,12 @@ Result<SurfaceEvalResult> SurfaceService::eval(SurfaceId surface_id, Scalar u,
       const auto rr_rot = rotate_vec_around_axis(k, rvv, cuu);
       return detail::add_point_vec(O, {rr_rot.x, rr_rot.y, rr_rot.z});
     };
-    const auto u0 = std::clamp(cu - step_u, dom.u.min, dom.u.max);
-    const auto u1 = std::clamp(cu + step_u, dom.u.min, dom.u.max);
-    const auto v0 = std::clamp(cv - step_v, dom.v.min, dom.v.max);
-    const auto v1 = std::clamp(cv + step_v, dom.v.min, dom.v.max);
-    result.du = normalize_or_default(detail::subtract(eval_pt(u1, cv), eval_pt(u0, cv)),
-                                     Vec3{1.0, 0.0, 0.0});
-    result.dv = normalize_or_default(detail::subtract(eval_pt(cu, v1), eval_pt(cu, v0)),
-                                     Vec3{0.0, 1.0, 0.0});
+    result.du = surface_partial_u_from_eval(eval_pt, cu, cv, dom);
+    result.dv = surface_partial_v_from_eval(eval_pt, cu, cv, dom);
     result.normal = normalize_or_default(detail::cross(result.du, result.dv),
                                          Vec3{0.0, 0.0, 1.0});
-    result.k1 = 0.0;
-    result.k2 = 0.0;
+    parametric_surface_principal_curvature_fd(eval_pt, cu, cv, dom, result.k1,
+                                              result.k2);
     break;
   }
   case detail::SurfaceKind::Swept: {
@@ -2563,13 +3046,23 @@ Result<SurfaceEvalResult> SurfaceService::eval(SurfaceId surface_id, Scalar u,
       result.k2 = 0.0;
       break;
     }
-    result.point = detail::add_point_vec(base_ev.value->point, detail::scale(dir, cu * L));
-    result.du = detail::scale(dir, L);
-    result.dv = detail::scale(base_ev.value->tangent, (prof_dom.max - prof_dom.min));
+    const auto eval_pt = [&](Scalar uu, Scalar vv) -> Point3 {
+      const auto cuu = std::clamp(uu, dom.u.min, dom.u.max);
+      const auto cvv = std::clamp(vv, dom.v.min, dom.v.max);
+      const auto tvv = prof_dom.min + cvv * (prof_dom.max - prof_dom.min);
+      const auto ev = curves.eval(surface.profile_curve_id, tvv, 0);
+      if (ev.status != StatusCode::Ok || !ev.value.has_value()) {
+        return surface.origin;
+      }
+      return detail::add_point_vec(ev.value->point, detail::scale(dir, cuu * L));
+    };
+    result.point = eval_pt(cu, cv);
+    result.du = surface_partial_u_from_eval(eval_pt, cu, cv, dom);
+    result.dv = surface_partial_v_from_eval(eval_pt, cu, cv, dom);
     result.normal = normalize_or_default(detail::cross(result.du, result.dv),
                                          Vec3{0.0, 0.0, 1.0});
-    result.k1 = 0.0;
-    result.k2 = 0.0;
+    parametric_surface_principal_curvature_fd(eval_pt, cu, cv, dom, result.k1,
+                                              result.k2);
     break;
   }
   case detail::SurfaceKind::Trimmed: {
@@ -2609,23 +3102,29 @@ Result<SurfaceEvalResult> SurfaceService::eval(SurfaceId surface_id, Scalar u,
       result.k2 = 0.0;
       break;
     }
-    SurfaceService base{state_};
-    const auto base_dom = base.domain(surface.base_surface_id);
-    Range2D dom = base_dom.value.has_value() ? *base_dom.value : Range2D{Range1D{0.0, 1.0}, Range1D{0.0, 1.0}};
+    SurfaceService base_svc{state_};
+    const auto base_dom = base_svc.domain(surface.base_surface_id);
+    Range2D dom = base_dom.value.has_value() ? *base_dom.value
+                                             : Range2D{Range1D{0.0, 1.0}, Range1D{0.0, 1.0}};
     const auto cu = std::clamp(u, dom.u.min, dom.u.max);
     const auto cv = std::clamp(v, dom.v.min, dom.v.max);
-    const auto ev = base.eval(surface.base_surface_id, cu, cv, deriv_order);
-    if (ev.status != StatusCode::Ok || !ev.value.has_value()) {
-      result.point = surface.origin;
-      result.du = {1.0, 0.0, 0.0};
-      result.dv = {0.0, 1.0, 0.0};
-      result.normal = {0.0, 0.0, 1.0};
-      result.k1 = 0.0;
-      result.k2 = 0.0;
-      break;
-    }
-    result = *ev.value;
-    result.point = detail::add_point_vec(result.point, detail::scale(result.normal, surface.offset_distance));
+    const SurfaceId base_id = surface.base_surface_id;
+    const Scalar off_d = surface.offset_distance;
+    const auto eval_offset_pt = [&](Scalar uu, Scalar vv) -> Point3 {
+      const auto e = base_svc.eval(base_id, uu, vv, 1);
+      if (e.status != StatusCode::Ok || !e.value.has_value()) {
+        return surface.origin;
+      }
+      const auto &b = *e.value;
+      return detail::add_point_vec(b.point, detail::scale(b.normal, off_d));
+    };
+    result.point = eval_offset_pt(cu, cv);
+    result.du = surface_partial_u_from_eval(eval_offset_pt, cu, cv, dom);
+    result.dv = surface_partial_v_from_eval(eval_offset_pt, cu, cv, dom);
+    result.normal = normalize_or_default(detail::cross(result.du, result.dv),
+                                         Vec3{0.0, 0.0, 1.0});
+    parametric_surface_principal_curvature_fd(eval_offset_pt, cu, cv, dom,
+                                                result.k1, result.k2);
     break;
   }
   default:
@@ -2753,8 +3252,12 @@ Result<Point3> SurfaceService::closest_point(SurfaceId surface_id,
   if (surface.kind == detail::SurfaceKind::BSpline ||
       surface.kind == detail::SurfaceKind::Bezier ||
       surface.kind == detail::SurfaceKind::Nurbs) {
-    const auto uv = approximate_surface_uv(surface, point);
-    const auto eval_result = eval(surface_id, uv.first, uv.second, 1);
+    const auto uv_res = closest_uv(surface_id, point);
+    if (uv_res.status != StatusCode::Ok || !uv_res.value.has_value()) {
+      return error_result<Point3>(uv_res.status, uv_res.diagnostic_id);
+    }
+    const auto eval_result =
+        eval(surface_id, uv_res.value->first, uv_res.value->second, 0);
     if (eval_result.status != StatusCode::Ok || !eval_result.value.has_value()) {
       return detail::failed_result<Point3>(
           *state_, StatusCode::OperationFailed, diag_codes::kGeoClosestPointFailure,
@@ -3058,13 +3561,77 @@ SurfaceService::closest_uv_batch(SurfaceId surface_id,
                    state_->create_diagnostic("曲面批量最近参数已求解"));
 }
 
+namespace {
+constexpr int kDerivedSurfaceBboxSegments = 14;
+
+BoundingBox sample_derived_surface_bbox(
+    const std::shared_ptr<detail::KernelState> &state, SurfaceId surface_id,
+    const detail::SurfaceRecord &surface) {
+  Range2D domain = surface_domain(surface);
+  if (surface.kind == detail::SurfaceKind::Offset &&
+      detail::has_surface(*state, surface.base_surface_id)) {
+    domain = surface_domain(state->surfaces.at(surface.base_surface_id.value));
+  }
+  const Scalar span_u = domain.u.max - domain.u.min;
+  const Scalar span_v = domain.v.max - domain.v.min;
+  if (!std::isfinite(span_u) || !std::isfinite(span_v) ||
+      !(span_u > 1e-18) || !(span_v > 1e-18)) {
+    return make_surface_bbox(surface);
+  }
+  SurfaceService geo{state};
+  bool any = false;
+  Point3 lo{};
+  Point3 hi{};
+  for (int iu = 0; iu <= kDerivedSurfaceBboxSegments; ++iu) {
+    const Scalar t_u =
+        static_cast<Scalar>(iu) / static_cast<Scalar>(kDerivedSurfaceBboxSegments);
+    const Scalar u = domain.u.min + span_u * t_u;
+    for (int iv = 0; iv <= kDerivedSurfaceBboxSegments; ++iv) {
+      const Scalar t_v =
+          static_cast<Scalar>(iv) / static_cast<Scalar>(kDerivedSurfaceBboxSegments);
+      const Scalar v = domain.v.min + span_v * t_v;
+      const auto er = geo.eval(surface_id, u, v, 0);
+      if (er.status != StatusCode::Ok || !er.value.has_value()) {
+        continue;
+      }
+      const auto &p = er.value->point;
+      if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) {
+        continue;
+      }
+      if (!any) {
+        lo = hi = p;
+        any = true;
+      } else {
+        lo.x = std::min(lo.x, p.x);
+        lo.y = std::min(lo.y, p.y);
+        lo.z = std::min(lo.z, p.z);
+        hi.x = std::max(hi.x, p.x);
+        hi.y = std::max(hi.y, p.y);
+        hi.z = std::max(hi.z, p.z);
+      }
+    }
+  }
+  if (!any) {
+    return make_surface_bbox(surface);
+  }
+  return detail::make_bbox(lo, hi);
+}
+}  // namespace
+
 Result<Range2D> SurfaceService::domain(SurfaceId surface_id) const {
   if (!detail::has_surface(*state_, surface_id)) {
     return detail::invalid_input_result<Range2D>(
         *state_, diag_codes::kCoreInvalidHandle,
         "曲面定义域查询失败：目标曲面不存在", "曲面定义域查询失败");
   }
-  return ok_result(surface_domain(state_->surfaces.at(surface_id.value)),
+  const auto &s = state_->surfaces.at(surface_id.value);
+  if (s.kind == detail::SurfaceKind::Offset &&
+      detail::has_surface(*state_, s.base_surface_id)) {
+    return ok_result(
+        surface_domain(state_->surfaces.at(s.base_surface_id.value)),
+        state_->create_diagnostic("已返回曲面定义域"));
+  }
+  return ok_result(surface_domain(s),
                    state_->create_diagnostic("已返回曲面定义域"));
 }
 
@@ -3075,8 +3642,18 @@ Result<BoundingBox> SurfaceService::bbox(SurfaceId surface_id) const {
         *state_, diag_codes::kCoreInvalidHandle,
         "曲面包围盒查询失败：目标曲面不存在", "曲面包围盒查询失败");
   }
-  return ok_result(make_surface_bbox(it->second),
-                   state_->create_diagnostic("已返回曲面包围盒"));
+  const auto &rec = it->second;
+  switch (rec.kind) {
+  case detail::SurfaceKind::Revolved:
+  case detail::SurfaceKind::Swept:
+  case detail::SurfaceKind::Trimmed:
+  case detail::SurfaceKind::Offset:
+    return ok_result(sample_derived_surface_bbox(state_, surface_id, rec),
+                     state_->create_diagnostic("已返回曲面包围盒"));
+  default:
+    return ok_result(make_surface_bbox(rec),
+                     state_->create_diagnostic("已返回曲面包围盒"));
+  }
 }
 
 Result<std::vector<BoundingBox>>

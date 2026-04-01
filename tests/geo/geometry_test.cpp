@@ -38,6 +38,12 @@ int main() {
             std::cerr << "unexpected pcurve eval\n";
             return 1;
         }
+        auto pc_ev2 = kernel.pcurve_service().eval(*pc.value, 0.5, 2);
+        if (pc_ev2.status != axiom::StatusCode::Ok || !pc_ev2.value.has_value() ||
+            !std::isfinite(pc_ev2.value->curvature) || !approx(pc_ev2.value->curvature, 0.0, 1e-3)) {
+            std::cerr << "unexpected pcurve curvature on straight segment\n";
+            return 1;
+        }
         auto pc_closest_t = kernel.pcurve_service().closest_parameter(*pc.value, {1.2, 0.2});
         auto pc_closest_p = kernel.pcurve_service().closest_point(*pc.value, {1.2, 0.2});
         if (pc_closest_t.status != axiom::StatusCode::Ok || !pc_closest_t.value.has_value() ||
@@ -320,6 +326,35 @@ int main() {
         std::cerr << "unexpected bspline eval result\n";
         return 1;
     }
+    auto bspline_eval_k = kernel.curve_service().eval(*bspline.value, 0.5, 2);
+    if (bspline_eval_k.status != axiom::StatusCode::Ok || !bspline_eval_k.value.has_value() ||
+        !approx(bspline_eval_k.value->curvature, 0.0, 1e-6)) {
+        std::cerr << "unexpected bspline curve curvature on straight segment\n";
+        return 1;
+    }
+    auto bspline_cubic = kernel.curves().make_bspline(
+        {{{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {1.0, 1.0, 0.0}, {2.0, 1.0, 0.0}}});
+    if (bspline_cubic.status != axiom::StatusCode::Ok || !bspline_cubic.value.has_value()) {
+        std::cerr << "failed to create 4-point bspline\n";
+        return 1;
+    }
+    auto cubic_ev = kernel.curve_service().eval(*bspline_cubic.value, 1.0, 2);
+    if (cubic_ev.status != axiom::StatusCode::Ok || !cubic_ev.value.has_value() ||
+        !std::isfinite(cubic_ev.value->curvature)) {
+        std::cerr << "unexpected cubic bspline eval/curvature\n";
+        return 1;
+    }
+    auto circ_curve = kernel.curves().make_circle({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, 2.0);
+    if (circ_curve.status != axiom::StatusCode::Ok || !circ_curve.value.has_value()) {
+        std::cerr << "failed to create circle for curvature test\n";
+        return 1;
+    }
+    auto circ_curve_ev = kernel.curve_service().eval(*circ_curve.value, 0.25, 2);
+    if (circ_curve_ev.status != axiom::StatusCode::Ok || !circ_curve_ev.value.has_value() ||
+        !approx(circ_curve_ev.value->curvature, 0.5, 1e-6)) {
+        std::cerr << "unexpected analytic circle curve curvature\n";
+        return 1;
+    }
     const std::vector<axiom::Point3> curve_query_points {{0.0, 0.0, 0.0}, {1.2, 0.2, 0.0}};
     auto bspline_closest_t_batch =
         kernel.curve_service().closest_parameters_batch(*bspline.value, curve_query_points);
@@ -436,6 +471,14 @@ int main() {
         if (t.status != axiom::StatusCode::Ok || !t.value.has_value() ||
             *t.value < 1.0 || *t.value > 2.0) {
             std::cerr << "unexpected composite chain closest_parameter domain\n";
+            return 1;
+        }
+        // Second segment length 2 in Y: GN must use true speed (derivatives[0]), not unit tangent.
+        const double expect_tv = 1.0 + 0.99 / 2.0;
+        auto t_vert = kernel.curve_service().closest_parameter(*chain.value, {1.0, 0.99, 0.0});
+        if (t_vert.status != axiom::StatusCode::Ok || !t_vert.value.has_value() ||
+            std::abs(*t_vert.value - expect_tv) > 0.06) {
+            std::cerr << "unexpected composite chain closest_parameter on non-unit-speed segment\n";
             return 1;
         }
     }
@@ -586,6 +629,35 @@ int main() {
         bspline_surface_eval_batch.value->size() != 3 ||
         !approx(bspline_surface_eval_batch.value->at(1).point.z, 0.25)) {
         std::cerr << "unexpected surface eval batch result\n";
+        return 1;
+    }
+    // Bilinear patch with z = u*v at interior: saddle → principal curvatures opposite-signed and non-trivial
+    // (finite-difference fundamental forms on the control grid; trace may drift slightly from 0).
+    {
+        const auto k1 = bspline_surface_eval.value->k1;
+        const auto k2 = bspline_surface_eval.value->k2;
+        if (!std::isfinite(k1) || !std::isfinite(k2) || std::abs(k1) < 0.12 || std::abs(k2) < 0.12 ||
+            (k1 * k2 >= 0.0)) {
+            std::cerr << "unexpected bspline surface principal curvature at saddle-like patch\n";
+            return 1;
+        }
+    }
+
+    auto flat_bspline_surface = kernel.surfaces().make_bspline(
+        {{{0.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {1.0, 0.0, 0.0}, {1.0, 1.0, 0.0}}});
+    if (flat_bspline_surface.status != axiom::StatusCode::Ok || !flat_bspline_surface.value.has_value()) {
+        std::cerr << "failed to create flat bspline surface\n";
+        return 1;
+    }
+    auto flat_bspline_eval =
+        kernel.surface_service().eval(*flat_bspline_surface.value, 0.5, 0.5, 1);
+    if (flat_bspline_eval.status != axiom::StatusCode::Ok || !flat_bspline_eval.value.has_value() ||
+        !approx(flat_bspline_eval.value->point.z, 0.0, 1e-9)) {
+        std::cerr << "unexpected flat bspline surface eval\n";
+        return 1;
+    }
+    if (std::abs(flat_bspline_eval.value->k1) > 0.08 || std::abs(flat_bspline_eval.value->k2) > 0.08) {
+        std::cerr << "unexpected flat bspline surface curvature (expect near zero)\n";
         return 1;
     }
 
@@ -817,6 +889,64 @@ int main() {
         if (off_eval.status != axiom::StatusCode::Ok || !off_eval.value.has_value() ||
             !approx(off_eval.value->point.z, 3.0)) {
             std::cerr << "unexpected offset eval\n";
+            return 1;
+        }
+        // Avoid sphere polar singularity (u,v)=(0,0): check κ at generic interior parameters.
+        auto off_curv = kernel.surface_service().eval(*off.value, 1.0, 0.7, 1);
+        if (off_curv.status != axiom::StatusCode::Ok || !off_curv.value.has_value()) {
+            std::cerr << "unexpected offset sphere eval for curvature\n";
+            return 1;
+        }
+        const double exp_off_k = 1.0 / 3.0;
+        if (!approx(off_curv.value->k1, exp_off_k, 8e-3) ||
+            !approx(off_curv.value->k2, exp_off_k, 8e-3)) {
+            std::cerr << "unexpected offset sphere principal curvatures\n";
+            return 1;
+        }
+
+        auto sw_flat = kernel.surface_service().eval(*sw.value, 0.5, 0.5, 1);
+        if (sw_flat.status != axiom::StatusCode::Ok || !sw_flat.value.has_value() ||
+            std::abs(sw_flat.value->k1) > 0.05 || std::abs(sw_flat.value->k2) > 0.05) {
+            std::cerr << "unexpected swept ruled-surface principal curvatures (expect near-flat)\n";
+            return 1;
+        }
+
+        // Offset 曲面定义域应与基球面一致（不再误报 [0,1]²）。
+        const double two_pi_dom = std::acos(-1.0) * 2.0;
+        const double pi_dom = std::acos(-1.0);
+        auto off_dom = kernel.surface_service().domain(*off.value);
+        if (off_dom.status != axiom::StatusCode::Ok || !off_dom.value.has_value() ||
+            !approx(off_dom.value->u.min, 0.0) || !approx(off_dom.value->v.min, 0.0) ||
+            !approx(off_dom.value->u.max, two_pi_dom) || !approx(off_dom.value->v.max, pi_dom)) {
+            std::cerr << "offset surface domain should inherit base sphere domain\n";
+            return 1;
+        }
+
+        // 派生曲面 bbox：固定网格采样，显著收紧相对占位 50³。
+        auto bbox_max_span = [](const axiom::BoundingBox& B) {
+            return std::max({B.max.x - B.min.x, B.max.y - B.min.y, B.max.z - B.min.z});
+        };
+        auto rev_bb = kernel.surface_service().bbox(*rev.value);
+        auto sw_bb = kernel.surface_service().bbox(*sw.value);
+        auto trim_bb = kernel.surface_service().bbox(*trimmed.value);
+        auto off_bb = kernel.surface_service().bbox(*off.value);
+        if (rev_bb.status != axiom::StatusCode::Ok || !rev_bb.value.has_value() || !rev_bb.value->is_valid ||
+            sw_bb.status != axiom::StatusCode::Ok || !sw_bb.value.has_value() || !sw_bb.value->is_valid ||
+            trim_bb.status != axiom::StatusCode::Ok || !trim_bb.value.has_value() || !trim_bb.value->is_valid ||
+            off_bb.status != axiom::StatusCode::Ok || !off_bb.value.has_value() || !off_bb.value->is_valid) {
+            std::cerr << "derived surface bbox query failed\n";
+            return 1;
+        }
+        if (bbox_max_span(*rev_bb.value) > 3.0 || bbox_max_span(*sw_bb.value) > 3.0) {
+            std::cerr << "revolved/swept bbox unexpectedly loose (regression to placeholder scale?)\n";
+            return 1;
+        }
+        if (bbox_max_span(*trim_bb.value) > 4.5) {
+            std::cerr << "trimmed sphere patch bbox unexpectedly loose\n";
+            return 1;
+        }
+        if (bbox_max_span(*off_bb.value) < 5.5 || bbox_max_span(*off_bb.value) > 6.6) {
+            std::cerr << "offset sphere bbox span unexpected (expect ~6 for R=3 shell)\n";
             return 1;
         }
     }

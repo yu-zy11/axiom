@@ -1,9 +1,14 @@
 #include "axiom/plugin/plugin_registry.h"
 
+#include "axiom/diag/error_codes.h"
+#include "axiom/plugin/plugin_sdk_version.h"
+
 #include <algorithm>
 #include <cctype>
 #include <fstream>
 #include <set>
+#include <string>
+#include <string_view>
 
 namespace axiom {
 namespace {
@@ -13,40 +18,306 @@ std::string lower_copy(std::string value) {
     }
     return value;
 }
+
+bool is_all_whitespace(std::string_view s) {
+    return s.find_first_not_of(" \t\n\r\f\v") == std::string_view::npos;
+}
+
+std::string_view trim_manifest_field(std::string_view s) {
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) {
+        s.remove_prefix(1);
+    }
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) {
+        s.remove_suffix(1);
+    }
+    return s;
+}
+
+Warning make_warn(std::string_view code, std::string message) {
+    return Warning {std::string(code), std::move(message)};
+}
+
+void remove_manifests_bound_to_implementation(std::vector<PluginManifest>& manifests, std::string_view impl_type_trimmed) {
+    manifests.erase(std::remove_if(manifests.begin(), manifests.end(),
+                                    [impl_type_trimmed](const PluginManifest& m) {
+                                        return trim_manifest_field(m.implementation_type_name) == impl_type_trimmed;
+                                    }),
+                    manifests.end());
+}
+
+Result<PluginManifest> bind_manifest_implementation_type(PluginManifest manifest, std::string_view plugin_type_name) {
+    const auto ptn = trim_manifest_field(plugin_type_name);
+    if (ptn.empty()) {
+        return error_result<PluginManifest>(StatusCode::InvalidInput, {},
+                                            {make_warn(diag_codes::kPluginCapabilityIncomplete, "插件 type_name 无效，无法绑定清单")});
+    }
+    const auto decl = trim_manifest_field(manifest.implementation_type_name);
+    if (!decl.empty() && decl != ptn) {
+        return error_result<PluginManifest>(
+            StatusCode::InvalidInput, {},
+            {make_warn(diag_codes::kPluginCapabilityIncomplete, "清单 implementation_type_name 与插件 type_name 不一致")});
+    }
+    manifest.implementation_type_name = std::string(ptn);
+    return ok_result(std::move(manifest));
+}
+
+struct ParsedPluginApiVersion {
+    int major{-1};
+    int minor{-1};
+    int patch{-1};
+    bool has_minor{false};
+    bool has_patch{false};
+};
+
+bool parse_positive_int_segment(std::string_view seg, int& out) {
+    if (seg.empty()) {
+        return false;
+    }
+    long long v = 0;
+    for (const char ch : seg) {
+        if (!std::isdigit(static_cast<unsigned char>(ch))) {
+            return false;
+        }
+        v = v * 10 + (ch - '0');
+        if (v > 1'000'000) {
+            return false;
+        }
+    }
+    out = static_cast<int>(v);
+    return true;
+}
+
+bool try_parse_plugin_api_version(std::string_view s, ParsedPluginApiVersion& out) {
+    s = trim_manifest_field(s);
+    if (s.empty()) {
+        return false;
+    }
+    if (s.front() == 'v' || s.front() == 'V') {
+        s.remove_prefix(1);
+        s = trim_manifest_field(s);
+    }
+    std::vector<std::string_view> parts;
+    for (;;) {
+        const auto dot = s.find('.');
+        if (dot == std::string_view::npos) {
+            parts.push_back(s);
+            break;
+        }
+        parts.push_back(s.substr(0, dot));
+        s.remove_prefix(dot + 1);
+    }
+    if (parts.empty() || parts[0].empty()) {
+        return false;
+    }
+    if (!parse_positive_int_segment(parts[0], out.major)) {
+        return false;
+    }
+    out.has_minor = false;
+    out.has_patch = false;
+    if (parts.size() >= 2) {
+        if (!parse_positive_int_segment(parts[1], out.minor)) {
+            return false;
+        }
+        out.has_minor = true;
+    }
+    if (parts.size() >= 3) {
+        if (!parse_positive_int_segment(parts[2], out.patch)) {
+            return false;
+        }
+        out.has_patch = true;
+    }
+    return true;
+}
+
+}  // namespace
+
+bool plugin_api_version_declared_compatible(std::string_view declared_trimmed,
+                                            std::string_view expected_sdk_api,
+                                            PluginApiVersionMatchMode mode) {
+    if (mode == PluginApiVersionMatchMode::Exact) {
+        return declared_trimmed == expected_sdk_api;
+    }
+    ParsedPluginApiVersion host_p{};
+    ParsedPluginApiVersion decl_p{};
+    if (!try_parse_plugin_api_version(expected_sdk_api, host_p) || !try_parse_plugin_api_version(declared_trimmed, decl_p)) {
+        return false;
+    }
+    if (mode == PluginApiVersionMatchMode::SameMajor) {
+        return decl_p.major == host_p.major;
+    }
+    if (mode == PluginApiVersionMatchMode::SameMinor) {
+        if (!decl_p.has_minor || !host_p.has_minor) {
+            return false;
+        }
+        return decl_p.major == host_p.major && decl_p.minor == host_p.minor;
+    }
+    return declared_trimmed == expected_sdk_api;
+}
+
+void PluginRegistry::set_host_policy(const PluginHostPolicy& policy) {
+    host_policy_ = policy;
+}
+
+Result<PluginHostPolicy> PluginRegistry::host_policy() const {
+    return ok_result(host_policy_);
+}
+
+Result<void> PluginRegistry::validate_manifest(const PluginManifest& manifest) const {
+    if (host_policy_.require_non_empty_manifest_name) {
+        if (manifest.name.empty() || is_all_whitespace(manifest.name)) {
+            return error_void(StatusCode::InvalidInput, {},
+                              {make_warn(diag_codes::kPluginCapabilityIncomplete, "插件清单 name 为空或仅空白")});
+        }
+    }
+    if (host_policy_.require_non_empty_capabilities && manifest.capabilities.empty()) {
+        return error_void(StatusCode::InvalidInput, {},
+                          {make_warn(diag_codes::kPluginCapabilityIncomplete, "插件清单 capabilities 为空")});
+    }
+    if (host_policy_.require_plugin_api_version_match) {
+        const auto declared = trim_manifest_field(manifest.plugin_api_version);
+        if (declared.empty()) {
+            return error_void(StatusCode::InvalidInput, {},
+                              {make_warn(diag_codes::kPluginVersionIncompatible, "插件清单未声明 plugin_api_version")});
+        }
+        if (!plugin_api_version_declared_compatible(declared, kPluginSdkApiVersion,
+                                                    host_policy_.plugin_api_version_match_mode)) {
+            return error_void(StatusCode::InvalidInput, {},
+                              {make_warn(diag_codes::kPluginVersionIncompatible,
+                                         "插件清单 plugin_api_version 与宿主 SDK API 不兼容")});
+        }
+    }
+    return ok_void();
+}
+
+Result<void> PluginRegistry::preflight_register_with_plugin(const PluginManifest& manifest, std::string_view impl_type_name,
+                                                            Result<bool> (PluginRegistry::*has_impl)(std::string_view) const) const {
+    const auto v = validate_manifest(manifest);
+    if (v.status != StatusCode::Ok) {
+        return v;
+    }
+    if (host_policy_.require_non_empty_plugin_type_name) {
+        if (impl_type_name.empty() || is_all_whitespace(impl_type_name)) {
+            return error_void(StatusCode::InvalidInput, {},
+                              {make_warn(diag_codes::kPluginCapabilityIncomplete, "插件 type_name 为空或仅空白")});
+        }
+    }
+    if (host_policy_.require_unique_manifest_name) {
+        const auto hm = has_manifest(manifest.name);
+        if (hm.status != StatusCode::Ok || !hm.value.has_value()) {
+            return error_void(StatusCode::OperationFailed);
+        }
+        if (*hm.value) {
+            return error_void(StatusCode::InvalidInput, {},
+                              {make_warn(diag_codes::kPluginDuplicateManifestName, "插件清单 name 已存在")});
+        }
+    }
+    if (host_policy_.max_plugin_slots > 0) {
+        const std::uint64_t current = static_cast<std::uint64_t>(curve_plugins_.size() + repair_plugins_.size() +
+                                                                 importer_plugins_.size() + exporter_plugins_.size());
+        if (current >= host_policy_.max_plugin_slots) {
+            return error_void(StatusCode::InvalidInput, {},
+                              {make_warn(diag_codes::kPluginHostCapacityExceeded, "插件实例数已达宿主上限")});
+        }
+    }
+    if (host_policy_.enforce_unique_implementation_type_name) {
+        const auto dup = (this->*has_impl)(impl_type_name);
+        if (dup.status != StatusCode::Ok || !dup.value.has_value()) {
+            return error_void(StatusCode::OperationFailed);
+        }
+        if (*dup.value) {
+            return error_void(StatusCode::InvalidInput, {},
+                              {make_warn(diag_codes::kPluginDuplicateImplementation, "插件 type_name 已注册")});
+        }
+    }
+    return ok_void();
+}
+
+Result<void> PluginRegistry::preflight_register_manifest_only(const PluginManifest& manifest) const {
+    const auto v = validate_manifest(manifest);
+    if (v.status != StatusCode::Ok) {
+        return v;
+    }
+    if (host_policy_.require_unique_manifest_name) {
+        const auto hm = has_manifest(manifest.name);
+        if (hm.status != StatusCode::Ok || !hm.value.has_value()) {
+            return error_void(StatusCode::OperationFailed);
+        }
+        if (*hm.value) {
+            return error_void(StatusCode::InvalidInput, {},
+                              {make_warn(diag_codes::kPluginDuplicateManifestName, "插件清单 name 已存在")});
+        }
+    }
+    return ok_void();
 }
 
 Result<void> PluginRegistry::register_curve_type(const PluginManifest& manifest, std::unique_ptr<ICurvePlugin> plugin) {
     if (!plugin) {
-        return error_void(StatusCode::InvalidInput);
+        return error_void(StatusCode::InvalidInput, {},
+                          {make_warn(diag_codes::kPluginLoadFailure, "曲线插件实例为空")});
     }
-    manifests_.push_back(manifest);
+    const auto pre = preflight_register_with_plugin(manifest, plugin->type_name(), &PluginRegistry::has_curve_type);
+    if (pre.status != StatusCode::Ok) {
+        return pre;
+    }
+    const auto bound = bind_manifest_implementation_type(manifest, plugin->type_name());
+    if (bound.status != StatusCode::Ok || !bound.value.has_value()) {
+        return error_void(bound.status, bound.diagnostic_id, std::move(bound.warnings));
+    }
+    manifests_.push_back(std::move(*bound.value));
     curve_plugins_.push_back(std::move(plugin));
     return ok_void();
 }
 
 Result<void> PluginRegistry::register_repair_plugin(const PluginManifest& manifest, std::unique_ptr<IRepairPlugin> plugin) {
     if (!plugin) {
-        return error_void(StatusCode::InvalidInput);
+        return error_void(StatusCode::InvalidInput, {},
+                          {make_warn(diag_codes::kPluginLoadFailure, "修复插件实例为空")});
     }
-    manifests_.push_back(manifest);
+    const auto pre = preflight_register_with_plugin(manifest, plugin->type_name(), &PluginRegistry::has_repair_type);
+    if (pre.status != StatusCode::Ok) {
+        return pre;
+    }
+    const auto bound = bind_manifest_implementation_type(manifest, plugin->type_name());
+    if (bound.status != StatusCode::Ok || !bound.value.has_value()) {
+        return error_void(bound.status, bound.diagnostic_id, std::move(bound.warnings));
+    }
+    manifests_.push_back(std::move(*bound.value));
     repair_plugins_.push_back(std::move(plugin));
     return ok_void();
 }
 
 Result<void> PluginRegistry::register_importer(const PluginManifest& manifest, std::unique_ptr<IImporterPlugin> plugin) {
     if (!plugin) {
-        return error_void(StatusCode::InvalidInput);
+        return error_void(StatusCode::InvalidInput, {},
+                          {make_warn(diag_codes::kPluginLoadFailure, "导入插件实例为空")});
     }
-    manifests_.push_back(manifest);
+    const auto pre = preflight_register_with_plugin(manifest, plugin->type_name(), &PluginRegistry::has_importer_type);
+    if (pre.status != StatusCode::Ok) {
+        return pre;
+    }
+    const auto bound = bind_manifest_implementation_type(manifest, plugin->type_name());
+    if (bound.status != StatusCode::Ok || !bound.value.has_value()) {
+        return error_void(bound.status, bound.diagnostic_id, std::move(bound.warnings));
+    }
+    manifests_.push_back(std::move(*bound.value));
     importer_plugins_.push_back(std::move(plugin));
     return ok_void();
 }
 
 Result<void> PluginRegistry::register_exporter(const PluginManifest& manifest, std::unique_ptr<IExporterPlugin> plugin) {
     if (!plugin) {
-        return error_void(StatusCode::InvalidInput);
+        return error_void(StatusCode::InvalidInput, {},
+                          {make_warn(diag_codes::kPluginLoadFailure, "导出插件实例为空")});
     }
-    manifests_.push_back(manifest);
+    const auto pre = preflight_register_with_plugin(manifest, plugin->type_name(), &PluginRegistry::has_exporter_type);
+    if (pre.status != StatusCode::Ok) {
+        return pre;
+    }
+    const auto bound = bind_manifest_implementation_type(manifest, plugin->type_name());
+    if (bound.status != StatusCode::Ok || !bound.value.has_value()) {
+        return error_void(bound.status, bound.diagnostic_id, std::move(bound.warnings));
+    }
+    manifests_.push_back(std::move(*bound.value));
     exporter_plugins_.push_back(std::move(plugin));
     return ok_void();
 }
@@ -93,7 +364,10 @@ Result<bool> PluginRegistry::has_manifest(std::string_view name) const {
 Result<PluginManifest> PluginRegistry::find_manifest(std::string_view name) const {
     const auto it = std::find_if(manifests_.begin(), manifests_.end(),
                                  [name](const PluginManifest& m){ return m.name == name; });
-    if (it == manifests_.end()) return error_result<PluginManifest>(StatusCode::InvalidInput);
+    if (it == manifests_.end()) {
+        return error_result<PluginManifest>(StatusCode::InvalidInput, {},
+                                            {make_warn(diag_codes::kPluginLoadFailure, "未找到匹配 name 的插件清单")});
+    }
     return ok_result(*it);
 }
 
@@ -140,30 +414,74 @@ Result<bool> PluginRegistry::has_exporter_type(std::string_view type_name) const
 }
 
 Result<void> PluginRegistry::unregister_curve_type(std::string_view type_name) {
+    const auto tn = trim_manifest_field(type_name);
+    if (tn.empty()) {
+        return error_void(StatusCode::InvalidInput, {},
+                          {make_warn(diag_codes::kPluginCapabilityIncomplete, "注销插件时 type_name 为空或仅空白")});
+    }
+    const auto before = curve_plugins_.size();
     curve_plugins_.erase(std::remove_if(curve_plugins_.begin(), curve_plugins_.end(),
-                                        [type_name](const auto& p){ return p && p->type_name() == type_name; }),
+                                        [&tn](const auto& p) { return p && p->type_name() == tn; }),
                          curve_plugins_.end());
+    if (curve_plugins_.size() == before) {
+        return error_void(StatusCode::InvalidInput, {},
+                          {make_warn(diag_codes::kPluginNotRegistered, "未找到 type_name 对应的曲线插件")});
+    }
+    remove_manifests_bound_to_implementation(manifests_, tn);
     return ok_void();
 }
 
 Result<void> PluginRegistry::unregister_repair_plugin(std::string_view type_name) {
+    const auto tn = trim_manifest_field(type_name);
+    if (tn.empty()) {
+        return error_void(StatusCode::InvalidInput, {},
+                          {make_warn(diag_codes::kPluginCapabilityIncomplete, "注销插件时 type_name 为空或仅空白")});
+    }
+    const auto before = repair_plugins_.size();
     repair_plugins_.erase(std::remove_if(repair_plugins_.begin(), repair_plugins_.end(),
-                                         [type_name](const auto& p){ return p && p->type_name() == type_name; }),
+                                         [&tn](const auto& p) { return p && p->type_name() == tn; }),
                           repair_plugins_.end());
+    if (repair_plugins_.size() == before) {
+        return error_void(StatusCode::InvalidInput, {},
+                          {make_warn(diag_codes::kPluginNotRegistered, "未找到 type_name 对应的修复插件")});
+    }
+    remove_manifests_bound_to_implementation(manifests_, tn);
     return ok_void();
 }
 
 Result<void> PluginRegistry::unregister_importer(std::string_view type_name) {
+    const auto tn = trim_manifest_field(type_name);
+    if (tn.empty()) {
+        return error_void(StatusCode::InvalidInput, {},
+                          {make_warn(diag_codes::kPluginCapabilityIncomplete, "注销插件时 type_name 为空或仅空白")});
+    }
+    const auto before = importer_plugins_.size();
     importer_plugins_.erase(std::remove_if(importer_plugins_.begin(), importer_plugins_.end(),
-                                           [type_name](const auto& p){ return p && p->type_name() == type_name; }),
+                                           [&tn](const auto& p) { return p && p->type_name() == tn; }),
                             importer_plugins_.end());
+    if (importer_plugins_.size() == before) {
+        return error_void(StatusCode::InvalidInput, {},
+                          {make_warn(diag_codes::kPluginNotRegistered, "未找到 type_name 对应的导入插件")});
+    }
+    remove_manifests_bound_to_implementation(manifests_, tn);
     return ok_void();
 }
 
 Result<void> PluginRegistry::unregister_exporter(std::string_view type_name) {
+    const auto tn = trim_manifest_field(type_name);
+    if (tn.empty()) {
+        return error_void(StatusCode::InvalidInput, {},
+                          {make_warn(diag_codes::kPluginCapabilityIncomplete, "注销插件时 type_name 为空或仅空白")});
+    }
+    const auto before = exporter_plugins_.size();
     exporter_plugins_.erase(std::remove_if(exporter_plugins_.begin(), exporter_plugins_.end(),
-                                           [type_name](const auto& p){ return p && p->type_name() == type_name; }),
+                                           [&tn](const auto& p) { return p && p->type_name() == tn; }),
                             exporter_plugins_.end());
+    if (exporter_plugins_.size() == before) {
+        return error_void(StatusCode::InvalidInput, {},
+                          {make_warn(diag_codes::kPluginNotRegistered, "未找到 type_name 对应的导出插件")});
+    }
+    remove_manifests_bound_to_implementation(manifests_, tn);
     return ok_void();
 }
 
@@ -183,6 +501,10 @@ Result<std::unordered_map<std::string, std::uint64_t>> PluginRegistry::capabilit
 }
 
 Result<void> PluginRegistry::register_manifest_only(const PluginManifest& manifest) {
+    const auto pre = preflight_register_manifest_only(manifest);
+    if (pre.status != StatusCode::Ok) {
+        return pre;
+    }
     manifests_.push_back(manifest);
     return ok_void();
 }
@@ -351,6 +673,16 @@ Result<std::string> PluginRegistry::manifest_to_text(std::string_view name) cons
         if (i + 1 < manifest.value->capabilities.size()) out += ",";
     }
     out += "]";
+    const auto api = trim_manifest_field(manifest.value->plugin_api_version);
+    if (!api.empty()) {
+        out += " api=";
+        out += api;
+    }
+    const auto impl = trim_manifest_field(manifest.value->implementation_type_name);
+    if (!impl.empty()) {
+        out += " impl=";
+        out += impl;
+    }
     return ok_result(std::move(out));
 }
 
@@ -364,6 +696,16 @@ Result<std::vector<std::string>> PluginRegistry::all_manifests_to_text_lines() c
             if (i + 1 < m.capabilities.size()) line += ",";
         }
         line += "]";
+        const auto api = trim_manifest_field(m.plugin_api_version);
+        if (!api.empty()) {
+            line += " api=";
+            line += api;
+        }
+        const auto impl = trim_manifest_field(m.implementation_type_name);
+        if (!impl.empty()) {
+            line += " impl=";
+            line += impl;
+        }
         out.push_back(std::move(line));
     }
     return ok_result(std::move(out));

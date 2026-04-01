@@ -1,7 +1,9 @@
 #include <iostream>
 #include <filesystem>
 #include <array>
+#include <string>
 
+#include "axiom/diag/error_codes.h"
 #include "axiom/plugin/plugin_registry.h"
 #include "axiom/sdk/kernel.h"
 
@@ -106,6 +108,11 @@ int main() {
         std::cerr << "unexpected extended kernel core/sdk behavior\n";
         return 1;
     }
+    // 后续插件门面注销等用例依赖诊断写入；此处恢复开启（上文已验证过可关闭）。
+    if (kernel.set_enable_diagnostics(true).status != axiom::StatusCode::Ok) {
+        std::cerr << "failed to re-enable diagnostics after core/sdk checks\n";
+        return 1;
+    }
     auto has_curve = kernel.has_curve_id(axiom::CurveId {999999});
     auto has_surface = kernel.has_surface_id(axiom::SurfaceId {999999});
     auto has_face = kernel.has_face_id(axiom::FaceId {999999});
@@ -145,6 +152,20 @@ int main() {
         registry.register_importer(m, std::make_unique<DummyImporterPlugin>()).status != axiom::StatusCode::Ok ||
         registry.register_exporter(m, std::make_unique<DummyExporterPlugin>()).status != axiom::StatusCode::Ok) {
         std::cerr << "plugin registration failed\n";
+        return 1;
+    }
+    {
+        auto dup = registry.register_curve_type(m, std::make_unique<DummyCurvePlugin>());
+        if (dup.status == axiom::StatusCode::Ok || dup.warnings.empty() ||
+            dup.warnings[0].code != std::string(axiom::diag_codes::kPluginDuplicateImplementation)) {
+            std::cerr << "expected duplicate curve plugin rejection with stable code\n";
+            return 1;
+        }
+    }
+    axiom::PluginManifest blank_name;
+    blank_name.name = "   ";
+    if (registry.validate_manifest(blank_name).status == axiom::StatusCode::Ok) {
+        std::cerr << "expected invalid manifest rejection\n";
         return 1;
     }
     auto curve_count = registry.curve_plugin_count();
@@ -256,15 +277,18 @@ int main() {
     std::filesystem::remove(*manifest_txt.value);
     std::filesystem::remove(*caps_txt.value);
     std::filesystem::remove(*summary_txt.value);
+    if (registry.unregister_curve_type("dummy_curve").status != axiom::StatusCode::Ok ||
+        registry.unregister_repair_plugin("dummy_repair").status != axiom::StatusCode::Ok ||
+        registry.unregister_importer("dummy_importer").status != axiom::StatusCode::Ok ||
+        registry.unregister_exporter("dummy_exporter").status != axiom::StatusCode::Ok) {
+        std::cerr << "plugin registry unregister behavior failed\n";
+        return 1;
+    }
     if (registry.register_manifest_only(m).status != axiom::StatusCode::Ok ||
         registry.remove_manifest_by_name("none").status != axiom::StatusCode::Ok ||
         registry.deduplicate_manifests_by_name().status != axiom::StatusCode::Ok ||
         registry.clear_plugins_keep_manifests().status != axiom::StatusCode::Ok ||
         registry.clear_manifests_keep_plugins().status != axiom::StatusCode::Ok ||
-        registry.unregister_curve_type("dummy_curve").status != axiom::StatusCode::Ok ||
-        registry.unregister_repair_plugin("dummy_repair").status != axiom::StatusCode::Ok ||
-        registry.unregister_importer("dummy_importer").status != axiom::StatusCode::Ok ||
-        registry.unregister_exporter("dummy_exporter").status != axiom::StatusCode::Ok ||
         registry.remove_manifests_by_vendor("axiom").status != axiom::StatusCode::Ok ||
         registry.remove_manifests_without_capabilities().status != axiom::StatusCode::Ok ||
         registry.clear().status != axiom::StatusCode::Ok) {
@@ -276,18 +300,93 @@ int main() {
     auto modules = kernel.module_names();
     auto fmt = kernel.io_supported_formats();
     auto can_imp_step = kernel.io_can_import_format("step");
+    auto can_imp_stl = kernel.io_can_import_format("stl");
     auto can_exp_axm = kernel.io_can_export_format("axmjson");
+    auto can_exp_stl = kernel.io_can_export_format("stl");
+    auto can_exp_gltf = kernel.io_can_export_format("gltf");
     auto cap_lines = kernel.capability_report_lines();
     auto cap_txt = kernel.capability_report_txt();
     if (services.status != axiom::StatusCode::Ok || !services.value.has_value() || services.value->empty() ||
         modules.status != axiom::StatusCode::Ok || !modules.value.has_value() || modules.value->empty() ||
-        fmt.status != axiom::StatusCode::Ok || !fmt.value.has_value() || fmt.value->size() != 2 ||
+        fmt.status != axiom::StatusCode::Ok || !fmt.value.has_value() || fmt.value->size() != 4 ||
         can_imp_step.status != axiom::StatusCode::Ok || !can_imp_step.value.has_value() || !*can_imp_step.value ||
+        can_imp_stl.status != axiom::StatusCode::Ok || !can_imp_stl.value.has_value() || *can_imp_stl.value ||
         can_exp_axm.status != axiom::StatusCode::Ok || !can_exp_axm.value.has_value() || !*can_exp_axm.value ||
+        can_exp_stl.status != axiom::StatusCode::Ok || !can_exp_stl.value.has_value() || !*can_exp_stl.value ||
+        can_exp_gltf.status != axiom::StatusCode::Ok || !can_exp_gltf.value.has_value() || !*can_exp_gltf.value ||
         cap_lines.status != axiom::StatusCode::Ok || !cap_lines.value.has_value() || cap_lines.value->empty() ||
         cap_txt.status != axiom::StatusCode::Ok || !cap_txt.value.has_value() || cap_txt.value->empty()) {
         std::cerr << "kernel capability snapshot behavior failed\n";
         return 1;
+    }
+
+    auto api_ver = kernel.plugin_sdk_api_version();
+    auto disc = kernel.plugin_discovery_report_lines();
+    auto pol = kernel.plugin_host_policy();
+    auto has_plg = kernel.has_service_plugin_registry();
+    auto has_pd = kernel.has_service_plugin_discovery();
+    auto pcap = kernel.plugin_capabilities();
+    if (api_ver.status != axiom::StatusCode::Ok || !api_ver.value.has_value() || api_ver.value->empty() ||
+        disc.status != axiom::StatusCode::Ok || !disc.value.has_value() || disc.value->empty() ||
+        pol.status != axiom::StatusCode::Ok || !pol.value.has_value() ||
+        has_plg.status != axiom::StatusCode::Ok || !has_plg.value.has_value() || !*has_plg.value ||
+        has_pd.status != axiom::StatusCode::Ok || !has_pd.value.has_value() || !*has_pd.value ||
+        pcap.status != axiom::StatusCode::Ok || !pcap.value.has_value()) {
+        std::cerr << "plugin discovery / policy facade failed\n";
+        return 1;
+    }
+    {
+        auto unreg_missing = kernel.unregister_plugin_curve("no_such_type_for_smoke");
+        if (unreg_missing.status != axiom::StatusCode::InvalidInput || unreg_missing.diagnostic_id.value == 0 ||
+            unreg_missing.warnings.empty() ||
+            unreg_missing.warnings[0].code != std::string(axiom::diag_codes::kPluginNotRegistered)) {
+            std::cerr << "kernel unregister_plugin_curve should fail diagnosably\n";
+            return 1;
+        }
+    }
+
+    {
+        axiom::KernelConfig cfg;
+        cfg.plugin_host_policy.max_plugin_slots = 2;
+        axiom::Kernel k2(cfg);
+        axiom::PluginManifest pm;
+        pm.name = "slot_test";
+        pm.version = "0";
+        pm.vendor = "t";
+        pm.capabilities = {};
+        class Ccurve final : public axiom::ICurvePlugin {
+        public:
+            std::string type_name() const override { return "slot_curve"; }
+            axiom::Result<axiom::CurveId> create(const axiom::PluginCurveDesc&) override {
+                return axiom::error_result<axiom::CurveId>(axiom::StatusCode::OperationFailed);
+            }
+        };
+        class Crepa final : public axiom::IRepairPlugin {
+        public:
+            std::string type_name() const override { return "slot_repair"; }
+            axiom::Result<axiom::OpReport> run(axiom::BodyId, axiom::RepairMode) override {
+                return axiom::error_result<axiom::OpReport>(axiom::StatusCode::OperationFailed);
+            }
+        };
+        class Cimp final : public axiom::IImporterPlugin {
+        public:
+            std::string type_name() const override { return "slot_imp"; }
+            axiom::Result<axiom::BodyId> import_file(std::string_view) override {
+                return axiom::error_result<axiom::BodyId>(axiom::StatusCode::OperationFailed);
+            }
+        };
+        auto& reg2 = k2.plugins();
+        if (reg2.register_curve_type(pm, std::make_unique<Ccurve>()).status != axiom::StatusCode::Ok ||
+            reg2.register_repair_plugin(pm, std::make_unique<Crepa>()).status != axiom::StatusCode::Ok) {
+            std::cerr << "plugin host capacity setup failed\n";
+            return 1;
+        }
+        auto over = reg2.register_importer(pm, std::make_unique<Cimp>());
+        if (over.status == axiom::StatusCode::Ok || over.warnings.empty() ||
+            over.warnings[0].code != std::string(axiom::diag_codes::kPluginHostCapacityExceeded)) {
+            std::cerr << "expected plugin host capacity rejection\n";
+            return 1;
+        }
     }
 
     return 0;

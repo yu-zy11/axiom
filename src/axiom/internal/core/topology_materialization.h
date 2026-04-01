@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <map>
 #include <span>
 #include <utility>
 #include <vector>
@@ -1235,6 +1236,274 @@ inline void materialize_body_bbox_shell(KernelState& state, BodyRecord& record) 
     record.shells.push_back(shell_id);
 }
 
+inline Vec3 newell_normal_unnormalized_poly(std::span<const Point3> poly) {
+    Vec3 n {0.0, 0.0, 0.0};
+    if (poly.size() < 3) {
+        return n;
+    }
+    for (std::size_t i = 0; i < poly.size(); ++i) {
+        const auto& p0 = poly[i];
+        const auto& p1 = poly[(i + 1) % poly.size()];
+        n.x += (p0.y - p1.y) * (p0.z + p1.z);
+        n.y += (p0.z - p1.z) * (p0.x + p1.x);
+        n.z += (p0.x - p1.x) * (p0.y + p1.y);
+    }
+    return n;
+}
+
+inline Point3 rodrigues_rotate_point_revolve(const Point3& p, const Point3& O, const Vec3& u, Scalar cos_t,
+                                             Scalar sin_t) {
+    const Vec3 v {p.x - O.x, p.y - O.y, p.z - O.z};
+    const auto uxv = cross(u, v);
+    const auto udotv = dot(u, v);
+    const auto omc = 1.0 - cos_t;
+    const Vec3 vr {v.x * cos_t + uxv.x * sin_t + u.x * udotv * omc,
+                   v.y * cos_t + uxv.y * sin_t + u.y * udotv * omc,
+                   v.z * cos_t + uxv.z * sin_t + u.z * udotv * omc};
+    return add_point_vec(O, vr);
+}
+
+/// David Eberly, Polyhedral Mass Properties (triangular faces), ρ=1。输出关于质心的惯性张量（世界系，对称）。
+inline void polyhedral_mass_properties_from_triangles(const std::vector<Point3>& p,
+                                                      const std::vector<std::array<int, 3>>& index,
+                                                      Scalar& out_volume, Point3& out_cm,
+                                                      std::array<Scalar, 9>& out_inertia, Scalar& out_area) {
+    out_volume = 0.0;
+    out_cm = Point3 {0.0, 0.0, 0.0};
+    out_area = 0.0;
+    out_inertia = {};
+    if (p.empty() || index.empty()) {
+        return;
+    }
+    constexpr Scalar mult[10] {1.0 / 6.0,  1.0 / 24.0, 1.0 / 24.0, 1.0 / 24.0, 1.0 / 60.0,
+                                1.0 / 60.0, 1.0 / 60.0, 1.0 / 120.0, 1.0 / 120.0, 1.0 / 120.0};
+    Scalar intg[10] {};
+    for (const auto& tri : index) {
+        const int i0 = tri[0];
+        const int i1 = tri[1];
+        const int i2 = tri[2];
+        if (i0 < 0 || i1 < 0 || i2 < 0 || static_cast<std::size_t>(i0) >= p.size() ||
+            static_cast<std::size_t>(i1) >= p.size() || static_cast<std::size_t>(i2) >= p.size()) {
+            continue;
+        }
+        const Scalar x0 = p[static_cast<std::size_t>(i0)].x;
+        const Scalar y0 = p[static_cast<std::size_t>(i0)].y;
+        const Scalar z0 = p[static_cast<std::size_t>(i0)].z;
+        const Scalar x1 = p[static_cast<std::size_t>(i1)].x;
+        const Scalar y1 = p[static_cast<std::size_t>(i1)].y;
+        const Scalar z1 = p[static_cast<std::size_t>(i1)].z;
+        const Scalar x2 = p[static_cast<std::size_t>(i2)].x;
+        const Scalar y2 = p[static_cast<std::size_t>(i2)].y;
+        const Scalar z2 = p[static_cast<std::size_t>(i2)].z;
+        const Scalar a1 = x1 - x0;
+        const Scalar b1 = y1 - y0;
+        const Scalar c1 = z1 - z0;
+        const Scalar a2 = x2 - x0;
+        const Scalar b2 = y2 - y0;
+        const Scalar c2 = z2 - z0;
+        const Scalar d0 = b1 * c2 - b2 * c1;
+        const Scalar d1 = a2 * c1 - a1 * c2;
+        const Scalar d2 = a1 * b2 - a2 * b1;
+        const auto e1 = subtract(p[static_cast<std::size_t>(i1)], p[static_cast<std::size_t>(i0)]);
+        const auto e2 = subtract(p[static_cast<std::size_t>(i2)], p[static_cast<std::size_t>(i0)]);
+        out_area += 0.5 * norm(cross(e1, e2));
+
+        auto subexpr = [](Scalar w0, Scalar w1, Scalar w2, Scalar& f1, Scalar& f2, Scalar& f3, Scalar& g0,
+                          Scalar& g1, Scalar& g2) {
+            const Scalar temp0 = w0 + w1;
+            f1 = temp0 + w2;
+            const Scalar temp1 = w0 * w0;
+            const Scalar temp2 = temp1 + w1 * temp0;
+            f2 = temp2 + w2 * f1;
+            f3 = w0 * temp1 + w1 * temp2 + w2 * f2;
+            g0 = f2 + w0 * (f1 + w0);
+            g1 = f2 + w1 * (f1 + w1);
+            g2 = f2 + w2 * (f1 + w2);
+        };
+        Scalar f1x, f2x, f3x, g0x, g1x, g2x;
+        Scalar f1y, f2y, f3y, g0y, g1y, g2y;
+        Scalar f1z, f2z, f3z, g0z, g1z, g2z;
+        subexpr(x0, x1, x2, f1x, f2x, f3x, g0x, g1x, g2x);
+        subexpr(y0, y1, y2, f1y, f2y, f3y, g0y, g1y, g2y);
+        subexpr(z0, z1, z2, f1z, f2z, f3z, g0z, g1z, g2z);
+        intg[0] += d0 * f1x;
+        intg[1] += d0 * f2x;
+        intg[2] += d1 * f2y;
+        intg[3] += d2 * f2z;
+        intg[4] += d0 * f3x;
+        intg[5] += d1 * f3y;
+        intg[6] += d2 * f3z;
+        intg[7] += d0 * (y0 * g0x + y1 * g1x + y2 * g2x);
+        intg[8] += d1 * (z0 * g0y + z1 * g1y + z2 * g2y);
+        intg[9] += d2 * (x0 * g0z + x1 * g1z + x2 * g2z);
+    }
+    for (int i = 0; i < 10; ++i) {
+        intg[i] *= mult[i];
+    }
+    const Scalar mass = intg[0];
+    if (!(mass > 1e-30)) {
+        return;
+    }
+    out_volume = mass;
+    out_cm = Point3 {intg[1] / mass, intg[2] / mass, intg[3] / mass};
+    const Scalar cmx = out_cm.x;
+    const Scalar cmy = out_cm.y;
+    const Scalar cmz = out_cm.z;
+    const Scalar ixx = intg[5] + intg[6] - mass * (cmy * cmy + cmz * cmz);
+    const Scalar iyy = intg[4] + intg[6] - mass * (cmz * cmz + cmx * cmx);
+    const Scalar izz = intg[4] + intg[5] - mass * (cmx * cmx + cmy * cmy);
+    const Scalar ixy = -(intg[7] - mass * cmx * cmy);
+    const Scalar iyz = -(intg[8] - mass * cmy * cmz);
+    const Scalar ixz = -(intg[9] - mass * cmx * cmz);
+    out_inertia = {ixx, ixy, ixz, ixy, iyy, iyz, ixz, iyz, izz};
+}
+
+/// 子午面闭合多边形绕其平面内轴旋转 `< 2π`：侧壁为直纹面的两三角形剖分 + 两侧平面封盖，闭合流形 BRep。
+inline bool try_materialize_sweep_revolve_meridian_body(KernelState& state, BodyRecord& record) {
+    if (record.kind != BodyKind::Sweep || record.rep_kind != RepKind::ExactBRep || !record.bbox.is_valid ||
+        !record.shells.empty()) {
+        return false;
+    }
+    if (record.label.size() < 8 || record.label.compare(0, 8, "revolve:") != 0) {
+        return false;
+    }
+    const auto& poly = record.revolve_profile_xyz;
+    const int n = static_cast<int>(poly.size());
+    if (n < 3) {
+        return false;
+    }
+    constexpr Scalar kPi = 3.14159265358979323846;
+    const Scalar ang = record.b;
+    const Scalar two_pi = 2.0 * kPi;
+    if (!(ang > 0.0) || ang >= two_pi - 1e-3) {
+        return false;
+    }
+    const auto n_raw = newell_normal_unnormalized_poly(std::span<const Point3>(poly.data(), poly.size()));
+    if (norm(n_raw) <= 1e-14) {
+        return false;
+    }
+    const auto n_unit = normalize(n_raw);
+    const auto u = normalize(record.axis);
+    const Scalar axis_in_plane_tol = std::max(1e-7, state.config.tolerance.linear * 10.0);
+    if (std::abs(dot(u, n_unit)) > axis_in_plane_tol) {
+        return false;
+    }
+    const Point3 O = record.origin;
+    const Scalar ct = std::cos(ang);
+    const Scalar st = std::sin(ang);
+
+    std::vector<Point3> pos(static_cast<std::size_t>(2 * n));
+    for (int i = 0; i < n; ++i) {
+        pos[static_cast<std::size_t>(i)] = poly[static_cast<std::size_t>(i)];
+        pos[static_cast<std::size_t>(n + i)] =
+            rodrigues_rotate_point_revolve(poly[static_cast<std::size_t>(i)], O, u, ct, st);
+    }
+
+    std::vector<std::array<int, 3>> tris;
+    tris.reserve(static_cast<std::size_t>(2 * n + 2 * std::max(0, n - 2)));
+    for (int i = 0; i < n; ++i) {
+        const int ip = (i + 1) % n;
+        tris.push_back({i, ip, n + ip});
+        tris.push_back({i, n + ip, n + i});
+    }
+    for (int k = 1; k < n - 1; ++k) {
+        tris.push_back({0, k, k + 1});
+    }
+    for (int k = 1; k < n - 1; ++k) {
+        tris.push_back({n, n + k + 1, n + k});
+    }
+
+    Scalar vol_chk = 0.0;
+    Point3 cm_tmp {};
+    std::array<Scalar, 9> in_tmp {};
+    Scalar area_tmp = 0.0;
+    polyhedral_mass_properties_from_triangles(pos, tris, vol_chk, cm_tmp, in_tmp, area_tmp);
+    if (vol_chk < 0.0) {
+        for (auto& t : tris) {
+            std::swap(t[1], t[2]);
+        }
+        polyhedral_mass_properties_from_triangles(pos, tris, vol_chk, cm_tmp, in_tmp, area_tmp);
+    }
+    if (!(vol_chk > 1e-18)) {
+        return false;
+    }
+
+    std::vector<VertexId> vid(static_cast<std::size_t>(2 * n));
+    for (int i = 0; i < 2 * n; ++i) {
+        vid[static_cast<std::size_t>(i)] = VertexId {state.allocate_id()};
+        state.vertices.emplace(vid[static_cast<std::size_t>(i)].value,
+                               VertexRecord {pos[static_cast<std::size_t>(i)]});
+    }
+
+    std::vector<EdgeId> edges;
+    std::map<std::pair<int, int>, int> edge_to_index;
+    auto edge_index_for_pair = [&](int a, int b) -> int {
+        const int lo = std::min(a, b);
+        const int hi = std::max(a, b);
+        const auto key = std::make_pair(lo, hi);
+        const auto it = edge_to_index.find(key);
+        if (it != edge_to_index.end()) {
+            return it->second;
+        }
+        const auto curve_id =
+            create_materialized_line(state, pos[static_cast<std::size_t>(lo)], pos[static_cast<std::size_t>(hi)]);
+        const auto eid = EdgeId {state.allocate_id()};
+        state.edges.emplace(eid.value,
+                            EdgeRecord {curve_id, vid[static_cast<std::size_t>(lo)], vid[static_cast<std::size_t>(hi)]});
+        const int idx = static_cast<int>(edges.size());
+        edges.push_back(eid);
+        edge_to_index.emplace(key, idx);
+        return idx;
+    };
+    auto coedge_ref = [&](int a, int b) -> std::pair<int, bool> {
+        const int lo = std::min(a, b);
+        const int hi = std::max(a, b);
+        const int ei = edge_index_for_pair(lo, hi);
+        const bool rev = (a == hi);
+        return {ei, rev};
+    };
+    auto tri_normal = [&](int a, int b, int c) -> Vec3 {
+        const auto pa = pos[static_cast<std::size_t>(a)];
+        const auto pb = pos[static_cast<std::size_t>(b)];
+        const auto pc = pos[static_cast<std::size_t>(c)];
+        const auto e1 = subtract(pb, pa);
+        const auto e2 = subtract(pc, pa);
+        return safe_unit_normal(cross(e1, e2));
+    };
+
+    const auto source_faces = std::span<const FaceId>(record.source_faces);
+    std::vector<FaceId> faces;
+    faces.reserve(tris.size());
+
+    for (const auto& t : tris) {
+        const auto [e0, r0] = coedge_ref(t[0], t[1]);
+        const auto [e1, r1] = coedge_ref(t[1], t[2]);
+        const auto [e2, r2] = coedge_ref(t[2], t[0]);
+        const std::array<std::pair<int, bool>, 3> refs {{{e0, r0}, {e1, r1}, {e2, r2}}};
+        faces.push_back(create_materialized_polygon_face(state, edges, std::span<const std::pair<int, bool>>(refs),
+                                                         tri_normal(t[0], t[1], t[2]), source_faces));
+    }
+
+    const auto shell_id = ShellId {state.allocate_id()};
+    ShellRecord shell;
+    shell.faces = std::move(faces);
+    shell.source_shells = record.source_shells;
+    if (record.source_faces.empty()) {
+        shell.source_faces = shell.faces;
+    } else {
+        shell.source_faces = record.source_faces;
+    }
+    state.shells.emplace(shell_id.value, std::move(shell));
+    record.shells.push_back(shell_id);
+
+    record.sweep_polyhedral_mass_valid = true;
+    record.sweep_polyhedral_volume = vol_chk;
+    record.sweep_cached_surface_area = area_tmp;
+    record.sweep_polyhedral_centroid = cm_tmp;
+    record.sweep_inertia_about_centroid = in_tmp;
+    return true;
+}
+
 inline void materialize_body_bbox_topology(KernelState& state, BodyRecord& record) {
     if (record.rep_kind != RepKind::ExactBRep || !record.bbox.is_valid || !record.shells.empty()) {
         return;
@@ -1242,6 +1511,9 @@ inline void materialize_body_bbox_topology(KernelState& state, BodyRecord& recor
     inherit_source_topology_from_owned_shells(state, record);
     infer_source_shells_from_source_faces(state, record);
     sanitize_source_references(state, record);
+    if (try_materialize_sweep_revolve_meridian_body(state, record)) {
+        return;
+    }
     if (!materialize_body_from_source_faces(state, record) &&
         !materialize_body_from_source_shells(state, record)) {
         materialize_body_bbox_shell(state, record);

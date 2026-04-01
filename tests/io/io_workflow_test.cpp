@@ -175,6 +175,8 @@ int main() {
     if (repaired_valid.status != axiom::StatusCode::Ok ||
         repaired_import_diag.status != axiom::StatusCode::Ok || !repaired_import_diag.value.has_value() ||
         !has_issue_code(*repaired_import_diag.value, axiom::diag_codes::kHealRepairValidated) ||
+        !has_issue_code(*repaired_import_diag.value, axiom::diag_codes::kHealRepairPipelineTrace) ||
+        !has_issue_code(*repaired_import_diag.value, axiom::diag_codes::kHealRepairReplaySummary) ||
         !has_issue_code(*repaired_import_diag.value, axiom::diag_codes::kIoPostImportRepairMode) ||
         repaired_sources.status != axiom::StatusCode::Ok || !repaired_sources.value.has_value() ||
         repaired_sources.value->size() != 1) {

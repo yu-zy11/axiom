@@ -300,14 +300,13 @@ MeshRecord tessellate_box(const BodyRecord& body, const TessellationOptions& opt
     return mesh;
 }
 
-void weld_mesh_vertices(MeshRecord& mesh, bool weld_normals) {
+void weld_mesh_vertices_quantized(MeshRecord& mesh, bool weld_normals, Scalar position_quant_step) {
     if (mesh.vertices.empty() || mesh.indices.empty()) {
         return;
     }
-    // Welding uses quantization to tolerate floating noise from face-wise generation.
-    // Keep it small enough to not collapse meaningful features, but large enough to merge shared box edges.
-    constexpr Scalar q = 1e-7;
-    auto quant = [](Scalar v) -> std::int64_t {
+    const Scalar q =
+        (position_quant_step > 0.0 && std::isfinite(position_quant_step)) ? position_quant_step : 1e-7;
+    auto quant = [q](Scalar v) -> std::int64_t {
         return static_cast<std::int64_t>(std::llround(v / q));
     };
     std::unordered_map<std::string, Index> map;
@@ -363,6 +362,13 @@ void weld_mesh_vertices(MeshRecord& mesh, bool weld_normals) {
     if (use_uv_key) {
         mesh.texcoords = std::move(new_uvs);
     }
+}
+
+void weld_mesh_vertices(MeshRecord& mesh, bool weld_normals) {
+    // Welding uses quantization to tolerate floating noise from face-wise generation.
+    // Keep it small enough to not collapse meaningful features, but large enough to merge shared box edges.
+    constexpr Scalar q = 1e-7;
+    weld_mesh_vertices_quantized(mesh, weld_normals, q);
 }
 
 MeshRecord tessellate_sphere(const BodyRecord& body, const TessellationOptions& options) {

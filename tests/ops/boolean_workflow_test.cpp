@@ -1,4 +1,7 @@
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <string>
 
 #include "axiom/diag/error_codes.h"
 #include "axiom/sdk/kernel.h"
@@ -92,6 +95,10 @@ int main() {
             if (issue.code == axiom::diag_codes::kBoolStageOutputMaterialized) {
                 found_output_stage = true;
             }
+            if (issue.code == axiom::diag_codes::kBoolStageValidate && issue.stage != "bool.validate") {
+                std::cerr << "expected Issue.stage bool.validate on boolean validate stage diagnostic\n";
+                return 1;
+            }
         }
     }
     if (!found_candidates_stage || !found_face_candidates || !found_intersection_curves || !found_intersection_segments ||
@@ -100,6 +107,23 @@ int main() {
         !found_rebuild || !found_stage_summary || !found_output_stage) {
         std::cerr << "expected boolean stage diagnostics (AXM-BOOL-D-0001/0004/0005/0006/0007/0008/0009 plus imprint)\n";
         return 1;
+    }
+
+    {
+        const auto json_path = std::filesystem::temp_directory_path() / "axiom_boolean_diag_stage.json";
+        auto exp = kernel.diagnostics().export_report_json(result.value->diagnostic_id, json_path.string());
+        if (exp.status != axiom::StatusCode::Ok) {
+            std::cerr << "boolean diagnostic json export failed\n";
+            return 1;
+        }
+        std::ifstream in {json_path};
+        const std::string json {(std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()};
+        std::filesystem::remove(json_path);
+        if (json.find("\"stage\":\"bool.validate\"") == std::string::npos ||
+            json.find("\"stage\":\"bool.prep\"") == std::string::npos) {
+            std::cerr << "expected workflow stage fields in exported boolean diagnostic json\n";
+            return 1;
+        }
     }
 
     auto valid = kernel.validate().validate_all(result.value->output, axiom::ValidationMode::Standard);

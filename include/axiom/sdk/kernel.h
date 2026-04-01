@@ -78,6 +78,37 @@ public:
     Result<bool> has_any_plugins() const;
     Result<std::vector<std::string>> plugin_vendors() const;
     Result<std::vector<std::string>> plugin_capabilities_histogram_lines() const;
+    /// 插件清单聚合后的能力标签（去重排序由注册表定义）。
+    Result<std::vector<std::string>> plugin_capabilities() const;
+    /// 稳定门面：进程内插件 SDK 与清单/能力摘要（用于能力发现与 CI 快照）。
+    Result<std::string> plugin_sdk_api_version() const;
+    Result<std::vector<std::string>> plugin_discovery_report_lines() const;
+    Result<PluginHostPolicy> plugin_host_policy() const;
+    Result<void> set_plugin_host_policy(PluginHostPolicy policy);
+    Result<bool> has_service_plugin_registry() const;
+    /// 与 `services_available()` 中的 `plugin.discovery` 一致。
+    Result<bool> has_service_plugin_discovery() const;
+    /// 能力发现 JSON 快照（供 CI/工具解析）；语义与 `plugin_discovery_report_lines` 对齐。
+    Result<std::string> plugin_discovery_report_json() const;
+    /// 注册失败且 `enable_diagnostics` 为真时写入诊断存储并返回非零 `diagnostic_id`。
+    Result<void> register_plugin_curve(const PluginManifest& manifest, std::unique_ptr<ICurvePlugin> plugin);
+    Result<void> register_plugin_repair(const PluginManifest& manifest, std::unique_ptr<IRepairPlugin> plugin);
+    Result<void> register_plugin_importer(const PluginManifest& manifest, std::unique_ptr<IImporterPlugin> plugin);
+    Result<void> register_plugin_exporter(const PluginManifest& manifest, std::unique_ptr<IExporterPlugin> plugin);
+    Result<void> register_plugin_manifest_only(const PluginManifest& manifest);
+    /// 注销失败且 `enable_diagnostics` 为真时写入诊断存储并返回非零 `diagnostic_id`。
+    Result<void> unregister_plugin_curve(std::string_view implementation_type_name);
+    Result<void> unregister_plugin_repair(std::string_view implementation_type_name);
+    Result<void> unregister_plugin_importer(std::string_view implementation_type_name);
+    Result<void> unregister_plugin_exporter(std::string_view implementation_type_name);
+    /// 按清单 `name` 删除条目；未删除任何条目不成功。
+    Result<void> unregister_plugin_manifest(std::string_view manifest_name);
+    /// 各清单声明的 `plugin_api_version` 与当前内核期望的对比（供 CI/门禁；不修改注册表）。
+    Result<std::vector<std::string>> plugin_api_compatibility_report_lines() const;
+    /// 插件修改或产出 `Body` 后建议调用，语义同 `validate().validate_all`（统一验证入口）。
+    Result<void> validate_after_plugin_mutation(BodyId body_id, ValidationMode mode = ValidationMode::Standard);
+    /// Trim bridge：由面外环 PCurve 推导底层曲面 UV 包围盒并创建 `make_trimmed` 子域（轴对齐盒；不挖内环孔洞）。
+    Result<SurfaceId> create_trimmed_surface_from_face_outer_loop_pcurves(FaceId face_id);
 
     CurveFactory& curves();
     PCurveFactory& pcurves();

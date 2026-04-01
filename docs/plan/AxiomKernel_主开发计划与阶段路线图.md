@@ -8,13 +8,18 @@
 
 - 文档体系初步成型
 - 模块划分、接口边界、错误码、测试策略已定义
-- 基础代码框架已搭建
-- `Kernel` 门面和主要服务类骨架已建立
-- 示例和 smoke test 已存在
+- **Stage 0**：基础代码框架、`Kernel` 门面与主要服务骨架、示例与 smoke 测试
+- **Stage 1**：全量工程可编译；`Result`/诊断/错误码接入主链路；多模块专项 `ctest` 与 IO/布尔/表示等工作流回归形成门禁
 
 当前阶段可定义为：
 
-`Stage 0: 文档与代码骨架完成，但尚未进入工业级能力实现阶段`
+`Stage 1 已达成，处于 Stage 1.5 / Stage 2 过渡：核心公共层增强 + 基础几何/拓扑深化`
+
+**本阶段退出标准（与代码、测试对齐的最低门禁）**：
+
+- 根目录 `cmake` 配置与完整构建通过，全量 `ctest` 绿
+- `Kernel::io_can_import_format` / `io_can_export_format` 与 `IOService::import_auto` / `export_auto` / `detect_format` 的格式集合**一致**（或由 API 文档明确双口径并有回归断言）
+- 高风险链路（BOOL/HEAL/IO）关键诊断可在 `DiagnosticService` 检索，且 JSON 导出可携带工作流阶段字段（`Issue.stage`）以便 CI 归档
 
 ## 2. 最终目标定义
 

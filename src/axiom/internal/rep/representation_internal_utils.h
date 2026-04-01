@@ -47,6 +47,7 @@ MeshRecord tessellate_face(const KernelState& state, FaceId face_id, const Tesse
 // Weld vertices by quantized position to improve connectivity across faces.
 // If normals are present, they are averaged on weld.
 // When texcoords are present (per-vertex), weld key includes quantized UV so seams stay valid.
+void weld_mesh_vertices_quantized(MeshRecord& mesh, bool weld_normals, Scalar position_quant_step);
 void weld_mesh_vertices(MeshRecord& mesh, bool weld_normals);
 
 // Derive conversion/round-trip budgets from user tessellation options (explicit industrial closure).

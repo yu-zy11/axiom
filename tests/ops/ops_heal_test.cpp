@@ -1,7 +1,14 @@
 #include <array>
+#include <chrono>
+#include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <span>
+#include <string>
 #include <vector>
 
+#include "axiom/core/types.h"
 #include "axiom/diag/error_codes.h"
 #include "axiom/sdk/kernel.h"
 
@@ -47,6 +54,125 @@ int main() {
         return 1;
     }
 
+    auto wedge = kernel.primitives().wedge({1.0, 2.0, 3.0}, 2.0, 3.0, 4.0);
+    if (wedge.status != axiom::StatusCode::Ok || !wedge.value.has_value()) {
+        std::cerr << "failed to create wedge for mass_properties test\n";
+        return 1;
+    }
+    auto wedge_props = kernel.query().mass_properties(*wedge.value);
+    if (wedge_props.status != axiom::StatusCode::Ok || !wedge_props.value.has_value()) {
+        std::cerr << "wedge mass_properties failed\n";
+        return 1;
+    }
+    const auto expected_wedge_volume = 0.5 * 2.0 * 3.0 * 4.0;
+    if (std::abs(wedge_props.value->volume - expected_wedge_volume) > 1e-9) {
+        std::cerr << "wedge volume should use prism formula not bbox\n";
+        return 1;
+    }
+    const auto expected_wedge_cx = 1.0 + 2.0 / 3.0;
+    const auto expected_wedge_cy = 2.0 + 3.0 / 3.0;
+    const auto expected_wedge_cz = 3.0 + 2.0;
+    if (std::abs(wedge_props.value->centroid.x - expected_wedge_cx) > 1e-9 ||
+        std::abs(wedge_props.value->centroid.y - expected_wedge_cy) > 1e-9 ||
+        std::abs(wedge_props.value->centroid.z - expected_wedge_cz) > 1e-9) {
+        std::cerr << "wedge centroid mismatch\n";
+        return 1;
+    }
+    const auto wdx = 2.0;
+    const auto wdy = 3.0;
+    const auto wdz = 4.0;
+    const auto wm = expected_wedge_volume;
+    const auto w_io_xx = wm * wdy * wdy / 6.0 + wm * wdz * wdz / 3.0;
+    const auto w_io_yy = wm * wdx * wdx / 6.0 + wm * wdz * wdz / 3.0;
+    const auto w_io_zz = wm * (wdx * wdx + wdy * wdy) / 6.0;
+    const auto wcx = wdx / 3.0;
+    const auto wcy = wdy / 3.0;
+    const auto wcz = wdz * 0.5;
+    const auto w_ic_xx = w_io_xx - wm * (wcy * wcy + wcz * wcz);
+    const auto w_ic_yy = w_io_yy - wm * (wcx * wcx + wcz * wcz);
+    const auto w_ic_zz = w_io_zz - wm * (wcx * wcx + wcy * wcy);
+    const auto w_ic_xy = -wm * wdx * wdy / 12.0 + wm * wcx * wcy;
+    const auto w_ic_xz = -wm * wdx * wdz / 6.0 + wm * wcx * wcz;
+    const auto w_ic_yz = -wm * wdy * wdz / 6.0 + wm * wcy * wcz;
+    if (std::abs(wedge_props.value->inertia[0] - w_ic_xx) > 1e-5 ||
+        std::abs(wedge_props.value->inertia[4] - w_ic_yy) > 1e-5 ||
+        std::abs(wedge_props.value->inertia[8] - w_ic_zz) > 1e-5 ||
+        std::abs(wedge_props.value->inertia[1] - w_ic_xy) > 1e-5 ||
+        std::abs(wedge_props.value->inertia[3] - w_ic_xy) > 1e-5 ||
+        std::abs(wedge_props.value->inertia[2] - w_ic_xz) > 1e-5 ||
+        std::abs(wedge_props.value->inertia[6] - w_ic_xz) > 1e-5 ||
+        std::abs(wedge_props.value->inertia[5] - w_ic_yz) > 1e-5 ||
+        std::abs(wedge_props.value->inertia[7] - w_ic_yz) > 1e-5) {
+        std::cerr << "wedge inertia tensor about centroid mismatch\n";
+        return 1;
+    }
+
+    auto box_props = kernel.query().mass_properties(*box_a.value);
+    if (box_props.status != axiom::StatusCode::Ok || !box_props.value.has_value()) {
+        std::cerr << "box mass_properties failed\n";
+        return 1;
+    }
+    const auto m = 1000.0;
+    const auto expected_ixx = m / 12.0 * (10.0 * 10.0 + 10.0 * 10.0);
+    if (std::abs(box_props.value->inertia[0] - expected_ixx) > 1e-3 ||
+        std::abs(box_props.value->inertia[4] - expected_ixx) > 1e-3 ||
+        std::abs(box_props.value->inertia[8] - expected_ixx) > 1e-3) {
+        std::cerr << "box principal inertia about centroid unexpected\n";
+        return 1;
+    }
+
+    auto torus = kernel.primitives().torus({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, 4.0, 1.0);
+    if (torus.status != axiom::StatusCode::Ok || !torus.value.has_value()) {
+        std::cerr << "failed to create torus for mass_properties test\n";
+        return 1;
+    }
+    auto torus_props = kernel.query().mass_properties(*torus.value);
+    if (torus_props.status != axiom::StatusCode::Ok || !torus_props.value.has_value()) {
+        std::cerr << "torus mass_properties failed\n";
+        return 1;
+    }
+    const auto r_t = 4.0;
+    const auto r_m = 1.0;
+    const auto m_t = torus_props.value->volume;
+    const auto i_ax_expected = m_t * (r_t * r_t + 0.75 * r_m * r_m);
+    const auto i_tr_expected = m_t * (0.5 * r_t * r_t + 0.625 * r_m * r_m);
+    if (std::abs(torus_props.value->inertia[8] - i_ax_expected) > 1e-3 * std::max(1.0, i_ax_expected) ||
+        std::abs(torus_props.value->inertia[0] - i_tr_expected) > 1e-3 * std::max(1.0, i_tr_expected) ||
+        std::abs(torus_props.value->inertia[4] - i_tr_expected) > 1e-3 * std::max(1.0, i_tr_expected)) {
+        std::cerr << "torus inertia tensor mismatch\n";
+        return 1;
+    }
+
+    axiom::ProfileRef tri_profile;
+    tri_profile.label = "tri_vol";
+    tri_profile.polygon_xyz = {{0.0, 0.0, 0.0}, {2.0, 0.0, 0.0}, {0.0, 2.0, 0.0}};
+    auto tri_extrude = kernel.sweeps().extrude(tri_profile, {0.0, 0.0, 1.0}, 3.0);
+    if (tri_extrude.status != axiom::StatusCode::Ok || !tri_extrude.value.has_value()) {
+        std::cerr << "triangle extrude failed for mass_properties test\n";
+        return 1;
+    }
+    auto tri_mp = kernel.query().mass_properties(*tri_extrude.value);
+    if (tri_mp.status != axiom::StatusCode::Ok || !tri_mp.value.has_value()) {
+        std::cerr << "triangle extrude mass_properties failed\n";
+        return 1;
+    }
+    const auto expected_prism_vol = 2.0 * 3.0;
+    if (std::abs(tri_mp.value->volume - expected_prism_vol) > 1e-6) {
+        std::cerr << "polygon extrude volume should use prism formula not bbox\n";
+        return 1;
+    }
+    const auto expected_prism_area = 4.0 + 12.0 + 6.0 * std::sqrt(2.0);
+    if (std::abs(tri_mp.value->area - expected_prism_area) > 1e-4) {
+        std::cerr << "polygon extrude surface area mismatch\n";
+        return 1;
+    }
+    if (std::abs(tri_mp.value->centroid.x - 2.0 / 3.0) > 1e-5 ||
+        std::abs(tri_mp.value->centroid.y - 2.0 / 3.0) > 1e-5 ||
+        std::abs(tri_mp.value->centroid.z - 1.5) > 1e-5) {
+        std::cerr << "polygon extrude centroid mismatch\n";
+        return 1;
+    }
+
     auto bad_intersection = kernel.booleans().run(axiom::BooleanOp::Intersect, *box_a.value, *box_b.value, {});
     if (bad_intersection.status != axiom::StatusCode::OperationFailed) {
         std::cerr << "expected failed intersection for disjoint boxes\n";
@@ -57,6 +183,49 @@ int main() {
     if (bad_intersection_diag.status != axiom::StatusCode::Ok || !bad_intersection_diag.value.has_value() ||
         !has_issue_code(*bad_intersection_diag.value, axiom::diag_codes::kBoolIntersectionFailure)) {
         std::cerr << "missing intersection failure diagnostic\n";
+        return 1;
+    }
+
+    // 不相交两盒并集：质量属性应为两盒体积/表面积之和与体积加权质心，而非 union AABB 的单一长方体体积。
+    axiom::BooleanOptions bool_opts;
+    auto disjoint_union = kernel.booleans().run(axiom::BooleanOp::Union, *box_a.value, *box_b.value, bool_opts);
+    if (disjoint_union.status != axiom::StatusCode::Ok || !disjoint_union.value.has_value()) {
+        std::cerr << "disjoint union failed\n";
+        return 1;
+    }
+    auto union_mp = kernel.query().mass_properties(disjoint_union.value->output);
+    if (union_mp.status != axiom::StatusCode::Ok || !union_mp.value.has_value()) {
+        std::cerr << "disjoint union mass_properties failed\n";
+        return 1;
+    }
+    const double vol_a = 10.0 * 10.0 * 10.0;
+    const double vol_b = 5.0 * 5.0 * 5.0;
+    const double area_a = 2.0 * (10.0 * 10.0 + 10.0 * 10.0 + 10.0 * 10.0);
+    const double area_b = 2.0 * (5.0 * 5.0 + 5.0 * 5.0 + 5.0 * 5.0);
+    const double exp_vol = vol_a + vol_b;
+    const double exp_area = area_a + area_b;
+    const double cx = (vol_a * 5.0 + vol_b * 32.5) / exp_vol;
+    if (std::abs(union_mp.value->volume - exp_vol) > 1e-6 || std::abs(union_mp.value->area - exp_area) > 1e-6 ||
+        std::abs(union_mp.value->centroid.x - cx) > 1e-5 || std::abs(union_mp.value->centroid.y - cx) > 1e-5 ||
+        std::abs(union_mp.value->centroid.z - cx) > 1e-5) {
+        std::cerr << "disjoint union mass_properties should combine primitive boxes analytically\n";
+        return 1;
+    }
+
+    auto disjoint_sub = kernel.booleans().run(axiom::BooleanOp::Subtract, *box_a.value, *box_b.value, bool_opts);
+    if (disjoint_sub.status != axiom::StatusCode::Ok || !disjoint_sub.value.has_value()) {
+        std::cerr << "disjoint subtract failed\n";
+        return 1;
+    }
+    auto sub_mp = kernel.query().mass_properties(disjoint_sub.value->output);
+    if (sub_mp.status != axiom::StatusCode::Ok || !sub_mp.value.has_value()) {
+        std::cerr << "disjoint subtract mass_properties failed\n";
+        return 1;
+    }
+    if (std::abs(sub_mp.value->volume - vol_a) > 1e-6 || std::abs(sub_mp.value->area - area_a) > 1e-6 ||
+        std::abs(sub_mp.value->centroid.x - 5.0) > 1e-5 || std::abs(sub_mp.value->centroid.y - 5.0) > 1e-5 ||
+        std::abs(sub_mp.value->centroid.z - 5.0) > 1e-5) {
+        std::cerr << "disjoint subtract mass_properties should match left box only\n";
         return 1;
     }
 
@@ -90,6 +259,114 @@ int main() {
         std::cerr << "extrude result failed strict topology validation\n";
         return 1;
     }
+    auto placeholder_extrude_mp = kernel.query().mass_properties(*sweep_ok.value);
+    if (placeholder_extrude_mp.status != axiom::StatusCode::Ok || !placeholder_extrude_mp.value.has_value()) {
+        std::cerr << "placeholder extrude mass_properties failed\n";
+        return 1;
+    }
+    // 占位 extrude：1×1 截面 × 距离 5，体积 5，表面积 2+4×5。
+    if (std::abs(placeholder_extrude_mp.value->volume - 5.0) > 1e-9 ||
+        std::abs(placeholder_extrude_mp.value->area - 22.0) > 1e-9 ||
+        std::abs(placeholder_extrude_mp.value->centroid.z - 2.5) > 1e-9) {
+        std::cerr << "placeholder extrude mass_properties mismatch\n";
+        return 1;
+    }
+
+    // 子午面多边形 revolve：真实三角化闭壳 BRep（8 面）+ Eberly 体积/表面积/质心/惯性；与 Pappus 解析体积近似一致。
+    axiom::ProfileRef tri_meridian;
+    tri_meridian.label = "tri_meridian";
+    tri_meridian.polygon_xyz = {{1.0, 0.0, 0.0}, {3.0, 0.0, 0.0}, {1.0, 0.0, 2.0}};
+    const axiom::Axis3 axis_z {{0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}};
+    const double pi = 3.14159265358979323846;
+    auto rev_mer = kernel.sweeps().revolve(tri_meridian, axis_z, pi);
+    if (rev_mer.status != axiom::StatusCode::Ok || !rev_mer.value.has_value()) {
+        std::cerr << "meridian polygon revolve failed\n";
+        return 1;
+    }
+    auto rev_mer_strict = kernel.validate().validate_topology(*rev_mer.value, axiom::ValidationMode::Strict);
+    if (rev_mer_strict.status != axiom::StatusCode::Ok) {
+        std::cerr << "meridian revolve failed strict topology validation\n";
+        return 1;
+    }
+    auto rev_mer_all = kernel.validate().validate_all(*rev_mer.value, axiom::ValidationMode::Strict);
+    if (rev_mer_all.status != axiom::StatusCode::Ok) {
+        std::cerr << "meridian revolve should pass strict validate_all\n";
+        return 1;
+    }
+    auto rev_mer_shells = kernel.topology().query().shells_of_body(*rev_mer.value);
+    if (rev_mer_shells.status != axiom::StatusCode::Ok || !rev_mer_shells.value.has_value() ||
+        rev_mer_shells.value->size() != 1) {
+        std::cerr << "meridian revolve expected one shell\n";
+        return 1;
+    }
+    auto rev_mer_faces = kernel.topology().query().faces_of_shell(rev_mer_shells.value->front());
+    if (rev_mer_faces.status != axiom::StatusCode::Ok || !rev_mer_faces.value.has_value() ||
+        rev_mer_faces.value->size() != 8) {
+        std::cerr << "meridian revolve expected 8 triangular faces (2n lateral + 2(n-2) caps)\n";
+        return 1;
+    }
+    auto rev_mer_mp = kernel.query().mass_properties(*rev_mer.value);
+    if (rev_mer_mp.status != axiom::StatusCode::Ok || !rev_mer_mp.value.has_value()) {
+        std::cerr << "meridian revolve mass_properties failed\n";
+        return 1;
+    }
+    const double area_m = 2.0;
+    const double r_bar_m = 5.0 / 3.0;
+    const double pappus_vol_m = area_m * r_bar_m * pi;
+    if (std::abs(rev_mer_mp.value->volume - pappus_vol_m) > 0.25) {
+        std::cerr << "meridian revolve polyhedral volume should be near Pappus analytic volume\n";
+        return 1;
+    }
+    if (rev_mer_mp.value->area <= 0.0 || rev_mer_mp.value->inertia[0] <= 0.0 ||
+        rev_mer_mp.value->inertia[4] <= 0.0 || rev_mer_mp.value->inertia[8] <= 0.0) {
+        std::cerr << "meridian revolve should report positive area and principal inertia diagonals\n";
+        return 1;
+    }
+
+    // 非子午面（轮廓平面不含旋转轴）：回退 bbox 壳，质量属性仍用 Pappus。
+    axiom::ProfileRef tri_xy;
+    tri_xy.label = "tri_xy";
+    tri_xy.polygon_xyz = {{1.0, 0.0, 0.0}, {3.0, 0.0, 0.0}, {1.0, 2.0, 0.0}};
+    auto rev_xy = kernel.sweeps().revolve(tri_xy, axis_z, pi);
+    if (rev_xy.status != axiom::StatusCode::Ok || !rev_xy.value.has_value()) {
+        std::cerr << "non-meridian revolve failed\n";
+        return 1;
+    }
+    auto rev_xy_strict = kernel.validate().validate_topology(*rev_xy.value, axiom::ValidationMode::Strict);
+    if (rev_xy_strict.status != axiom::StatusCode::Ok) {
+        std::cerr << "non-meridian revolve strict topology failed\n";
+        return 1;
+    }
+    auto rev_xy_mp = kernel.query().mass_properties(*rev_xy.value);
+    if (rev_xy_mp.status != axiom::StatusCode::Ok || !rev_xy_mp.value.has_value()) {
+        std::cerr << "non-meridian revolve mass_properties failed\n";
+        return 1;
+    }
+    const double r_bar_xy = std::sqrt((5.0 / 3.0) * (5.0 / 3.0) + (2.0 / 3.0) * (2.0 / 3.0));
+    const double expected_xy_vol = area_m * r_bar_xy * pi;
+    if (std::abs(rev_xy_mp.value->volume - expected_xy_vol) > 1e-5) {
+        std::cerr << "non-meridian revolve volume should follow Pappus\n";
+        return 1;
+    }
+
+    std::array<axiom::ProfileRef, 2> loft_profiles {};
+    loft_profiles[0].label = "lof1";
+    loft_profiles[1].label = "lof2";
+    auto loft_body = kernel.sweeps().loft(std::span<const axiom::ProfileRef>(loft_profiles));
+    if (loft_body.status != axiom::StatusCode::Ok || !loft_body.value.has_value()) {
+        std::cerr << "loft failed\n";
+        return 1;
+    }
+    auto loft_mp = kernel.query().mass_properties(*loft_body.value);
+    if (loft_mp.status != axiom::StatusCode::Ok || !loft_mp.value.has_value()) {
+        std::cerr << "loft mass_properties failed\n";
+        return 1;
+    }
+    // 占位 loft：extent=max(2,n)=2，体积 8。
+    if (std::abs(loft_mp.value->volume - 8.0) > 1e-9) {
+        std::cerr << "loft volume should use cached extent^3\n";
+        return 1;
+    }
 
     // Stage-2 minimal: polygon profile extrude should materialize a real prism shell (6 faces).
     axiom::ProfileRef rect;
@@ -103,6 +380,17 @@ int main() {
     auto prism_strict = kernel.validate().validate_topology(*prism.value, axiom::ValidationMode::Strict);
     if (prism_strict.status != axiom::StatusCode::Ok) {
         std::cerr << "polygon extrude failed strict topology validation\n";
+        return 1;
+    }
+    auto prism_strict_all = kernel.validate().validate_all(*prism.value, axiom::ValidationMode::Strict);
+    if (prism_strict_all.status != axiom::StatusCode::Ok) {
+        std::cerr << "prism should pass strict validate_all including surface domain checks\n";
+        return 1;
+    }
+    auto prism_manifold_std = kernel.validate().validate_manifold(*prism.value, axiom::ValidationMode::Standard);
+    auto prism_manifold_strict = kernel.validate().validate_manifold(*prism.value, axiom::ValidationMode::Strict);
+    if (prism_manifold_std.status != axiom::StatusCode::Ok || prism_manifold_strict.status != axiom::StatusCode::Ok) {
+        std::cerr << "prism should pass validate_manifold Standard and Strict\n";
         return 1;
     }
     auto prism_shells = kernel.topology().query().shells_of_body(*prism.value);
@@ -160,6 +448,16 @@ int main() {
     auto thicken_strict = kernel.validate().validate_topology(*thicken_ok.value, axiom::ValidationMode::Strict);
     if (thicken_strict.status != axiom::StatusCode::Ok) {
         std::cerr << "thicken result failed strict topology validation\n";
+        return 1;
+    }
+    auto thicken_mp = kernel.query().mass_properties(*thicken_ok.value);
+    if (thicken_mp.status != axiom::StatusCode::Ok || !thicken_mp.value.has_value()) {
+        std::cerr << "thicken mass_properties failed\n";
+        return 1;
+    }
+    // 10×10 轴对齐面 × 厚度 1：面面积估计 100，体积缓存 100。
+    if (std::abs(thicken_mp.value->volume - 100.0) > 1e-6) {
+        std::cerr << "thicken volume should use face-area×thickness not pure bbox volume\n";
         return 1;
     }
 
@@ -292,8 +590,20 @@ int main() {
     auto repair_diag = kernel.diagnostics().get(auto_repair.value->diagnostic_id);
     if (repair_diag.status != axiom::StatusCode::Ok || !repair_diag.value.has_value() ||
         !has_issue_code(*repair_diag.value, axiom::diag_codes::kHealFeatureRemovedWarning) ||
-        !has_issue_code(*repair_diag.value, axiom::diag_codes::kHealRepairValidated)) {
+        !has_issue_code(*repair_diag.value, axiom::diag_codes::kHealRepairValidated) ||
+        !has_issue_code(*repair_diag.value, axiom::diag_codes::kHealRepairPipelineTrace) ||
+        !has_issue_code(*repair_diag.value, axiom::diag_codes::kHealRepairReplaySummary)) {
         std::cerr << "expected repair warning diagnostic\n";
+        return 1;
+    }
+    const auto* trace_issue = find_issue(*repair_diag.value, axiom::diag_codes::kHealRepairPipelineTrace);
+    const auto* replay_issue = find_issue(*repair_diag.value, axiom::diag_codes::kHealRepairReplaySummary);
+    if (trace_issue == nullptr || trace_issue->message != "auto_repair" || trace_issue->stage != "heal.repair_pipeline" ||
+        trace_issue->related_entities.size() != 2 ||
+        trace_issue->related_entities.front() != box_a.value->value ||
+        trace_issue->related_entities.back() != auto_repair.value->output.value ||
+        replay_issue == nullptr || replay_issue->message != "auto_repair" || replay_issue->stage != "heal.repair_replay") {
+        std::cerr << "repair pipeline trace issue is unexpected\n";
         return 1;
     }
     const auto* feature_removed_issue = find_issue(*repair_diag.value, axiom::diag_codes::kHealFeatureRemovedWarning);
@@ -333,9 +643,17 @@ int main() {
     }
 
     std::array<axiom::BodyId, 2> body_pair {*box_a.value, auto_repair.value->output};
+    auto validate_geom_strict_box = kernel.validate().validate_geometry(*box_a.value, axiom::ValidationMode::Strict);
+    if (validate_geom_strict_box.status != axiom::StatusCode::Ok) {
+        std::cerr << "primitive box should pass Strict geometry (bbox + surface/curve 参数域)\n";
+        return 1;
+    }
     auto validate_many = kernel.validate().validate_all_many(body_pair, axiom::ValidationMode::Standard);
     auto validate_geom_many = kernel.validate().validate_geometry_many(body_pair, axiom::ValidationMode::Standard);
+    auto validate_tol_many_std = kernel.validate().validate_tolerance_many(body_pair, axiom::ValidationMode::Standard);
     auto validate_topo_many = kernel.validate().validate_topology_many(body_pair, axiom::ValidationMode::Standard);
+    auto validate_manifold_many = kernel.validate().validate_manifold_many(body_pair, axiom::ValidationMode::Standard);
+    auto validate_si_many = kernel.validate().validate_self_intersection_many(body_pair, axiom::ValidationMode::Strict);
     auto bbox_many = kernel.validate().validate_bbox_many(body_pair);
     auto invalid_count = kernel.validate().count_invalid_in(body_pair, axiom::ValidationMode::Standard);
     auto valid_filtered = kernel.validate().filter_valid_bodies(body_pair, axiom::ValidationMode::Standard);
@@ -344,7 +662,9 @@ int main() {
     auto topo_valid = kernel.validate().is_topology_valid(*box_a.value, axiom::ValidationMode::Standard);
     auto all_valid = kernel.validate().is_valid(*box_a.value, axiom::ValidationMode::Standard);
     if (validate_many.status != axiom::StatusCode::Ok || validate_geom_many.status != axiom::StatusCode::Ok ||
-        validate_topo_many.status != axiom::StatusCode::Ok || bbox_many.status != axiom::StatusCode::Ok ||
+        validate_tol_many_std.status != axiom::StatusCode::Ok || validate_topo_many.status != axiom::StatusCode::Ok ||
+        validate_manifold_many.status != axiom::StatusCode::Ok ||
+        validate_si_many.status != axiom::StatusCode::Ok || bbox_many.status != axiom::StatusCode::Ok ||
         invalid_count.status != axiom::StatusCode::Ok || !invalid_count.value.has_value() || *invalid_count.value != 0 ||
         valid_filtered.status != axiom::StatusCode::Ok || !valid_filtered.value.has_value() || valid_filtered.value->size() != 2 ||
         invalid_filtered.status != axiom::StatusCode::Ok || !invalid_filtered.value.has_value() || !invalid_filtered.value->empty() ||
@@ -398,7 +718,11 @@ int main() {
         shrink_ratio.status != axiom::StatusCode::Ok || !shrink_ratio.value.has_value() ||
         extent_change.status != axiom::StatusCode::Ok || !extent_change.value.has_value() ||
         ensure_valid.status != axiom::StatusCode::Ok ||
-        summary.status != axiom::StatusCode::Ok || !summary.value.has_value() || summary.value->empty()) {
+        summary.status != axiom::StatusCode::Ok || !summary.value.has_value() || summary.value->empty() ||
+        summary.value->find("issue_codes=") == std::string::npos ||
+        summary.value->find(std::string(axiom::diag_codes::kHealRepairPipelineTrace)) == std::string::npos ||
+        summary.value->find("pipeline_ops=") == std::string::npos ||
+        summary.value->find("auto_repair") == std::string::npos) {
         std::cerr << "extended repair observable API behavior is unexpected\n";
         return 1;
     }
@@ -464,6 +788,115 @@ int main() {
         third_offset_shells.value->size() != 1 || third_offset_standard.status != axiom::StatusCode::Ok) {
         std::cerr << "degraded-source reconstruction did not produce a valid owned topology fallback\n";
         return 1;
+    }
+
+    // Heal/Validation：Strict 下容差相对模型尺度与策略上限（见进度文档「容差冲突检查」缺口收敛）
+    {
+        axiom::Kernel tol_kernel;
+        auto tol_box = tol_kernel.primitives().box({0.0, 0.0, 0.0}, 10.0, 10.0, 10.0);
+        if (tol_box.status != axiom::StatusCode::Ok || !tol_box.value.has_value()) {
+            std::cerr << "tol_kernel box failed\n";
+            return 1;
+        }
+        auto set_huge = tol_kernel.set_linear_tolerance(5.0);
+        if (set_huge.status != axiom::StatusCode::Ok) {
+            std::cerr << "set_linear_tolerance failed\n";
+            return 1;
+        }
+        auto strict_bad = tol_kernel.validate().validate_all(*tol_box.value, axiom::ValidationMode::Strict);
+        if (strict_bad.status != axiom::StatusCode::ToleranceConflict) {
+            std::cerr << "expected Strict validate_all to fail on excessive linear tolerance\n";
+            return 1;
+        }
+        auto strict_diag = tol_kernel.diagnostics().get(strict_bad.diagnostic_id);
+        if (strict_diag.status != axiom::StatusCode::Ok || !strict_diag.value.has_value() ||
+            !has_issue_code(*strict_diag.value, axiom::diag_codes::kValToleranceConflict)) {
+            std::cerr << "expected kValToleranceConflict on strict tolerance validation\n";
+            return 1;
+        }
+        auto std_ok = tol_kernel.validate().validate_all(*tol_box.value, axiom::ValidationMode::Standard);
+        if (std_ok.status != axiom::StatusCode::Ok) {
+            std::cerr << "Standard validate_all should still pass with large linear tolerance\n";
+            return 1;
+        }
+        auto tol_box_b = tol_kernel.primitives().box({20.0, 0.0, 0.0}, 10.0, 10.0, 10.0);
+        if (tol_box_b.status != axiom::StatusCode::Ok || !tol_box_b.value.has_value()) {
+            std::cerr << "second tol_kernel box failed\n";
+            return 1;
+        }
+        std::array<axiom::BodyId, 2> tol_pair {*tol_box.value, *tol_box_b.value};
+        auto tol_many_strict = tol_kernel.validate().validate_tolerance_many(tol_pair, axiom::ValidationMode::Strict);
+        if (tol_many_strict.status != axiom::StatusCode::ToleranceConflict) {
+            std::cerr << "validate_tolerance_many Strict should fail when linear tolerance exceeds policy vs model\n";
+            return 1;
+        }
+        auto tol_many_std = tol_kernel.validate().validate_tolerance_many(tol_pair, axiom::ValidationMode::Standard);
+        if (tol_many_std.status != axiom::StatusCode::Ok) {
+            std::cerr << "validate_tolerance_many Standard should not apply Strict max_local gate\n";
+            return 1;
+        }
+    }
+
+    // Strict：Imported + 高纵横比包围盒薄片 + 线性容差落在薄片带内 → kValModelFinerThanTolerance（不误伤 Sweep/revolve）
+    {
+        axiom::KernelConfig thin_cfg {};
+        // 默认 max_local=1e-3 时 linear=0.002 会先触发 kValToleranceConflict；放宽上限以单独覆盖薄片诊断码。
+        thin_cfg.tolerance.max_local = 0.01;
+        axiom::Kernel thin_import_kernel(thin_cfg);
+        const auto uniq = std::to_string(static_cast<unsigned long long>(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+        const auto json_path =
+            std::filesystem::temp_directory_path() / ("axiom_ops_heal_thin_import_" + uniq + ".axmjson");
+        {
+            std::ofstream out(json_path);
+            out << R"({"format":"AXMJSON","body_kind":"Imported","label":"thin_sheet","bbox_min_x":0,"bbox_min_y":0,"bbox_min_z":0,"bbox_max_x":10,"bbox_max_y":10,"bbox_max_z":0.01})";
+        }
+        axiom::ImportOptions imp;
+        auto imported = thin_import_kernel.io().import_axmjson(json_path.string(), imp);
+        std::filesystem::remove(json_path);
+        if (imported.status != axiom::StatusCode::Ok || !imported.value.has_value()) {
+            std::cerr << "thin sheet axmjson import failed\n";
+            return 1;
+        }
+        auto set_lin = thin_import_kernel.set_linear_tolerance(0.002);
+        if (set_lin.status != axiom::StatusCode::Ok) {
+            std::cerr << "set_linear_tolerance on thin import kernel failed\n";
+            return 1;
+        }
+        auto strict_sheet =
+            thin_import_kernel.validate().validate_tolerance(*imported.value, axiom::ValidationMode::Strict);
+        if (strict_sheet.status != axiom::StatusCode::ToleranceConflict) {
+            std::cerr << "expected Strict validate_tolerance to fail on thin imported bbox vs linear tolerance\n";
+            return 1;
+        }
+        auto thin_diag = thin_import_kernel.diagnostics().get(strict_sheet.diagnostic_id);
+        if (thin_diag.status != axiom::StatusCode::Ok || !thin_diag.value.has_value() ||
+            !has_issue_code(*thin_diag.value, axiom::diag_codes::kValModelFinerThanTolerance)) {
+            std::cerr << "expected kValModelFinerThanTolerance on thin imported strict tolerance validation\n";
+            return 1;
+        }
+        auto std_sheet =
+            thin_import_kernel.validate().validate_tolerance(*imported.value, axiom::ValidationMode::Standard);
+        if (std_sheet.status != axiom::StatusCode::Ok) {
+            std::cerr << "Standard validate_tolerance should not apply imported thin-sheet strict gate\n";
+            return 1;
+        }
+    }
+
+    // Strict：未修改的解析盒体应通过网格近似自交检测（主流程中的 box_a 已被 modify/repair 改动）
+    {
+        axiom::Kernel si_kernel;
+        auto fresh_box = si_kernel.primitives().box({0.0, 0.0, 0.0}, 2.0, 2.0, 2.0);
+        if (fresh_box.status != axiom::StatusCode::Ok || !fresh_box.value.has_value()) {
+            std::cerr << "fresh box for self-intersection check failed\n";
+            return 1;
+        }
+        auto box_strict_si =
+            si_kernel.validate().validate_self_intersection(*fresh_box.value, axiom::ValidationMode::Strict);
+        if (box_strict_si.status != axiom::StatusCode::Ok) {
+            std::cerr << "fresh box should pass strict mesh-based self-intersection check\n";
+            return 1;
+        }
     }
 
     return 0;

@@ -77,6 +77,11 @@ public:
     Result<std::uint64_t> non_manifold_edge_count_of_body(BodyId body_id) const;
     Result<bool> is_body_topology_empty(BodyId body_id) const;
     Result<PCurveId> pcurve_of_coedge(CoedgeId coedge_id) const;
+    /// Trim bridge：外环每条 coedge 均须绑定有效 PCurve；在 PCurve 控制点（折线顶点）上求 UV 轴对齐包围盒。
+    /// 语义对齐 `validate_face_trim_consistency` 所用 UV（与 `SurfaceService::closest_uv(face_surface, …)` 同参空间）。
+    Result<Range2D> face_outer_loop_uv_bounds(FaceId face_id) const;
+    /// 返回该面引用曲面的「修剪基曲面」：`Trimmed` 则沿 `base_surface_id` 解引用直至非 Trimmed。
+    Result<SurfaceId> underlying_surface_for_face_trim(FaceId face_id) const;
 
 private:
     std::shared_ptr<detail::KernelState> state_;
@@ -117,6 +122,14 @@ public:
     Result<std::uint64_t> touched_face_count() const;
     Result<std::uint64_t> touched_shell_count() const;
     Result<std::uint64_t> touched_body_count() const;
+    // Destructive ops in this transaction (for audit/metrics). Reset on rollback and clear_tracking_records.
+    Result<std::uint64_t> deleted_face_count() const;
+    Result<std::uint64_t> deleted_shell_count() const;
+    Result<std::uint64_t> deleted_body_count() const;
+    /// Successful `replace_surface` calls in this transaction (audit/metrics). Reset on rollback / clear_tracking_records.
+    Result<std::uint64_t> replaced_surface_count() const;
+    /// Successful `set_coedge_pcurve` calls (trim bridge). Reset on rollback / clear_tracking_records.
+    Result<std::uint64_t> coedge_pcurve_bind_count() const;
     Result<bool> has_created_vertex(VertexId vertex_id) const;
     Result<bool> has_created_edge(EdgeId edge_id) const;
     Result<bool> has_created_coedge(CoedgeId coedge_id) const;
@@ -132,6 +145,8 @@ public:
     Result<void> clear_tracking_records();
     Result<std::vector<VertexId>> created_vertices() const;
     Result<std::vector<EdgeId>> created_edges() const;
+    Result<std::vector<CoedgeId>> created_coedges() const;
+    Result<std::vector<LoopId>> created_loops() const;
     Result<std::vector<FaceId>> created_faces() const;
     Result<std::vector<ShellId>> created_shells() const;
     Result<std::vector<BodyId>> created_bodies() const;
@@ -146,6 +161,11 @@ private:
     std::vector<std::uint64_t> created_faces_;
     std::vector<std::uint64_t> created_shells_;
     std::vector<std::uint64_t> created_bodies_;
+    std::uint64_t txn_deleted_faces_{0};
+    std::uint64_t txn_deleted_shells_{0};
+    std::uint64_t txn_deleted_bodies_{0};
+    std::uint64_t txn_replaced_surfaces_{0};
+    std::uint64_t txn_coedge_pcurve_binds_{0};
     bool active_ {true};
 };
 
@@ -178,6 +198,8 @@ public:
     Result<void> validate_body_closedness(BodyId body_id) const;
     Result<void> validate_body_sources(BodyId body_id) const;
     Result<void> validate_body_bbox(BodyId body_id) const;
+    /// Per-body index checks (coedge_to_loop / loop_to_faces / edge_to_coedges / face_to_shells) for topology reachable from the body's shells only.
+    Result<void> validate_body_topology_indices(BodyId body_id) const;
     Result<void> validate_indices_consistency() const;
     Result<void> validate_face_many(std::span<const FaceId> face_ids) const;
     Result<void> validate_shell_many(std::span<const ShellId> shell_ids) const;

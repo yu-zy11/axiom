@@ -194,6 +194,19 @@ enum class NodeKind {
   Analysis
 };
 
+/// 插件宿主沙箱级别（当前均为进程内模型；非 OS 级隔离）。
+enum class PluginSandboxLevel : std::uint8_t {
+  None = 0,       ///< 与历史行为一致：共享地址空间
+  Annotated = 1   ///< 能力/发现报告中标注更高安全期望（占位，执行模型仍同 None）
+};
+
+/// 宿主对清单 `plugin_api_version` 与 SDK API 的比对规则（仅当 `require_plugin_api_version_match` 为真时参与注册门禁）。
+enum class PluginApiVersionMatchMode : std::uint8_t {
+  Exact = 0,     ///< 声明串（去空白后）与 `kPluginSdkApiVersion` 完全一致
+  SameMinor = 1, ///< `major.minor` 须与宿主一致；允许额外 patch（如宿主 `1.0` 接受 `1.0.3`）
+  SameMajor = 2  ///< `major` 须一致（更宽松，仅建议在受控环境使用）
+};
+
 struct Warning {
   std::string code;
   std::string message;
@@ -204,6 +217,8 @@ struct Issue {
   IssueSeverity severity{IssueSeverity::Info};
   std::string message;
   std::vector<std::uint64_t> related_entities;
+  /// 工作流阶段标签（如 bool.validate、io.post_import.validation）；空表示未标注。
+  std::string stage;
 };
 
 struct DiagnosticReport {
@@ -228,11 +243,34 @@ struct TolerancePolicy {
   PrecisionMode precision_mode{PrecisionMode::AdaptiveCertified};
 };
 
+/// 内核侧插件宿主策略（进程内注册，非 OS 级隔离；用于容量与声明校验）。
+struct PluginHostPolicy {
+  /// 曲线/修复/导入/导出插件实例总数上限；0 表示不限制。
+  std::uint32_t max_plugin_slots{0};
+  /// 同一类插件内 `type_name()` 是否必须唯一。
+  bool enforce_unique_implementation_type_name{true};
+  /// 注册时清单 `name` 必须非空且非全空白。
+  bool require_non_empty_manifest_name{true};
+  /// 已存在同名 manifest 时拒绝再次注册（默认 false，兼容多槽位共用一个展示名）。
+  bool require_unique_manifest_name{false};
+  /// 清单 capabilities 非空。
+  bool require_non_empty_capabilities{false};
+  /// 实现侧 `type_name()` 非空且非全空白。
+  bool require_non_empty_plugin_type_name{true};
+  /// 为真时：`PluginManifest::plugin_api_version`（去空白后）必须满足 `plugin_api_version_match_mode` 与宿主 SDK API 的兼容规则。
+  bool require_plugin_api_version_match{false};
+  /// 与 `require_plugin_api_version_match` 联用；默认 `Exact` 保持历史行为。
+  PluginApiVersionMatchMode plugin_api_version_match_mode{PluginApiVersionMatchMode::Exact};
+  /// 安全/隔离策略占位（供能力发现、审计与未来扩展；当前不改变插件调用路径）。
+  PluginSandboxLevel sandbox_level{PluginSandboxLevel::None};
+};
+
 struct KernelConfig {
   TolerancePolicy tolerance{};
   PrecisionMode precision_mode{PrecisionMode::AdaptiveCertified};
   bool enable_diagnostics{true};
   bool enable_cache{true};
+  PluginHostPolicy plugin_host_policy{};
 };
 
 struct ImportOptions {
@@ -288,12 +326,16 @@ struct TessellationOptions {
 struct CurveEvalResult {
   Point3 point{};
   Vec3 tangent{};
+  /// 3D 空间曲线曲率 κ = |r'×r''| / |r'|³（弧长参数意义下）；直线/退化处为 0。
+  Scalar curvature{};
   std::vector<Vec3> derivatives;
 };
 
 struct PCurveEvalResult {
   Point2 point{};
   Vec2 tangent{};
+  /// UV 平面内带符号曲率 (x'y''−y'x'') / |r'|³；退化处为 0。
+  Scalar curvature{};
   std::vector<Vec2> derivatives;
 };
 
@@ -372,6 +414,10 @@ struct PluginManifest {
   std::string version;
   std::string vendor;
   std::vector<std::string> capabilities;
+  /// 声明与宿主 `kPluginSdkApiVersion` / `Kernel::plugin_sdk_api_version` 兼容，例如 `"1.0"`；可空（由策略决定是否允许）。
+  std::string plugin_api_version;
+  /// 与进程内实现 `type_name()` 对齐；`register_*` 带实现时若为空则自动填为插件 `type_name`（去空白），若已填则须一致。`register_manifest_only` 可预填供审计；按 `type_name` 注销实现时会移除同字段匹配的清单条目。
+  std::string implementation_type_name;
 };
 
 } // namespace axiom

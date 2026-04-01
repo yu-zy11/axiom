@@ -51,6 +51,12 @@ int main() {
             std::cerr << "failed to bind pcurve to coedge\n";
             return 1;
         }
+        auto bind_n = txn.coedge_pcurve_bind_count();
+        if (bind_n.status != axiom::StatusCode::Ok || !bind_n.value.has_value() ||
+            *bind_n.value != 1) {
+            std::cerr << "expected coedge_pcurve_bind_count 1 after set_coedge_pcurve\n";
+            return 1;
+        }
         auto q = kernel.topology().query().pcurve_of_coedge(*c0.value);
         if (q.status != axiom::StatusCode::Ok || !q.value.has_value() ||
             q.value->value != pc.value->value) {
@@ -65,6 +71,279 @@ int main() {
         auto rb = txn.rollback();
         if (rb.status != axiom::StatusCode::Ok) {
             std::cerr << "rollback failed for coedge binding test\n";
+            return 1;
+        }
+        auto bind_after_rb = txn.coedge_pcurve_bind_count();
+        if (bind_after_rb.status != axiom::StatusCode::Ok || !bind_after_rb.value.has_value() ||
+            *bind_after_rb.value != 0) {
+            std::cerr << "expected coedge_pcurve_bind_count 0 after rollback\n";
+            return 1;
+        }
+    }
+
+    // ---- TopoCore (7.2): dangling vertex should fail validate_vertex ----
+    {
+        auto txn = kernel.topology().begin_transaction();
+        auto v = txn.create_vertex({99.0, 99.0, 99.0});
+        if (v.status != axiom::StatusCode::Ok || !v.value.has_value()) {
+            std::cerr << "failed to create isolated vertex for dangling test\n";
+            return 1;
+        }
+        auto bad = kernel.topology().validate().validate_vertex(*v.value);
+        if (bad.status == axiom::StatusCode::Ok) {
+            std::cerr << "expected validate_vertex to fail for dangling vertex\n";
+            return 1;
+        }
+        auto d = kernel.diagnostics().get(bad.diagnostic_id);
+        if (d.status != axiom::StatusCode::Ok || !d.value.has_value() ||
+            !has_issue_code(*d.value, axiom::diag_codes::kTopoDanglingVertex)) {
+            std::cerr << "expected kTopoDanglingVertex for vertex unused by edges\n";
+            return 1;
+        }
+        auto rb = txn.rollback();
+        if (rb.status != axiom::StatusCode::Ok) {
+            std::cerr << "rollback failed for dangling vertex test\n";
+            return 1;
+        }
+    }
+
+    // ---- TopoCore (7.2): validate_indices_consistency — reverse edge index (edge without coedge) ----
+    {
+        axiom::Kernel k_edge_index;
+        auto line = k_edge_index.curves().make_line({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
+        if (line.status != axiom::StatusCode::Ok || !line.value.has_value()) {
+            std::cerr << "failed to create curve for edge reverse-index test\n";
+            return 1;
+        }
+        auto txn = k_edge_index.topology().begin_transaction();
+        auto v0 = txn.create_vertex({0.0, 0.0, 0.0});
+        auto v1 = txn.create_vertex({1.0, 0.0, 0.0});
+        auto e = txn.create_edge(*line.value, *v0.value, *v1.value);
+        if (v0.status != axiom::StatusCode::Ok || v1.status != axiom::StatusCode::Ok ||
+            e.status != axiom::StatusCode::Ok || !v0.value.has_value() ||
+            !v1.value.has_value() || !e.value.has_value()) {
+            std::cerr << "failed to create edge-only topology for reverse-index test\n";
+            return 1;
+        }
+        auto cm = txn.commit();
+        if (cm.status != axiom::StatusCode::Ok) {
+            std::cerr << "commit failed for edge reverse-index test\n";
+            return 1;
+        }
+        auto idx_bad = k_edge_index.topology().validate().validate_indices_consistency();
+        if (idx_bad.status == axiom::StatusCode::Ok) {
+            std::cerr << "expected validate_indices_consistency to fail for edge without coedge\n";
+            return 1;
+        }
+        auto diag = k_edge_index.diagnostics().get(idx_bad.diagnostic_id);
+        if (diag.status != axiom::StatusCode::Ok || !diag.value.has_value() ||
+            !has_issue_code(*diag.value, axiom::diag_codes::kTopoDanglingEdge)) {
+            std::cerr << "expected kTopoDanglingEdge for reverse edge_to_coedges check\n";
+            return 1;
+        }
+    }
+
+    // ---- TopoCore (7.2): loop single-owner — second create_face with same outer loop must fail ----
+    {
+        axiom::Kernel k_loop_owner;
+        auto plane = k_loop_owner.surfaces().make_plane({0.0, 0.0, -5.0}, {0.0, 0.0, 1.0});
+        auto la0 = k_loop_owner.curves().make_line({0.0, -5.0, 0.0}, {1.0, 0.0, 0.0});
+        auto la1 = k_loop_owner.curves().make_line({1.0, -5.0, 0.0}, {0.0, 1.0, 0.0});
+        auto la2 = k_loop_owner.curves().make_line({1.0, -4.0, 0.0}, {-1.0, 0.0, 0.0});
+        auto la3 = k_loop_owner.curves().make_line({0.0, -4.0, 0.0}, {0.0, -1.0, 0.0});
+        if (plane.status != axiom::StatusCode::Ok || !plane.value.has_value() ||
+            la0.status != axiom::StatusCode::Ok || !la0.value.has_value() ||
+            la1.status != axiom::StatusCode::Ok || !la1.value.has_value() ||
+            la2.status != axiom::StatusCode::Ok || !la2.value.has_value() ||
+            la3.status != axiom::StatusCode::Ok || !la3.value.has_value()) {
+            std::cerr << "failed to init geometry for loop single-owner test\n";
+            return 1;
+        }
+        auto txn = k_loop_owner.topology().begin_transaction();
+        auto va0 = txn.create_vertex({0.0, -5.0, 0.0});
+        auto va1 = txn.create_vertex({1.0, -5.0, 0.0});
+        auto va2 = txn.create_vertex({1.0, -4.0, 0.0});
+        auto va3 = txn.create_vertex({0.0, -4.0, 0.0});
+        auto ea0 = txn.create_edge(*la0.value, *va0.value, *va1.value);
+        auto ea1 = txn.create_edge(*la1.value, *va1.value, *va2.value);
+        auto ea2 = txn.create_edge(*la2.value, *va2.value, *va3.value);
+        auto ea3 = txn.create_edge(*la3.value, *va3.value, *va0.value);
+        auto ca0 = txn.create_coedge(*ea0.value, false);
+        auto ca1 = txn.create_coedge(*ea1.value, false);
+        auto ca2 = txn.create_coedge(*ea2.value, false);
+        auto ca3 = txn.create_coedge(*ea3.value, false);
+        const std::array<axiom::CoedgeId, 4> coa {
+            *ca0.value, *ca1.value, *ca2.value, *ca3.value};
+        auto shared_loop = txn.create_loop(coa);
+        auto face_a = txn.create_face(*plane.value, *shared_loop.value, {});
+        auto face_b = txn.create_face(*plane.value, *shared_loop.value, {});
+        if (shared_loop.status != axiom::StatusCode::Ok || !shared_loop.value.has_value() ||
+            face_a.status != axiom::StatusCode::Ok || !face_a.value.has_value()) {
+            std::cerr << "failed to create first face for loop single-owner test\n";
+            return 1;
+        }
+        if (face_b.status == axiom::StatusCode::Ok) {
+            std::cerr << "expected second create_face with shared outer loop to fail\n";
+            return 1;
+        }
+        auto d = k_loop_owner.diagnostics().get(face_b.diagnostic_id);
+        if (d.status != axiom::StatusCode::Ok || !d.value.has_value() ||
+            !has_issue_code(*d.value, axiom::diag_codes::kTopoFaceOuterLoopInvalid)) {
+            std::cerr << "expected kTopoFaceOuterLoopInvalid for shared outer loop\n";
+            return 1;
+        }
+        auto rb = txn.rollback();
+        if (rb.status != axiom::StatusCode::Ok) {
+            std::cerr << "rollback failed for loop single-owner test\n";
+            return 1;
+        }
+    }
+
+    // ---- TopoCore (7.2): delete_face leaves orphan loop; indices fail; txn rollback restores ----
+    {
+        auto plane = kernel.surfaces().make_plane({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0});
+        auto l0 = kernel.curves().make_line({0.0, 30.0, 0.0}, {1.0, 0.0, 0.0});
+        auto l1 = kernel.curves().make_line({1.0, 30.0, 0.0}, {0.0, 1.0, 0.0});
+        auto l2 = kernel.curves().make_line({1.0, 31.0, 0.0}, {-1.0, 0.0, 0.0});
+        auto l3 = kernel.curves().make_line({0.0, 31.0, 0.0}, {0.0, -1.0, 0.0});
+        if (plane.status != axiom::StatusCode::Ok || !plane.value.has_value() ||
+            l0.status != axiom::StatusCode::Ok || !l0.value.has_value() ||
+            l1.status != axiom::StatusCode::Ok || !l1.value.has_value() ||
+            l2.status != axiom::StatusCode::Ok || !l2.value.has_value() ||
+            l3.status != axiom::StatusCode::Ok || !l3.value.has_value()) {
+            std::cerr << "failed to create geometry for orphan loop index test\n";
+            return 1;
+        }
+        auto txn = kernel.topology().begin_transaction();
+        auto v0 = txn.create_vertex({0.0, 30.0, 0.0});
+        auto v1 = txn.create_vertex({1.0, 30.0, 0.0});
+        auto v2 = txn.create_vertex({1.0, 31.0, 0.0});
+        auto v3 = txn.create_vertex({0.0, 31.0, 0.0});
+        auto e0 = txn.create_edge(*l0.value, *v0.value, *v1.value);
+        auto e1 = txn.create_edge(*l1.value, *v1.value, *v2.value);
+        auto e2 = txn.create_edge(*l2.value, *v2.value, *v3.value);
+        auto e3 = txn.create_edge(*l3.value, *v3.value, *v0.value);
+        auto c0 = txn.create_coedge(*e0.value, false);
+        auto c1 = txn.create_coedge(*e1.value, false);
+        auto c2 = txn.create_coedge(*e2.value, false);
+        auto c3 = txn.create_coedge(*e3.value, false);
+        const std::array<axiom::CoedgeId, 4> co {{ *c0.value, *c1.value, *c2.value, *c3.value }};
+        auto loop = txn.create_loop(co);
+        auto face = txn.create_face(*plane.value, *loop.value, {});
+        auto shell = txn.create_shell(std::array<axiom::FaceId, 1> {*face.value});
+        auto body = txn.create_body(std::array<axiom::ShellId, 1> {*shell.value});
+        if (loop.status != axiom::StatusCode::Ok || !loop.value.has_value() ||
+            face.status != axiom::StatusCode::Ok || !face.value.has_value() ||
+            shell.status != axiom::StatusCode::Ok || !shell.value.has_value() ||
+            body.status != axiom::StatusCode::Ok || !body.value.has_value()) {
+            std::cerr << "failed to build topology for orphan loop index test\n";
+            return 1;
+        }
+        auto del = txn.delete_face(*face.value);
+        if (del.status != axiom::StatusCode::Ok) {
+            std::cerr << "delete_face failed in orphan loop index test\n";
+            return 1;
+        }
+        auto del_face_n = txn.deleted_face_count();
+        if (del_face_n.status != axiom::StatusCode::Ok || !del_face_n.value.has_value() ||
+            *del_face_n.value != 1) {
+            std::cerr << "expected deleted_face_count 1 after delete_face\n";
+            return 1;
+        }
+        auto idx_bad = kernel.topology().validate().validate_indices_consistency();
+        if (idx_bad.status == axiom::StatusCode::Ok) {
+            std::cerr << "expected validate_indices_consistency to fail after orphaning loops\n";
+            return 1;
+        }
+        auto d = kernel.diagnostics().get(idx_bad.diagnostic_id);
+        if (d.status != axiom::StatusCode::Ok || !d.value.has_value() ||
+            !has_issue_code(*d.value, axiom::diag_codes::kTopoOrphanLoop)) {
+            std::cerr << "expected kTopoOrphanLoop in diagnostics after delete_face\n";
+            return 1;
+        }
+        auto rb = txn.rollback();
+        if (rb.status != axiom::StatusCode::Ok) {
+            std::cerr << "rollback failed for orphan loop index test\n";
+            return 1;
+        }
+        auto del_face_after_rb = txn.deleted_face_count();
+        if (del_face_after_rb.status != axiom::StatusCode::Ok ||
+            !del_face_after_rb.value.has_value() || *del_face_after_rb.value != 0) {
+            std::cerr << "expected deleted_face_count 0 after rollback\n";
+            return 1;
+        }
+    }
+
+    // ---- TopoCore (7.2): deleted_face_count survives commit (isolated kernel) ----
+    {
+        axiom::Kernel k_commit_del;
+        auto plane = k_commit_del.surfaces().make_plane({0.0, 0.0, 60.0}, {0.0, 0.0, 1.0});
+        auto l0 = k_commit_del.curves().make_line({0.0, 60.0, 0.0}, {1.0, 0.0, 0.0});
+        auto l1 = k_commit_del.curves().make_line({1.0, 60.0, 0.0}, {0.0, 1.0, 0.0});
+        auto l2 = k_commit_del.curves().make_line({1.0, 61.0, 0.0}, {-1.0, 0.0, 0.0});
+        auto l3 = k_commit_del.curves().make_line({0.0, 61.0, 0.0}, {0.0, -1.0, 0.0});
+        if (plane.status != axiom::StatusCode::Ok || !plane.value.has_value() ||
+            l0.status != axiom::StatusCode::Ok || !l0.value.has_value() ||
+            l1.status != axiom::StatusCode::Ok || !l1.value.has_value() ||
+            l2.status != axiom::StatusCode::Ok || !l2.value.has_value() ||
+            l3.status != axiom::StatusCode::Ok || !l3.value.has_value()) {
+            std::cerr << "failed to create geometry for deleted_face_count commit test\n";
+            return 1;
+        }
+        axiom::FaceId committed_face{0};
+        {
+            auto txn = k_commit_del.topology().begin_transaction();
+            auto v0 = txn.create_vertex({0.0, 60.0, 0.0});
+            auto v1 = txn.create_vertex({1.0, 60.0, 0.0});
+            auto v2 = txn.create_vertex({1.0, 61.0, 0.0});
+            auto v3 = txn.create_vertex({0.0, 61.0, 0.0});
+            auto e0 = txn.create_edge(*l0.value, *v0.value, *v1.value);
+            auto e1 = txn.create_edge(*l1.value, *v1.value, *v2.value);
+            auto e2 = txn.create_edge(*l2.value, *v2.value, *v3.value);
+            auto e3 = txn.create_edge(*l3.value, *v3.value, *v0.value);
+            auto c0 = txn.create_coedge(*e0.value, false);
+            auto c1 = txn.create_coedge(*e1.value, false);
+            auto c2 = txn.create_coedge(*e2.value, false);
+            auto c3 = txn.create_coedge(*e3.value, false);
+            const std::array<axiom::CoedgeId, 4> co {
+                {*c0.value, *c1.value, *c2.value, *c3.value}};
+            auto loop = txn.create_loop(co);
+            auto face = txn.create_face(*plane.value, *loop.value, {});
+            auto shell = txn.create_shell(std::array<axiom::FaceId, 1>{*face.value});
+            auto body = txn.create_body(std::array<axiom::ShellId, 1>{*shell.value});
+            if (loop.status != axiom::StatusCode::Ok || !loop.value.has_value() ||
+                face.status != axiom::StatusCode::Ok || !face.value.has_value() ||
+                shell.status != axiom::StatusCode::Ok || !shell.value.has_value() ||
+                body.status != axiom::StatusCode::Ok || !body.value.has_value()) {
+                std::cerr << "failed to build topology for deleted_face_count commit test\n";
+                return 1;
+            }
+            committed_face = *face.value;
+            auto cm = txn.commit();
+            if (cm.status != axiom::StatusCode::Ok) {
+                std::cerr << "commit failed in deleted_face_count commit test\n";
+                return 1;
+            }
+        }
+        auto txn2 = k_commit_del.topology().begin_transaction();
+        auto del = txn2.delete_face(committed_face);
+        if (del.status != axiom::StatusCode::Ok) {
+            std::cerr << "delete_face failed after commit in deleted_face_count test\n";
+            return 1;
+        }
+        auto n1 = txn2.deleted_face_count();
+        if (n1.status != axiom::StatusCode::Ok || !n1.value.has_value() || *n1.value != 1) {
+            std::cerr << "expected deleted_face_count 1 before second commit\n";
+            return 1;
+        }
+        auto cm2 = txn2.commit();
+        if (cm2.status != axiom::StatusCode::Ok) {
+            std::cerr << "second commit failed in deleted_face_count test\n";
+            return 1;
+        }
+        auto n2 = txn2.deleted_face_count();
+        if (n2.status != axiom::StatusCode::Ok || !n2.value.has_value() || *n2.value != 1) {
+            std::cerr << "expected deleted_face_count still 1 after commit\n";
             return 1;
         }
     }
@@ -150,6 +429,36 @@ int main() {
         auto face_trim_ok = kernel.topology().validate().validate_face_trim_consistency(*face.value);
         if (face_trim_ok.status != axiom::StatusCode::Ok) {
             std::cerr << "expected face trim consistency ok\n";
+            return 1;
+        }
+
+        // Trim bridge: outer-loop PCurves -> UV bounds -> Geo Trimmed (underlying plane).
+        auto uv_bounds = kernel.topology().query().face_outer_loop_uv_bounds(*face.value);
+        if (uv_bounds.status != axiom::StatusCode::Ok || !uv_bounds.value.has_value()) {
+            std::cerr << "expected face_outer_loop_uv_bounds ok\n";
+            return 1;
+        }
+        if (std::abs(uv_bounds.value->u.min) > 1e-9 || std::abs(uv_bounds.value->u.max - 1.0) > 1e-9 ||
+            std::abs(uv_bounds.value->v.min) > 1e-9 || std::abs(uv_bounds.value->v.max - 1.0) > 1e-9) {
+            std::cerr << "unexpected face_outer_loop_uv_bounds range\n";
+            return 1;
+        }
+        auto under_s = kernel.topology().query().underlying_surface_for_face_trim(*face.value);
+        if (under_s.status != axiom::StatusCode::Ok || !under_s.value.has_value() ||
+            under_s.value->value != plane.value->value) {
+            std::cerr << "expected underlying_surface_for_face_trim to match plane surface\n";
+            return 1;
+        }
+        auto trim_from_topo = kernel.create_trimmed_surface_from_face_outer_loop_pcurves(*face.value);
+        if (trim_from_topo.status != axiom::StatusCode::Ok || !trim_from_topo.value.has_value()) {
+            std::cerr << "create_trimmed_surface_from_face_outer_loop_pcurves failed\n";
+            return 1;
+        }
+        auto tev = kernel.surface_service().eval(*trim_from_topo.value, 0.5, 0.5, 0);
+        if (tev.status != axiom::StatusCode::Ok || !tev.value.has_value() ||
+            std::abs(tev.value->point.x - 0.5) > 1e-6 || std::abs(tev.value->point.y - 0.5) > 1e-6 ||
+            std::abs(tev.value->point.z) > 1e-6) {
+            std::cerr << "unexpected eval on topology-derived trimmed surface\n";
             return 1;
         }
 
@@ -820,7 +1129,7 @@ int main() {
         }
     }
 
-    // ---- Stage 2: duplicate faces within a shell should be rejected (relation inconsistent) ----
+    // ---- Stage 2: duplicate FaceId in shell face list rejected (7.2: loop single-owner forbids two faces sharing one loop) ----
     {
         auto plane = kernel.surfaces().make_plane({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0});
         auto l0 = kernel.curves().make_line({0.0, 4.0, 0.0}, {1.0, 0.0, 0.0});
@@ -851,27 +1160,21 @@ int main() {
         const std::array<axiom::CoedgeId, 4> coedges {{ *c0.value, *c1.value, *c2.value, *c3.value }};
         auto loop = txn.create_loop(coedges);
         auto f0 = txn.create_face(*plane.value, *loop.value, {});
-        auto f1 = txn.create_face(*plane.value, *loop.value, {});
-        if (f0.status != axiom::StatusCode::Ok || !f0.value.has_value() ||
-            f1.status != axiom::StatusCode::Ok || !f1.value.has_value()) {
-            std::cerr << "failed to create duplicate faces for shell test\n";
+        if (loop.status != axiom::StatusCode::Ok || !loop.value.has_value() ||
+            f0.status != axiom::StatusCode::Ok || !f0.value.has_value()) {
+            std::cerr << "failed to create face for duplicate-in-shell list test\n";
             return 1;
         }
-        const std::array<axiom::FaceId, 2> faces {{ *f0.value, *f1.value }};
-        auto shell = txn.create_shell(faces);
-        if (shell.status != axiom::StatusCode::Ok || !shell.value.has_value()) {
-            std::cerr << "failed to create shell for duplicate face test\n";
+        const std::array<axiom::FaceId, 2> dup_list {{ *f0.value, *f0.value }};
+        auto shell = txn.create_shell(dup_list);
+        if (shell.status == axiom::StatusCode::Ok) {
+            std::cerr << "expected create_shell to fail when face list repeats same FaceId\n";
             return 1;
         }
-        auto shell_valid = kernel.topology().validate().validate_shell(*shell.value);
-        if (shell_valid.status != axiom::StatusCode::Ok) {
-            std::cerr << "expected shell validation to pass (duplicate faces reported as warning)\n";
-            return 1;
-        }
-        auto shell_diag = kernel.diagnostics().get(shell_valid.diagnostic_id);
+        auto shell_diag = kernel.diagnostics().get(shell.diagnostic_id);
         if (shell_diag.status != axiom::StatusCode::Ok || !shell_diag.value.has_value() ||
             !has_issue_code(*shell_diag.value, axiom::diag_codes::kTopoDuplicateFaceInShell)) {
-            std::cerr << "expected kTopoDuplicateFaceInShell for duplicate faces in shell\n";
+            std::cerr << "expected kTopoDuplicateFaceInShell for repeated FaceId in shell list\n";
             return 1;
         }
         auto rb = txn.rollback();
@@ -1088,6 +1391,8 @@ int main() {
     auto txn_has_snapshot_body = txn.has_snapshot_body(*body.value);
     auto txn_created_vertices = txn.created_vertices();
     auto txn_created_edges = txn.created_edges();
+    auto txn_created_coedges_list = txn.created_coedges();
+    auto txn_created_loops_list = txn.created_loops();
     auto txn_created_faces = txn.created_faces();
     auto txn_created_shells = txn.created_shells();
     auto txn_created_bodies = txn.created_bodies();
@@ -1117,6 +1422,12 @@ int main() {
         txn_has_snapshot_body.status != axiom::StatusCode::Ok || !txn_has_snapshot_body.value.has_value() || *txn_has_snapshot_body.value ||
         txn_created_vertices.status != axiom::StatusCode::Ok || !txn_created_vertices.value.has_value() || txn_created_vertices.value->size() != 4 ||
         txn_created_edges.status != axiom::StatusCode::Ok || !txn_created_edges.value.has_value() || txn_created_edges.value->size() != 4 ||
+        txn_created_coedges_list.status != axiom::StatusCode::Ok || !txn_created_coedges_list.value.has_value() ||
+        txn_created_coedges_list.value->size() != 4 ||
+        txn_created_coedges_list.value->at(0).value != c0.value->value ||
+        txn_created_loops_list.status != axiom::StatusCode::Ok || !txn_created_loops_list.value.has_value() ||
+        txn_created_loops_list.value->size() != 1 ||
+        txn_created_loops_list.value->front().value != loop.value->value ||
         txn_created_faces.status != axiom::StatusCode::Ok || !txn_created_faces.value.has_value() || txn_created_faces.value->size() != 1 ||
         txn_created_shells.status != axiom::StatusCode::Ok || !txn_created_shells.value.has_value() || txn_created_shells.value->size() != 1 ||
         txn_created_bodies.status != axiom::StatusCode::Ok || !txn_created_bodies.value.has_value() || txn_created_bodies.value->size() != 1) {
@@ -1289,6 +1600,8 @@ int main() {
     auto body_source_valid = kernel.topology().validate().validate_body_sources(*body.value);
     auto body_bbox_valid = kernel.topology().validate().validate_body_bbox(*body.value);
     auto indices_valid = kernel.topology().validate().validate_indices_consistency();
+    auto body_topology_indices_valid =
+        kernel.topology().validate().validate_body_topology_indices(*body.value);
     std::array<axiom::FaceId, 1> face_ids {*face.value};
     std::array<axiom::ShellId, 1> shell_ids {*shell.value};
     std::array<axiom::BodyId, 1> body_ids {*body.value};
@@ -1308,6 +1621,7 @@ int main() {
         loop_valid.status != axiom::StatusCode::Ok || face_source_valid.status != axiom::StatusCode::Ok ||
         shell_source_valid.status != axiom::StatusCode::Ok || body_source_valid.status != axiom::StatusCode::Ok ||
         body_bbox_valid.status != axiom::StatusCode::Ok || indices_valid.status != axiom::StatusCode::Ok ||
+        body_topology_indices_valid.status != axiom::StatusCode::Ok ||
         face_many_valid.status != axiom::StatusCode::Ok || shell_many_valid.status != axiom::StatusCode::Ok ||
         body_many_valid.status != axiom::StatusCode::Ok ||
         is_face_valid.status != axiom::StatusCode::Ok || !is_face_valid.value.has_value() || !*is_face_valid.value ||
@@ -1329,6 +1643,12 @@ int main() {
         std::cerr << "failed to replace face surface in transaction\n";
         return 1;
     }
+    auto rep_cnt = modify_txn.replaced_surface_count();
+    if (rep_cnt.status != axiom::StatusCode::Ok || !rep_cnt.value.has_value() ||
+        *rep_cnt.value != 1) {
+        std::cerr << "expected replaced_surface_count 1 after replace_surface\n";
+        return 1;
+    }
 
     auto changed_surface = kernel.topology().query().surface_of_face(*face.value);
     if (changed_surface.status != axiom::StatusCode::Ok || !changed_surface.value.has_value() ||
@@ -1340,6 +1660,12 @@ int main() {
     auto rollback = modify_txn.rollback();
     if (rollback.status != axiom::StatusCode::Ok) {
         std::cerr << "rollback failed\n";
+        return 1;
+    }
+    auto rep_after_rb = modify_txn.replaced_surface_count();
+    if (rep_after_rb.status != axiom::StatusCode::Ok || !rep_after_rb.value.has_value() ||
+        *rep_after_rb.value != 0) {
+        std::cerr << "expected replaced_surface_count 0 after rollback\n";
         return 1;
     }
     auto modify_txn_active = modify_txn.is_active();
@@ -1719,11 +2045,59 @@ int main() {
     }
 
     // ---- Stage 2 regression: Strict topology should fail for non-manifold shells (edge use > 2) ----
+    // Three distinct loops reusing the same four EdgeIds (each face owns its coedges) so each edge is used 3x in the shell.
     {
+        auto edges_q = kernel.topology().query().edges_of_loop(*loop.value);
+        if (edges_q.status != axiom::StatusCode::Ok || !edges_q.value.has_value() ||
+            edges_q.value->size() != 4) {
+            std::cerr << "failed to query edges for non-manifold shell test\n";
+            return 1;
+        }
+        const auto& E = *edges_q.value;
         auto nm_txn = kernel.topology().begin_transaction();
-        auto f0 = nm_txn.create_face(*plane0.value, *loop.value, {});
-        auto f1 = nm_txn.create_face(*plane0.value, *loop.value, {});
-        auto f2 = nm_txn.create_face(*plane0.value, *loop.value, {});
+        auto nm_a0 = nm_txn.create_coedge(E[0], false);
+        auto nm_a1 = nm_txn.create_coedge(E[1], false);
+        auto nm_a2 = nm_txn.create_coedge(E[2], false);
+        auto nm_a3 = nm_txn.create_coedge(E[3], false);
+        auto nm_b0 = nm_txn.create_coedge(E[0], false);
+        auto nm_b1 = nm_txn.create_coedge(E[1], false);
+        auto nm_b2 = nm_txn.create_coedge(E[2], false);
+        auto nm_b3 = nm_txn.create_coedge(E[3], false);
+        auto nm_c0 = nm_txn.create_coedge(E[0], false);
+        auto nm_c1 = nm_txn.create_coedge(E[1], false);
+        auto nm_c2 = nm_txn.create_coedge(E[2], false);
+        auto nm_c3 = nm_txn.create_coedge(E[3], false);
+        if (nm_a0.status != axiom::StatusCode::Ok || nm_a1.status != axiom::StatusCode::Ok ||
+            nm_a2.status != axiom::StatusCode::Ok || nm_a3.status != axiom::StatusCode::Ok ||
+            nm_b0.status != axiom::StatusCode::Ok || nm_b1.status != axiom::StatusCode::Ok ||
+            nm_b2.status != axiom::StatusCode::Ok || nm_b3.status != axiom::StatusCode::Ok ||
+            nm_c0.status != axiom::StatusCode::Ok || nm_c1.status != axiom::StatusCode::Ok ||
+            nm_c2.status != axiom::StatusCode::Ok || nm_c3.status != axiom::StatusCode::Ok ||
+            !nm_a0.value.has_value() || !nm_a1.value.has_value() || !nm_a2.value.has_value() ||
+            !nm_a3.value.has_value() || !nm_b0.value.has_value() || !nm_b1.value.has_value() ||
+            !nm_b2.value.has_value() || !nm_b3.value.has_value() || !nm_c0.value.has_value() ||
+            !nm_c1.value.has_value() || !nm_c2.value.has_value() || !nm_c3.value.has_value()) {
+            std::cerr << "failed to create coedges for non-manifold shell test\n";
+            return 1;
+        }
+        const std::array<axiom::CoedgeId, 4> ring0 {
+            *nm_a0.value, *nm_a1.value, *nm_a2.value, *nm_a3.value};
+        const std::array<axiom::CoedgeId, 4> ring1 {
+            *nm_b0.value, *nm_b1.value, *nm_b2.value, *nm_b3.value};
+        const std::array<axiom::CoedgeId, 4> ring2 {
+            *nm_c0.value, *nm_c1.value, *nm_c2.value, *nm_c3.value};
+        auto lp0 = nm_txn.create_loop(ring0);
+        auto lp1 = nm_txn.create_loop(ring1);
+        auto lp2 = nm_txn.create_loop(ring2);
+        if (lp0.status != axiom::StatusCode::Ok || lp1.status != axiom::StatusCode::Ok ||
+            lp2.status != axiom::StatusCode::Ok || !lp0.value.has_value() ||
+            !lp1.value.has_value() || !lp2.value.has_value()) {
+            std::cerr << "failed to create parallel loops for non-manifold shell test\n";
+            return 1;
+        }
+        auto f0 = nm_txn.create_face(*plane0.value, *lp0.value, {});
+        auto f1 = nm_txn.create_face(*plane0.value, *lp1.value, {});
+        auto f2 = nm_txn.create_face(*plane0.value, *lp2.value, {});
         if (f0.status != axiom::StatusCode::Ok || f1.status != axiom::StatusCode::Ok || f2.status != axiom::StatusCode::Ok ||
             !f0.value.has_value() || !f1.value.has_value() || !f2.value.has_value()) {
             std::cerr << "failed to create non-manifold faces\n";
@@ -1759,40 +2133,7 @@ int main() {
         }
     }
 
-    // ---- Stage 2+: Strict topology should fail for duplicate faces in one shell (same signature) ----
-    {
-        auto dup_txn = kernel.topology().begin_transaction();
-        auto f0 = dup_txn.create_face(*plane0.value, *loop.value, {});
-        auto f1 = dup_txn.create_face(*plane0.value, *loop.value, {});
-        if (f0.status != axiom::StatusCode::Ok || f1.status != axiom::StatusCode::Ok ||
-            !f0.value.has_value() || !f1.value.has_value()) {
-            std::cerr << "failed to create duplicate faces for strict duplicate-face test\n";
-            return 1;
-        }
-        auto shell = dup_txn.create_shell(std::array<axiom::FaceId, 2>{*f0.value, *f1.value});
-        auto body = dup_txn.create_body(std::array<axiom::ShellId, 1>{*shell.value});
-        if (shell.status != axiom::StatusCode::Ok || body.status != axiom::StatusCode::Ok ||
-            !shell.value.has_value() || !body.value.has_value()) {
-            std::cerr << "failed to create shell/body for strict duplicate-face test\n";
-            return 1;
-        }
-        auto strict = kernel.validate().validate_topology(*body.value, axiom::ValidationMode::Strict);
-        if (strict.status == axiom::StatusCode::Ok) {
-            std::cerr << "expected strict topology validation to fail for duplicate faces\n";
-            return 1;
-        }
-        auto diag = kernel.diagnostics().get(strict.diagnostic_id);
-        if (diag.status != axiom::StatusCode::Ok || !diag.value.has_value() ||
-            !has_issue_code(*diag.value, axiom::diag_codes::kTopoDuplicateFaceInShell)) {
-            std::cerr << "expected strict validation to expose duplicate-face diagnostic code\n";
-            return 1;
-        }
-        auto rb = dup_txn.rollback();
-        if (rb.status != axiom::StatusCode::Ok) {
-            std::cerr << "rollback failed after strict duplicate-face test\n";
-            return 1;
-        }
-    }
+    // ---- Stage 2+: same-surface same-loop-id duplicate shell signature is blocked at create_face (7.2); Strict duplicate-signature path is covered by Heal strict_check when data is corrupted. ----
 
     // ---- Stage 2+: Strict topology should fail for disconnected (but closed) shells ----
     {

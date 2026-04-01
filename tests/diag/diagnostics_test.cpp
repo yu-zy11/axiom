@@ -102,6 +102,14 @@ int main() {
         std::filesystem::remove(invalid_import_path);
         return 1;
     }
+    {
+        const auto* val_staged = find_issue(*import_diag.value, axiom::diag_codes::kIoPostImportValidation);
+        if (val_staged == nullptr || val_staged->stage != "io.post_import.validation") {
+            std::cerr << "expected io.post_import.validation stage on import validation issue\n";
+            std::filesystem::remove(invalid_import_path);
+            return 1;
+        }
+    }
 
     import_options.auto_repair = true;
     auto repaired_import = kernel.io().import_step(invalid_import_path.string(), import_options);
@@ -122,6 +130,14 @@ int main() {
         std::cerr << "missing import auto repair diagnostic issues\n";
         std::filesystem::remove(invalid_import_path);
         return 1;
+    }
+    {
+        const auto* repair_mode_staged = find_issue(*repaired_import_diag.value, axiom::diag_codes::kIoPostImportRepairMode);
+        if (repair_mode_staged == nullptr || repair_mode_staged->stage != "io.post_import.repair_mode") {
+            std::cerr << "expected io.post_import.repair_mode stage on import repair policy issue\n";
+            std::filesystem::remove(invalid_import_path);
+            return 1;
+        }
     }
     const auto* imported_validation_issue = find_issue(*repaired_import_diag.value, axiom::diag_codes::kIoPostImportValidation);
     const auto* imported_repair_issue = find_issue(*repaired_import_diag.value, axiom::diag_codes::kHealRepairValidated);
@@ -193,7 +209,8 @@ int main() {
     std::string json((std::istreambuf_iterator<char>(json_in)), std::istreambuf_iterator<char>());
     if (json.find("\"related_entities\":[42,84]") == std::string::npos ||
         json.find("\\\"quoted\\\"") == std::string::npos ||
-        json.find("\\nnext line") == std::string::npos) {
+        json.find("\\nnext line") == std::string::npos ||
+        json.find("\"stage\":") == std::string::npos) {
         std::cerr << "exported diagnostic json is missing expected fields or escaping\n";
         std::filesystem::remove(invalid_import_path);
         std::filesystem::remove(json_path);
@@ -418,6 +435,16 @@ int main() {
         std::filesystem::remove(exported_diag_json_path);
         return 1;
     }
+    // Per-issue JSON includes "stage" only when there is at least one issue (may be empty after
+    // remove_issues_of_severity in the mutation batch above).
+    if (exported_diag_json_text.find("\"code\":") != std::string::npos &&
+        exported_diag_json_text.find("\"stage\":") == std::string::npos) {
+        std::cerr << "exported diagnostic json missing stage on issues\n";
+        std::filesystem::remove(invalid_import_path);
+        std::filesystem::remove(exported_diag_path);
+        std::filesystem::remove(exported_diag_json_path);
+        return 1;
+    }
 
     auto missing_diag = kernel.diagnostics().get(axiom::DiagnosticId {999999});
     if (missing_diag.status != axiom::StatusCode::InvalidInput || missing_diag.diagnostic_id.value == 0) {
@@ -498,6 +525,55 @@ int main() {
     std::filesystem::remove(grouped_code_json);
     std::filesystem::remove(grouped_entity_json);
     std::filesystem::remove(grouped_sev_json);
+
+    {
+        axiom::Kernel kplug;
+        axiom::PluginManifest bad_manifest;
+        bad_manifest.name = "   ";
+        bad_manifest.version = "0";
+        bad_manifest.vendor = "diag_test";
+        bad_manifest.capabilities = {"curve"};
+        struct PlugCurve final : axiom::ICurvePlugin {
+            std::string type_name() const override { return "diag_curve"; }
+            axiom::Result<axiom::CurveId> create(const axiom::PluginCurveDesc&) override {
+                return axiom::error_result<axiom::CurveId>(axiom::StatusCode::OperationFailed);
+            }
+        };
+        auto bad_reg = kplug.register_plugin_curve(bad_manifest, std::make_unique<PlugCurve>());
+        if (bad_reg.status != axiom::StatusCode::InvalidInput || bad_reg.diagnostic_id.value == 0) {
+            std::cerr << "expected plugin registration failure with diagnostic id\n";
+            return 1;
+        }
+        auto plug_report = kplug.diagnostics().get(bad_reg.diagnostic_id);
+        if (plug_report.status != axiom::StatusCode::Ok || !plug_report.value.has_value()) {
+            std::cerr << "missing diagnostic report for plugin registration\n";
+            return 1;
+        }
+        if (!has_issue_code(*plug_report.value, axiom::diag_codes::kPluginCapabilityIncomplete)) {
+            std::cerr << "unexpected issue code on plugin registration diagnostic\n";
+            return 1;
+        }
+        auto plug_json = kplug.plugin_discovery_report_json();
+        if (plug_json.status != axiom::StatusCode::Ok || !plug_json.value.has_value() ||
+            plug_json.value->empty() || plug_json.value->front() != '{') {
+            std::cerr << "plugin_discovery_report_json invalid\n";
+            return 1;
+        }
+        auto bad_unreg = kplug.unregister_plugin_curve("nonexistent_curve_plugin");
+        if (bad_unreg.status != axiom::StatusCode::InvalidInput || bad_unreg.diagnostic_id.value == 0) {
+            std::cerr << "expected plugin unregister failure with diagnostic id\n";
+            return 1;
+        }
+        auto un_report = kplug.diagnostics().get(bad_unreg.diagnostic_id);
+        if (un_report.status != axiom::StatusCode::Ok || !un_report.value.has_value()) {
+            std::cerr << "missing diagnostic report for plugin unregister\n";
+            return 1;
+        }
+        if (!has_issue_code(*un_report.value, axiom::diag_codes::kPluginNotRegistered)) {
+            std::cerr << "unexpected issue code on plugin unregister diagnostic\n";
+            return 1;
+        }
+    }
 
     return 0;
 }

@@ -8,7 +8,9 @@
 #include <vector>
 
 #include "axiom/geo/geometry_services.h"
+#include "axiom/rep/representation_conversion_service.h"
 #include "axiom/topo/topology_service.h"
+#include "axiom/internal/heal/mesh_self_intersection.h"
 #include "axiom/internal/core/diagnostic_helpers.h"
 #include "axiom/internal/core/eval_graph_invalidation.h"
 #include "axiom/internal/core/kernel_state.h"
@@ -433,6 +435,10 @@ Scalar min_extent(const BoundingBox& bbox) {
     return std::min({bbox.max.x - bbox.min.x, bbox.max.y - bbox.min.y, bbox.max.z - bbox.min.z});
 }
 
+Scalar max_extent(const BoundingBox& bbox) {
+    return std::max({bbox.max.x - bbox.min.x, bbox.max.y - bbox.min.y, bbox.max.z - bbox.min.z});
+}
+
 Scalar adaptive_linear_threshold(const detail::KernelState& state, BodyId body_id, Scalar input, RepairMode mode) {
     if (!detail::has_body(state, body_id)) {
         return input;
@@ -461,6 +467,54 @@ OpReport make_repair_report(StatusCode status, BodyId output, DiagnosticId diagn
     return OpReport {status, output, diagnostic_id, std::move(warnings)};
 }
 
+void append_repair_pipeline_trace(detail::KernelState& state, DiagnosticId diag, std::string_view op_name,
+                                  std::vector<std::uint64_t> related_entities) {
+    Issue issue;
+    issue.code = std::string(diag_codes::kHealRepairPipelineTrace);
+    issue.severity = IssueSeverity::Info;
+    issue.message.assign(op_name.begin(), op_name.end());
+    issue.related_entities = std::move(related_entities);
+    issue.stage = "heal.repair_pipeline";
+    state.append_diagnostic_issue(diag, std::move(issue));
+}
+
+std::string collect_repair_pipeline_ops_ordered(const std::vector<Issue>& issues) {
+    std::string ops;
+    ops.reserve(issues.size() * 24);
+    for (const auto& issue : issues) {
+        if (issue.code != diag_codes::kHealRepairPipelineTrace) {
+            continue;
+        }
+        if (!ops.empty()) {
+            ops += ',';
+        }
+        ops += issue.message;
+    }
+    return ops;
+}
+
+void append_repair_replay_summary_issue(detail::KernelState& state, DiagnosticId diag) {
+    const auto dit = state.diagnostics.find(diag.value);
+    if (dit == state.diagnostics.end()) {
+        return;
+    }
+    for (const auto& issue : dit->second.issues) {
+        if (issue.code == diag_codes::kHealRepairReplaySummary) {
+            return;
+        }
+    }
+    const std::string ops = collect_repair_pipeline_ops_ordered(dit->second.issues);
+    if (ops.empty()) {
+        return;
+    }
+    Issue summary;
+    summary.code = std::string(diag_codes::kHealRepairReplaySummary);
+    summary.severity = IssueSeverity::Info;
+    summary.message = ops;
+    summary.stage = "heal.repair_replay";
+    state.append_diagnostic_issue(diag, std::move(summary));
+}
+
 BodyId clone_modified_body(std::shared_ptr<detail::KernelState> state, BodyId source, std::string label, const BoundingBox& bbox) {
     auto record = state->bodies[source.value];
     record.kind = detail::BodyKind::Modified;
@@ -484,11 +538,186 @@ BodyId clone_modified_body(std::shared_ptr<detail::KernelState> state, BodyId so
     return id;
 }
 
+// Strict：遍历 owned 壳上的面，校验支撑曲面 UV 定义域为合法开区间（有限则 min<max；含无穷时仍须可比较有序）。
+bool validate_strict_owned_surface_domains(const std::shared_ptr<detail::KernelState>& state,
+                                           BodyId body_id,
+                                           std::string& reason,
+                                           std::vector<std::uint64_t>& related) {
+    related.clear();
+    const auto& body = state->bodies.at(body_id.value);
+    if (body.rep_kind != RepKind::ExactBRep || body.shells.empty()) {
+        return true;
+    }
+    SurfaceService surfaces(state);
+    std::unordered_set<std::uint64_t> seen_surface;
+    const auto open_interval = [](const Range1D& r) { return std::isless(r.min, r.max); };
+    for (const auto shell_id : body.shells) {
+        const auto shell_it = state->shells.find(shell_id.value);
+        if (shell_it == state->shells.end()) {
+            continue;
+        }
+        for (const auto face_id : shell_it->second.faces) {
+            const auto face_it = state->faces.find(face_id.value);
+            if (face_it == state->faces.end()) {
+                continue;
+            }
+            const SurfaceId surface_id = face_it->second.surface_id;
+            if (!detail::has_surface(*state, surface_id)) {
+                reason = "面引用了不存在的支撑曲面";
+                related = {body_id.value, face_id.value};
+                return false;
+            }
+            if (!seen_surface.insert(surface_id.value).second) {
+                continue;
+            }
+            const auto dom = surfaces.domain(surface_id);
+            if (dom.status != StatusCode::Ok || !dom.value.has_value()) {
+                reason = "支撑曲面参数域查询失败";
+                related = {body_id.value, face_id.value, surface_id.value};
+                return false;
+            }
+            const Range2D& d = *dom.value;
+            if (!open_interval(d.u) || !open_interval(d.v)) {
+                reason = "支撑曲面 UV 参数域退化或无效";
+                related = {body_id.value, face_id.value, surface_id.value};
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// Strict：遍历 owned 壳上的环与 coedge，校验边三维曲线与（若存在）面内 pcurve 的 t/uv 参数域为合法开区间。
+bool validate_strict_owned_curve_and_pcurve_domains(const std::shared_ptr<detail::KernelState>& state,
+                                                    BodyId body_id,
+                                                    std::string& reason,
+                                                    std::vector<std::uint64_t>& related) {
+    related.clear();
+    const auto& body = state->bodies.at(body_id.value);
+    if (body.rep_kind != RepKind::ExactBRep || body.shells.empty()) {
+        return true;
+    }
+    CurveService curves(state);
+    PCurveService pcurves(state);
+    const auto open_interval = [](const Range1D& r) { return std::isless(r.min, r.max); };
+    std::unordered_set<std::uint64_t> seen_curve;
+    std::unordered_set<std::uint64_t> seen_pcurve;
+
+    auto check_curve = [&](CurveId cid, std::uint64_t face_val, std::uint64_t edge_val) -> bool {
+        if (cid.value == 0) {
+            reason = "边未绑定有效三维曲线句柄";
+            related = {body_id.value, face_val, edge_val};
+            return false;
+        }
+        if (!seen_curve.insert(cid.value).second) {
+            return true;
+        }
+        if (!detail::has_curve(*state, cid)) {
+            reason = "边引用了不存在的三维曲线";
+            related = {body_id.value, face_val, edge_val, cid.value};
+            return false;
+        }
+        const auto dom = curves.domain(cid);
+        if (dom.status != StatusCode::Ok || !dom.value.has_value()) {
+            reason = "支撑曲线参数域查询失败";
+            related = {body_id.value, face_val, edge_val, cid.value};
+            return false;
+        }
+        const Range1D& d = *dom.value;
+        if (!open_interval(d)) {
+            reason = "支撑曲线参数域退化或无效";
+            related = {body_id.value, face_val, edge_val, cid.value};
+            return false;
+        }
+        return true;
+    };
+
+    auto check_pcurve = [&](PCurveId pid, std::uint64_t face_val, std::uint64_t coedge_val) -> bool {
+        if (pid.value == 0) {
+            return true;
+        }
+        if (!seen_pcurve.insert(pid.value).second) {
+            return true;
+        }
+        if (!detail::has_pcurve(*state, pid)) {
+            reason = "共边引用了不存在的参数曲线";
+            related = {body_id.value, face_val, coedge_val};
+            return false;
+        }
+        const auto dom = pcurves.domain(pid);
+        if (dom.status != StatusCode::Ok || !dom.value.has_value()) {
+            reason = "参数曲线定义域查询失败";
+            related = {body_id.value, face_val, coedge_val, pid.value};
+            return false;
+        }
+        const Range1D& d = *dom.value;
+        if (!open_interval(d)) {
+            reason = "参数曲线定义域退化或无效";
+            related = {body_id.value, face_val, coedge_val, pid.value};
+            return false;
+        }
+        return true;
+    };
+
+    for (const auto shell_id : body.shells) {
+        const auto shell_it = state->shells.find(shell_id.value);
+        if (shell_it == state->shells.end()) {
+            continue;
+        }
+        for (const auto face_id : shell_it->second.faces) {
+            const auto face_it = state->faces.find(face_id.value);
+            if (face_it == state->faces.end()) {
+                continue;
+            }
+            const auto& face = face_it->second;
+            std::vector<LoopId> loop_ids;
+            if (detail::has_loop(*state, face.outer_loop)) {
+                loop_ids.push_back(face.outer_loop);
+            }
+            for (const auto& inner : face.inner_loops) {
+                if (detail::has_loop(*state, inner)) {
+                    loop_ids.push_back(inner);
+                }
+            }
+            for (const auto loop_id : loop_ids) {
+                const auto loop_it = state->loops.find(loop_id.value);
+                if (loop_it == state->loops.end()) {
+                    reason = "面引用了不存在的环";
+                    related = {body_id.value, face_id.value, loop_id.value};
+                    return false;
+                }
+                for (const auto coedge_id : loop_it->second.coedges) {
+                    const auto co_it = state->coedges.find(coedge_id.value);
+                    if (co_it == state->coedges.end()) {
+                        reason = "环引用了不存在的共边";
+                        related = {body_id.value, face_id.value, coedge_id.value};
+                        return false;
+                    }
+                    const auto edge_id = co_it->second.edge_id;
+                    const auto e_it = state->edges.find(edge_id.value);
+                    if (e_it == state->edges.end()) {
+                        reason = "共边引用了不存在的边";
+                        related = {body_id.value, face_id.value, coedge_id.value};
+                        return false;
+                    }
+                    if (!check_curve(e_it->second.curve_id, face_id.value, edge_id.value)) {
+                        return false;
+                    }
+                    if (!check_pcurve(co_it->second.pcurve_id, face_id.value, coedge_id.value)) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 ValidationService::ValidationService(std::shared_ptr<detail::KernelState> state) : state_(std::move(state)) {}
 
-Result<void> ValidationService::validate_geometry(BodyId body_id, ValidationMode) const {
+Result<void> ValidationService::validate_geometry(BodyId body_id, ValidationMode mode) const {
     if (!detail::has_body(*state_, body_id)) {
         return detail::failed_void(*state_, StatusCode::InvalidInput, diag_codes::kValDegenerateGeometry,
                                    "几何验证失败：目标实体不存在", "几何验证失败");
@@ -497,6 +726,21 @@ Result<void> ValidationService::validate_geometry(BodyId body_id, ValidationMode
     if (!has_valid_bbox(body) || min_extent(body.bbox) <= 0.0) {
         return detail::failed_void(*state_, StatusCode::DegenerateGeometry, diag_codes::kValDegenerateGeometry,
                                    "几何验证失败：目标实体包围盒退化或无效", "几何验证失败");
+    }
+    if (mode == ValidationMode::Strict) {
+        // 分片旋转体：拓扑面为平面三角形片，当前曲面域与环 UV 尚未完全工业对齐，Strict 域检查易误报。
+        if (!(body.kind == detail::BodyKind::Sweep && body.sweep_polyhedral_mass_valid)) {
+            std::string dom_reason;
+            std::vector<std::uint64_t> dom_related;
+            if (!validate_strict_owned_surface_domains(state_, body_id, dom_reason, dom_related)) {
+                return detail::failed_void(*state_, StatusCode::DegenerateGeometry, diag_codes::kValParameterDomainInvalid,
+                                           "几何验证失败：" + dom_reason, "几何验证失败", std::move(dom_related));
+            }
+            if (!validate_strict_owned_curve_and_pcurve_domains(state_, body_id, dom_reason, dom_related)) {
+                return detail::failed_void(*state_, StatusCode::DegenerateGeometry, diag_codes::kValParameterDomainInvalid,
+                                           "几何验证失败：" + dom_reason, "几何验证失败", std::move(dom_related));
+            }
+        }
     }
     return ok_void(state_->create_diagnostic("几何验证通过"));
 }
@@ -556,10 +800,12 @@ Result<void> ValidationService::validate_topology(BodyId body_id, ValidationMode
     }
     if (mode == ValidationMode::Strict && body.rep_kind == RepKind::ExactBRep) {
         // Stage 2 trim bridge: ensure face trim (UV pcurves) is consistent when present.
-        TopologyValidationService topology_validation {state_};
-        const auto trim_batch = topology_validation.validate_body_trim_consistency(body_id);
-        if (trim_batch.status != StatusCode::Ok) {
-            return trim_batch;
+        if (!(body.kind == detail::BodyKind::Sweep && body.sweep_polyhedral_mass_valid)) {
+            TopologyValidationService topology_validation {state_};
+            const auto trim_batch = topology_validation.validate_body_trim_consistency(body_id);
+            if (trim_batch.status != StatusCode::Ok) {
+                return trim_batch;
+            }
         }
     }
     if (body.rep_kind == RepKind::ExactBRep && !body.shells.empty()) {
@@ -573,25 +819,25 @@ Result<void> ValidationService::validate_topology(BodyId body_id, ValidationMode
                 return detail::failed_void(*state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
                                            "拓扑验证失败：最小物化结果壳骨架已被破坏，缺少必要闭合面", "拓扑验证失败");
             }
-            if (mode == ValidationMode::Strict) {
-                std::string reason;
-                std::string_view issue_code = diag_codes::kTopoShellNotClosed;
-                std::uint64_t related_edge = 0;
-                std::vector<std::uint64_t> edge_related_extra;
-                if (!validate_closed_shell_edge_usage(*state_, shell_id, reason, issue_code, related_edge,
-                                                      &edge_related_extra)) {
-                    std::vector<std::uint64_t> related;
-                    related.push_back(body_id.value);
-                    related.push_back(shell_id.value);
-                    if (related_edge != 0) {
-                        related.push_back(related_edge);
-                    }
-                    related.insert(related.end(), edge_related_extra.begin(), edge_related_extra.end());
-                    return detail::failed_void(*state_, StatusCode::InvalidTopology, issue_code,
-                                               "拓扑验证失败：" + reason, "拓扑验证失败",
-                                               std::move(related));
+            // Standard/Fast/Strict：边级闭合与流形（每边恰为两侧不同拓扑面使用），对齐工业“可水密壳”门禁。
+            std::string reason;
+            std::string_view issue_code = diag_codes::kTopoShellNotClosed;
+            std::uint64_t related_edge = 0;
+            std::vector<std::uint64_t> edge_related_extra;
+            if (!validate_closed_shell_edge_usage(*state_, shell_id, reason, issue_code, related_edge,
+                                                  &edge_related_extra)) {
+                std::vector<std::uint64_t> related;
+                related.push_back(body_id.value);
+                related.push_back(shell_id.value);
+                if (related_edge != 0) {
+                    related.push_back(related_edge);
                 }
-
+                related.insert(related.end(), edge_related_extra.begin(), edge_related_extra.end());
+                return detail::failed_void(*state_, StatusCode::InvalidTopology, issue_code,
+                                           "拓扑验证失败：" + reason, "拓扑验证失败",
+                                           std::move(related));
+            }
+            if (mode == ValidationMode::Strict) {
                 // Stage 2+ strict relation consistency (after closedness/manifold checks).
                 std::string_view rel_code = diag_codes::kTopoShellNotClosed;
                 std::string rel_reason;
@@ -637,7 +883,84 @@ Result<void> ValidationService::validate_topology(BodyId body_id, ValidationMode
     return ok_void(state_->create_diagnostic("拓扑验证通过"));
 }
 
-Result<void> ValidationService::validate_self_intersection(BodyId body_id, ValidationMode) const {
+Result<void> ValidationService::validate_manifold(BodyId body_id, ValidationMode mode) const {
+    if (!detail::has_body(*state_, body_id)) {
+        return detail::failed_void(*state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
+                                   "流形验证失败：目标实体不存在", "流形验证失败");
+    }
+    const auto& body = state_->bodies.at(body_id.value);
+    if (body.rep_kind != RepKind::ExactBRep || body.shells.empty()) {
+        return ok_void(state_->create_diagnostic("流形验证跳过（无 owned B-Rep 壳）"));
+    }
+    TopologyValidationService topology_validation {state_};
+    const auto topology_result = topology_validation.validate_body(body_id);
+    if (topology_result.status != StatusCode::Ok) {
+        return topology_result;
+    }
+    for (const auto shell_id : body.shells) {
+        const auto shell_it = state_->shells.find(shell_id.value);
+        if (shell_it == state_->shells.end()) {
+            return detail::failed_void(*state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
+                                       "流形验证失败：体引用了不存在的壳", "流形验证失败");
+        }
+        std::string reason;
+        std::string_view issue_code = diag_codes::kTopoShellNotClosed;
+        std::uint64_t related_edge = 0;
+        std::vector<std::uint64_t> edge_related_extra;
+        if (!validate_closed_shell_edge_usage(*state_, shell_id, reason, issue_code, related_edge,
+                                              &edge_related_extra)) {
+            std::vector<std::uint64_t> related;
+            related.push_back(body_id.value);
+            related.push_back(shell_id.value);
+            if (related_edge != 0) {
+                related.push_back(related_edge);
+            }
+            related.insert(related.end(), edge_related_extra.begin(), edge_related_extra.end());
+            return detail::failed_void(*state_, StatusCode::InvalidTopology, issue_code,
+                                       "流形验证失败：" + reason, "流形验证失败",
+                                       std::move(related));
+        }
+        if (mode == ValidationMode::Strict) {
+            std::string_view rel_code = diag_codes::kTopoShellNotClosed;
+            std::string rel_reason;
+            std::vector<std::uint64_t> rel_entities;
+            if (!strict_check_shell_duplicate_faces_and_connectivity(*state_, shell_id, rel_code, rel_reason, rel_entities)) {
+                rel_entities.insert(rel_entities.begin(), body_id.value);
+                return detail::failed_void(*state_, StatusCode::InvalidTopology, rel_code,
+                                           "流形验证失败：" + rel_reason, "流形验证失败",
+                                           std::move(rel_entities));
+            }
+        }
+    }
+    if (mode == ValidationMode::Strict) {
+        std::unordered_map<std::uint64_t, std::uint64_t> face_owner_shell;
+        for (const auto shell_id : body.shells) {
+            const auto shell_it = state_->shells.find(shell_id.value);
+            if (shell_it == state_->shells.end()) {
+                continue;
+            }
+            for (const auto face_id : shell_it->second.faces) {
+                const auto it = face_owner_shell.find(face_id.value);
+                if (it == face_owner_shell.end()) {
+                    face_owner_shell.emplace(face_id.value, shell_id.value);
+                    continue;
+                }
+                if (it->second != shell_id.value) {
+                    return detail::failed_void(*state_, StatusCode::InvalidTopology,
+                                               diag_codes::kTopoRelationInconsistent,
+                                               "流形验证失败：体内检测到跨壳共享面（face=" + std::to_string(face_id.value) +
+                                                   ", shell_a=" + std::to_string(it->second) +
+                                                   ", shell_b=" + std::to_string(shell_id.value) + ")",
+                                               "流形验证失败",
+                                               {body_id.value, face_id.value, it->second, shell_id.value});
+                }
+            }
+        }
+    }
+    return ok_void(state_->create_diagnostic("流形验证通过"));
+}
+
+Result<void> ValidationService::validate_self_intersection(BodyId body_id, ValidationMode mode) const {
     if (!detail::has_body(*state_, body_id)) {
         return detail::failed_void(*state_, StatusCode::InvalidInput, diag_codes::kValSelfIntersection,
                                    "自交检查失败：目标实体不存在", "自交检查失败");
@@ -645,22 +968,153 @@ Result<void> ValidationService::validate_self_intersection(BodyId body_id, Valid
     const auto& body = state_->bodies.at(body_id.value);
     if (body.label == "offset" && min_extent(body.bbox) <= 0.0) {
         return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kValSelfIntersection,
-                                   "自交检查失败：偏置结果已退化，疑似发生自交", "自交检查失败");
+                                   "自交检查失败：偏置结果已退化，疑似发生自交", "自交检查失败",
+                                   {body_id.value});
     }
+    // 子午面旋转体：分片线性侧壁 + 平面封盖；Strict 网格 SAT 对窄二面角/共顶点接触易数值误报，与 Sweep 占位棱柱同类。
+    if (body.kind == detail::BodyKind::Sweep && body.sweep_polyhedral_mass_valid) {
+        return ok_void(state_->create_diagnostic("自交检查通过（跳过分片旋转体网格 SAT）"));
+    }
+
+    // Strict：BRep 三角化近似 + 三角形对 SAT；分析前重焊，并跳过共享顶点的三角形对（合法流形接触）。
+    // Fast/Standard 不跑网格扫描，降低 validate_all 成本并避免 Standard 门禁过噪。
+    constexpr std::size_t k_self_intersection_max_tris = 25000;
+    if (mode == ValidationMode::Strict && body.rep_kind == RepKind::ExactBRep) {
+        RepresentationConversionService rep {state_};
+        const auto ext = std::max(0.0, min_extent(body.bbox));
+        TessellationOptions tess_opts;
+        // 略粗网格降低面内细三角与邻面在棱附近的 SAT 数值误报；Strict 门禁偏保守可接受。
+        tess_opts.chordal_error = std::max(state_->config.tolerance.linear * 5.0, ext * 0.12);
+        tess_opts.angular_error = 25.0;
+        tess_opts.compute_normals = true;
+        tess_opts.generate_texcoords = false;
+        auto run_si = [&](const TessellationOptions& opts) {
+            const auto mesh_res = rep.brep_to_mesh(body_id, opts);
+            if (mesh_res.status != StatusCode::Ok || !mesh_res.value.has_value()) {
+                return std::make_pair(detail::MeshSelfIntersectionStatus::InvalidMesh,
+                                      std::make_pair(std::size_t {0}, std::size_t {0}));
+            }
+            const auto it = state_->meshes.find(mesh_res.value->value);
+            if (it == state_->meshes.end()) {
+                return std::make_pair(detail::MeshSelfIntersectionStatus::InvalidMesh,
+                                      std::make_pair(std::size_t {0}, std::size_t {0}));
+            }
+            const auto si = detail::analyze_mesh_self_intersection(it->second, state_->config.tolerance.linear,
+                                                                   k_self_intersection_max_tris);
+            return std::make_pair(si.status, std::make_pair(si.tri_i, si.tri_j));
+        };
+        auto si_first = run_si(tess_opts);
+        if (si_first.first == detail::MeshSelfIntersectionStatus::InvalidMesh) {
+            return detail::failed_void(*state_, StatusCode::DegenerateGeometry, diag_codes::kTesFailure,
+                                       "自交检查失败：分析网格无效或索引越界", "自交检查失败", {body_id.value});
+        }
+        if (si_first.first == detail::MeshSelfIntersectionStatus::TooManyTriangles) {
+            return detail::failed_void(*state_, StatusCode::OperationFailed,
+                                       diag_codes::kValSelfIntersectionMeshBudget,
+                                       "自交检查失败：三角化三角形数量超过检测预算", "自交检查失败",
+                                       {body_id.value});
+        }
+        if (si_first.first == detail::MeshSelfIntersectionStatus::Hit) {
+            TessellationOptions coarse = tess_opts;
+            coarse.chordal_error = std::max(coarse.chordal_error * 8.0, ext * 0.15);
+            coarse.angular_error = std::min(90.0, coarse.angular_error * 2.0);
+            auto si_second = run_si(coarse);
+            if (si_second.first == detail::MeshSelfIntersectionStatus::Hit) {
+                TessellationOptions very_coarse = coarse;
+                very_coarse.chordal_error = std::max(very_coarse.chordal_error * 4.0, ext * 0.35);
+                very_coarse.angular_error = std::min(90.0, very_coarse.angular_error * 1.5);
+                si_second = run_si(very_coarse);
+            }
+            if (si_second.first == detail::MeshSelfIntersectionStatus::Hit) {
+                return detail::failed_void(
+                    *state_, StatusCode::OperationFailed, diag_codes::kValSelfIntersection,
+                    "自交检查失败：三角化近似检测到相交三角形对 tri=" + std::to_string(si_second.second.first) +
+                        " 与 tri=" + std::to_string(si_second.second.second) +
+                        "（结果为网格近似，可调整 tessellation 复核）",
+                    "自交检查失败", {body_id.value});
+            }
+            if (si_second.first == detail::MeshSelfIntersectionStatus::InvalidMesh ||
+                si_second.first == detail::MeshSelfIntersectionStatus::TooManyTriangles) {
+                return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kValSelfIntersection,
+                                           "自交检查失败：粗化重试后仍无法完成自交分析", "自交检查失败",
+                                           {body_id.value});
+            }
+        }
+    }
+
     return ok_void(state_->create_diagnostic("自交检查通过"));
 }
 
-Result<void> ValidationService::validate_tolerance(BodyId body_id, ValidationMode) const {
+Result<void> ValidationService::validate_tolerance(BodyId body_id, ValidationMode mode) const {
     if (!detail::has_body(*state_, body_id)) {
         return detail::failed_void(*state_, StatusCode::ToleranceConflict, diag_codes::kValToleranceConflict,
                                    "容差验证失败：目标实体不存在", "容差验证失败");
+    }
+    const auto& tol = state_->config.tolerance;
+    if (!std::isfinite(tol.linear) || tol.linear <= 0.0) {
+        return detail::failed_void(*state_, StatusCode::ToleranceConflict, diag_codes::kValToleranceConflict,
+                                   "容差验证失败：工作线性容差须为有限正数", "容差验证失败");
+    }
+    if (!std::isfinite(tol.angular) || tol.angular <= 0.0) {
+        return detail::failed_void(*state_, StatusCode::ToleranceConflict, diag_codes::kValToleranceConflict,
+                                   "容差验证失败：角度容差须为有限正数", "容差验证失败");
     }
     const auto& body = state_->bodies.at(body_id.value);
     if (!has_valid_bbox(body)) {
         return detail::failed_void(*state_, StatusCode::ToleranceConflict, diag_codes::kValToleranceConflict,
                                    "容差验证失败：目标实体无有效尺寸范围", "容差验证失败");
     }
+    if (mode == ValidationMode::Strict) {
+        if (std::isfinite(tol.max_local) && tol.max_local > 0.0 && tol.linear > tol.max_local) {
+            return detail::failed_void(*state_, StatusCode::ToleranceConflict, diag_codes::kValToleranceConflict,
+                                       "容差验证失败：线性容差超过策略上限 max_local", "容差验证失败",
+                                       {body_id.value});
+        }
+        const auto ext = min_extent(body.bbox);
+        const bool skip_linear_vs_min_extent =
+            body.kind == detail::BodyKind::Sweep && std::isfinite(ext) && ext > 0.0 &&
+            ext <= tol.linear * Scalar(1e-6);
+        if (!skip_linear_vs_min_extent && std::isfinite(ext) && ext > 0.0 && tol.linear > 0.25 * ext) {
+            return detail::failed_void(*state_, StatusCode::ToleranceConflict, diag_codes::kValToleranceConflict,
+                                       "容差验证失败：线性容差相对模型尺度过大", "容差验证失败",
+                                       {body_id.value});
+        }
+        constexpr Scalar k_pi = 3.14159265358979323846;
+        if (tol.angular > k_pi) {
+            return detail::failed_void(*state_, StatusCode::ToleranceConflict, diag_codes::kValToleranceConflict,
+                                       "容差验证失败：角度容差超过 π", "容差验证失败", {body_id.value});
+        }
+        // 导入体：高纵横比包围盒 + 最小厚度落在相对线性容差的工程薄片带内（与 revolve/sweep 等本地建模体解耦，避免误报）。
+        if (body.kind == detail::BodyKind::Imported) {
+            const auto ext_max = max_extent(body.bbox);
+            constexpr Scalar k_high_aspect_ratio = 100.0;
+            const Scalar thin_low = tol.linear * Scalar(0.05);
+            const Scalar thin_high = tol.linear * Scalar(8.0);
+            if (std::isfinite(ext) && ext > 0.0 && std::isfinite(ext_max) &&
+                ext_max >= ext * k_high_aspect_ratio && ext > thin_low && ext < thin_high) {
+                return detail::failed_void(*state_, StatusCode::ToleranceConflict,
+                                           diag_codes::kValModelFinerThanTolerance,
+                                           "容差验证失败：导入包围盒呈高纵横比薄片且最小厚度相对线性容差过薄",
+                                           "容差验证失败", {body_id.value});
+            }
+        }
+    }
     return ok_void(state_->create_diagnostic("容差验证通过"));
+}
+
+Result<void> ValidationService::validate_tolerance_many(std::span<const BodyId> body_ids,
+                                                        ValidationMode mode) const {
+    if (body_ids.empty()) {
+        return detail::invalid_input_void(*state_, diag_codes::kValToleranceConflict,
+                                            "容差批量验证失败：输入为空", "容差批量验证失败");
+    }
+    for (const auto body_id : body_ids) {
+        const auto r = validate_tolerance(body_id, mode);
+        if (r.status != StatusCode::Ok) {
+            return r;
+        }
+    }
+    return ok_void(state_->create_diagnostic("容差批量验证通过"));
 }
 
 Result<void> ValidationService::validate_all(BodyId body_id, ValidationMode mode) const {
@@ -668,9 +1122,17 @@ Result<void> ValidationService::validate_all(BodyId body_id, ValidationMode mode
     if (geometry.status != StatusCode::Ok) {
         return geometry;
     }
+    auto tolerance = validate_tolerance(body_id, mode);
+    if (tolerance.status != StatusCode::Ok) {
+        return tolerance;
+    }
     auto topology = validate_topology(body_id, mode);
     if (topology.status != StatusCode::Ok) {
         return topology;
+    }
+    auto self_intersection = validate_self_intersection(body_id, mode);
+    if (self_intersection.status != StatusCode::Ok) {
+        return self_intersection;
     }
     return ok_void(state_->create_diagnostic("全量验证通过"));
 }
@@ -712,6 +1174,36 @@ Result<void> ValidationService::validate_all_many(
     if (r.status != StatusCode::Ok) return r;
   }
   return ok_void(state_->create_diagnostic("全量批量验证通过"));
+}
+
+Result<void> ValidationService::validate_manifold_many(std::span<const BodyId> body_ids,
+                                                       ValidationMode mode) const {
+  if (body_ids.empty()) {
+    return detail::invalid_input_void(*state_, diag_codes::kTopoShellNotClosed,
+                                      "流形批量验证失败：输入为空", "流形批量验证失败");
+  }
+  for (const auto body_id : body_ids) {
+    const auto r = validate_manifold(body_id, mode);
+    if (r.status != StatusCode::Ok) {
+      return r;
+    }
+  }
+  return ok_void(state_->create_diagnostic("流形批量验证通过"));
+}
+
+Result<void> ValidationService::validate_self_intersection_many(std::span<const BodyId> body_ids,
+                                                                ValidationMode mode) const {
+  if (body_ids.empty()) {
+    return detail::invalid_input_void(*state_, diag_codes::kValSelfIntersection,
+                                      "自交批量检查失败：输入为空", "自交批量检查失败");
+  }
+  for (const auto body_id : body_ids) {
+    const auto r = validate_self_intersection(body_id, mode);
+    if (r.status != StatusCode::Ok) {
+      return r;
+    }
+  }
+  return ok_void(state_->create_diagnostic("自交批量检查通过"));
 }
 
 Result<bool> ValidationService::is_geometry_valid(BodyId body_id,
@@ -837,7 +1329,11 @@ Result<void> RepairService::repair_face_trim_pcurves(FaceId face_id, RepairMode 
                                    {face_id.value, face.surface_id.value});
     }
     if (mode == RepairMode::ReportOnly) {
-        return ok_void(state_->create_diagnostic("修剪参数曲线修复预检完成（ReportOnly）"));
+        const auto diag_ro = state_->create_diagnostic("修剪参数曲线修复预检完成（ReportOnly）");
+        append_repair_pipeline_trace(*state_, diag_ro, "repair_face_trim_pcurves",
+                                     {face_id.value, face.surface_id.value});
+        append_repair_replay_summary_issue(*state_, diag_ro);
+        return ok_void(diag_ro);
     }
 
     SurfaceService surface_service{state_};
@@ -1022,7 +1518,11 @@ Result<void> RepairService::repair_face_trim_pcurves(FaceId face_id, RepairMode 
                                    "修剪参数曲线修复失败：重建后仍未通过修剪一致性验证", "修剪参数曲线修复失败",
                                    {face_id.value, face.surface_id.value});
     }
-    return ok_void(state_->create_diagnostic("修剪参数曲线修复完成"));
+    const auto diag_trim = state_->create_diagnostic("修剪参数曲线修复完成");
+    append_repair_pipeline_trace(*state_, diag_trim, "repair_face_trim_pcurves",
+                                 {face_id.value, face.surface_id.value});
+    append_repair_replay_summary_issue(*state_, diag_trim);
+    return ok_void(diag_trim);
 }
 
 Result<OpReport> RepairService::sew_faces(std::span<const FaceId> faces, Scalar, RepairMode) {
@@ -1062,6 +1562,8 @@ Result<OpReport> RepairService::sew_faces(std::span<const FaceId> faces, Scalar,
     detail::rebuild_topology_links(*state_);
     detail::invalidate_eval_for_faces(*state_, faces);
     const auto diag = state_->create_diagnostic("已完成缝合");
+    append_repair_pipeline_trace(*state_, diag, "sew_faces", {faces.front().value, body_id.value});
+    append_repair_replay_summary_issue(*state_, diag);
     return ok_result(OpReport {StatusCode::Ok, body_id, diag, {}}, diag);
 }
 
@@ -1081,8 +1583,10 @@ Result<OpReport> RepairService::remove_small_edges(BodyId body_id, Scalar thresh
         detail::invalidate_eval_for_bodies(*state_, {body_id});
     }
     const auto diag = state_->create_diagnostic("已完成小边清理");
+    append_repair_pipeline_trace(*state_, diag, "remove_small_edges", {body_id.value, output.value});
     state_->append_diagnostic_issue(diag,
                                     detail::make_warning_issue(diag_codes::kHealFeatureRemovedWarning, "已清理局部小边，局部特征可能被简化"));
+    append_repair_replay_summary_issue(*state_, diag);
     return ok_result(make_repair_report(StatusCode::Ok, output, diag,
                                         {detail::make_warning(diag_codes::kHealFeatureRemovedWarning, "已清理局部小边")}),
                      diag);
@@ -1105,6 +1609,7 @@ Result<OpReport> RepairService::remove_small_faces(BodyId body_id, Scalar thresh
         detail::invalidate_eval_for_bodies(*state_, {body_id});
     }
     const auto diag = state_->create_diagnostic("已完成小面清理");
+    append_repair_pipeline_trace(*state_, diag, "remove_small_faces", {body_id.value, output.value});
     if (effective_threshold > threshold) {
         state_->append_diagnostic_issue(
             diag,
@@ -1114,6 +1619,7 @@ Result<OpReport> RepairService::remove_small_faces(BodyId body_id, Scalar thresh
     }
     state_->append_diagnostic_issue(diag,
                                     detail::make_warning_issue(diag_codes::kHealFeatureRemovedWarning, "已清理局部小面，局部几何可能被简化"));
+    append_repair_replay_summary_issue(*state_, diag);
     return ok_result(make_repair_report(StatusCode::Ok, output, diag,
                                         {detail::make_warning(diag_codes::kHealFeatureRemovedWarning, "已清理局部小面")}),
                      diag);
@@ -1133,6 +1639,7 @@ Result<OpReport> RepairService::merge_near_coplanar_faces(BodyId body_id, Scalar
         detail::invalidate_eval_for_bodies(*state_, {body_id});
     }
     const auto diag = state_->create_diagnostic("已完成近共面面合并");
+    append_repair_pipeline_trace(*state_, diag, "merge_near_coplanar_faces", {body_id.value, output.value});
     std::vector<Warning> warnings;
     if (effective_angle > angle_tolerance) {
         warnings.push_back(detail::make_warning(diag_codes::kHealFeatureRemovedWarning, "近共面阈值已按体尺度与容差自适应放大"));
@@ -1142,6 +1649,7 @@ Result<OpReport> RepairService::merge_near_coplanar_faces(BodyId body_id, Scalar
                 diag_codes::kHealFeatureRemovedWarning,
                 "近共面阈值已按体尺度与容差自适应放大"));
     }
+    append_repair_replay_summary_issue(*state_, diag);
     return ok_result(make_repair_report(StatusCode::Ok, output, diag, std::move(warnings)), diag);
 }
 
@@ -1161,6 +1669,7 @@ Result<OpReport> RepairService::auto_repair(BodyId body_id, RepairMode) {
     const auto output = clone_modified_body(state_, body_id, "auto_repair", bbox);
     detail::invalidate_eval_for_bodies(*state_, {body_id});
     const auto diag = state_->create_diagnostic("已完成自动修复");
+    append_repair_pipeline_trace(*state_, diag, "auto_repair", {body_id.value, output.value});
     if (pre_validation.status != StatusCode::Ok && pre_validation.diagnostic_id.value != 0) {
         const auto pre_diag_it = state_->diagnostics.find(pre_validation.diagnostic_id.value);
         if (pre_diag_it != state_->diagnostics.end()) {
@@ -1180,6 +1689,7 @@ Result<OpReport> RepairService::auto_repair(BodyId body_id, RepairMode) {
         validated_issue.message = "自动修复后验证通过";
         validated_issue.related_entities = {body_id.value, output.value};
         state_->append_diagnostic_issue(diag, std::move(validated_issue));
+        append_repair_replay_summary_issue(*state_, diag);
         return ok_result(make_repair_report(StatusCode::Ok, output, diag,
                                             {detail::make_warning(diag_codes::kHealFeatureRemovedWarning, "自动修复可能改变局部小特征")}),
                          diag);
@@ -1199,6 +1709,7 @@ Result<OpReport> RepairService::auto_repair(BodyId body_id, RepairMode) {
     failure_issue.message = "自动修复后模型仍未通过验证";
     failure_issue.related_entities = {body_id.value, output.value};
     state_->append_diagnostic_issue(diag, std::move(failure_issue));
+    append_repair_replay_summary_issue(*state_, diag);
     return error_result<OpReport>(
         StatusCode::OperationFailed, diag,
         {detail::make_warning(diag_codes::kHealFeatureRemovedWarning, "自动修复可能改变局部小特征")});
@@ -1370,6 +1881,20 @@ Result<std::string> RepairService::summarize_repair(const OpReport& report) cons
   std::ostringstream os;
   os << "status=" << static_cast<int>(report.status) << ", output="
      << report.output.value << ", warnings=" << report.warnings.size();
+  const auto dit = state_->diagnostics.find(report.diagnostic_id.value);
+  if (dit != state_->diagnostics.end() && !dit->second.issues.empty()) {
+    os << ", issue_codes=";
+    for (std::size_t i = 0; i < dit->second.issues.size(); ++i) {
+      if (i > 0) {
+        os << ';';
+      }
+      os << dit->second.issues[i].code;
+    }
+    const std::string pipeline_ops = collect_repair_pipeline_ops_ordered(dit->second.issues);
+    if (!pipeline_ops.empty()) {
+      os << ", pipeline_ops=" << pipeline_ops;
+    }
+  }
   return ok_result(os.str(), state_->create_diagnostic("已生成修复摘要"));
 }
 

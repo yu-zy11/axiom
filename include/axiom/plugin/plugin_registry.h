@@ -10,6 +10,11 @@
 
 namespace axiom {
 
+/// 判断已 trim 的声明版本是否与 `expected_sdk_api` 在给定模式下兼容（注册门禁与 `plugin_api_compatibility_report_lines` 共用语义）。
+bool plugin_api_version_declared_compatible(std::string_view declared_trimmed,
+                                            std::string_view expected_sdk_api,
+                                            PluginApiVersionMatchMode mode);
+
 class ICurvePlugin {
 public:
     virtual ~ICurvePlugin() = default;
@@ -40,6 +45,12 @@ public:
 
 class PluginRegistry {
 public:
+    void set_host_policy(const PluginHostPolicy& policy);
+    Result<PluginHostPolicy> host_policy() const;
+
+    /// 按当前宿主策略校验清单（供预检或工具使用）。
+    Result<void> validate_manifest(const PluginManifest& manifest) const;
+
     Result<void> register_curve_type(const PluginManifest& manifest, std::unique_ptr<ICurvePlugin> plugin);
     Result<void> register_repair_plugin(const PluginManifest& manifest, std::unique_ptr<IRepairPlugin> plugin);
     Result<void> register_importer(const PluginManifest& manifest, std::unique_ptr<IImporterPlugin> plugin);
@@ -60,6 +71,7 @@ public:
     Result<bool> has_repair_type(std::string_view type_name) const;
     Result<bool> has_importer_type(std::string_view type_name) const;
     Result<bool> has_exporter_type(std::string_view type_name) const;
+    /// `type_name` 去空白后须非空，且须命中已注册实现；否则返回 `InvalidInput` 与稳定 `warnings`。
     Result<void> unregister_curve_type(std::string_view type_name);
     Result<void> unregister_repair_plugin(std::string_view type_name);
     Result<void> unregister_importer(std::string_view type_name);
@@ -110,6 +122,11 @@ public:
     Result<std::string> registry_summary_line() const;
 
 private:
+    Result<void> preflight_register_with_plugin(const PluginManifest& manifest, std::string_view impl_type_name,
+                                                Result<bool> (PluginRegistry::*has_impl)(std::string_view) const) const;
+    Result<void> preflight_register_manifest_only(const PluginManifest& manifest) const;
+
+    PluginHostPolicy host_policy_{};
     std::vector<PluginManifest> manifests_;
     std::vector<std::unique_ptr<ICurvePlugin>> curve_plugins_;
     std::vector<std::unique_ptr<IRepairPlugin>> repair_plugins_;

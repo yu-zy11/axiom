@@ -265,6 +265,7 @@ Result<BodyId> IOService::import_step(std::string_view path, const ImportOptions
     if (options.run_validation) {
         auto validation_issue = detail::make_info_issue(diag_codes::kIoPostImportValidation, "STEP 导入后已触发自动验证");
         validation_issue.related_entities = {body_id.value};
+        validation_issue.stage = "io.post_import.validation";
         issues.push_back(std::move(validation_issue));
 
         ValidationService validation {state_};
@@ -288,6 +289,7 @@ Result<BodyId> IOService::import_step(std::string_view path, const ImportOptions
                     "STEP 导入后自动修复策略已启用: mode=" +
                         std::to_string(static_cast<int>(repair_mode)));
                 repair_mode_issue.related_entities = {result_body_id.value};
+                repair_mode_issue.stage = "io.post_import.repair_mode";
                 issues.push_back(std::move(repair_mode_issue));
 
                 RepairService repair {state_};
@@ -437,6 +439,7 @@ Result<BodyId> IOService::import_axmjson(std::string_view path, const ImportOpti
     if (options.run_validation) {
         auto validation_issue = detail::make_info_issue(diag_codes::kIoPostImportValidation, "AXMJSON 导入后已触发自动验证");
         validation_issue.related_entities = {body_id.value};
+        validation_issue.stage = "io.post_import.validation";
         issues.push_back(std::move(validation_issue));
 
         ValidationService validation {state_};
@@ -460,6 +463,7 @@ Result<BodyId> IOService::import_axmjson(std::string_view path, const ImportOpti
                     "AXMJSON 导入后自动修复策略已启用: mode=" +
                         std::to_string(static_cast<int>(repair_mode)));
                 repair_mode_issue.related_entities = {result_body_id.value};
+                repair_mode_issue.stage = "io.post_import.repair_mode";
                 issues.push_back(std::move(repair_mode_issue));
 
                 RepairService repair {state_};

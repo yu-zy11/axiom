@@ -15,20 +15,37 @@ inline Warning make_warning(std::string_view code, std::string message) {
 }
 
 inline Issue make_error_issue(std::string_view code, std::string message) {
-    return Issue {std::string(code), IssueSeverity::Error, std::move(message), {}};
+    Issue issue;
+    issue.code = std::string(code);
+    issue.severity = IssueSeverity::Error;
+    issue.message = std::move(message);
+    return issue;
 }
 
 inline Issue make_error_issue(std::string_view code, std::string message,
                               std::vector<std::uint64_t> related_entities) {
-    return Issue {std::string(code), IssueSeverity::Error, std::move(message), std::move(related_entities)};
+    Issue issue;
+    issue.code = std::string(code);
+    issue.severity = IssueSeverity::Error;
+    issue.message = std::move(message);
+    issue.related_entities = std::move(related_entities);
+    return issue;
 }
 
 inline Issue make_info_issue(std::string_view code, std::string message) {
-    return Issue {std::string(code), IssueSeverity::Info, std::move(message), {}};
+    Issue issue;
+    issue.code = std::string(code);
+    issue.severity = IssueSeverity::Info;
+    issue.message = std::move(message);
+    return issue;
 }
 
 inline Issue make_warning_issue(std::string_view code, std::string message) {
-    return Issue {std::string(code), IssueSeverity::Warning, std::move(message), {}};
+    Issue issue;
+    issue.code = std::string(code);
+    issue.severity = IssueSeverity::Warning;
+    issue.message = std::move(message);
+    return issue;
 }
 
 inline DiagnosticId success_diag(KernelState& state, std::string summary) {
@@ -57,6 +74,13 @@ inline Result<T> invalid_input_result(KernelState& state, std::string_view code,
 template <typename T>
 inline Result<T> failed_result(KernelState& state, StatusCode status, std::string_view code, std::string message, std::string summary) {
     return error_result<T>(status, error_diag(state, std::move(summary), code, std::move(message)));
+}
+
+template <typename T>
+inline Result<T> failed_result(KernelState& state, StatusCode status, std::string_view code, std::string message, std::string summary,
+                               std::vector<std::uint64_t> related_entities) {
+    return error_result<T>(status,
+                           error_diag(state, std::move(summary), code, std::move(message), std::move(related_entities)));
 }
 
 inline Result<void> invalid_input_void(KernelState& state, std::string_view code, std::string message, std::string summary) {
