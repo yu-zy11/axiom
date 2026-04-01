@@ -34,6 +34,11 @@ int main() {
     bool found_intersection_stored = false;
     bool found_imprint_applied = false;
     bool found_imprint_segment_applied = false;
+    bool found_split_stage = false;
+    bool found_classify_stage = false;
+    bool found_rebuild_stage = false;
+    bool found_validate_stage = false;
+    bool found_repair_stage = false;
     bool found_classification = false;
     bool found_rebuild = false;
     bool found_output_stage = false;
@@ -54,14 +59,29 @@ int main() {
             if (issue.code == axiom::diag_codes::kBoolIntersectionWiresStored) {
                 found_intersection_stored = true;
             }
+            if (issue.code == axiom::diag_codes::kBoolStageSplit) {
+                found_split_stage = true;
+            }
             if (issue.code == axiom::diag_codes::kBoolImprintApplied) {
                 found_imprint_applied = true;
             }
             if (issue.code == axiom::diag_codes::kBoolImprintSegmentApplied) {
                 found_imprint_segment_applied = true;
             }
+            if (issue.code == axiom::diag_codes::kBoolStageClassify) {
+                found_classify_stage = true;
+            }
             if (issue.code == axiom::diag_codes::kBoolClassificationCompleted) {
                 found_classification = true;
+            }
+            if (issue.code == axiom::diag_codes::kBoolStageRebuild) {
+                found_rebuild_stage = true;
+            }
+            if (issue.code == axiom::diag_codes::kBoolStageValidate) {
+                found_validate_stage = true;
+            }
+            if (issue.code == axiom::diag_codes::kBoolStageRepair) {
+                found_repair_stage = true;
             }
             if (issue.code == axiom::diag_codes::kBoolRebuildCompleted) {
                 found_rebuild = true;
@@ -75,8 +95,9 @@ int main() {
         }
     }
     if (!found_candidates_stage || !found_face_candidates || !found_intersection_curves || !found_intersection_segments ||
-        !found_intersection_stored || !(found_imprint_segment_applied || found_imprint_applied) ||
-        !found_classification || !found_rebuild || !found_stage_summary || !found_output_stage) {
+        !found_intersection_stored || !found_split_stage || !(found_imprint_segment_applied || found_imprint_applied) ||
+        !found_classify_stage || !found_classification || !found_rebuild_stage || !found_validate_stage ||
+        !found_rebuild || !found_stage_summary || !found_output_stage) {
         std::cerr << "expected boolean stage diagnostics (AXM-BOOL-D-0001/0004/0005/0006/0007/0008/0009 plus imprint)\n";
         return 1;
     }

@@ -17,9 +17,9 @@ description: Develop and harden AxiomKernel IO workflows (STEP/AXMJSON/glTF/STL 
 - 实现：`src/io/io_service.cpp`
 - 受影响模块：`rep`（gltf/stl 导出依赖 `brep_to_mesh`）、`heal`（导入后 validate/repair）
 - 关键回归：
-  - `tests/io_workflow_test.cpp`
-  - `tests/representation_io_test.cpp`
-  - `tests/diagnostics_test.cpp`（涉及诊断回流）
+  - `tests/io/io_workflow_test.cpp`
+  - `tests/rep/representation_io_test.cpp`
+  - `tests/diag/diagnostics_test.cpp`（涉及诊断回流）
 
 ## 硬规则（必须遵守）
 

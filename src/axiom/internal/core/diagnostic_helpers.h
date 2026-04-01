@@ -74,3 +74,4 @@ inline Result<void> failed_void(KernelState& state, StatusCode status, std::stri
 }
 
 }  // namespace axiom::detail
+

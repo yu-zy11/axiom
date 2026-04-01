@@ -96,6 +96,18 @@ int main() {
         !fine_report.value->is_indexed || fine_report.value->connected_components != 1 ||
         fine_report.value->has_out_of_range_indices || fine_report.value->has_degenerate_triangles) {
         std::cerr << "unexpected tessellation density behavior\n";
+        std::cerr << "coarse: tris=" << *coarse_triangles.value << " verts=" << *coarse_vertices.value << "\n";
+        std::cerr << "fine: tris=" << *fine_triangles.value << " verts=" << *fine_vertices.value
+                  << " indices=" << *fine_indices.value << " comps=" << *fine_components.value
+                  << " oor=" << (*fine_out_of_range.value ? "true" : "false")
+                  << " deg=" << (*fine_degenerate.value ? "true" : "false") << "\n";
+        std::cerr << "fine_report: tris=" << fine_report.value->triangle_count
+                  << " verts=" << fine_report.value->vertex_count
+                  << " comps=" << fine_report.value->connected_components
+                  << " indexed=" << (fine_report.value->is_indexed ? "true" : "false")
+                  << " oor=" << (fine_report.value->has_out_of_range_indices ? "true" : "false")
+                  << " deg=" << (fine_report.value->has_degenerate_triangles ? "true" : "false")
+                  << "\n";
         return 1;
     }
     const auto mesh_report_path = std::filesystem::temp_directory_path() / "axiom_mesh_report.json";
@@ -110,7 +122,8 @@ int main() {
     if (mesh_report_text.find("\"triangle_count\":" + std::to_string(*fine_triangles.value)) == std::string::npos ||
         mesh_report_text.find("\"has_out_of_range_indices\":false") == std::string::npos ||
         mesh_report_text.find("\"tessellation_strategy\":\"primitive_box\"") == std::string::npos ||
-        mesh_report_text.find("\"tessellation_budget_digest\"") == std::string::npos) {
+        mesh_report_text.find("\"tessellation_budget_digest\"") == std::string::npos ||
+        mesh_report_text.find("\"has_texcoords\":false") == std::string::npos) {
         std::cerr << "mesh report json content is unexpected\n";
         std::filesystem::remove(mesh_report_path);
         return 1;

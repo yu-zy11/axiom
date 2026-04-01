@@ -41,3 +41,4 @@ TolerancePolicy tolerance_with_angular(const TolerancePolicy& base, Scalar angul
 bool valid_tolerance_policy(const TolerancePolicy& policy);
 
 }  // namespace axiom::detail
+

@@ -91,7 +91,30 @@ int main() {
         return 1;
     }
 
-    // NOTE: polygon-based extrude profile is not part of current public API surface.
+    // Stage-2 minimal: polygon profile extrude should materialize a real prism shell (6 faces).
+    axiom::ProfileRef rect;
+    rect.label = "rect";
+    rect.polygon_xyz = {{0.0, 0.0, 0.0}, {2.0, 0.0, 0.0}, {2.0, 1.0, 0.0}, {0.0, 1.0, 0.0}};
+    auto prism = kernel.sweeps().extrude(rect, {0.0, 0.0, 1.0}, 3.0);
+    if (prism.status != axiom::StatusCode::Ok || !prism.value.has_value()) {
+        std::cerr << "polygon extrude failed\n";
+        return 1;
+    }
+    auto prism_strict = kernel.validate().validate_topology(*prism.value, axiom::ValidationMode::Strict);
+    if (prism_strict.status != axiom::StatusCode::Ok) {
+        std::cerr << "polygon extrude failed strict topology validation\n";
+        return 1;
+    }
+    auto prism_shells = kernel.topology().query().shells_of_body(*prism.value);
+    if (prism_shells.status != axiom::StatusCode::Ok || !prism_shells.value.has_value() || prism_shells.value->size() != 1) {
+        std::cerr << "polygon extrude expected one shell\n";
+        return 1;
+    }
+    auto prism_faces = kernel.topology().query().faces_of_shell(prism_shells.value->front());
+    if (prism_faces.status != axiom::StatusCode::Ok || !prism_faces.value.has_value() || prism_faces.value->size() != 6) {
+        std::cerr << "polygon extrude expected 6 faces\n";
+        return 1;
+    }
 
     auto box_edges = kernel.topology().query().edges_of_body(*box_a.value);
     if (box_edges.status != axiom::StatusCode::Ok || !box_edges.value.has_value() ||

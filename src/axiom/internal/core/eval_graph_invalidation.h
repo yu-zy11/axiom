@@ -67,3 +67,4 @@ inline void invalidate_eval_for_faces(KernelState& state, std::span<const FaceId
 }
 
 }  // namespace axiom::detail
+

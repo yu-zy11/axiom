@@ -270,6 +270,9 @@ struct PluginCurveDesc {
 
 struct ProfileRef {
   std::string label;
+  /// Optional planar polygon profile in world coordinates (closedness implicit: last connects to first).
+  /// When provided, `sweeps().extrude(...)` can materialize a real prism shell (Stage-2 minimal).
+  std::vector<Point3> polygon_xyz;
 };
 
 struct TessellationOptions {

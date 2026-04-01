@@ -53,3 +53,4 @@ void weld_mesh_vertices(MeshRecord& mesh, bool weld_normals);
 ConversionErrorBudget conversion_error_budget_from_tessellation(const TessellationOptions& options);
 
 }  // namespace axiom::detail
+

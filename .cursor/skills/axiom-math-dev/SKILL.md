@@ -25,7 +25,7 @@ description: Develop and harden AxiomKernel MathCore (linear algebra, predicates
 - Public API：`include/axiom/math/math_services.h`
 - 实现：`src/math/math_services.cpp`
 - Internal utils：`include/axiom/internal/math/math_internal_utils.h` + `src/math/math_internal_utils.cpp`
-- 回归测试：`tests/math_services_test.cpp`（必要时新增跨模块回归，但保持拆分）
+- 回归测试：`tests/math/math_services_test.cpp`（必要时新增跨模块回归，但保持拆分）
 
 ## 标准工作流（按顺序执行）
 

@@ -22,7 +22,7 @@ description: Develop and harden AxiomKernel Diagnostics (error/diagnostic codes,
   - `src/diag/diagnostic_internal_utils.cpp`
   - `src/diag/diagnostic_service.cpp`
 - 文档字典（改码必同步）：`docs/diagnostics/**`
-- 关键回归：`tests/diagnostics_test.cpp`（以及受影响工作流测试）
+- 关键回归：`tests/diag/diagnostics_test.cpp`（以及受影响工作流测试）
 
 ## 硬规则（必须遵守）
 
@@ -47,7 +47,7 @@ description: Develop and harden AxiomKernel Diagnostics (error/diagnostic codes,
 
 ### 3) 测试固化
 
-- 在 `tests/diagnostics_test.cpp` 断言：
+- 在 `tests/diag/diagnostics_test.cpp` 断言：
   - 失败时 code 正确
   - JSON 导出包含关键字段
   - related_entities 可用于反查

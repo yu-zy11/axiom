@@ -120,22 +120,39 @@
 - 插件仍是骨架实现，求值图已具备基础状态能力但仍远未达到参数化求解级
 - 拓扑-BRep 桥接仍较弱，布尔结果仍主要停留在包围盒级表达
 
+### 3.2.0 证据口径说明（文档=代码真实状态）
+
+本节及后续“完成度判断”以 **代码与测试为证据**，并遵循硬规则：**接口存在 ≠ 完成**。判定口径：
+
+- **已完成（基础可回归）**：主链路实现存在 + 关键失败链路有明确状态/诊断码 + `tests/<模块>/*_test.cpp` 有回归覆盖
+- **部分完成**：实现存在但仍以占位/近似/回退链路为主，或测试/诊断覆盖不完整
+- **未开始/缺失**：无实现，或仅有接口/空语义
+
+为便于追溯，本仓库当前以“单模块单实现单测试”为主，核心证据入口如下（随代码演进可补充）：
+
+- **core/sdk**：`include/axiom/sdk/kernel.h`、`src/sdk/kernel.cpp`、`tests/sdk/smoke_test.cpp`
+- **diag**：`include/axiom/diag/diagnostic_service.h`、`src/diag/diagnostic_service.cpp`、`tests/diag/diagnostics_test.cpp`
+- **io**：`include/axiom/io/io_service.h`、`src/io/io_service.cpp`、`tests/io/io_workflow_test.cpp`
+- **topo**：`include/axiom/topo/topology_service.h`、`src/topo/topology_service.cpp`、`tests/topo/topology_test.cpp`
+- **rep**：`include/axiom/rep/representation_conversion_service.h`、`src/rep/representation_conversion_service.cpp`、`tests/rep/representation_io_test.cpp`
+- **eval**：`include/axiom/eval/eval_services.h`、`src/eval/eval_services.cpp`、`tests/eval/query_eval_test.cpp`
+
 ### 3.2.1 各模块完成度一览（架构快照，相对「工业几何引擎」）
 
 说明：下表 **不等于接口是否齐全**，而是指在工业场景下可用的**算法深度、容差与可诊断闭环**是否到位。`Stage2 内可用度` 表示当前 Stage 1.5/2 过渡目标下支撑持续开发的便利程度。
 
 | 模块 | Stage2 内可用度 | 工业化差距 | 主要回归/证据（ctest） | 最突出不足 |
 |------|----------------|-----------|------------------------|------------|
-| **core** | 中 | 高 | `axiom_smoke_test` | `Kernel` 能力报告与 `IOService` 实际格式能力不一致；运行时 store 策略需持续收敛 |
+| **core** | 中 | 高 | `axiom_smoke_test` | **能力报告口径不一致**：`Kernel::io_supported_formats/io_can_*` 与 `IOService::detect_format/import_auto/export_auto` 真实能力存在偏差（会导致“宣称不可导出但实际可导出”） |
 | **math** | 中 | 高 | `axiom_math_services_test` | 工业级鲁棒谓词、尺度自适应容差在全链路的一致解释仍未闭合 |
 | **geo** | 中 | 高 | `axiom_geometry_test` | 高质量 B-Spline/NURBS、曲率与鲁棒最近点、真实 trim 语义 |
-| **topo** | 中 | 高 | `axiom_topology_test` | 完整拓扑规则集、trim bridge（PCurve↔3D）工业闭环、事务可观测性 |
+| **topo** | 中 | 高 | `axiom_topology_test` | 规则集仍不完整；但 **trim bridge（UV 闭合/面级 trim 一致性）与 Strict 闭合性（open/non-manifold）已进入回归**，离工业闭环仍有差距 |
 | **rep** | 中 | 高 | `axiom_representation_io_test` | 全几何类型的误差预算三角化、工业 round-trip、显示/UV seam |
 | **io** | 中偏低 | 高 | `axiom_io_workflow_test` | 多格式导入（含 glTF/STL 等）、严格导出、输出验证报告；能力报告对齐 |
 | **ops** | 低 | **极高** | `axiom_boolean_workflow_test`、`axiom_boolean_prep_test`、`axiom_ops_heal_test` | **布尔真闭环**、特征建模真实拓扑、圆角倒角算法 |
 | **heal** | 中偏低 | 高 | `axiom_ops_heal_test`、`axiom_io_workflow_test` | 自交、流形性完备、容差冲突与小特征工业修复与回放 |
 | **eval** | 中 | 高 | `axiom_query_eval_test` | 与真实建模/重建深度耦合、缓存与指标门禁 |
-| **diag** | 中 | 中偏高 | `axiom_diagnostics_test` | BOOL/HEAL/IO **阶段化、全覆盖**绑定与批量导出策略 |
+| **diag** | 中偏高 | 中偏高 | `axiom_diagnostics_test` | 阶段化（BOOL/HEAL/IO）**全覆盖绑定**仍不足；但诊断检索/统计/JSON 导出与 related_entities 回流在回归中已相对扎实 |
 | **plugin & sdk** | 低 | 高 | `axiom_smoke_test`（门面/插件查询） | 隔离与安全、示例插件、能力发现与兼容性策略 |
 
 ### 3.2.2 模块完成度与不足（详细版，可转 backlog）
@@ -145,7 +162,7 @@
 - **core（Kernel/State/Result/Stores）**
   - **已具备**：`Kernel` 门面、基础配置写入/查询、运行时 store 清理/重置、对象计数与能力报告框架
   - **主要不足**：
-    - **能力报告一致性**：`Kernel::io_supported_formats/io_can_*` 与 `IOService::detect_format/import_auto/export_auto` 存在口径不一致风险（工业环境会导致“宣称不可用但实际可用/反之”）
+    - **能力报告一致性（已在代码中确认为真实偏差）**：`Kernel::io_supported_formats()` 当前仅返回 `step/axmjson`，且 `Kernel::io_can_export_format()` 复用导入能力；但 `IOService` 已实现 `export_gltf/export_stl`，并且 `export_auto()` 会按扩展名走 `gltf/stl`。这会导致能力报告对外宣称与实际可用能力不一致，属于需要优先收敛的工程化缺口。
     - **工程化不变量门禁**：reset/clear 后的缓存/索引一致性、跨模块可观测性仍需更系统回归
   - **建议测试入口**：`axiom_smoke_test`（新增“能力报告一致性断言”）、必要时新增 core 专项测试
 

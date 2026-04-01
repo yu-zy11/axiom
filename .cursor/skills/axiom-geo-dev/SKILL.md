@@ -26,14 +26,14 @@ description: Develop and harden AxiomKernel GeoCore (curves/surfaces creation, e
   - `eval`（点 + 一阶导/normal 的最小语义；高阶可占位）
   - `bbox`
   - `closest_parameter/closest_uv/closest_point`（可先网格采样 + 轻量 refine）
-  - 对应 `tests/geometry_test.cpp` 回归
+  - 对应 `tests/geo/geometry_test.cpp` 回归
 
 ## 快速定位：GeoCore 入口文件
 
 - Public API：`include/axiom/geo/geometry_services.h`
 - 实现：`src/geo/geometry_services.cpp`
 - 记录结构：`include/axiom/internal/core/kernel_state.h`
-- 回归测试：`tests/geometry_test.cpp`（ctest：`axiom_geometry_test`）
+- 回归测试：`tests/geo/geometry_test.cpp`（ctest：`axiom_geometry_test`）
 - 阶段缺口：`docs/plan/AxiomKernel_当前开发进度.md`（重点看 7.1）
 
 ## 标准工作流（按顺序执行）
@@ -62,7 +62,7 @@ description: Develop and harden AxiomKernel GeoCore (curves/surfaces creation, e
 
 ### 4) 测试（每个类型至少 1 个正向 + 1 个非法输入）
 
-在 `tests/geometry_test.cpp` 中为每个新增类型断言：
+在 `tests/geo/geometry_test.cpp` 中为每个新增类型断言：
 - 创建成功
 - domain 符合预期
 - eval 在代表点上返回稳定值

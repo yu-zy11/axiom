@@ -65,6 +65,16 @@ inline constexpr std::string_view kBoolImprintSegmentApplied = "AXM-BOOL-D-0011"
 inline constexpr std::string_view kBoolClassificationCompleted = "AXM-BOOL-D-0012";
 /// 已完成重建阶段（占位实现：输出壳/体一致性与 Strict 校验摘要）。
 inline constexpr std::string_view kBoolRebuildCompleted = "AXM-BOOL-D-0013";
+/// 已进入切分阶段（真实算法入口：imprint/split/trim）。
+inline constexpr std::string_view kBoolStageSplit = "AXM-BOOL-D-0014";
+/// 已进入分类阶段（真实算法入口：cell/face classification）。
+inline constexpr std::string_view kBoolStageClassify = "AXM-BOOL-D-0015";
+/// 已进入重建阶段（真实算法入口：shell rebuild / stitch / merge）。
+inline constexpr std::string_view kBoolStageRebuild = "AXM-BOOL-D-0016";
+/// 已进入验证阶段（Strict/Standard validation for rebuilt topology）。
+inline constexpr std::string_view kBoolStageValidate = "AXM-BOOL-D-0017";
+/// 已进入修复阶段（auto_repair / heal fallback）。
+inline constexpr std::string_view kBoolStageRepair = "AXM-BOOL-D-0018";
 
 inline constexpr std::string_view kBlendInvalidTarget = "AXM-BLEND-E-0001";
 inline constexpr std::string_view kBlendParameterTooLarge = "AXM-BLEND-E-0002";

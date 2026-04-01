@@ -40,11 +40,15 @@ ctest --test-dir build
 ## 目录结构
 
 - `include/axiom/`: 对外公开头文件（Public API）
-- `include/axiom/internal/`: 内部实现细节头（禁止上层/插件直接依赖）
-- `src/`: 实现源码
-- `tests/`: 自动化测试
+- `src/`: 实现源码（包含 `src/axiom/internal/**`：模块私有 internal 头，不安装、不对外暴露）
+- `tests/`: 自动化测试（按模块分子目录，如 `tests/geo/`、`tests/ops/`）
+- `cmake/`: 构建片段（如 `AxiomKernelLibraries.cmake` 定义各模块静态库）
 - `examples/`: 示例程序
 - `docs/`: 设计/接口/质量/诊断等文档
+
+## 构建产物（模块化 targets）
+
+当前仓库已按模块拆分为多个 CMake target（如 `axiom_math/axiom_geo/axiom_topo/...`），并保留 `axiom_kernel` 作为聚合入口（供示例与测试链接）。
 
 ## 诊断与错误处理约定（摘要）
 

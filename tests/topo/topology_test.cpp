@@ -1851,6 +1851,69 @@ int main() {
         }
     }
 
+    // ---- Stage 2+: Strict topology should fail when a Body shares one owned Face across multiple owned Shells ----
+    {
+        auto box = kernel.primitives().box({0.0, 0.0, 0.0}, 1.0, 2.0, 3.0);
+        if (box.status != axiom::StatusCode::Ok || !box.value.has_value()) {
+            std::cerr << "failed to create box for shared-face-across-shells test\n";
+            return 1;
+        }
+        auto shells = kernel.topology().query().shells_of_body(*box.value);
+        if (shells.status != axiom::StatusCode::Ok || !shells.value.has_value() || shells.value->empty()) {
+            std::cerr << "failed to query box shells for shared-face-across-shells test\n";
+            return 1;
+        }
+        auto faces = kernel.topology().query().faces_of_shell(shells.value->front());
+        if (faces.status != axiom::StatusCode::Ok || !faces.value.has_value() || faces.value->size() != 6) {
+            std::cerr << "expected 6 faces on box shell for shared-face-across-shells test\n";
+            return 1;
+        }
+        const auto shared_face = faces.value->front();
+
+        auto txn = kernel.topology().begin_transaction();
+        auto sh1 = txn.create_shell(std::array<axiom::FaceId, 6>{
+            (*faces.value)[0], (*faces.value)[1], (*faces.value)[2],
+            (*faces.value)[3], (*faces.value)[4], (*faces.value)[5]
+        });
+        if (sh1.status != axiom::StatusCode::Ok || !sh1.value.has_value()) {
+            std::cerr << "failed to create first shell clone for shared-face-across-shells test\n";
+            return 1;
+        }
+        // Second shell shares one face with the first shell but is otherwise a closed box shell.
+        std::array<axiom::FaceId, 6> faces2{
+            shared_face, (*faces.value)[1], (*faces.value)[2],
+            (*faces.value)[3], (*faces.value)[4], (*faces.value)[5]
+        };
+        auto sh2 = txn.create_shell(faces2);
+        if (sh2.status != axiom::StatusCode::Ok || !sh2.value.has_value()) {
+            std::cerr << "failed to create second shell for shared-face-across-shells test\n";
+            return 1;
+        }
+        auto body = txn.create_body(std::array<axiom::ShellId, 2>{*sh1.value, *sh2.value});
+        if (body.status != axiom::StatusCode::Ok || !body.value.has_value()) {
+            std::cerr << "failed to create body for shared-face-across-shells test\n";
+            return 1;
+        }
+
+        auto strict = kernel.validate().validate_topology(*body.value, axiom::ValidationMode::Strict);
+        if (strict.status == axiom::StatusCode::Ok) {
+            std::cerr << "expected Strict to fail for shared face across shells\n";
+            return 1;
+        }
+        auto diag = kernel.diagnostics().get(strict.diagnostic_id);
+        if (diag.status != axiom::StatusCode::Ok || !diag.value.has_value() ||
+            !has_issue_code(*diag.value, axiom::diag_codes::kTopoRelationInconsistent)) {
+            std::cerr << "expected kTopoRelationInconsistent for shared face across shells\n";
+            return 1;
+        }
+
+        auto rb = txn.rollback();
+        if (rb.status != axiom::StatusCode::Ok) {
+            std::cerr << "rollback failed for shared-face-across-shells test\n";
+            return 1;
+        }
+    }
+
     // ---- Stage 2: Face must not reuse the same Edge across outer/inner loops ----
     {
         auto l01 = kernel.curves().make_line({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0});

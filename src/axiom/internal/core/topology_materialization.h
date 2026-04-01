@@ -1249,3 +1249,4 @@ inline void materialize_body_bbox_topology(KernelState& state, BodyRecord& recor
 }
 
 }  // namespace axiom::detail
+

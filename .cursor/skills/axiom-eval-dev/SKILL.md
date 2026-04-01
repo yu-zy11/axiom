@@ -16,7 +16,7 @@ description: Develop and harden AxiomKernel EvalGraph (dependencies, invalidatio
 - Public API：`include/axiom/eval/eval_services.h`
 - 实现：`src/eval/eval_services.cpp`
 - 内部工具：`include/axiom/internal/core/eval_graph_invalidation.h` 等
-- 关键回归：`tests/query_eval_test.cpp`
+- 关键回归：`tests/eval/query_eval_test.cpp`
 
 ## 硬规则（必须遵守）
 
@@ -32,7 +32,7 @@ description: Develop and harden AxiomKernel EvalGraph (dependencies, invalidatio
 
 ### 2) 先补测试，再改实现
 
-在 `tests/query_eval_test.cpp` 固化：
+在 `tests/eval/query_eval_test.cpp` 固化：
 
 - 循环依赖失败码
 - 去重重算计数行为

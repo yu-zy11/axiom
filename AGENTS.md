@@ -48,8 +48,15 @@ ctest --test-dir build
 
 - **`include/axiom/`**：对外公开头文件（Public API）
 - **`src/`**：实现（不应泄漏实现细节到 `include/`）
-- **`tests/`**：自动化测试
+- **`tests/`**：自动化测试（按模块子目录组织，见下）
+- **`cmake/`**：CMake 片段（模块库定义等）
 - **`examples/`**：示例程序（用于演示主链路可用）
+
+### 构建 target 约定（模块化）
+
+- 代码按模块拆分为多个 CMake target（例如 `axiom_math/axiom_geo/axiom_topo/...`），并用 `target_link_libraries` 显式表达依赖方向（参见“允许依赖/禁止依赖”章节）。
+- 各模块库定义集中在 `cmake/AxiomKernelLibraries.cmake`，根目录 `CMakeLists.txt` 负责选项、示例与测试 target。
+- `axiom_kernel` 作为聚合入口 target（供示例/工作流测试链接），避免测试因链接过小而丢失集成链路覆盖。
 
 ### 当前仓库的模块目录（对齐实际代码）
 
@@ -65,9 +72,9 @@ ctest --test-dir build
   - `io/`：`io_service.h`
   - `plugin/`：`plugin_registry.h`
   - `sdk/`：`kernel.h`
-- **Internal（内部实现细节头）**：`include/axiom/internal/`（禁止上层/插件绕过 Public API 直接依赖）
-- **实现源码**：`src/<module>/...`（与 `include/axiom/<module>/...` 对应）
-- **测试**：`tests/*.cpp`
+- **Internal（内部实现细节头）**：`src/axiom/internal/`（模块私有，不安装；禁止上层/插件绕过 Public API 直接依赖）
+- **实现源码**：`src/<module>/...`（与 `include/axiom/<module>/...` 对应；internal 头通过 CMake 的 PRIVATE include 暴露给允许依赖的模块）
+- **测试**：`tests/<模块>/*_test.cpp`（按模块分子目录；`ctest` 名称不变）
 - **示例**：`examples/basic_workflow.cpp`
 
 ### 模块分层（核心约束）
@@ -301,7 +308,7 @@ AXM_PERF_MAX_MS=2000 AXM_PERF_ITERATIONS=80 ctest --test-dir build -R axiom_perf
 - **错误码**：是否新增失败路径？是否在 `include/axiom/diag/error_codes.h` 增补常量，并同步 `docs/diagnostics/AxiomKernel_错误码与诊断码字典.md`？
 - **诊断**：失败是否能通过 `diagnostic_id` 追踪？是否能导出 JSON 以便 CI/回归归档？
 - **事务/一致性**：修改型操作失败是否保证不污染原模型？（至少要能回滚到一致状态）
-- **测试**：是否新增/更新了对应 `tests/*.cpp`？是否可用 `ctest -R ...` 稳定复现？
+- **测试**：是否新增/更新了对应 `tests/<模块>/` 下的回归？是否可用 `ctest -R ...` 稳定复现？
 - **性能**：是否触碰热路径（循环/批处理/布尔/IO）？是否需要更新/新增 `perf_baseline` 或记录对比数据？
 - **文档**：是否需要同步接口样例、评审清单、或用户可读文案映射？
 

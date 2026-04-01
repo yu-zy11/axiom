@@ -120,7 +120,9 @@ bool is_valid_bbox(const BoundingBox& bbox) {
 }
 
 bool has_valid_tessellation_options(const TessellationOptions& options) {
-    return options.chordal_error > 0.0 && options.angular_error > 0.0;
+    return options.chordal_error > 0.0 && options.angular_error > 0.0 &&
+           options.weld_shading_split_angle_deg >= 0.0 &&
+           options.weld_shading_split_angle_deg <= 180.0;
 }
 
 std::size_t tessellation_slices_per_face(const TessellationOptions& options) {
@@ -145,7 +147,9 @@ std::string tessellation_cache_key(const BodyRecord& body, const TessellationOpt
         << "|bb=" << body.bbox.min.x << "," << body.bbox.min.y << "," << body.bbox.min.z
         << "," << body.bbox.max.x << "," << body.bbox.max.y << "," << body.bbox.max.z
         << "|tess=" << options.chordal_error << "," << options.angular_error
-        << "," << (options.compute_normals ? 1 : 0);
+        << "," << (options.compute_normals ? 1 : 0)
+        << "," << (options.generate_texcoords ? 1 : 0)
+        << "," << options.weld_shading_split_angle_deg;
     return oss.str();
 }
 
@@ -156,6 +160,8 @@ std::string tessellation_budget_digest_json(const TessellationOptions& options) 
     oss << "{\"chordal_error\":" << options.chordal_error
         << ",\"angular_error_deg\":" << options.angular_error
         << ",\"compute_normals\":" << (options.compute_normals ? "true" : "false")
+        << ",\"generate_texcoords\":" << (options.generate_texcoords ? "true" : "false")
+        << ",\"weld_shading_split_angle_deg\":" << options.weld_shading_split_angle_deg
         << "}";
     return oss.str();
 }
@@ -176,7 +182,8 @@ std::string face_tessellation_cache_key(const KernelState& state, FaceId face_id
     oss << "face=" << face_id.value
         << "|tess=" << options.chordal_error << "," << options.angular_error
         << "," << (options.compute_normals ? 1 : 0)
-        << ",1";
+        << "," << (options.generate_texcoords ? 1 : 0)
+        << "," << options.weld_shading_split_angle_deg;
     const auto face_it = state.faces.find(face_id.value);
     if (face_it != state.faces.end()) {
         oss << "|surf=" << face_it->second.surface_id.value
@@ -229,18 +236,40 @@ MeshRecord tessellate_box(const BodyRecord& body, const TessellationOptions& opt
     const auto ny = std::max<std::size_t>(1, segments_for_length(dy, options));
     const auto nz = std::max<std::size_t>(1, segments_for_length(dz, options));
 
-    auto emit_face_grid = [&](const Point3& origin, const Vec3& udir, Scalar ulen,
-                              const Vec3& vdir, Scalar vlen, const Vec3& n,
-                              std::size_t nu, std::size_t nv) {
+    // Precompute axis coordinates so shared edges match bitwise across faces.
+    const auto o = body.origin;
+    std::vector<Scalar> xs(nx + 1), ys(ny + 1), zs(nz + 1);
+    for (std::size_t i = 0; i <= nx; ++i) xs[i] = o.x + dx * (static_cast<Scalar>(i) / static_cast<Scalar>(nx));
+    for (std::size_t i = 0; i <= ny; ++i) ys[i] = o.y + dy * (static_cast<Scalar>(i) / static_cast<Scalar>(ny));
+    for (std::size_t i = 0; i <= nz; ++i) zs[i] = o.z + dz * (static_cast<Scalar>(i) / static_cast<Scalar>(nz));
+
+    // Emit a face grid by selecting which axis corresponds to (u,v) and holding the third axis constant.
+    enum class Axis { X, Y, Z };
+    auto emit_face_grid = [&](Axis u_axis, Axis v_axis, Axis w_axis, Scalar w_value,
+                              const Vec3& n, std::size_t nu, std::size_t nv) {
         const auto base = static_cast<Index>(mesh.vertices.size());
+        auto coord = [&](Axis a, std::size_t idx_u, std::size_t idx_v) -> Scalar {
+            switch (a) {
+                case Axis::X: return (u_axis == Axis::X) ? xs[idx_u] : (v_axis == Axis::X) ? xs[idx_v] : w_value;
+                case Axis::Y: return (u_axis == Axis::Y) ? ys[idx_u] : (v_axis == Axis::Y) ? ys[idx_v] : w_value;
+                case Axis::Z: return (u_axis == Axis::Z) ? zs[idx_u] : (v_axis == Axis::Z) ? zs[idx_v] : w_value;
+            }
+            return 0.0;
+        };
         for (std::size_t j = 0; j <= nv; ++j) {
             const auto tv = (nv == 0) ? 0.0 : (static_cast<Scalar>(j) / static_cast<Scalar>(nv));
             for (std::size_t i = 0; i <= nu; ++i) {
                 const auto tu = (nu == 0) ? 0.0 : (static_cast<Scalar>(i) / static_cast<Scalar>(nu));
-                const auto p = add_point_vec(add_point_vec(origin, scale(udir, ulen * tu)), scale(vdir, vlen * tv));
+                const Point3 p {
+                    coord(Axis::X, i, j),
+                    coord(Axis::Y, i, j),
+                    coord(Axis::Z, i, j),
+                };
                 mesh.vertices.push_back(p);
                 if (options.compute_normals) mesh.normals.push_back(n);
-                mesh.texcoords.push_back(Point2{tu, tv});
+                if (options.generate_texcoords) {
+                    mesh.texcoords.push_back(Point2{tu, tv});
+                }
             }
         }
         for (std::size_t j = 0; j < nv; ++j) {
@@ -254,18 +283,20 @@ MeshRecord tessellate_box(const BodyRecord& body, const TessellationOptions& opt
         }
     };
 
-    const auto o = body.origin;
     // +Z, -Z
-    emit_face_grid(Point3{o.x, o.y, o.z + dz}, Vec3{1,0,0}, dx, Vec3{0,1,0}, dy, Vec3{0,0,1}, nx, ny);
-    emit_face_grid(Point3{o.x, o.y, o.z},      Vec3{1,0,0}, dx, Vec3{0,1,0}, dy, Vec3{0,0,-1}, nx, ny);
+    emit_face_grid(Axis::X, Axis::Y, Axis::Z, zs.back(), Vec3{0,0,1}, nx, ny);
+    emit_face_grid(Axis::X, Axis::Y, Axis::Z, zs.front(), Vec3{0,0,-1}, nx, ny);
     // +Y, -Y
-    emit_face_grid(Point3{o.x, o.y + dy, o.z}, Vec3{1,0,0}, dx, Vec3{0,0,1}, dz, Vec3{0,1,0}, nx, nz);
-    emit_face_grid(Point3{o.x, o.y, o.z},      Vec3{1,0,0}, dx, Vec3{0,0,1}, dz, Vec3{0,-1,0}, nx, nz);
+    emit_face_grid(Axis::X, Axis::Z, Axis::Y, ys.back(), Vec3{0,1,0}, nx, nz);
+    emit_face_grid(Axis::X, Axis::Z, Axis::Y, ys.front(), Vec3{0,-1,0}, nx, nz);
     // +X, -X
-    emit_face_grid(Point3{o.x + dx, o.y, o.z}, Vec3{0,1,0}, dy, Vec3{0,0,1}, dz, Vec3{1,0,0}, ny, nz);
-    emit_face_grid(Point3{o.x, o.y, o.z},      Vec3{0,1,0}, dy, Vec3{0,0,1}, dz, Vec3{-1,0,0}, ny, nz);
+    emit_face_grid(Axis::Y, Axis::Z, Axis::X, xs.back(), Vec3{1,0,0}, ny, nz);
+    emit_face_grid(Axis::Y, Axis::Z, Axis::X, xs.front(), Vec3{-1,0,0}, ny, nz);
 
     weld_mesh_vertices(mesh, options.compute_normals);
+    if (!options.generate_texcoords) {
+        mesh.texcoords.clear();
+    }
     return mesh;
 }
 
@@ -273,7 +304,9 @@ void weld_mesh_vertices(MeshRecord& mesh, bool weld_normals) {
     if (mesh.vertices.empty() || mesh.indices.empty()) {
         return;
     }
-    constexpr Scalar q = 1e-12;
+    // Welding uses quantization to tolerate floating noise from face-wise generation.
+    // Keep it small enough to not collapse meaningful features, but large enough to merge shared box edges.
+    constexpr Scalar q = 1e-7;
     auto quant = [](Scalar v) -> std::int64_t {
         return static_cast<std::int64_t>(std::llround(v / q));
     };
@@ -291,7 +324,12 @@ void weld_mesh_vertices(MeshRecord& mesh, bool weld_normals) {
 
     for (std::size_t i = 0; i < mesh.vertices.size(); ++i) {
         const auto& p = mesh.vertices[i];
-        const auto key = std::to_string(quant(p.x)) + "," + std::to_string(quant(p.y)) + "," + std::to_string(quant(p.z));
+        std::string key =
+            std::to_string(quant(p.x)) + "," + std::to_string(quant(p.y)) + "," + std::to_string(quant(p.z));
+        if (use_uv_key) {
+            const auto& uv = mesh.texcoords[i];
+            key += "|uv=" + std::to_string(quant(uv.x)) + "," + std::to_string(quant(uv.y));
+        }
         const auto it = map.find(key);
         if (it == map.end()) {
             const auto ni = static_cast<Index>(new_vertices.size());
@@ -355,8 +393,10 @@ MeshRecord tessellate_sphere(const BodyRecord& body, const TessellationOptions& 
             if (options.compute_normals) {
                 mesh.normals.push_back(n);
             }
-            mesh.texcoords.push_back(Point2{static_cast<Scalar>(i) / static_cast<Scalar>(nu),
-                                            static_cast<Scalar>(j) / static_cast<Scalar>(nv)});
+            if (options.generate_texcoords) {
+                mesh.texcoords.push_back(Point2{static_cast<Scalar>(i) / static_cast<Scalar>(nu),
+                                                static_cast<Scalar>(j) / static_cast<Scalar>(nv)});
+            }
         }
     }
     for (std::size_t j = 0; j < nv; ++j) {
@@ -407,7 +447,9 @@ MeshRecord tessellate_cylinder(const BodyRecord& body, const TessellationOptions
             if (options.compute_normals) {
                 mesh.normals.push_back(radial);
             }
-            mesh.texcoords.push_back(Point2{static_cast<Scalar>(i) / static_cast<Scalar>(nu), tz});
+            if (options.generate_texcoords) {
+                mesh.texcoords.push_back(Point2{static_cast<Scalar>(i) / static_cast<Scalar>(nu), tz});
+            }
         }
     }
     for (std::size_t j = 0; j < nv; ++j) {
@@ -428,11 +470,11 @@ MeshRecord tessellate_cylinder(const BodyRecord& body, const TessellationOptions
     const auto bottom_center_idx = static_cast<Index>(mesh.vertices.size());
     mesh.vertices.push_back(cap_center_bottom);
     if (options.compute_normals) mesh.normals.push_back(scale(axis, -1.0));
-    mesh.texcoords.push_back(Point2{0.5, 0.5});
+    if (options.generate_texcoords) mesh.texcoords.push_back(Point2{0.5, 0.5});
     const auto top_center_idx = static_cast<Index>(mesh.vertices.size());
     mesh.vertices.push_back(cap_center_top);
     if (options.compute_normals) mesh.normals.push_back(axis);
-    mesh.texcoords.push_back(Point2{0.5, 0.5});
+    if (options.generate_texcoords) mesh.texcoords.push_back(Point2{0.5, 0.5});
 
     const auto bottom_ring_base = static_cast<Index>(mesh.vertices.size());
     for (std::size_t i = 0; i <= nu; ++i) {
@@ -444,7 +486,7 @@ MeshRecord tessellate_cylinder(const BodyRecord& body, const TessellationOptions
                                  udir.z * cu + vdir.z * su};
         mesh.vertices.push_back(add_point_vec(cap_center_bottom, scale(radial, r)));
         if (options.compute_normals) mesh.normals.push_back(scale(axis, -1.0));
-        mesh.texcoords.push_back(Point2{0.5 + 0.5 * cu, 0.5 + 0.5 * su});
+        if (options.generate_texcoords) mesh.texcoords.push_back(Point2{0.5 + 0.5 * cu, 0.5 + 0.5 * su});
     }
     const auto top_ring_base = static_cast<Index>(mesh.vertices.size());
     for (std::size_t i = 0; i <= nu; ++i) {
@@ -456,7 +498,7 @@ MeshRecord tessellate_cylinder(const BodyRecord& body, const TessellationOptions
                                  udir.z * cu + vdir.z * su};
         mesh.vertices.push_back(add_point_vec(cap_center_top, scale(radial, r)));
         if (options.compute_normals) mesh.normals.push_back(axis);
-        mesh.texcoords.push_back(Point2{0.5 + 0.5 * cu, 0.5 + 0.5 * su});
+        if (options.generate_texcoords) mesh.texcoords.push_back(Point2{0.5 + 0.5 * cu, 0.5 + 0.5 * su});
     }
     for (std::size_t i = 0; i < nu; ++i) {
         const auto b0 = bottom_ring_base + static_cast<Index>(i);
@@ -512,7 +554,9 @@ MeshRecord tessellate_cone(const BodyRecord& body, const TessellationOptions& op
                 });
                 mesh.normals.push_back(n);
             }
-            mesh.texcoords.push_back(Point2{static_cast<Scalar>(i) / static_cast<Scalar>(nu), t});
+            if (options.generate_texcoords) {
+                mesh.texcoords.push_back(Point2{static_cast<Scalar>(i) / static_cast<Scalar>(nu), t});
+            }
         }
     }
     for (std::size_t j = 0; j < nv; ++j) {
@@ -532,7 +576,7 @@ MeshRecord tessellate_cone(const BodyRecord& body, const TessellationOptions& op
     const auto base_center_idx = static_cast<Index>(mesh.vertices.size());
     mesh.vertices.push_back(base_center);
     if (options.compute_normals) mesh.normals.push_back(axis);
-    mesh.texcoords.push_back(Point2{0.5, 0.5});
+    if (options.generate_texcoords) mesh.texcoords.push_back(Point2{0.5, 0.5});
     const auto ring_base = static_cast<Index>(mesh.vertices.size());
     for (std::size_t i = 0; i <= nu; ++i) {
         const auto u = (static_cast<Scalar>(i) / static_cast<Scalar>(nu)) * (2.0 * kPi);
@@ -543,7 +587,7 @@ MeshRecord tessellate_cone(const BodyRecord& body, const TessellationOptions& op
                                  udir.z * cu + vdir.z * su};
         mesh.vertices.push_back(add_point_vec(base_center, scale(radial, r_base)));
         if (options.compute_normals) mesh.normals.push_back(axis);
-        mesh.texcoords.push_back(Point2{0.5 + 0.5 * cu, 0.5 + 0.5 * su});
+        if (options.generate_texcoords) mesh.texcoords.push_back(Point2{0.5 + 0.5 * cu, 0.5 + 0.5 * su});
     }
     for (std::size_t i = 0; i < nu; ++i) {
         const auto i0 = ring_base + static_cast<Index>(i);
@@ -592,8 +636,10 @@ MeshRecord tessellate_torus(const BodyRecord& body, const TessellationOptions& o
                 const Vec3 n = normalize(dir_minor);
                 mesh.normals.push_back(n);
             }
-            mesh.texcoords.push_back(Point2{static_cast<Scalar>(i) / static_cast<Scalar>(nu),
-                                            static_cast<Scalar>(j) / static_cast<Scalar>(nv)});
+            if (options.generate_texcoords) {
+                mesh.texcoords.push_back(Point2{static_cast<Scalar>(i) / static_cast<Scalar>(nu),
+                                                static_cast<Scalar>(j) / static_cast<Scalar>(nv)});
+            }
         }
     }
     for (std::size_t j = 0; j < nv; ++j) {

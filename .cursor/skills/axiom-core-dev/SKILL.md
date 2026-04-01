@@ -43,9 +43,9 @@ description: Develop and harden AxiomKernel Core (KernelState/KernelConfig, Resu
 
 ### 3) 测试入口（建议）
 
-- “门面一致性/能力报告”：`tests/smoke_test.cpp` 或新增 core 专项测试
-- “容差/配置写入”：`tests/math_services_test.cpp`（若仅 math）或新增 core 测试
-- “runtime reset/clear”：按影响面选择 `tests/query_eval_test.cpp`、`tests/representation_io_test.cpp` 等回归入口
+- “门面一致性/能力报告”：`tests/sdk/smoke_test.cpp` 或新增 core 专项测试
+- “容差/配置写入”：`tests/math/math_services_test.cpp`（若仅 math）或新增 core 测试
+- “runtime reset/clear”：按影响面选择 `tests/eval/query_eval_test.cpp`、`tests/rep/representation_io_test.cpp` 等回归入口
 
 ## DoD（完成定义）
 

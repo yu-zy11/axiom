@@ -557,19 +557,9 @@ Result<void> ValidationService::validate_topology(BodyId body_id, ValidationMode
     if (mode == ValidationMode::Strict && body.rep_kind == RepKind::ExactBRep) {
         // Stage 2 trim bridge: ensure face trim (UV pcurves) is consistent when present.
         TopologyValidationService topology_validation {state_};
-        for (const auto shell_id : body.shells) {
-            const auto shell_it = state_->shells.find(shell_id.value);
-            if (shell_it == state_->shells.end()) {
-                continue;
-            }
-            for (const auto face_id : shell_it->second.faces) {
-                const auto r = topology_validation.validate_face_trim_consistency(face_id);
-                if (r.status != StatusCode::Ok) {
-                    // Preserve the underlying diagnostic details (message + diagnostic_id)
-                    // so callers can locate which coedge/edge/pcurve failed.
-                    return r;
-                }
-            }
+        const auto trim_batch = topology_validation.validate_body_trim_consistency(body_id);
+        if (trim_batch.status != StatusCode::Ok) {
+            return trim_batch;
         }
     }
     if (body.rep_kind == RepKind::ExactBRep && !body.shells.empty()) {
@@ -611,6 +601,35 @@ Result<void> ValidationService::validate_topology(BodyId body_id, ValidationMode
                     return detail::failed_void(*state_, StatusCode::InvalidTopology, rel_code,
                                                "拓扑验证失败：" + rel_reason, "拓扑验证失败",
                                                std::move(rel_entities));
+                }
+            }
+        }
+    }
+
+    if (mode == ValidationMode::Strict && body.rep_kind == RepKind::ExactBRep) {
+        // Stage 2+: body-level owned topology consistency:
+        // Within one Body, a Face must not be shared by multiple owned Shells.
+        // This prevents cross-shell self-gluing and makes manifold/closedness reasoning stable.
+        std::unordered_map<std::uint64_t, std::uint64_t> face_owner_shell;
+        for (const auto shell_id : body.shells) {
+            const auto shell_it = state_->shells.find(shell_id.value);
+            if (shell_it == state_->shells.end()) {
+                continue;
+            }
+            for (const auto face_id : shell_it->second.faces) {
+                const auto it = face_owner_shell.find(face_id.value);
+                if (it == face_owner_shell.end()) {
+                    face_owner_shell.emplace(face_id.value, shell_id.value);
+                    continue;
+                }
+                if (it->second != shell_id.value) {
+                    return detail::failed_void(*state_, StatusCode::InvalidTopology,
+                                               diag_codes::kTopoRelationInconsistent,
+                                               "拓扑验证失败：体内检测到跨壳共享面（face=" + std::to_string(face_id.value) +
+                                                   ", shell_a=" + std::to_string(it->second) +
+                                                   ", shell_b=" + std::to_string(shell_id.value) + ")",
+                                               "拓扑验证失败",
+                                               {body_id.value, face_id.value, it->second, shell_id.value});
                 }
             }
         }

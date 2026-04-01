@@ -17,3 +17,4 @@ std::vector<DiagnosticId> diagnostic_snapshot_recent(const KernelState& state, s
 std::uint64_t diagnostic_prune_to_max(KernelState& state, std::uint64_t max_keep);
 
 }  // namespace axiom::detail
+

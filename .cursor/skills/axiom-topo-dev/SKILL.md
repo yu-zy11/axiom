@@ -30,7 +30,7 @@ description: Develop and harden AxiomKernel TopoCore (topology transaction/query
 - Public API：`include/axiom/topo/topology_service.h`
 - 实现：`src/topo/topology_service.cpp`
 - KernelState（拓扑容器/索引）：`include/axiom/internal/core/kernel_state.h`
-- 回归测试：`tests/topology_test.cpp`（ctest 名称：`axiom_topology_test`）
+- 回归测试：`tests/topo/topology_test.cpp`（ctest 名称：`axiom_topology_test`）
 - 阶段进度与缺口：`docs/plan/AxiomKernel_当前开发进度.md`（重点看 7.2）
 - 功能需求对照：`docs/plan/AxiomKernel_几何引擎功能需求文档.md`（Topo 章节）
 

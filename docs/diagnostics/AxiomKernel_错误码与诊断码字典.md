@@ -407,6 +407,11 @@
 | `AXM-BOOL-D-0011` | 布尔切分/imprint 已应用（按交线段切分矩形面，`kBoolImprintSegmentApplied`） |
 | `AXM-BOOL-D-0012` | 布尔分类阶段完成（占位：分类统计，`kBoolClassificationCompleted`） |
 | `AXM-BOOL-D-0013` | 布尔重建阶段完成（占位：Strict 校验摘要，`kBoolRebuildCompleted`） |
+| `AXM-BOOL-D-0014` | 布尔切分阶段开始（imprint/split/trim 入口，`kBoolStageSplit`） |
+| `AXM-BOOL-D-0015` | 布尔分类阶段开始（cell/face classification 入口，`kBoolStageClassify`） |
+| `AXM-BOOL-D-0016` | 布尔重建阶段开始（shell rebuild/stitch/merge 入口，`kBoolStageRebuild`） |
+| `AXM-BOOL-D-0017` | 布尔验证阶段开始（Strict/Standard validation 入口，`kBoolStageValidate`） |
+| `AXM-BOOL-D-0018` | 布尔修复阶段开始（auto_repair/heal 入口，`kBoolStageRepair`） |
 
 ## 9.2 `HEAL` 诊断码
 

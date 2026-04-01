@@ -33,11 +33,11 @@ description: Develop and harden AxiomKernel OpsCore (primitives/sweep/boolean/mo
 - 验证/修复：`include/axiom/heal/heal_services.h` + `src/heal/heal_services.cpp`
 - IO 元数据（kind/origin/axis/params）：`src/io/io_service.cpp`
 - 关键回归测试（ctest 名称）：
-  - `tests/ops_heal_test.cpp`（`axiom_ops_heal_test`）
-  - `tests/boolean_workflow_test.cpp`（`axiom_boolean_workflow_test`）
-  - `tests/boolean_prep_test.cpp`（`axiom_boolean_prep_test`）
-  - `tests/query_eval_test.cpp`（`axiom_query_eval_test`）
-  - `tests/smoke_test.cpp`（`axiom_smoke_test`）
+  - `tests/ops/ops_heal_test.cpp`（`axiom_ops_heal_test`）
+  - `tests/ops/boolean_workflow_test.cpp`（`axiom_boolean_workflow_test`）
+  - `tests/ops/boolean_prep_test.cpp`（`axiom_boolean_prep_test`）
+  - `tests/eval/query_eval_test.cpp`（`axiom_query_eval_test`）
+  - `tests/sdk/smoke_test.cpp`（`axiom_smoke_test`）
 
 ## 标准工作流（按顺序执行）
 

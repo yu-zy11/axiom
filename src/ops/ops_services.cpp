@@ -1756,16 +1756,51 @@ Result<BodyId> SweepService::extrude(const ProfileRef& profile, const Vec3& dire
     record.rep_kind = RepKind::ExactBRep;
     record.label = "extrude:" + profile.label;
     const auto dir = detail::normalize(direction);
-    const auto p0 = Point3{0.0, 0.0, 0.0};
-    const auto p1 = detail::add_point_vec(p0, detail::scale(dir, distance));
-    // minimal profile extent: unit square around origin
-    const auto minx = std::min(p0.x, p1.x) - 0.5;
-    const auto maxx = std::max(p0.x, p1.x) + 0.5;
-    const auto miny = std::min(p0.y, p1.y) - 0.5;
-    const auto maxy = std::max(p0.y, p1.y) + 0.5;
-    const auto minz = std::min(p0.z, p1.z) - 0.5;
-    const auto maxz = std::max(p0.z, p1.z) + 0.5;
-    record.bbox = detail::make_bbox({minx, miny, minz}, {maxx, maxy, maxz});
+    record.axis = dir;
+    record.b = distance;
+    if (!profile.polygon_xyz.empty()) {
+        if (profile.polygon_xyz.size() < 3) {
+            return detail::invalid_input_result<BodyId>(
+                *state_, diag_codes::kCoreParameterOutOfRange,
+                "拉伸失败：polygon 轮廓点数不足（至少 3 个点）", "拉伸失败");
+        }
+        BoundingBox bbox {};
+        auto extend = [&](const Point3& p) {
+            if (!bbox.is_valid) {
+                bbox.min = p;
+                bbox.max = p;
+                bbox.is_valid = true;
+                return;
+            }
+            bbox.min.x = std::min(bbox.min.x, p.x);
+            bbox.min.y = std::min(bbox.min.y, p.y);
+            bbox.min.z = std::min(bbox.min.z, p.z);
+            bbox.max.x = std::max(bbox.max.x, p.x);
+            bbox.max.y = std::max(bbox.max.y, p.y);
+            bbox.max.z = std::max(bbox.max.z, p.z);
+        };
+        for (const auto& p : profile.polygon_xyz) {
+            extend(p);
+            extend(detail::add_point_vec(p, detail::scale(dir, distance)));
+        }
+        if (!bbox.is_valid) {
+            return detail::invalid_input_result<BodyId>(
+                *state_, diag_codes::kCoreParameterOutOfRange,
+                "拉伸失败：polygon 轮廓点非法，无法形成有效包围盒", "拉伸失败");
+        }
+        record.bbox = bbox;
+    } else {
+        const auto p0 = Point3{0.0, 0.0, 0.0};
+        const auto p1 = detail::add_point_vec(p0, detail::scale(dir, distance));
+        // minimal profile extent: unit square around origin
+        const auto minx = std::min(p0.x, p1.x) - 0.5;
+        const auto maxx = std::max(p0.x, p1.x) + 0.5;
+        const auto miny = std::min(p0.y, p1.y) - 0.5;
+        const auto maxy = std::max(p0.y, p1.y) + 0.5;
+        const auto minz = std::min(p0.z, p1.z) - 0.5;
+        const auto maxz = std::max(p0.z, p1.z) + 0.5;
+        record.bbox = detail::make_bbox({minx, miny, minz}, {maxx, maxy, maxz});
+    }
     return ok_result(make_body(state_, record, "已完成拉伸"), state_->create_diagnostic("已完成拉伸"));
 }
 
@@ -1934,6 +1969,9 @@ Result<OpReport> BooleanService::run(BooleanOp op, BodyId lhs, BodyId rhs, const
     const auto intersection_segments = clip_intersection_lines_to_face_overlap(*state_, intersection_curves);
     append_boolean_intersection_segment_issue(*state_, diag, lhs, rhs, intersection_segments);
     if (diag.value != 0 && !intersection_segments.empty()) {
+        append_boolean_stage_issue(*state_, diag, diag_codes::kBoolStageSplit,
+                                  "布尔切分阶段开始：已准备执行 imprint/split 占位路径",
+                                  {lhs.value, rhs.value, output.value});
         std::vector<CurveId> curves;
         curves.reserve(intersection_segments.size());
         for (const auto& seg : intersection_segments) {
@@ -2033,6 +2071,9 @@ Result<OpReport> BooleanService::run(BooleanOp op, BodyId lhs, BodyId rhs, const
                                {lhs.value, rhs.value, output.value});
 
     if (diag.value != 0) {
+        append_boolean_stage_issue(*state_, diag, diag_codes::kBoolStageClassify,
+                                  "布尔分类阶段开始：将对输出面执行最小可解释分类统计",
+                                  {lhs.value, rhs.value, output.value});
         // Stage 2 classification v1: point classification against analytic RHS primitive when available.
         auto point_in_cylinder = [&](const detail::BodyRecord& cyl, const Point3& p, Scalar eps) -> int {
             // returns: 1 inside, 0 on, -1 outside
@@ -2173,6 +2214,9 @@ Result<OpReport> BooleanService::run(BooleanOp op, BodyId lhs, BodyId rhs, const
         bool subtract_shell_rebuild_rolled_back = false;
         if (op == BooleanOp::Subtract && prep.overlap_candidates > 0 && out_it != state_->bodies.end() &&
             !out_it->second.shells.empty() && !face_cls.empty()) {
+            append_boolean_stage_issue(*state_, diag, diag_codes::kBoolStageRebuild,
+                                      "布尔重建阶段开始：将尝试按分类结果裁剪/重建输出壳（占位策略）",
+                                      {lhs.value, rhs.value, output.value});
             const auto shell_id = out_it->second.shells.front();
             const auto shell_it = state_->shells.find(shell_id.value);
             if (shell_it != state_->shells.end()) {
@@ -2205,9 +2249,15 @@ Result<OpReport> BooleanService::run(BooleanOp op, BodyId lhs, BodyId rhs, const
         }
 
         ValidationService validation {state_};
+        append_boolean_stage_issue(*state_, diag, diag_codes::kBoolStageValidate,
+                                  "布尔验证阶段开始：将对输出执行 Strict 拓扑验证",
+                                  {lhs.value, rhs.value, output.value});
         auto strict_result = validation.validate_topology(output, ValidationMode::Strict);
         bool auto_repair_used = false;
         if (strict_result.status != StatusCode::Ok && boolean_options.auto_repair) {
+            append_boolean_stage_issue(*state_, diag, diag_codes::kBoolStageRepair,
+                                      "布尔修复阶段开始：Strict 未通过，将尝试 auto_repair(Safe)",
+                                      {lhs.value, rhs.value, output.value});
             RepairService repair {state_};
             const auto repaired = repair.auto_repair(output, RepairMode::Safe);
             if (repaired.status == StatusCode::Ok && repaired.value.has_value()) {

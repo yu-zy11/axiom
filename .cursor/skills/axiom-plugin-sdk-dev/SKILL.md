@@ -15,7 +15,7 @@ description: Develop and harden AxiomKernel Plugin/SDK surface (Kernel facade st
 
 - SDK：`include/axiom/sdk/kernel.h` + `src/sdk/kernel.cpp`
 - Plugin：`include/axiom/plugin/plugin_registry.h` + `src/plugin/plugin_registry.cpp`
-- 关键回归：`tests/smoke_test.cpp`、`tests/diagnostics_test.cpp`（以及任何新增的 E2E 测试）
+- 关键回归：`tests/sdk/smoke_test.cpp`、`tests/diag/diagnostics_test.cpp`（以及任何新增的 E2E 测试）
 
 ## 硬规则（必须遵守）
 

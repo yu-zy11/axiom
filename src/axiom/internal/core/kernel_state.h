@@ -333,3 +333,4 @@ inline bool has_shell(const KernelState& state, ShellId shell_id) {
 }
 
 }  // namespace axiom::detail
+

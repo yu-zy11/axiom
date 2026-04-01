@@ -31,8 +31,8 @@ description: Develop and harden AxiomKernel RepCore (industrial tessellation/tri
 - IO 对 `rep` 的依赖（glTF/STL 导出会调用 `brep_to_mesh`）
   - `src/io/io_service.cpp`
 - 关键回归测试
-  - `tests/representation_io_test.cpp`
-  - 视改动范围可能影响 `tests/io_workflow_test.cpp`（glTF 输出）
+  - `tests/rep/representation_io_test.cpp`
+  - 视改动范围可能影响 `tests/io/io_workflow_test.cpp`（glTF 输出）
 
 ## 工业级三角化：实现策略（默认路线）
 
