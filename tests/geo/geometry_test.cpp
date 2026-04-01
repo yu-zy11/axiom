@@ -1110,8 +1110,25 @@ int main() {
             std::cerr << "unexpected plane trim eval z\n";
             return 1;
         }
+        // UV 多边形 trim：closest_uv / closest_point 应在 3D 上回到平面（z≈0），参数在盒内。
+        {
+            const axiom::Point3 q {1.0, 0.5, 2.5};
+            auto uv_c = kernel.surface_service().closest_uv(*tr.value, q);
+            if (uv_c.status != axiom::StatusCode::Ok || !uv_c.value.has_value() ||
+                uv_c.value->first < 0.0 || uv_c.value->first > 2.0 || uv_c.value->second < 0.0 ||
+                uv_c.value->second > 2.0) {
+                std::cerr << "unexpected polygon-trim closest_uv domain\n";
+                return 1;
+            }
+            auto p_near = kernel.surface_service().closest_point(*tr.value, q);
+            if (p_near.status != axiom::StatusCode::Ok || !p_near.value.has_value() ||
+                !approx(p_near.value->z, 0.0, 1e-5)) {
+                std::cerr << "unexpected polygon-trim closest_point z\n";
+                return 1;
+            }
+        }
         auto bad = kernel.surfaces().make_trimmed_polygon(*pl.value, 0.0, 1.0, 0.0, 1.0,
-                                                            std::span<const axiom::Point2>(tri.data(), 2));
+                                                          std::span<const axiom::Point2>(tri.data(), 2));
         if (bad.status != axiom::StatusCode::InvalidInput) {
             std::cerr << "expected invalid trim polygon with <3 points\n";
             return 1;

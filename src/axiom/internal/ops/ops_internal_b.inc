@@ -433,6 +433,12 @@ void set_boolean_diagnostic_stage(Issue& issue, std::string_view code) {
         issue.stage = "bool.repair";
     } else if (code == kBoolStrictValidationResidual) {
         issue.stage = "bool.validate.residual";
+    } else if (code == kBoolInvalidInput) {
+        issue.stage = "bool.input";
+    } else if (code == kBoolIntersectionFailure) {
+        issue.stage = "bool.abort.intersect";
+    } else if (code == kBoolClassificationFailure) {
+        issue.stage = "bool.abort.classify";
     }
 }
 

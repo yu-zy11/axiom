@@ -67,6 +67,7 @@ static std::vector<std::string> fixed_service_names() {
       "plugin.export",
       "plugin.repair",
       "plugin.curve",
+      "plugin.verify_curve",
       "sdk.kernel"
   };
 }

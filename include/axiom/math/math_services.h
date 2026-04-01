@@ -130,8 +130,10 @@ public:
     Scalar normalize_angular_request(Scalar requested) const;
     Scalar resolve_linear_for_scale(Scalar requested, Scalar model_scale) const;
     Scalar resolve_angular_for_scale(Scalar requested, Scalar model_scale) const;
+    /// 三值比较：小于为 -1，相等为 0，大于为 +1。若 lhs、rhs 或 tolerance 非有限，返回 0。
     int compare_linear(Scalar lhs, Scalar rhs, Scalar tolerance) const;
     int compare_angular(Scalar lhs, Scalar rhs, Scalar tolerance) const;
+    /// lhs 与 rhs 在 tolerance 内视为相等；任一参数非有限或 tolerance 非正有限时返回 false。
     bool within_linear(Scalar lhs, Scalar rhs, Scalar tolerance) const;
     bool within_angular(Scalar lhs, Scalar rhs, Scalar tolerance) const;
     bool is_valid_policy(const TolerancePolicy& policy) const;

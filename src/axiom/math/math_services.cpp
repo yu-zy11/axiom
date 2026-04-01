@@ -44,7 +44,18 @@ Scalar LinearAlgebraService::norm(const Vec3 &value) const {
 }
 
 Scalar LinearAlgebraService::squared_norm(const Vec3 &value) const {
-  return value.x * value.x + value.y * value.y + value.z * value.z;
+  if (!detail::finite_vec3(value)) {
+    return std::numeric_limits<Scalar>::infinity();
+  }
+  // 用 long double 累加平方，降低大尺度坐标下的中间溢出相对 `x*x+y*y+z*z` 直接按 double 累加的风险。
+  const long double sx = static_cast<long double>(value.x);
+  const long double sy = static_cast<long double>(value.y);
+  const long double sz = static_cast<long double>(value.z);
+  const long double s2 = sx * sx + sy * sy + sz * sz;
+  if (!std::isfinite(static_cast<double>(s2))) {
+    return std::numeric_limits<Scalar>::infinity();
+  }
+  return static_cast<Scalar>(s2);
 }
 
 Vec3 LinearAlgebraService::normalize(const Vec3 &value) const {
@@ -452,6 +463,10 @@ bool PredicateService::bbox_center_in(const BoundingBox &inner,
 
 bool PredicateService::range1d_overlap(const Range1D &lhs, const Range1D &rhs,
                                        Scalar tolerance) const {
+  if (!std::isfinite(lhs.min) || !std::isfinite(lhs.max) || !std::isfinite(rhs.min) ||
+      !std::isfinite(rhs.max) || !std::isfinite(tolerance)) {
+    return false;
+  }
   const auto tol = std::max(tolerance, 0.0);
   return (lhs.max + tol >= rhs.min) && (rhs.max + tol >= lhs.min);
 }
@@ -779,6 +794,9 @@ Scalar ToleranceService::resolve_angular_for_scale(Scalar requested,
 
 int ToleranceService::compare_linear(Scalar lhs, Scalar rhs,
                                      Scalar tolerance) const {
+  if (!std::isfinite(lhs) || !std::isfinite(rhs)) {
+    return 0;
+  }
   if (within_linear(lhs, rhs, tolerance)) {
     return 0;
   }
@@ -787,6 +805,9 @@ int ToleranceService::compare_linear(Scalar lhs, Scalar rhs,
 
 int ToleranceService::compare_angular(Scalar lhs, Scalar rhs,
                                       Scalar tolerance) const {
+  if (!std::isfinite(lhs) || !std::isfinite(rhs)) {
+    return 0;
+  }
   if (within_angular(lhs, rhs, tolerance)) {
     return 0;
   }

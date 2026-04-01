@@ -429,6 +429,8 @@
 | `AXM-BOOL-D-0017` | 布尔验证阶段开始（Strict/Standard validation 入口，`kBoolStageValidate`） |
 | `AXM-BOOL-D-0018` | 布尔修复阶段开始（auto_repair/heal 入口，`kBoolStageRepair`） |
 
+与 **`AXM-BOOL-E-*` 错误码**绑定的布尔早期失败路径会在 `Issue.stage` 中写入可聚合阶段标签（与 `export_report_json` 一致）：`bool.input`（输入体无效，`AXM-BOOL-E-0001`）、`bool.abort.intersect`（交集在包围盒层面不相交，`AXM-BOOL-E-0003`）、`bool.abort.classify`（如减运算右包左无法表达空结果，`AXM-BOOL-E-0005`）。Strict 残留告警见 `bool.validate.residual`（`AXM-BOOL-W-0003`）。
+
 ## 9.2 `HEAL` 诊断码
 
 | 诊断码 | 含义 |

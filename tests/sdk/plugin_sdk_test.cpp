@@ -730,6 +730,11 @@ int main() {
             std::cerr << "has_service_plugin_curve unexpected\n";
             return 1;
         }
+        auto has_pvc = k_cv.has_service_plugin_verify_curve();
+        if (has_pvc.status != axiom::StatusCode::Ok || !has_pvc.value.has_value() || !*has_pvc.value) {
+            std::cerr << "has_service_plugin_verify_curve unexpected\n";
+            return 1;
+        }
         axiom::PluginCurveDesc empty_desc {};
         auto miss_cv = k_cv.plugin_create_curve("no_such_curve_plugin_xyz", empty_desc);
         if (miss_cv.status != axiom::StatusCode::InvalidInput || miss_cv.warnings.empty() ||
@@ -782,6 +787,20 @@ int main() {
         auto got_cv = k_cv.plugin_create_curve("kernel_line_curve_sdk_test", d);
         if (got_cv.status != axiom::StatusCode::Ok || !got_cv.value.has_value() || got_cv.value->value == 0) {
             std::cerr << "plugin_create_curve should return valid curve id\n";
+            return 1;
+        }
+
+        auto via_reg = k_cv.plugins().invoke_registered_curve("kernel_line_curve_sdk_test", axiom::PluginCurveDesc {});
+        if (via_reg.status != axiom::StatusCode::Ok || !via_reg.value.has_value()) {
+            std::cerr << "invoke_registered_curve should succeed for line plugin\n";
+            return 1;
+        }
+        if (k_cv.verify_after_plugin_curve(*via_reg.value).status != axiom::StatusCode::Ok) {
+            std::cerr << "verify_after_plugin_curve should pass for registry-created line\n";
+            return 1;
+        }
+        if (k_cv.verify_after_plugin_curve(axiom::CurveId {999999999ull}).status == axiom::StatusCode::Ok) {
+            std::cerr << "verify_after_plugin_curve should fail for unknown curve id\n";
             return 1;
         }
 

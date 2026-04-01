@@ -242,6 +242,9 @@ struct KernelState {
     std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> eval_body_bindings;
     PluginRegistry plugin_registry;
 
+    /// 拓扑只读查询累计次数（`TopologyQueryService` 顶层调用；嵌套查询通过 thread_local 深度只计一次）。
+    mutable std::uint64_t topology_query_op_count{0};
+
     std::uint64_t allocate_id() {
         return next_id++;
     }

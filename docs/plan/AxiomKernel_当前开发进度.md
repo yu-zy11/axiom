@@ -2,7 +2,7 @@
 
 本文档用于记录 `AxiomKernel` 当前阶段的实际开发状态、已完成内容、当前风险和下一阶段执行重点。
 
-**相关文档（计划层）**：[主开发计划与阶段路线图](AxiomKernel_主开发计划与阶段路线图.md)（总阶段与退出标准）、[MVP 实施蓝图](AxiomKernel_MVP实施蓝图.md)（交付拆解）、[几何引擎功能需求文档](AxiomKernel_几何引擎功能需求文档.md)（需求对照见本文 §3.3）；工程约定见仓库根目录 `AGENTS.md`。
+**相关文档（计划层）**：[主开发计划与阶段路线图](AxiomKernel_主开发计划与阶段路线图.md)（总阶段与退出标准）、[MVP 实施蓝图](AxiomKernel_MVP实施蓝图.md)（交付拆解）、[几何引擎功能需求文档](AxiomKernel_几何引擎功能需求文档.md)（需求对照见本文 §3.3）、[近期迭代与 Backlog](AxiomKernel_近期迭代与Backlog.md)（近期执行项）、[变更纪要](AxiomKernel_变更纪要.md)（批次历史摘要）；工程约定见仓库根目录 `AGENTS.md`；文档导航见 [`docs/README.md`](../README.md)；结构与文档治理问题见 [`docs/architecture/AxiomKernel_项目结构与文档治理建议.md`](../architecture/AxiomKernel_项目结构与文档治理建议.md)。
 
 ## 1. 当前阶段
 
@@ -67,6 +67,7 @@
 - `axiom_topology_test`
 - `axiom_representation_io_test`
 - `axiom_ops_heal_test`
+- `axiom_heal_test`
 - `axiom_query_eval_test`
 - `axiom_boolean_prep_test`
 - `axiom_math_services_test`
@@ -123,7 +124,7 @@
 - 插件仍是骨架实现，求值图已具备基础状态能力但仍远未达到参数化求解级
 - 拓扑-BRep 桥接仍较弱；布尔输出已可出现切分后面数变化等原型拓扑，但稳定工业级重建与全几何类型覆盖仍不足
 
-### 3.2.0 证据口径说明（文档=代码真实状态）
+### 证据口径说明（文档=代码真实状态）
 
 本节及后续“完成度判断”以 **代码与测试为证据**，并遵循硬规则：**接口存在 ≠ 完成**。判定口径：
 
@@ -140,10 +141,10 @@
 - **rep**：`include/axiom/rep/representation_conversion_service.h`、`src/axiom/rep/representation_conversion_service.cpp`、`tests/rep/representation_io_test.cpp`
 - **eval**：`include/axiom/eval/eval_services.h`、`src/axiom/eval/eval_services.cpp`、`tests/eval/query_eval_test.cpp`
 - **ops**：`include/axiom/ops/ops_services.h`、`src/axiom/ops/ops_services.cpp`、`tests/ops/boolean_workflow_test.cpp`、`tests/ops/boolean_prep_test.cpp`（修改/查询等亦在本实现中）
-- **heal**：`include/axiom/heal/heal_services.h`、`src/axiom/heal/heal_services.cpp`；专项回归见 `tests/ops/ops_heal_test.cpp`（与验证/修复工作流同测）
+- **heal**：`include/axiom/heal/heal_services.h`、`src/axiom/heal/heal_services.cpp`、`tests/heal/heal_test.cpp`；交叉工作流回归仍见 `tests/ops/ops_heal_test.cpp`
 - **math**：`include/axiom/math/math_services.h`、`src/axiom/math/math_services.cpp`、`tests/math/math_services_test.cpp`
 
-### 3.2.1 各模块完成度一览（架构快照，相对「工业几何引擎」）
+### 各模块完成度一览（架构快照，相对「工业几何引擎」）
 
 说明：下表 **不等于接口是否齐全**，而是指在工业场景下可用的**算法深度、容差与可诊断闭环**是否到位。`Stage2 内可用度` 表示当前 Stage 1.5/2 过渡目标下支撑持续开发的便利程度。
 
@@ -154,19 +155,19 @@
 | **geo** | 中 | 高 | `axiom_geometry_test` | 高质量 B-Spline/NURBS、曲率与鲁棒最近点、真实 trim 语义 |
 | **topo** | 中 | 高 | `axiom_topology_test` | 规则集仍不完整；但 **trim bridge（UV 闭合/面级 trim 一致性）与 Strict 闭合性（open/non-manifold）已进入回归**，离工业闭环仍有差距 |
 | **rep** | 中 | 高 | `axiom_representation_io_test` | 全几何类型的误差预算三角化、工业 round-trip、显示/UV seam |
-| **io** | 中偏低 | 高 | `axiom_io_workflow_test` | **mesh 格式导入**（如 STL/glTF）、更多互操作格式；**严格导出与输出验证报告**闭环（`Kernel` 与 `IOService` 能力报告已对齐并由 smoke 固化） |
+| **io** | 中 | 高 | `axiom_io_workflow_test`、`axiom_smoke_test` | **工业级全格式**（标准 IGES/STEP 实体、通用 3MF 等）仍缺；**严格导出与侧车报告**已有首批闭环（见 §3.2.2 io）；批处理/失败路径诊断覆盖仍可加强 |
 | **ops** | 低 | **极高** | `axiom_boolean_workflow_test`、`axiom_boolean_prep_test`、`axiom_ops_heal_test` | **布尔真闭环**、特征建模真实拓扑、圆角倒角算法 |
-| **heal** | 中偏低 | 高 | `axiom_ops_heal_test`、`axiom_io_workflow_test` | 自交、流形性完备、容差冲突与小特征工业修复与回放 |
+| **heal** | 中偏低 | 高 | `axiom_heal_test`、`axiom_ops_heal_test`、`axiom_io_workflow_test` | 自交、流形性完备、容差冲突与小特征工业修复与回放 |
 | **eval** | 中 | 高 | `axiom_query_eval_test` | 与真实建模/重建深度耦合、缓存与指标门禁 |
 | **diag** | 中偏高 | 中偏高 | `axiom_diagnostics_test` | 阶段化（BOOL/HEAL/IO）**全覆盖绑定**仍不足；但诊断检索/统计/JSON 导出与 related_entities 回流在回归中已相对扎实 |
 | **plugin & sdk** | 低～中偏低 | 高 | `axiom_smoke_test`、`axiom_plugin_sdk_test`、`axiom_diagnostics_test`（插件注册失败诊断） | **OS 级隔离/安全**仍未具备；动态加载与签名校验；长期兼容性策略需产品化 |
 
-### 3.2.2 模块完成度与不足（详细版，可转 backlog）
+### 模块完成度与不足（详细版，可转 backlog）
 
 说明：本节把“工业化差距”展开成**可执行缺口**。每条缺口建议具备 DoD：实现 + 诊断 + 回归（必要时含性能门禁）。
 
 - **core（Kernel/State/Result/Stores）**
-  - **已具备**：`Kernel` 门面、基础配置写入/查询、运行时 store 清理/重置、对象计数与能力报告框架；**`io_supported_formats` / `io_can_import_format` / `io_can_export_format` 已与 `IOService::detect_format`、`import_auto`、`export_auto` 对齐**（`gltf`/`stl` 仅导出、不导入），并由 `axiom_smoke_test` 回归
+  - **已具备**：`Kernel` 门面、基础配置写入/查询、运行时 store 清理/重置、对象计数与能力报告框架；**`io_supported_formats` / `io_can_import_format` / `io_can_export_format` 已与 `IOService::detect_format`、`import_auto`、`export_auto` 对齐**，并由 `axiom_smoke_test` 回归
   - **主要不足**：
     - **工程化不变量门禁**：reset/clear 后的缓存/索引一致性、跨模块可观测性仍需更系统回归
   - **建议测试入口**：`axiom_smoke_test`（能力报告与导入/导出能力断言）
@@ -208,10 +209,10 @@
   - **建议测试入口**：`axiom_representation_io_test`（报告字段与密度单调性）+ `axiom_io_workflow_test`（导出链路不回归）
 
 - **io（STEP/AXMJSON/glTF/STL + workflow）**
-  - **已具备**：STEP/AXMJSON 导入导出主链路；glTF/STL 导出最小实现；导入后 validation/auto-repair 与诊断回流；**`Kernel` 格式能力报告与 `IOService::detect_format` / `import_auto` / `export_auto` 已对齐**（`axiom_smoke_test` 固化）
+  - **已具备**：STEP/AXMJSON 导入导出主链路；**STL/glTF 导入**（Axiom 导出子集/嵌入数据可解析）；**IGES/BREP/OBJ/3MF** 的 **Axiom 元数据或自描述 ZIP 子集**互操作（非完整工业标准文件）；网格导出 **`ExportOptions::compatibility_mode` 严格门控** + 可选 **`write_mesh_validation_report` JSON 侧车**（`merge` 回流导出诊断）；**`Kernel` 格式能力报告与 `detect_format` / `import_auto` / `export_auto` 已对齐**（`axiom_smoke_test`）；`io_workflow` 含往返与**空路径/未知扩展名**失败诊断断言
   - **主要不足**：
-    - **导入侧互操作**：glTF/STL 导入、IGES/BREP 等互操作缺口
-    - **严格/兼容模式与输出验证报告**：面向工业交付的导出策略与“输出验证闭环”缺失
+    - **标准实体级互操作**：标准 IGES/STEP 实体交换、通用 3MF/OBJ 工业阅读器仍不足
+    - **工业交付深化**：更细的导出策略矩阵、侧车字段与 CI 门禁、批处理失败聚合
   - **建议测试入口**：`axiom_io_workflow_test` + `axiom_diagnostics_test`
 
 - **ops（Primitive/Sweep/Boolean/Modify/Blend/Query）**
@@ -223,11 +224,11 @@
   - **建议测试入口**：`axiom_boolean_workflow_test`、`axiom_boolean_prep_test`、`axiom_ops_heal_test`
 
 - **heal（Validation/Repair）**
-  - **已具备**：Strict 拓扑与来源一致性校验、导入后验证与可选自动修复语义、部分 repair 策略与 related_entities 回流；**网格自交分析**（`mesh_self_intersection` 等内部实现）与 **`validate_self_intersection` / 批量路径**已接入工作流并有 `axiom_ops_heal_test` 覆盖（仍为可扩展原型，非工业级完备）
+  - **已具备**：Strict 拓扑与来源一致性校验、导入后验证与可选自动修复语义、部分 repair 策略与 related_entities 回流；**网格自交分析**（`mesh_self_intersection` 等内部实现）与 **`validate_self_intersection` / 批量路径**已接入工作流，并由 `axiom_heal_test` + `axiom_ops_heal_test` 共同覆盖（仍为可扩展原型，非工业级完备）
   - **主要不足**：
     - **工业验证项仍不完整**：体/壳级自交与 BRep 全场景、流形性完备规则、容差冲突、参数域异常等仍需系统化
     - **工业修复策略缺失**：小特征/近重复/法向与退化处理策略与回放机制不足
-  - **建议测试入口**：`axiom_ops_heal_test`、`axiom_io_workflow_test`
+  - **建议测试入口**：`axiom_heal_test`、`axiom_ops_heal_test`、`axiom_io_workflow_test`
 
 - **eval（EvalGraph）**
   - **已具备**：循环保护、失效传播、重算计数与治理接口，已有专项回归
@@ -241,9 +242,9 @@
 
 ## 3.3 对照《几何引擎功能需求文档》的差距清单（按模块）
 
-说明：本节用“已完成 / 部分完成 / 未开始”对齐 `docs/plan/AxiomKernel_几何引擎功能需求文档.md` 的一级需求模块，便于下一批迭代拆解。这里的“已完成”指**具备可回归的最小可用链路**，不等于工业级。
+说明：本节用“已完成 / 部分完成 / 未开始”对齐 `docs/plan/AxiomKernel_几何引擎功能需求文档.md` 的一级需求模块，便于下一批迭代拆解。这里的“已完成”指**具备可回归的最小可用链路**，不等于工业级。为避免与本文自身章节号冲突，以下标题统一写作“需求 7.x”。
 
-### 7.1 几何基础对象管理（GeoCore）
+### 需求 7.1 几何基础对象管理（GeoCore）
 
 - **曲线类型**
   - **已完成（基础可用）**：直线、线段、圆、椭圆、抛物线、双曲线、Bezier、BSpline（近似）、NURBS（近似）、复合曲线 polyline（占位）
@@ -257,7 +258,7 @@
   - **已完成（基础可用）**：eval / bbox / domain（含 analytic 的 ±inf 语义）、closest_point / closest_parameter / closest_uv（含 domain 收敛与角度归一化）
   - **未开始/缺失**：曲面曲率高质量实现、稳定最近点（迭代/鲁棒收敛）、参数域边界与修剪（trim）语义
 
-### 7.2 拓扑结构管理（TopoCore）
+### 需求 7.2 拓扑结构管理（TopoCore）
 
 - **拓扑元素与关系**
   - **已完成（基础可用）**：Vertex/Edge/Coedge/Loop/Face/Shell/Body；外环与内环；基础反向邻接索引；来源追踪的基础查询
@@ -267,7 +268,7 @@
   - **已完成（基础可用）**：begin/commit/rollback；删除面/壳/体支持；回滚后索引恢复回归覆盖
   - **未开始/缺失**：更细粒度写集/读集、并发/隔离级别定义、事务可观测性（更系统的审计/统计）
 
-### 7.3 基础建模能力（OpsCore/TopoCore/GeoCore）
+### 需求 7.3 基础建模能力（OpsCore/TopoCore/GeoCore）
 
 - **基础体构造**
   - **部分完成**：`PrimitiveService` 已提供 `box/wedge/sphere/cylinder/cone/torus` 等；物化层对部分 primitive 可走 **解析壳路径**（如 `Wedge` 专用壳、`Cylinder` 棱柱壳等），其余仍常退回 **bbox 壳** 以满足 Strict/闭环回归；派生结果体仍大量依赖最小物化骨架、`source_*` 推导与来源壳克隆
@@ -276,57 +277,57 @@
   - **部分完成（接口/占位）**：`SweepService` 等接口存在，部分路径产出派生体与工作流语义
   - **未开始/缺失（工业化）**：拉伸/旋转/扫掠/放样/加厚等 **真实几何求交 + 拓扑构造 + 失败可诊断** 的完整实现
 
-### 7.4 布尔运算能力（OpsCore）
+### 需求 7.4 布尔运算能力（OpsCore）
 
 - **部分完成**：布尔前置、面级候选、解析交线/交线段、交线入库、矩形面 imprint 原型、近似求交与占位语义、来源传播；**阶段化诊断与 `Issue.stage` 已在关键路径绑定**（见 `axiom_boolean_workflow_test`），整体仍为过渡实现
 - **未开始/缺失（工业闭环）**：候选对→精确求交→切分→分类→重建→验证/修复的**完整**闭环；通用 imprint/trim/merge；**全部**失败分支的阶段化诊断门禁
 
-### 7.5 几何修改能力（OpsCore/HealCore）
+### 需求 7.5 几何修改能力（OpsCore/HealCore）
 
 - **部分完成**：偏置/抽壳/面替换/删除面补面等接口语义、失败/告警路径与来源传播已有基础回归
 - **未开始/缺失**：真实几何修改算法、局部重建、稳定的失败分类（自交/薄壁/高曲率/容差冲突）与可回放修复记录
 
-### 7.6 圆角与倒角（OpsCore）
+### 需求 7.6 圆角与倒角（OpsCore）
 
 - **部分完成**：接口与非法输入保护、占位语义与基础诊断
 - **未开始/缺失**：真实圆角/倒角几何生成（含角区）、变半径、失败原因细分与回归数据集
 
-### 7.7 查询与分析（Query/Eval/Rep）
+### 需求 7.7 查询与分析（Query/Eval/Rep）
 
 - **部分完成**：bbox、点分类、部分距离/近似求交、截面（偏占位）与批量接口雏形；`QueryService::mass_properties` 等已存在，但对多数体仍偏 **bbox 近似**，非工业级物理属性；**基本体**（盒/楔/球/柱/锥/环）已走统一解析路径；**Sweep** 质量口径集中到 `try_sweep_body_mass_properties` 并与查询共用；**布尔**结果体在 `BodyRecord` 中写入 **`has_boolean_op`/`boolean_op`**（`BooleanService::run`）后，`mass_properties` 可区分 **Union/Split** 与 **Subtract/Intersect**：**Intersect**+双盒且结果 bbox≈**AABB 交** 时按交叠长方体解析；**Subtract**+**LhsContainsRhs**+双盒时 **体积差** 与 **质心/惯性差分**（表面积为外+内占位和）；**LhsContainsRhs/RhsContainsLhs** 下取大包络体 **仅 Union/Split**（无 `has_boolean_op` 时保留原兼容启发式）；其余 Disjoint 并集相加、Touching/Overlapping 体积一致性、左体减、Sweep 操作数等规则同前；**Modified** `replace_face` 包围盒不变时继承来源；`axiom_ops_heal_test` 含 **相交体积**、**嵌套减**、面接触并集、包含并集、extrude+盒、`replace_face` 继承
 - **未开始/缺失**：长度/面积/体积/重心/惯性矩的工业级正确性；曲率/厚度分析；稳定的曲线-曲面/曲面-曲面求交
 
-### 7.8 验证与修复（HealCore/Validation）
+### 需求 7.8 验证与修复（HealCore/Validation）
 
-- **部分完成**：拓扑一致性/来源一致性/闭合性 Strict 校验；导入后验证与可选自动修复语义；缝合结果最小物化；**自交校验路径**（含网格自交分析与 `validate_self_intersection` 等）与 `axiom_ops_heal_test` 回归
+- **部分完成**：拓扑一致性/来源一致性/闭合性 Strict 校验；导入后验证与可选自动修复语义；缝合结果最小物化；**自交校验路径**（含网格自交分析与 `validate_self_intersection` 等）与 `axiom_heal_test` / `axiom_ops_heal_test` 回归
 - **未开始/缺失**：自交/流形性在 **BRep 全类型与大数据集**上的工业级完备规则；容差冲突检查、参数域异常检查；小边/小面/法向/近重复归并等工业化修复策略与回放机制
 
-### 7.9 数据交换（IO）
+### 需求 7.9 数据交换（IO）
 
-- **部分完成**：STEP/AXMJSON 导入导出主链路雏形、导入后自动验证与诊断回传；glTF/STL **导出**已具备最小实现（基于当前网格记录写出）
-- **未开始/缺失**：IGES/BREP 完整互操作；STL/glTF **导入**；第二阶段 OBJ/3MF 等；导出严格/兼容模式与“输出验证报告”闭环（**Kernel 与 IOService 的格式能力报告已与 `import_auto`/`export_auto`/`detect_format` 对齐**，见 `axiom_smoke_test`）
+- **部分完成**：STEP/AXMJSON 导入导出主链路、导入后自动验证与诊断回传；**STL/glTF 导入导出**（网格/内嵌子集）；**IGES/BREP/OBJ/3MF** 的 Axiom 子集路径；**严格导出 + 可选网格验证侧车 JSON**；**Kernel 与 IOService 格式能力、`import_auto`/`export_auto`/`detect_format` 对齐**（`axiom_smoke_test`）
+- **未开始/缺失**：标准 **IGES/STEP 实体级**交换与工业级 **3MF/OBJ** 读写；导出策略与侧车字段的产品化矩阵与大数据集回归
 
-### 7.10 三角化与显示支撑（Rep）
+### 需求 7.10 三角化与显示支撑（Rep）
 
 - **部分完成**：三角化语义与参数校验、基础检查报告雏形；已开始具备（1）primitive 的解析三角化（可曲率敏感，受 chordal/angular options 影响）（2）有 owned topo 的派生体按 face 组装三角化 + 顶点焊接（3）tessellation cache 与 face tessellation cache（含失效清理）
 - **未开始/缺失**：更完整的曲率敏感细分（覆盖更多曲面/修剪面/高阶曲面）；更可靠的局部重三角化（patch 级误差控制与 seam/weld 规则）；显示级缓存/增量更新；纹理参数（UV seam/unwrap）等完整输出
 
-### 7.11 版本/事务/增量更新（Core/EvalGraph）
+### 需求 7.11 版本/事务/增量更新（Core/EvalGraph）
 
 - **部分完成**：版本号与事务、EvalGraph 基础失效传播/重算计数/循环依赖保护
 - **未开始/缺失**：结构共享策略细化、跨模块增量重算接入真实建模链路、缓存命中指标体系
 
-### 7.12 插件扩展（PluginSDK）
+### 需求 7.12 插件扩展（PluginSDK）
 
-- **部分完成**：`PluginRegistry` 注册与清单查询；**清单↔实现绑定**（`PluginManifest::implementation_type_name`：带实现注册时自动填充或校验与 `type_name()` 一致；按 `type_name` 注销实现时同步移除绑定清单）；**注销路径可诊断**（`unregister_*`；门面 **`unregister_plugin_*`**）；`PluginHostPolicy` 含 **`PluginSandboxLevel`**、容量与 API 版本等门禁；**`PluginApiVersionMatchMode`**；**`auto_validate_body_after_plugin_importer`** / **`auto_validate_body_before_plugin_exporter`** / **`auto_validate_body_after_plugin_repair`** / **`auto_verify_curve_after_plugin_curve`** 与门面 **`plugin_import_file`** / **`plugin_export_file`** / **`plugin_run_repair`** / **`plugin_create_curve`**、**`invoke_registered_importer`** / **`invoke_registered_exporter`** / **`invoke_registered_repair`** / **`invoke_registered_curve`**；`find_manifest` 未命中带 **`kPluginLoadFailure`**；能力发现 JSON 含 **`manifests`** 摘要；`validate_after_plugin_mutation`、`register_plugin_*` 诊断；`services_available` 含 **`plugin.import`**、**`plugin.export`**、**`plugin.repair`**、**`plugin.curve`**；示例与 `axiom_plugin_sdk_test` / smoke 回归
-- **未开始/缺失**：**进程外/OS 级隔离**、动态库加载与供应链安全（签名/沙箱）；**完整 SemVer 与多 ABI 并存**（`SameMajor`/`SameMinor` 已支持剥离 `-` 预发布与 `+` 构建元数据后再做核心版本比较；`Exact` 仍为整串相等；多 ABI 并存与完整 SemVer 语义仍不足）；非上述宿主封装路径（如直接 **`PluginRegistry::invoke_registered_*` 绕过 Kernel 校验策略**、或插件产出 **Body** 而未走 **`plugin_import_file` / `plugin_run_repair`** 等）仍依赖宿主显式 **`validate_after_plugin_mutation`** 或自行一致性检查
+- **部分完成**：`PluginRegistry` 注册与清单查询；**清单↔实现绑定**（`PluginManifest::implementation_type_name`：带实现注册时自动填充或校验与 `type_name()` 一致；按 `type_name` 注销实现时同步移除绑定清单）；**注销路径可诊断**（`unregister_*`；门面 **`unregister_plugin_*`**）；`PluginHostPolicy` 含 **`PluginSandboxLevel`**、容量与 API 版本等门禁；**`PluginApiVersionMatchMode`**；**`auto_validate_body_after_plugin_importer`** / **`auto_validate_body_before_plugin_exporter`** / **`auto_validate_body_after_plugin_repair`** / **`auto_verify_curve_after_plugin_curve`** 与门面 **`plugin_import_file`** / **`plugin_export_file`** / **`plugin_run_repair`** / **`plugin_create_curve`**、**`invoke_registered_importer`** / **`invoke_registered_exporter`** / **`invoke_registered_repair`** / **`invoke_registered_curve`**；**`verify_after_plugin_curve`**（与 `plugin_create_curve` 开启自动校验时语义一致，供绕过门面路径显式闭环）；`find_manifest` 未命中带 **`kPluginLoadFailure`**；能力发现 JSON 含 **`manifests`** 摘要；`validate_after_plugin_mutation`、`register_plugin_*` 诊断；`services_available` 含 **`plugin.import`**、**`plugin.export`**、**`plugin.repair`**、**`plugin.curve`**、**`plugin.verify_curve`**；示例与 `axiom_plugin_sdk_test` / smoke 回归
+- **未开始/缺失**：**进程外/OS 级隔离**、动态库加载与供应链安全（签名/沙箱）；**完整 SemVer 与多 ABI 并存**（`SameMajor`/`SameMinor` 已支持剥离 `-` 预发布与 `+` 构建元数据后再做核心版本比较；`Exact` 仍为整串相等；多 ABI 并存与完整 SemVer 语义仍不足）；直接 **`PluginRegistry::invoke_registered_*`** 仍不自动套用 `PluginHostPolicy` 中的自动验证开关；**Body** 侧可显式 **`validate_after_plugin_mutation`**，**曲线**侧可显式 **`verify_after_plugin_curve`**（若完全绕过上述门面且未调用二者，则仍依赖宿主自行一致性检查）
 
-### 7.13 诊断与日志（Diagnostics）
+### 需求 7.13 诊断与日志（Diagnostics）
 
 - **部分完成**：错误码常量、诊断报告、JSON 导出（含 `Issue.stage`）、按相关实体检索；BOOL/HEAL/IO **关键路径**阶段标签与 workflow 回归断言
 - **未开始/缺失**：覆盖**所有**失败路径的系统化绑定；阶段化诊断**全覆盖**门禁；诊断聚合检索与批量导出策略
 
-### 7.14 混合表示与转换（RepCore）
+### 需求 7.14 混合表示与转换（RepCore）
 
 - **部分完成**：BRep/Mesh/Implicit 的基础语义与部分测试；BRep↔Mesh round-trip 报告与网格检查已有专项回归
 - **未开始/缺失**：高质量转换、工业级误差控制、混合建模策略与对外接口长期冻结
@@ -362,10 +363,10 @@
 - **误差预算与质量度量不足**：需要把“误差预算（budget）→细分策略→质量报告→round-trip 验证”做成稳定闭环，并覆盖更多几何类型/修剪体。
 - **显示管线能力不足**：局部重三角化、缓存更新、纹理坐标与 seam 规则仍不足以支撑工业显示/编辑体验。
 
-### F) IO：互操作与能力报告收敛不足
+### F) IO：标准互操作深度与工业交付矩阵仍不足
 
-- **格式互操作缺口**：IGES/BREP/STL/glTF **导入**等缺失；导出严格/兼容模式与输出验证报告闭环未完成。
-- **能力报告**：`Kernel` 与 `IOService` 主链路格式集合**已对齐**并由 `axiom_smoke_test` 固化；后续新增格式须同步改门面与测试。
+- **格式深度**：已实现 **STL/glTF 导入**与 **IGES/BREP/OBJ/3MF（Axiom 子集）** 及严格导出/侧车首批闭环；**标准 IGES/STEP 实体、通用 3MF** 等仍不足。
+- **能力报告**：`Kernel` 与 `IOService` 主链路格式集合**已对齐**并由 `axiom_smoke_test` 固化；新增格式须同步 `detect_format` / `import_auto` / `export_auto` / 门面与测试。
 
 ### G) Diagnostics/Eval/Plugin：工程化可观测与扩展不足
 
@@ -383,6 +384,8 @@
 
 ## 5. 下一迭代 Sprint 焦点与本阶段 backlog
 
+说明：为降低本文档膨胀，本节内容已同步拆分到 `docs/plan/AxiomKernel_近期迭代与Backlog.md`；本文仍保留事实上下文与历史兼容入口。
+
 阶段口径保持：`Stage 1.5 / Stage 2 过渡：核心公共层增强 + 基础几何/拓扑深化`。本节区分 **本迭代可交付**、**最近已闭合批次** 与 **全项目长期树**，避免与 §6 历史清单重复。
 
 ### 5.1 Sprint 焦点（当前迭代 3～5 条，可验收）
@@ -394,7 +397,7 @@
 3. **topo**：Strict 规则逐项加严（面环方向、悬挂/重复等）与 trim bridge 可物化子规则。  
    **DoD**：`axiom_topology_test` 失败类回归 + 诊断码。  
 4. **heal + io**：导入侧 mesh 格式导入或验证项（自交/流形性）中的下一可闭合条；维持导入后验证/修复诊断与 `related_entities` 可追溯。  
-   **DoD**：`axiom_io_workflow_test` / `axiom_ops_heal_test` 增量断言。
+   **DoD**：`axiom_heal_test` / `axiom_io_workflow_test` / `axiom_ops_heal_test` 增量断言。
 
 ### 5.2 本阶段 backlog 表（唯一入口，随迭代刷新）
 
@@ -416,7 +419,7 @@
 1. 求值图循环依赖失败路径绑定 `AXM-EVAL-E-0001`；重算 DAG 去重；脏依赖防护；`body` 绑定去重。  
 2. 表示层点分类线性容差；点到体距离无效包围盒语义；`BRep/Implicit -> Mesh` 参数校验与细分映射。  
 3. `query_eval` / `representation_io` 等对上述语义的回归覆盖。  
-4. `Kernel::io_supported_formats` / `io_can_import_format` / `io_can_export_format` 与 `IOService::detect_format`、`import_auto`、`export_auto` 对齐（`gltf`/`stl` 仅导出），`axiom_smoke_test` 固化。  
+4. `Kernel::io_supported_formats` / `io_can_import_format` / `io_can_export_format` 与 `IOService::detect_format`、`import_auto`、`export_auto` 对齐，`axiom_smoke_test` 固化。  
 5. `Issue::stage` 字段；诊断 JSON/文本导出；BOOL/HEAL/IO 关键路径阶段标签与 `axiom_boolean_workflow_test`、`axiom_diagnostics_test`、`axiom_ops_heal_test` 回归断言。  
 6. 《主开发计划与阶段路线图》`§1`：Stage 1 已达成、处于 Stage 1.5/2 过渡；本文档 §5 Sprint/backlog 结构重写。
 
@@ -425,7 +428,7 @@
 1. BOOL 全阶段失败路径诊断绑定与工业数据集雏形。  
 2. 特征建模（拉伸/旋转/扫掠）真实拓扑物化，替代过度依赖最小骨架。  
 3. HEAL 自交/流形性/容差冲突的验证与可回放修复。  
-4. IO：STL/glTF 导入或 IGES 互操作（与产品路线一致后择一）。  
+4. IO：标准 IGES/STEP 实体交换或通用 3MF 读写的下一里程碑（与产品路线一致后择一）。  
 5. EvalGraph 与建模事件的命中率/成本指标门禁。  
 6. Plugin：OS 级隔离与动态加载安全（中长期）。
 
@@ -451,6 +454,8 @@
 说明：该清单是“全项目完成”所需长期任务树，实际编码将按批次持续落地，每批均保证可编译、可测试、可回归。
 
 ## 6. 最近完成的关键成果
+
+说明：本节的批次摘要版本已同步整理到 `docs/plan/AxiomKernel_变更纪要.md`；本文仍暂时保留较细粒度条目，后续新增历史应优先沉淀到独立纪要文档。
 
 - 修正文档中 `Kernel` 门面与样例调用不一致问题
 - 实际跑通工程编译
@@ -591,7 +596,8 @@
 - 为 `ops_heal_test` 增加自适应阈值行为回归（告警与结果变化校验）
 - 为 `EvalGraphService` 增加节点存在性/类型/标签、依赖管理、批量失效重算、图清理与体绑定查询能力
 - 为 `query_eval_test` 补充评估图治理能力回归测试，并保持全量 `ctest` 通过
-- 对齐 `Kernel::io_supported_formats` / `io_can_import_format` / `io_can_export_format` 与 `IOService::detect_format`、`import_auto`、`export_auto`（`gltf`/`stl` 仅导出），并由 `axiom_smoke_test` 固化
+- 对齐 `Kernel::io_supported_formats` / `io_can_import_format` / `io_can_export_format` 与 `IOService::detect_format`、`import_auto`、`export_auto`，并由 `axiom_smoke_test` 固化
+- 扩展 IO：STL/glTF 导入；IGES/BREP/OBJ/3MF（Axiom 子集）；网格导出严格门控与 `mesh_report` 侧车诊断合并；`io_workflow` 补充非法路径/未知扩展名诊断断言
 - 为 `Issue` 增加 `stage` 字段；诊断 JSON/文本导出携带阶段；布尔/导入验证/修复管线与 `AXM-HEAL-D-0006` 等绑定稳定 `stage` 标签；`axiom_boolean_workflow_test`、`axiom_diagnostics_test`、`axiom_ops_heal_test` 增加回归断言
 - 更新《主开发计划与阶段路线图》当前阶段表述为 Stage 1 已达成、处于 Stage 1.5/2 过渡；重写本文档 §5 Sprint/backlog 结构
 - **工程结构（2026-04）**：将各模块实现从 `src/<module>/` 收敛到 `src/axiom/<module>/`，与 `include/axiom/<module>/` 对齐；同步更新 `cmake/AxiomKernelLibraries.cmake`、`AGENTS.md`、相关技能文档与进度文档中的实现路径引用；全量 `ctest` 通过

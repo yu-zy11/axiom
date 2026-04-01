@@ -94,6 +94,9 @@ public:
     /// 返回该面引用曲面的「修剪基曲面」：`Trimmed` 则沿 `base_surface_id` 解引用直至非 Trimmed。
     Result<SurfaceId> underlying_surface_for_face_trim(FaceId face_id) const;
 
+    /// 累计拓扑只读查询次数（自 `KernelState` 创建起；嵌套调用只计最外层一次）。与 `TopologyTransaction::write_operation_count` 互补，用于审计/可观测性。
+    Result<std::uint64_t> query_operation_count() const;
+
 private:
     std::shared_ptr<detail::KernelState> state_;
 };

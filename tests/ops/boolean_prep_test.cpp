@@ -16,6 +16,15 @@ bool has_issue_code(const axiom::DiagnosticReport& report, std::string_view code
     return false;
 }
 
+const axiom::Issue* find_issue(const axiom::DiagnosticReport& report, std::string_view code) {
+    for (const auto& issue : report.issues) {
+        if (issue.code == code) {
+            return &issue;
+        }
+    }
+    return nullptr;
+}
+
 bool has_warning_code(const std::vector<axiom::Warning>& warnings, std::string_view code) {
     for (const auto& warning : warnings) {
         if (warning.code == code) {
@@ -92,6 +101,28 @@ int main() {
     if (subtract_diag.status != axiom::StatusCode::Ok || !subtract_diag.value.has_value() ||
         !has_issue_code(*subtract_diag.value, axiom::diag_codes::kBoolClassificationFailure)) {
         std::cerr << "missing subtract containment diagnostic\n";
+        return 1;
+    }
+    const auto* cls_issue = find_issue(*subtract_diag.value, axiom::diag_codes::kBoolClassificationFailure);
+    if (cls_issue == nullptr || cls_issue->stage != "bool.abort.classify") {
+        std::cerr << "expected bool.abort.classify stage on subtract containment failure\n";
+        return 1;
+    }
+
+    auto intersect_disjoint = kernel.booleans().run(axiom::BooleanOp::Intersect, *outer.value, *far.value, {});
+    if (intersect_disjoint.status != axiom::StatusCode::OperationFailed) {
+        std::cerr << "expected disjoint intersect failure\n";
+        return 1;
+    }
+    auto intersect_disjoint_diag = kernel.diagnostics().get(intersect_disjoint.diagnostic_id);
+    if (intersect_disjoint_diag.status != axiom::StatusCode::Ok || !intersect_disjoint_diag.value.has_value() ||
+        !has_issue_code(*intersect_disjoint_diag.value, axiom::diag_codes::kBoolIntersectionFailure)) {
+        std::cerr << "missing disjoint intersect diagnostic\n";
+        return 1;
+    }
+    const auto* isect_issue = find_issue(*intersect_disjoint_diag.value, axiom::diag_codes::kBoolIntersectionFailure);
+    if (isect_issue == nullptr || isect_issue->stage != "bool.abort.intersect") {
+        std::cerr << "expected bool.abort.intersect stage on disjoint intersect failure\n";
         return 1;
     }
 

@@ -20,6 +20,8 @@
 
 ## 3. 最小插件示例
 
+以下示例按当前仓库中的 `Result<T>` / `Kernel` 用法编写，风格对齐 `examples/minimal_plugin.cpp` 与 `tests/sdk/plugin_sdk_test.cpp`，避免出现“文档能看懂但照抄无法编译”的情况。
+
 ### 3.1 修复器插件
 
 ```cpp
@@ -33,7 +35,7 @@ public:
     OpReport report{};
     report.status = StatusCode::Ok;
     report.output = body_id;
-    return Result<OpReport>{StatusCode::Ok, report, {}, DiagnosticId{0}};
+    return ok_result(report);
   }
 };
 ```
@@ -101,7 +103,8 @@ registry.register_repair_plugin(
 class CustomImporterPlugin : public IImporterPlugin {
 public:
   Result<BodyId> import_file(std::string_view path) override {
-    return Result<BodyId>{StatusCode::NotImplemented, std::nullopt, {}, DiagnosticId{0}};
+    (void)path;
+    return error_result<BodyId>(StatusCode::NotImplemented);
   }
 };
 ```

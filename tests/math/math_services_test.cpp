@@ -364,5 +364,40 @@ int main() {
         }
     }
 
+    // valid_bbox 含角点有限性：非有限包围盒不得参与相交/包含谓词。
+    {
+        const axiom::BoundingBox bad {axiom::Point3{NAN, 0.0, 0.0}, axiom::Point3{1.0, 1.0, 1.0}, true};
+        const axiom::BoundingBox ok {axiom::Point3{0.0, 0.0, 0.0}, axiom::Point3{1.0, 1.0, 1.0}, true};
+        if (kernel.predicates().bbox_valid(bad) || kernel.predicates().aabb_intersects(bad, ok, 0.0) ||
+            kernel.predicates().aabb_intersects(ok, bad, 0.0)) {
+            std::cerr << "expected invalid bbox / no intersection for non-finite corners\n";
+            return 1;
+        }
+    }
+    // Range1D 非有限端点不得给出“相交”真值。
+    const axiom::Range2D r2_ok {axiom::Range1D{0.0, 1.0}, axiom::Range1D{0.0, 1.0}};
+    const axiom::Range2D r2_bad {axiom::Range1D{NAN, 1.0}, axiom::Range1D{0.0, 1.0}};
+    if (kernel.predicates().range1d_overlap({0.0, 1.0}, {NAN, 2.0}, 0.0) ||
+        kernel.predicates().range2d_overlap(r2_ok, r2_bad, 0.0)) {
+        std::cerr << "expected range overlap false for non-finite bounds\n";
+        return 1;
+    }
+    // compare_*：非有限标量不强行排序，返回 0。
+    if (kernel.tolerance().compare_linear(NAN, 1.0, 1e-3) != 0 ||
+        kernel.tolerance().compare_angular(INFINITY, 0.1, 1e-3) != 0) {
+        std::cerr << "expected compare_linear/angular to return 0 for non-finite operands\n";
+        return 1;
+    }
+    // squared_norm：大尺度下避免裸 double 累加过早 Inf（与 safe_norm 策略一致）。
+    {
+        const double s = 1e200;
+        const axiom::Vec3 v {s, 0.0, 0.0};
+        const auto sn = kernel.linear_algebra().squared_norm(v);
+        if (std::isnan(sn) || !(sn > 0.0)) {
+            std::cerr << "expected positive non-NaN squared_norm for large axis-aligned vector\n";
+            return 1;
+        }
+    }
+
     return 0;
 }

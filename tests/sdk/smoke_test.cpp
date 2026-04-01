@@ -370,6 +370,28 @@ int main() {
         std::cerr << "services_available missing plugin.repair\n";
         return 1;
     }
+    bool saw_plugin_curve_svc = false;
+    for (const auto& sv : *services.value) {
+        if (sv == "plugin.curve") {
+            saw_plugin_curve_svc = true;
+            break;
+        }
+    }
+    if (!saw_plugin_curve_svc) {
+        std::cerr << "services_available missing plugin.curve\n";
+        return 1;
+    }
+    bool saw_plugin_verify_curve_svc = false;
+    for (const auto& sv : *services.value) {
+        if (sv == "plugin.verify_curve") {
+            saw_plugin_verify_curve_svc = true;
+            break;
+        }
+    }
+    if (!saw_plugin_verify_curve_svc) {
+        std::cerr << "services_available missing plugin.verify_curve\n";
+        return 1;
+    }
 
     auto api_ver = kernel.plugin_sdk_api_version();
     auto disc = kernel.plugin_discovery_report_lines();
@@ -379,6 +401,8 @@ int main() {
     auto has_pimp = kernel.has_service_plugin_import();
     auto has_pexp = kernel.has_service_plugin_export();
     auto has_prep = kernel.has_service_plugin_repair();
+    auto has_pcurve = kernel.has_service_plugin_curve();
+    auto has_pvc = kernel.has_service_plugin_verify_curve();
     auto pcap = kernel.plugin_capabilities();
     if (api_ver.status != axiom::StatusCode::Ok || !api_ver.value.has_value() || api_ver.value->empty() ||
         disc.status != axiom::StatusCode::Ok || !disc.value.has_value() || disc.value->empty() ||
@@ -388,6 +412,8 @@ int main() {
         has_pimp.status != axiom::StatusCode::Ok || !has_pimp.value.has_value() || !*has_pimp.value ||
         has_pexp.status != axiom::StatusCode::Ok || !has_pexp.value.has_value() || !*has_pexp.value ||
         has_prep.status != axiom::StatusCode::Ok || !has_prep.value.has_value() || !*has_prep.value ||
+        has_pcurve.status != axiom::StatusCode::Ok || !has_pcurve.value.has_value() || !*has_pcurve.value ||
+        has_pvc.status != axiom::StatusCode::Ok || !has_pvc.value.has_value() || !*has_pvc.value ||
         pcap.status != axiom::StatusCode::Ok || !pcap.value.has_value()) {
         std::cerr << "plugin discovery / policy facade failed\n";
         return 1;

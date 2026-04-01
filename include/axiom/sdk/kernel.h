@@ -96,6 +96,8 @@ public:
     Result<bool> has_service_plugin_repair() const;
     /// 与 `services_available()` 中的 `plugin.curve` 一致（由 `Kernel::plugin_create_curve` 提供宿主封装）。
     Result<bool> has_service_plugin_curve() const;
+    /// 与 `services_available()` 中的 `plugin.verify_curve` 一致（显式曲线一致性校验，见 `verify_after_plugin_curve`）。
+    Result<bool> has_service_plugin_verify_curve() const;
     /// 能力发现 JSON 快照（供 CI/工具解析）；语义与 `plugin_discovery_report_lines` 对齐。
     Result<std::string> plugin_discovery_report_json() const;
     /// 注册失败且 `enable_diagnostics` 为真时写入诊断存储并返回非零 `diagnostic_id`。
@@ -115,6 +117,8 @@ public:
     Result<std::vector<std::string>> plugin_api_compatibility_report_lines() const;
     /// 插件修改或产出 `Body` 后建议调用，语义同 `validate().validate_all`（统一验证入口）。
     Result<void> validate_after_plugin_mutation(BodyId body_id, ValidationMode mode = ValidationMode::Standard);
+    /// 在直接调用 `PluginRegistry::invoke_registered_curve` 等绕过 `plugin_create_curve` 的路径上，用于与 `plugin_create_curve`（在开启 `auto_verify_curve_after_plugin_curve` 时）相同的宿主一致性校验：`CurveId` 已注册且 `curve_service().domain` 为合法开区间（允许无穷界）。
+    Result<void> verify_after_plugin_curve(CurveId curve_id);
     /// 调用已注册导入插件；若 `PluginHostPolicy::auto_validate_body_after_plugin_importer` 为真，成功后对返回体做 `validate_all`。
     /// 验证失败时返回非 Ok 且通常不带 `value`（实体仍可能已创建，需结合诊断与场景清理）。
     Result<BodyId> plugin_import_file(std::string_view implementation_type_name, std::string_view path,

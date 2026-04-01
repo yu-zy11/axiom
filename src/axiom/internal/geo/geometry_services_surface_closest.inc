@@ -286,15 +286,150 @@ SurfaceService::closest_uv(SurfaceId surface_id, const Point3 &point) const {
           *state_, StatusCode::InvalidInput, diag_codes::kGeoParameterSolveFailure,
           "曲面参数反求失败：基曲面不存在", "曲面参数反求失败");
     }
-    SurfaceService base{state_};
-    const auto base_uv = base.closest_uv(surface.base_surface_id, point);
-    if (base_uv.status != StatusCode::Ok || !base_uv.value.has_value()) {
-      return error_result<std::pair<Scalar, Scalar>>(base_uv.status, base_uv.diagnostic_id);
+    const auto dom = domain(surface_id);
+    if (dom.status != StatusCode::Ok || !dom.value.has_value()) {
+      return detail::failed_result<std::pair<Scalar, Scalar>>(
+          *state_, StatusCode::OperationFailed, diag_codes::kGeoParameterSolveFailure,
+          "曲面参数反求失败：曲面定义域不可用", "曲面参数反求失败");
     }
-    Scalar uu = base_uv.value->first;
-    Scalar vv = base_uv.value->second;
-    apply_trimmed_surface_uv_in_parameter_space(surface, uu, vv);
-    return ok_result(std::make_pair(uu, vv),
+    const auto d = *dom.value;
+
+    // 仅轴对齐盒：基曲面最近参数 + UV 投影（保持历史行为）。
+    if (surface.trim_uv_loop.size() < 3) {
+      SurfaceService base{state_};
+      const auto base_uv = base.closest_uv(surface.base_surface_id, point);
+      if (base_uv.status != StatusCode::Ok || !base_uv.value.has_value()) {
+        return error_result<std::pair<Scalar, Scalar>>(base_uv.status, base_uv.diagnostic_id);
+      }
+      Scalar uu = base_uv.value->first;
+      Scalar vv = base_uv.value->second;
+      apply_trimmed_surface_uv_in_parameter_space(surface, uu, vv);
+      return ok_result(std::make_pair(uu, vv),
+                       state_->create_diagnostic("已求出曲面最近参数"));
+    }
+
+    // UV 闭合多边形：在修剪盒上按 3D 距离做多起点采样 + 阻尼 GN，避免环外查询时
+    // 「仅基曲面最近点再投影」偏离真实最近参数。
+    Scalar best_u = (d.u.min + d.u.max) * static_cast<Scalar>(0.5);
+    Scalar best_v = (d.v.min + d.v.max) * static_cast<Scalar>(0.5);
+    Scalar best_cost = std::numeric_limits<Scalar>::max();
+    const auto consider = [&](Scalar su, Scalar sv) {
+      const auto evs = eval(surface_id, su, sv, 0);
+      if (evs.status == StatusCode::Ok && evs.value.has_value()) {
+        const Scalar c = squared_distance(evs.value->point, point);
+        if (c < best_cost) {
+          best_cost = c;
+          best_u = su;
+          best_v = sv;
+        }
+      }
+    };
+    const int grid = 9;
+    const Scalar span_u = d.u.max - d.u.min;
+    const Scalar span_v = d.v.max - d.v.min;
+    const int g1 = std::max(1, grid - 1);
+    for (int iu = 0; iu < grid; ++iu) {
+      for (int iv = 0; iv < grid; ++iv) {
+        const Scalar su =
+            d.u.min + span_u * (static_cast<Scalar>(iu) / static_cast<Scalar>(g1));
+        const Scalar sv =
+            d.v.min + span_v * (static_cast<Scalar>(iv) / static_cast<Scalar>(g1));
+        consider(su, sv);
+      }
+    }
+    for (const auto &p2 : surface.trim_uv_loop) {
+      consider(std::clamp(p2.x, d.u.min, d.u.max), std::clamp(p2.y, d.v.min, d.v.max));
+    }
+    const std::size_t npl = surface.trim_uv_loop.size();
+    for (std::size_t i = 0; i < npl; ++i) {
+      const auto &a = surface.trim_uv_loop[i];
+      const auto &b = surface.trim_uv_loop[(i + 1) % npl];
+      consider(std::clamp((a.x + b.x) * static_cast<Scalar>(0.5), d.u.min, d.u.max),
+               std::clamp((a.y + b.y) * static_cast<Scalar>(0.5), d.v.min, d.v.max));
+    }
+    {
+      SurfaceService base{state_};
+      const auto base_uv = base.closest_uv(surface.base_surface_id, point);
+      if (base_uv.status == StatusCode::Ok && base_uv.value.has_value()) {
+        Scalar uu = base_uv.value->first;
+        Scalar vv = base_uv.value->second;
+        apply_trimmed_surface_uv_in_parameter_space(surface, uu, vv);
+        consider(uu, vv);
+      }
+    }
+    if (!(best_cost < std::numeric_limits<Scalar>::max())) {
+      SurfaceService base{state_};
+      const auto base_uv = base.closest_uv(surface.base_surface_id, point);
+      if (base_uv.status != StatusCode::Ok || !base_uv.value.has_value()) {
+        return error_result<std::pair<Scalar, Scalar>>(base_uv.status, base_uv.diagnostic_id);
+      }
+      Scalar uu = base_uv.value->first;
+      Scalar vv = base_uv.value->second;
+      apply_trimmed_surface_uv_in_parameter_space(surface, uu, vv);
+      return ok_result(std::make_pair(uu, vv),
+                       state_->create_diagnostic("已求出曲面最近参数"));
+    }
+
+    std::pair<Scalar, Scalar> uv{best_u, best_v};
+    {
+      const auto ev0 = eval(surface_id, std::clamp(uv.first, d.u.min, d.u.max),
+                            std::clamp(uv.second, d.v.min, d.v.max), 0);
+      if (ev0.status == StatusCode::Ok && ev0.value.has_value()) {
+        best_cost = squared_distance(ev0.value->point, point);
+      }
+    }
+    Scalar lambda = 1e-6;
+    for (int iter = 0; iter < 22; ++iter) {
+      const auto cu = std::clamp(uv.first, d.u.min, d.u.max);
+      const auto cv = std::clamp(uv.second, d.v.min, d.v.max);
+      const auto ev = eval(surface_id, cu, cv, 1);
+      if (ev.status != StatusCode::Ok || !ev.value.has_value()) {
+        break;
+      }
+      const auto &r = *ev.value;
+      const Vec3 err = detail::subtract(r.point, point);
+      const auto j00 = detail::dot(r.du, r.du);
+      const auto j01 = detail::dot(r.du, r.dv);
+      const auto j11 = detail::dot(r.dv, r.dv);
+      const auto g0 = detail::dot(r.du, err);
+      const auto g1 = detail::dot(r.dv, err);
+      bool accepted = false;
+      for (int attempt = 0; attempt < 6; ++attempt) {
+        Scalar du_step = 0.0;
+        Scalar dv_step = 0.0;
+        const auto scale = std::max<Scalar>(1.0, j00 + j11);
+        const auto lam = lambda * scale;
+        if (!solve_2x2(j00 + lam, j01, j01, j11 + lam, -g0, -g1, du_step, dv_step)) {
+          lambda *= 10.0;
+          continue;
+        }
+        const auto next_u = std::clamp(cu + du_step, d.u.min, d.u.max);
+        const auto next_v = std::clamp(cv + dv_step, d.v.min, d.v.max);
+        const auto ev_next = eval(surface_id, next_u, next_v, 0);
+        if (ev_next.status != StatusCode::Ok || !ev_next.value.has_value()) {
+          lambda *= 10.0;
+          continue;
+        }
+        const auto next_cost = squared_distance(ev_next.value->point, point);
+        if (next_cost <= best_cost) {
+          best_cost = next_cost;
+          uv.first = next_u;
+          uv.second = next_v;
+          lambda = std::max<Scalar>(1e-12, lambda * 0.3);
+          accepted = true;
+          if (std::abs(du_step) + std::abs(dv_step) < 1e-10) {
+            iter = 9999;
+          }
+          break;
+        }
+        lambda *= 10.0;
+      }
+      if (!accepted) {
+        break;
+      }
+    }
+    return ok_result(std::make_pair(std::clamp(uv.first, d.u.min, d.u.max),
+                                    std::clamp(uv.second, d.v.min, d.v.max)),
                      state_->create_diagnostic("已求出曲面最近参数"));
   }
   case detail::SurfaceKind::Revolved:

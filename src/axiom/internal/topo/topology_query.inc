@@ -1,9 +1,37 @@
+namespace {
+
+thread_local int g_topo_query_audit_depth = 0;
+
+/// 每个「顶层」TopologyQueryService 公共入口计一次读操作；内部再调其它查询方法时不重复计数。
+struct TopoQueryAuditScope {
+  explicit TopoQueryAuditScope(const std::shared_ptr<detail::KernelState> &state)
+      : state_(state) {
+    if (state_) {
+      if (g_topo_query_audit_depth == 0) {
+        ++state_->topology_query_op_count;
+      }
+      ++g_topo_query_audit_depth;
+    }
+  }
+  ~TopoQueryAuditScope() {
+    if (state_) {
+      --g_topo_query_audit_depth;
+    }
+  }
+  TopoQueryAuditScope(const TopoQueryAuditScope &) = delete;
+  TopoQueryAuditScope &operator=(const TopoQueryAuditScope &) = delete;
+  std::shared_ptr<detail::KernelState> state_;
+};
+
+}  // namespace
+
 TopologyQueryService::TopologyQueryService(
     std::shared_ptr<detail::KernelState> state)
     : state_(std::move(state)) {}
 
 Result<std::array<VertexId, 2>>
 TopologyQueryService::vertices_of_edge(EdgeId edge_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto it = state_->edges.find(edge_id.value);
   if (it == state_->edges.end()) {
     return detail::invalid_input_result<std::array<VertexId, 2>>(
@@ -16,6 +44,7 @@ TopologyQueryService::vertices_of_edge(EdgeId edge_id) const {
 
 Result<std::vector<CoedgeId>>
 TopologyQueryService::coedges_of_edge(EdgeId edge_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   if (!detail::has_edge(*state_, edge_id)) {
     return detail::invalid_input_result<std::vector<CoedgeId>>(
         *state_, diag_codes::kCoreInvalidHandle, "边查询失败：目标边不存在",
@@ -35,6 +64,7 @@ TopologyQueryService::coedges_of_edge(EdgeId edge_id) const {
 
 Result<std::vector<LoopId>>
 TopologyQueryService::loops_of_edge(EdgeId edge_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   if (!detail::has_edge(*state_, edge_id)) {
     return detail::invalid_input_result<std::vector<LoopId>>(
         *state_, diag_codes::kCoreInvalidHandle, "边查询失败：目标边不存在",
@@ -61,6 +91,7 @@ TopologyQueryService::loops_of_edge(EdgeId edge_id) const {
 
 Result<std::vector<FaceId>>
 TopologyQueryService::faces_of_edge(EdgeId edge_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   if (!detail::has_edge(*state_, edge_id)) {
     return detail::invalid_input_result<std::vector<FaceId>>(
         *state_, diag_codes::kCoreInvalidHandle, "边查询失败：目标边不存在",
@@ -91,6 +122,7 @@ TopologyQueryService::faces_of_edge(EdgeId edge_id) const {
 
 Result<std::vector<ShellId>>
 TopologyQueryService::shells_of_edge(EdgeId edge_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto faces_result = faces_of_edge(edge_id);
   if (faces_result.status != StatusCode::Ok ||
       !faces_result.value.has_value()) {
@@ -115,6 +147,7 @@ TopologyQueryService::shells_of_edge(EdgeId edge_id) const {
 
 Result<std::vector<EdgeId>>
 TopologyQueryService::edges_of_loop(LoopId loop_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto it = state_->loops.find(loop_id.value);
   if (it == state_->loops.end()) {
     return detail::invalid_input_result<std::vector<EdgeId>>(
@@ -138,6 +171,7 @@ TopologyQueryService::edges_of_loop(LoopId loop_id) const {
 
 Result<std::vector<LoopId>>
 TopologyQueryService::loops_of_face(FaceId face_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto it = state_->faces.find(face_id.value);
   if (it == state_->faces.end()) {
     return detail::invalid_input_result<std::vector<LoopId>>(
@@ -150,6 +184,7 @@ TopologyQueryService::loops_of_face(FaceId face_id) const {
 }
 
 Result<SurfaceId> TopologyQueryService::surface_of_face(FaceId face_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto it = state_->faces.find(face_id.value);
   if (it == state_->faces.end()) {
     return detail::invalid_input_result<SurfaceId>(
@@ -162,6 +197,7 @@ Result<SurfaceId> TopologyQueryService::surface_of_face(FaceId face_id) const {
 
 Result<std::vector<ShellId>>
 TopologyQueryService::shells_of_face(FaceId face_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   if (!detail::has_face(*state_, face_id)) {
     return detail::invalid_input_result<std::vector<ShellId>>(
         *state_, diag_codes::kTopoFaceOuterLoopInvalid,
@@ -180,6 +216,7 @@ TopologyQueryService::shells_of_face(FaceId face_id) const {
 
 Result<std::vector<BodyId>>
 TopologyQueryService::bodies_of_face(FaceId face_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   if (!detail::has_face(*state_, face_id)) {
     return detail::invalid_input_result<std::vector<BodyId>>(
         *state_, diag_codes::kTopoFaceOuterLoopInvalid,
@@ -208,6 +245,7 @@ TopologyQueryService::bodies_of_face(FaceId face_id) const {
 
 Result<std::vector<FaceId>>
 TopologyQueryService::source_faces_of_face(FaceId face_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto it = state_->faces.find(face_id.value);
   if (it == state_->faces.end()) {
     return detail::invalid_input_result<std::vector<FaceId>>(
@@ -220,6 +258,7 @@ TopologyQueryService::source_faces_of_face(FaceId face_id) const {
 
 Result<std::vector<FaceId>>
 TopologyQueryService::faces_of_shell(ShellId shell_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto it = state_->shells.find(shell_id.value);
   if (it == state_->shells.end()) {
     return detail::invalid_input_result<std::vector<FaceId>>(
@@ -232,6 +271,7 @@ TopologyQueryService::faces_of_shell(ShellId shell_id) const {
 
 Result<std::vector<BodyId>>
 TopologyQueryService::bodies_of_shell(ShellId shell_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   if (!detail::has_shell(*state_, shell_id)) {
     return detail::invalid_input_result<std::vector<BodyId>>(
         *state_, diag_codes::kTopoShellNotClosed, "壳查询失败：目标壳不存在",
@@ -250,6 +290,7 @@ TopologyQueryService::bodies_of_shell(ShellId shell_id) const {
 
 Result<std::vector<ShellId>>
 TopologyQueryService::source_shells_of_shell(ShellId shell_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto it = state_->shells.find(shell_id.value);
   if (it == state_->shells.end()) {
     return detail::invalid_input_result<std::vector<ShellId>>(
@@ -262,6 +303,7 @@ TopologyQueryService::source_shells_of_shell(ShellId shell_id) const {
 
 Result<std::vector<FaceId>>
 TopologyQueryService::source_faces_of_shell(ShellId shell_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto it = state_->shells.find(shell_id.value);
   if (it == state_->shells.end()) {
     return detail::invalid_input_result<std::vector<FaceId>>(
@@ -274,6 +316,7 @@ TopologyQueryService::source_faces_of_shell(ShellId shell_id) const {
 
 Result<std::vector<ShellId>>
 TopologyQueryService::shells_of_body(BodyId body_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto it = state_->bodies.find(body_id.value);
   if (it == state_->bodies.end()) {
     return detail::invalid_input_result<std::vector<ShellId>>(
@@ -286,6 +329,7 @@ TopologyQueryService::shells_of_body(BodyId body_id) const {
 
 Result<std::vector<BodyId>>
 TopologyQueryService::source_bodies_of_body(BodyId body_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto it = state_->bodies.find(body_id.value);
   if (it == state_->bodies.end()) {
     return detail::invalid_input_result<std::vector<BodyId>>(
@@ -298,6 +342,7 @@ TopologyQueryService::source_bodies_of_body(BodyId body_id) const {
 
 Result<std::vector<ShellId>>
 TopologyQueryService::source_shells_of_body(BodyId body_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto it = state_->bodies.find(body_id.value);
   if (it == state_->bodies.end()) {
     return detail::invalid_input_result<std::vector<ShellId>>(
@@ -310,6 +355,7 @@ TopologyQueryService::source_shells_of_body(BodyId body_id) const {
 
 Result<std::vector<FaceId>>
 TopologyQueryService::source_faces_of_body(BodyId body_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto it = state_->bodies.find(body_id.value);
   if (it == state_->bodies.end()) {
     return detail::invalid_input_result<std::vector<FaceId>>(
@@ -322,6 +368,7 @@ TopologyQueryService::source_faces_of_body(BodyId body_id) const {
 
 Result<TopologySummary>
 TopologyQueryService::summary_of_shell(ShellId shell_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto shell_it = state_->shells.find(shell_id.value);
   if (shell_it == state_->shells.end()) {
     return detail::invalid_input_result<TopologySummary>(
@@ -369,6 +416,7 @@ TopologyQueryService::summary_of_shell(ShellId shell_id) const {
 
 Result<TopologySummary>
 TopologyQueryService::summary_of_body(BodyId body_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto body_it = state_->bodies.find(body_id.value);
   if (body_it == state_->bodies.end()) {
     return detail::invalid_input_result<TopologySummary>(
@@ -395,6 +443,7 @@ TopologyQueryService::summary_of_body(BodyId body_id) const {
 
 Result<std::uint64_t>
 TopologyQueryService::edge_count_of_loop(LoopId loop_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto edges = edges_of_loop(loop_id);
   if (edges.status != StatusCode::Ok || !edges.value.has_value()) {
     return error_result<std::uint64_t>(edges.status, edges.diagnostic_id);
@@ -406,6 +455,7 @@ TopologyQueryService::edge_count_of_loop(LoopId loop_id) const {
 
 Result<std::uint64_t>
 TopologyQueryService::loop_count_of_face(FaceId face_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto loops = loops_of_face(face_id);
   if (loops.status != StatusCode::Ok || !loops.value.has_value()) {
     return error_result<std::uint64_t>(loops.status, loops.diagnostic_id);
@@ -417,6 +467,7 @@ TopologyQueryService::loop_count_of_face(FaceId face_id) const {
 
 Result<std::uint64_t>
 TopologyQueryService::face_count_of_shell(ShellId shell_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto faces = faces_of_shell(shell_id);
   if (faces.status != StatusCode::Ok || !faces.value.has_value()) {
     return error_result<std::uint64_t>(faces.status, faces.diagnostic_id);
@@ -428,6 +479,7 @@ TopologyQueryService::face_count_of_shell(ShellId shell_id) const {
 
 Result<std::uint64_t>
 TopologyQueryService::shell_count_of_body(BodyId body_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto shells = shells_of_body(body_id);
   if (shells.status != StatusCode::Ok || !shells.value.has_value()) {
     return error_result<std::uint64_t>(shells.status, shells.diagnostic_id);
@@ -439,6 +491,7 @@ TopologyQueryService::shell_count_of_body(BodyId body_id) const {
 
 Result<std::uint64_t>
 TopologyQueryService::coedge_count_of_edge(EdgeId edge_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto coedges = coedges_of_edge(edge_id);
   if (coedges.status != StatusCode::Ok || !coedges.value.has_value()) {
     return error_result<std::uint64_t>(coedges.status, coedges.diagnostic_id);
@@ -450,6 +503,7 @@ TopologyQueryService::coedge_count_of_edge(EdgeId edge_id) const {
 
 Result<std::uint64_t>
 TopologyQueryService::owner_count_of_edge(EdgeId edge_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto shells = shells_of_edge(edge_id);
   if (shells.status != StatusCode::Ok || !shells.value.has_value()) {
     return error_result<std::uint64_t>(shells.status, shells.diagnostic_id);
@@ -461,6 +515,7 @@ TopologyQueryService::owner_count_of_edge(EdgeId edge_id) const {
 
 Result<std::uint64_t>
 TopologyQueryService::owner_count_of_face(FaceId face_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto shells = shells_of_face(face_id);
   if (shells.status != StatusCode::Ok || !shells.value.has_value()) {
     return error_result<std::uint64_t>(shells.status, shells.diagnostic_id);
@@ -472,6 +527,7 @@ TopologyQueryService::owner_count_of_face(FaceId face_id) const {
 
 Result<std::uint64_t>
 TopologyQueryService::owner_count_of_shell(ShellId shell_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto bodies = bodies_of_shell(shell_id);
   if (bodies.status != StatusCode::Ok || !bodies.value.has_value()) {
     return error_result<std::uint64_t>(bodies.status, bodies.diagnostic_id);
@@ -482,36 +538,43 @@ TopologyQueryService::owner_count_of_shell(ShellId shell_id) const {
 }
 
 Result<bool> TopologyQueryService::has_vertex(VertexId vertex_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   return ok_result(detail::has_vertex(*state_, vertex_id),
                    state_->create_diagnostic("已查询顶点存在性"));
 }
 
 Result<bool> TopologyQueryService::has_edge(EdgeId edge_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   return ok_result(detail::has_edge(*state_, edge_id),
                    state_->create_diagnostic("已查询边存在性"));
 }
 
 Result<bool> TopologyQueryService::has_loop(LoopId loop_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   return ok_result(detail::has_loop(*state_, loop_id),
                    state_->create_diagnostic("已查询环存在性"));
 }
 
 Result<bool> TopologyQueryService::has_face(FaceId face_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   return ok_result(detail::has_face(*state_, face_id),
                    state_->create_diagnostic("已查询面存在性"));
 }
 
 Result<bool> TopologyQueryService::has_shell(ShellId shell_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   return ok_result(detail::has_shell(*state_, shell_id),
                    state_->create_diagnostic("已查询壳存在性"));
 }
 
 Result<bool> TopologyQueryService::has_body(BodyId body_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   return ok_result(detail::has_body(*state_, body_id),
                    state_->create_diagnostic("已查询体存在性"));
 }
 
 Result<bool> TopologyQueryService::is_edge_boundary(EdgeId edge_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto count = owner_count_of_edge(edge_id);
   if (count.status != StatusCode::Ok || !count.value.has_value()) {
     return error_result<bool>(count.status, count.diagnostic_id);
@@ -521,6 +584,7 @@ Result<bool> TopologyQueryService::is_edge_boundary(EdgeId edge_id) const {
 }
 
 Result<bool> TopologyQueryService::is_edge_non_manifold(EdgeId edge_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto count = owner_count_of_edge(edge_id);
   if (count.status != StatusCode::Ok || !count.value.has_value()) {
     return error_result<bool>(count.status, count.diagnostic_id);
@@ -530,6 +594,7 @@ Result<bool> TopologyQueryService::is_edge_non_manifold(EdgeId edge_id) const {
 }
 
 Result<bool> TopologyQueryService::is_face_orphan(FaceId face_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto owners = owner_count_of_face(face_id);
   if (owners.status != StatusCode::Ok || !owners.value.has_value()) {
     return error_result<bool>(owners.status, owners.diagnostic_id);
@@ -539,6 +604,7 @@ Result<bool> TopologyQueryService::is_face_orphan(FaceId face_id) const {
 }
 
 Result<bool> TopologyQueryService::is_shell_orphan(ShellId shell_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto owners = owner_count_of_shell(shell_id);
   if (owners.status != StatusCode::Ok || !owners.value.has_value()) {
     return error_result<bool>(owners.status, owners.diagnostic_id);
@@ -548,6 +614,7 @@ Result<bool> TopologyQueryService::is_shell_orphan(ShellId shell_id) const {
 }
 
 Result<bool> TopologyQueryService::is_body_derived(BodyId body_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto it = state_->bodies.find(body_id.value);
   if (it == state_->bodies.end()) {
     return detail::invalid_input_result<bool>(
@@ -561,6 +628,7 @@ Result<bool> TopologyQueryService::is_body_derived(BodyId body_id) const {
 }
 
 Result<BoundingBox> TopologyQueryService::bbox_of_face(FaceId face_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   if (!detail::has_face(*state_, face_id)) {
     return detail::invalid_input_result<BoundingBox>(
         *state_, diag_codes::kCoreInvalidHandle,
@@ -578,6 +646,7 @@ Result<BoundingBox> TopologyQueryService::bbox_of_face(FaceId face_id) const {
 
 Result<BoundingBox>
 TopologyQueryService::bbox_of_shell(ShellId shell_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto shell_it = state_->shells.find(shell_id.value);
   if (shell_it == state_->shells.end()) {
     return detail::invalid_input_result<BoundingBox>(
@@ -602,6 +671,7 @@ TopologyQueryService::bbox_of_shell(ShellId shell_id) const {
 
 Result<BoundingBox>
 TopologyQueryService::bbox_of_body_from_topology(BodyId body_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto body_it = state_->bodies.find(body_id.value);
   if (body_it == state_->bodies.end()) {
     return detail::invalid_input_result<BoundingBox>(
@@ -619,6 +689,7 @@ TopologyQueryService::bbox_of_body_from_topology(BodyId body_id) const {
 
 Result<std::vector<FaceId>>
 TopologyQueryService::faces_of_body(BodyId body_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto shells = shells_of_body(body_id);
   if (shells.status != StatusCode::Ok || !shells.value.has_value()) {
     return error_result<std::vector<FaceId>>(shells.status,
@@ -640,6 +711,7 @@ TopologyQueryService::faces_of_body(BodyId body_id) const {
 
 Result<std::vector<LoopId>>
 TopologyQueryService::loops_of_body(BodyId body_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto faces = faces_of_body(body_id);
   if (faces.status != StatusCode::Ok || !faces.value.has_value()) {
     return error_result<std::vector<LoopId>>(faces.status, faces.diagnostic_id);
@@ -660,6 +732,7 @@ TopologyQueryService::loops_of_body(BodyId body_id) const {
 
 Result<std::vector<EdgeId>>
 TopologyQueryService::edges_of_body(BodyId body_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto loops = loops_of_body(body_id);
   if (loops.status != StatusCode::Ok || !loops.value.has_value()) {
     return error_result<std::vector<EdgeId>>(loops.status, loops.diagnostic_id);
@@ -680,6 +753,7 @@ TopologyQueryService::edges_of_body(BodyId body_id) const {
 
 Result<std::vector<VertexId>>
 TopologyQueryService::vertices_of_body(BodyId body_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto edges = edges_of_body(body_id);
   if (edges.status != StatusCode::Ok || !edges.value.has_value()) {
     return error_result<std::vector<VertexId>>(edges.status,
@@ -701,6 +775,7 @@ TopologyQueryService::vertices_of_body(BodyId body_id) const {
 
 Result<std::uint64_t>
 TopologyQueryService::face_count_of_body(BodyId body_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto faces = faces_of_body(body_id);
   if (faces.status != StatusCode::Ok || !faces.value.has_value()) {
     return error_result<std::uint64_t>(faces.status, faces.diagnostic_id);
@@ -712,6 +787,7 @@ TopologyQueryService::face_count_of_body(BodyId body_id) const {
 
 Result<std::uint64_t>
 TopologyQueryService::loop_count_of_body(BodyId body_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto loops = loops_of_body(body_id);
   if (loops.status != StatusCode::Ok || !loops.value.has_value()) {
     return error_result<std::uint64_t>(loops.status, loops.diagnostic_id);
@@ -723,6 +799,7 @@ TopologyQueryService::loop_count_of_body(BodyId body_id) const {
 
 Result<std::uint64_t>
 TopologyQueryService::edge_count_of_body(BodyId body_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto edges = edges_of_body(body_id);
   if (edges.status != StatusCode::Ok || !edges.value.has_value()) {
     return error_result<std::uint64_t>(edges.status, edges.diagnostic_id);
@@ -734,6 +811,7 @@ TopologyQueryService::edge_count_of_body(BodyId body_id) const {
 
 Result<std::uint64_t>
 TopologyQueryService::vertex_count_of_body(BodyId body_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto vertices = vertices_of_body(body_id);
   if (vertices.status != StatusCode::Ok || !vertices.value.has_value()) {
     return error_result<std::uint64_t>(vertices.status, vertices.diagnostic_id);
@@ -745,6 +823,7 @@ TopologyQueryService::vertex_count_of_body(BodyId body_id) const {
 
 Result<bool> TopologyQueryService::body_has_face(BodyId body_id,
                                                  FaceId face_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto faces = faces_of_body(body_id);
   if (faces.status != StatusCode::Ok || !faces.value.has_value()) {
     return error_result<bool>(faces.status, faces.diagnostic_id);
@@ -769,6 +848,7 @@ Result<bool> TopologyQueryService::shell_has_face(ShellId shell_id,
 
 Result<bool> TopologyQueryService::face_has_loop(FaceId face_id,
                                                  LoopId loop_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto loops = loops_of_face(face_id);
   if (loops.status != StatusCode::Ok || !loops.value.has_value()) {
     return error_result<bool>(loops.status, loops.diagnostic_id);
@@ -781,6 +861,7 @@ Result<bool> TopologyQueryService::face_has_loop(FaceId face_id,
 
 Result<bool> TopologyQueryService::loop_has_edge(LoopId loop_id,
                                                  EdgeId edge_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto edges = edges_of_loop(loop_id);
   if (edges.status != StatusCode::Ok || !edges.value.has_value()) {
     return error_result<bool>(edges.status, edges.diagnostic_id);
@@ -793,6 +874,7 @@ Result<bool> TopologyQueryService::loop_has_edge(LoopId loop_id,
 
 Result<bool> TopologyQueryService::edge_has_vertex(EdgeId edge_id,
                                                    VertexId vertex_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto vertices = vertices_of_edge(edge_id);
   if (vertices.status != StatusCode::Ok || !vertices.value.has_value()) {
     return error_result<bool>(vertices.status, vertices.diagnostic_id);
@@ -804,6 +886,7 @@ Result<bool> TopologyQueryService::edge_has_vertex(EdgeId edge_id,
 
 Result<std::uint64_t>
 TopologyQueryService::shared_face_count_of_body(BodyId body_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto faces = faces_of_body(body_id);
   if (faces.status != StatusCode::Ok || !faces.value.has_value()) {
     return error_result<std::uint64_t>(faces.status, faces.diagnostic_id);
@@ -823,6 +906,7 @@ TopologyQueryService::shared_face_count_of_body(BodyId body_id) const {
 
 Result<std::uint64_t>
 TopologyQueryService::shared_edge_count_of_body(BodyId body_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto edges = edges_of_body(body_id);
   if (edges.status != StatusCode::Ok || !edges.value.has_value()) {
     return error_result<std::uint64_t>(edges.status, edges.diagnostic_id);
@@ -842,6 +926,7 @@ TopologyQueryService::shared_edge_count_of_body(BodyId body_id) const {
 
 Result<std::uint64_t>
 TopologyQueryService::boundary_edge_count_of_body(BodyId body_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto edges = edges_of_body(body_id);
   if (edges.status != StatusCode::Ok || !edges.value.has_value()) {
     return error_result<std::uint64_t>(edges.status, edges.diagnostic_id);
@@ -863,6 +948,7 @@ TopologyQueryService::boundary_edge_count_of_body(BodyId body_id) const {
 
 Result<std::uint64_t>
 TopologyQueryService::non_manifold_edge_count_of_body(BodyId body_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto edges = edges_of_body(body_id);
   if (edges.status != StatusCode::Ok || !edges.value.has_value()) {
     return error_result<std::uint64_t>(edges.status, edges.diagnostic_id);
@@ -884,6 +970,7 @@ TopologyQueryService::non_manifold_edge_count_of_body(BodyId body_id) const {
 
 Result<bool>
 TopologyQueryService::is_body_topology_empty(BodyId body_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto body_it = state_->bodies.find(body_id.value);
   if (body_it == state_->bodies.end()) {
     return detail::invalid_input_result<bool>(
@@ -895,6 +982,7 @@ TopologyQueryService::is_body_topology_empty(BodyId body_id) const {
 }
 
 Result<PCurveId> TopologyQueryService::pcurve_of_coedge(CoedgeId coedge_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   const auto it = state_->coedges.find(coedge_id.value);
   if (it == state_->coedges.end()) {
     return detail::invalid_input_result<PCurveId>(
@@ -908,6 +996,7 @@ Result<PCurveId> TopologyQueryService::pcurve_of_coedge(CoedgeId coedge_id) cons
 
 Result<SurfaceId>
 TopologyQueryService::underlying_surface_for_face_trim(FaceId face_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   if (!detail::has_face(*state_, face_id)) {
     return detail::invalid_input_result<SurfaceId>(
         *state_, diag_codes::kCoreInvalidHandle,
@@ -929,6 +1018,7 @@ TopologyQueryService::underlying_surface_for_face_trim(FaceId face_id) const {
 
 Result<Range2D>
 TopologyQueryService::face_outer_loop_uv_bounds(FaceId face_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   if (!detail::has_face(*state_, face_id)) {
     return detail::invalid_input_result<Range2D>(
         *state_, diag_codes::kCoreInvalidHandle,
@@ -997,6 +1087,7 @@ TopologyQueryService::face_outer_loop_uv_bounds(FaceId face_id) const {
 
 Result<std::vector<Point2>>
 TopologyQueryService::face_outer_loop_uv_polyline(FaceId face_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
   if (!detail::has_face(*state_, face_id)) {
     return detail::invalid_input_result<std::vector<Point2>>(
         *state_, diag_codes::kCoreInvalidHandle,
@@ -1070,4 +1161,11 @@ TopologyQueryService::face_outer_loop_uv_polyline(FaceId face_id) const {
             std::vector<std::uint64_t>{face_id.value}));
   }
   return ok_result(std::move(out), state_->create_diagnostic("已串联面外环 UV 折线"));
+}
+
+Result<std::uint64_t>
+TopologyQueryService::query_operation_count() const {
+  return ok_result(
+      state_->topology_query_op_count,
+      state_->create_diagnostic("已查询拓扑只读操作累计次数"));
 }

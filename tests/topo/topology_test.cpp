@@ -105,6 +105,28 @@ int main() {
         }
     }
 
+    // ---- TopoCore (7.2): read-query audit — nested topology queries count as one top-level op ----
+    {
+        axiom::Kernel k_read;
+        auto q0 = k_read.topology().query().query_operation_count();
+        if (q0.status != axiom::StatusCode::Ok || !q0.value.has_value() || *q0.value != 0) {
+            std::cerr << "expected initial topology query_operation_count 0\n";
+            return 1;
+        }
+        (void)k_read.topology().query().has_vertex(axiom::VertexId{404});
+        auto q1 = k_read.topology().query().query_operation_count();
+        if (q1.status != axiom::StatusCode::Ok || !q1.value.has_value() || *q1.value != 1) {
+            std::cerr << "expected query_operation_count 1 after has_vertex\n";
+            return 1;
+        }
+        (void)k_read.topology().query().is_edge_boundary(axiom::EdgeId{404});
+        auto q2 = k_read.topology().query().query_operation_count();
+        if (q2.status != axiom::StatusCode::Ok || !q2.value.has_value() || *q2.value != 2) {
+            std::cerr << "expected query_operation_count 2 after is_edge_boundary (nested queries not double-counted)\n";
+            return 1;
+        }
+    }
+
     // ---- TopoCore (7.2): trim bridge audit — bind count accumulates & survives commit ----
     {
         axiom::Kernel k_bind_audit;

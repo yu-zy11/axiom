@@ -15,6 +15,16 @@ Result<void> ValidationService::validate_geometry(BodyId body_id, ValidationMode
         return detail::failed_void(*state_, StatusCode::DegenerateGeometry, diag_codes::kValDegenerateGeometry,
                                    "几何验证失败：目标实体包围盒退化或无效", "几何验证失败");
     }
+    // owned B-Rep：句柄完整性（全模式），与 Strict 参数域/退化项解耦，便于 Standard 工作流尽早发现悬空引用。
+    if (body.rep_kind == RepKind::ExactBRep && !body.shells.empty() &&
+        !(body.kind == detail::BodyKind::Sweep && body.sweep_polyhedral_mass_valid)) {
+        std::string ref_reason;
+        std::vector<std::uint64_t> ref_related;
+        if (!validate_owned_brep_reference_integrity(state_, body_id, ref_reason, ref_related)) {
+            return detail::failed_void(*state_, StatusCode::DegenerateGeometry, diag_codes::kValDegenerateGeometry,
+                                       "几何验证失败：" + ref_reason, "几何验证失败", std::move(ref_related));
+        }
+    }
     if (mode == ValidationMode::Strict) {
         // 分片旋转体：拓扑面为平面三角形片，当前曲面域与环 UV 尚未完全工业对齐，Strict 域检查易误报。
         if (!(body.kind == detail::BodyKind::Sweep && body.sweep_polyhedral_mass_valid)) {
@@ -387,6 +397,12 @@ Result<void> ValidationService::validate_tolerance(BodyId body_id, ValidationMod
                                    "容差验证失败：目标实体无有效尺寸范围", "容差验证失败");
     }
     if (mode == ValidationMode::Strict) {
+        if (std::isfinite(tol.min_local) && std::isfinite(tol.max_local) && tol.max_local > 0.0 &&
+            tol.min_local > tol.max_local) {
+            return detail::failed_void(*state_, StatusCode::ToleranceConflict, diag_codes::kValToleranceConflict,
+                                       "容差验证失败：线性容差策略 min_local 大于 max_local", "容差验证失败",
+                                       {body_id.value});
+        }
         if (std::isfinite(tol.max_local) && tol.max_local > 0.0 && tol.linear > tol.max_local) {
             return detail::failed_void(*state_, StatusCode::ToleranceConflict, diag_codes::kValToleranceConflict,
                                        "容差验证失败：线性容差超过策略上限 max_local", "容差验证失败",

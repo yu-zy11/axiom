@@ -24,6 +24,7 @@ Result<void> attach_plugin_unregistration_diag(detail::KernelState& st, Result<v
 Result<CurveId> attach_plugin_curve_create_diag(detail::KernelState& st, Result<CurveId> r);
 Result<CurveId> attach_plugin_post_curve_verify_fail_diag(detail::KernelState& st, CurveId curve_id,
                                                           Result<void> v);
+Result<void> attach_plugin_curve_consistency_verify_diag(detail::KernelState& st, CurveId curve_id, Result<void> v);
 Result<BodyId> attach_plugin_import_body_diag(detail::KernelState& st, Result<BodyId> r);
 Result<BodyId> attach_plugin_post_import_validate_fail_diag(detail::KernelState& st, BodyId body_id,
                                                             Result<void> v);

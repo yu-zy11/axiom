@@ -21,6 +21,38 @@ namespace axiom {
 
 using namespace ops_internal;
 
+namespace {
+
+Result<OpReport> boolean_op_fail_staged(std::shared_ptr<detail::KernelState> state,
+                                        bool diagnostics,
+                                        StatusCode st,
+                                        std::string_view code,
+                                        std::string message,
+                                        std::string summary,
+                                        BodyId lhs,
+                                        BodyId rhs,
+                                        const BooleanPrepStats* prep) {
+    if (!diagnostics) {
+        if (st == StatusCode::InvalidInput) {
+            return detail::invalid_input_result<OpReport>(*state, code, std::move(message), std::move(summary));
+        }
+        return detail::failed_result<OpReport>(*state, st, code, std::move(message), std::move(summary));
+    }
+    const DiagnosticId diag = state->create_diagnostic(std::move(summary));
+    append_boolean_stage_issue(*state, diag, diag_codes::kBoolStageCandidates,
+                               "布尔早期退出：在候选/包围盒关系检查阶段已中止，未生成结果体",
+                               {lhs.value, rhs.value});
+    if (prep != nullptr) {
+        append_boolean_prep_candidate_issue(*state, diag, lhs, rhs, *prep);
+    }
+    auto issue = detail::make_error_issue(code, std::move(message), {lhs.value, rhs.value});
+    set_boolean_diagnostic_stage(issue, code);
+    state->append_diagnostic_issue(diag, std::move(issue));
+    return error_result<OpReport>(st, diag);
+}
+
+}  // namespace
+
 PrimitiveService::PrimitiveService(std::shared_ptr<detail::KernelState> state) : state_(std::move(state)) {}
 
 Result<BodyId> PrimitiveService::box(const Point3& origin, Scalar dx, Scalar dy, Scalar dz) {
@@ -378,9 +410,9 @@ BooleanService::BooleanService(std::shared_ptr<detail::KernelState> state) : sta
 
 Result<OpReport> BooleanService::run(BooleanOp op, BodyId lhs, BodyId rhs, const BooleanOptions& boolean_options) {
     if (!detail::has_body(*state_, lhs) || !detail::has_body(*state_, rhs)) {
-        return detail::invalid_input_result<OpReport>(
-            *state_, diag_codes::kBoolInvalidInput,
-            "布尔运算失败：输入实体不存在或无效", "布尔运算失败");
+        return boolean_op_fail_staged(state_, boolean_options.diagnostics, StatusCode::InvalidInput,
+                                      diag_codes::kBoolInvalidInput,
+                                      "布尔运算失败：输入实体不存在或无效", "布尔运算失败", lhs, rhs, nullptr);
     }
 
     detail::BodyRecord record;
@@ -414,9 +446,10 @@ Result<OpReport> BooleanService::run(BooleanOp op, BodyId lhs, BodyId rhs, const
             break;
         case BooleanOp::Intersect:
             if (relation == BBoxRelation::Disjoint) {
-                return detail::failed_result<OpReport>(
-                    *state_, StatusCode::OperationFailed, diag_codes::kBoolIntersectionFailure,
-                    "布尔交集失败：两个输入体的包围盒不相交", "布尔交集失败");
+                return boolean_op_fail_staged(state_, boolean_options.diagnostics, StatusCode::OperationFailed,
+                                              diag_codes::kBoolIntersectionFailure,
+                                              "布尔交集失败：两个输入体的包围盒不相交", "布尔交集失败", lhs, rhs,
+                                              &prep);
             }
             record.bbox = prep.local_overlap_bbox.is_valid
                               ? prep.local_overlap_bbox
@@ -445,9 +478,10 @@ Result<OpReport> BooleanService::run(BooleanOp op, BodyId lhs, BodyId rhs, const
                     diag_codes::kBoolPrepNoCandidateWarning,
                     "减运算未发现局部重叠候选，当前仅按全局语义保留左体"));
             } else if (relation == BBoxRelation::RhsContainsLhs) {
-                return detail::failed_result<OpReport>(
-                    *state_, StatusCode::OperationFailed, diag_codes::kBoolClassificationFailure,
-                    "布尔减运算失败：右体近似完全包含左体，当前阶段无法稳定表达空结果", "布尔减运算失败");
+                return boolean_op_fail_staged(state_, boolean_options.diagnostics, StatusCode::OperationFailed,
+                                              diag_codes::kBoolClassificationFailure,
+                                              "布尔减运算失败：右体近似完全包含左体，当前阶段无法稳定表达空结果",
+                                              "布尔减运算失败", lhs, rhs, &prep);
             }
             break;
         case BooleanOp::Split:

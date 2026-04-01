@@ -59,6 +59,10 @@ if (AXM_ENABLE_TESTS)
     target_link_libraries(axiom_ops_heal_test PRIVATE axiom_kernel)
     add_test(NAME axiom_ops_heal_test COMMAND axiom_ops_heal_test)
 
+    add_executable(axiom_heal_test tests/heal/heal_test.cpp)
+    target_link_libraries(axiom_heal_test PRIVATE axiom_kernel)
+    add_test(NAME axiom_heal_test COMMAND axiom_heal_test)
+
     add_executable(axiom_query_eval_test tests/eval/query_eval_test.cpp)
     target_link_libraries(axiom_query_eval_test PRIVATE axiom_kernel)
     add_test(NAME axiom_query_eval_test COMMAND axiom_query_eval_test)

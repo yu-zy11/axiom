@@ -523,6 +523,103 @@ BodyId clone_modified_body(std::shared_ptr<detail::KernelState> state, BodyId so
     return id;
 }
 
+// Standard/Fast/Strict 共用：owned B-Rep 几何-拓扑句柄完整性（存在性），不调用曲线/曲面 domain API，便于在全模式下尽早拦截悬空引用。
+bool validate_owned_brep_reference_integrity(const std::shared_ptr<detail::KernelState>& state,
+                                             BodyId body_id,
+                                             std::string& reason,
+                                             std::vector<std::uint64_t>& related) {
+    related.clear();
+    const auto& body = state->bodies.at(body_id.value);
+    if (body.rep_kind != RepKind::ExactBRep || body.shells.empty()) {
+        return true;
+    }
+    for (const auto shell_id : body.shells) {
+        if (!detail::has_shell(*state, shell_id)) {
+            reason = "体引用了不存在的壳";
+            related = {body_id.value, shell_id.value};
+            return false;
+        }
+        const auto shell_it = state->shells.find(shell_id.value);
+        if (shell_it == state->shells.end()) {
+            reason = "体引用了不存在的壳";
+            related = {body_id.value, shell_id.value};
+            return false;
+        }
+        for (const auto face_id : shell_it->second.faces) {
+            if (!detail::has_face(*state, face_id)) {
+                reason = "壳引用了不存在的面";
+                related = {body_id.value, shell_id.value, face_id.value};
+                return false;
+            }
+            const auto& face = state->faces.at(face_id.value);
+            if (!detail::has_surface(*state, face.surface_id)) {
+                reason = "面引用了不存在的支撑曲面";
+                related = {body_id.value, face_id.value};
+                return false;
+            }
+            if (!detail::has_loop(*state, face.outer_loop)) {
+                reason = "拓扑面缺少有效外环句柄";
+                related = {body_id.value, face_id.value};
+                return false;
+            }
+            std::vector<LoopId> loop_ids;
+            loop_ids.push_back(face.outer_loop);
+            for (const auto& inner : face.inner_loops) {
+                if (detail::has_loop(*state, inner)) {
+                    loop_ids.push_back(inner);
+                }
+            }
+            for (const auto loop_id : loop_ids) {
+                const auto loop_it = state->loops.find(loop_id.value);
+                if (loop_it == state->loops.end()) {
+                    reason = "面引用了不存在的环";
+                    related = {body_id.value, face_id.value, loop_id.value};
+                    return false;
+                }
+                for (const auto coedge_id : loop_it->second.coedges) {
+                    const auto co_it = state->coedges.find(coedge_id.value);
+                    if (co_it == state->coedges.end()) {
+                        reason = "环引用了不存在的共边";
+                        related = {body_id.value, face_id.value, coedge_id.value};
+                        return false;
+                    }
+                    const EdgeId edge_id = co_it->second.edge_id;
+                    const auto e_it = state->edges.find(edge_id.value);
+                    if (e_it == state->edges.end()) {
+                        reason = "共边引用了不存在的边";
+                        related = {body_id.value, face_id.value, coedge_id.value};
+                        return false;
+                    }
+                    if (e_it->second.curve_id.value == 0) {
+                        reason = "边未绑定有效三维曲线句柄";
+                        related = {body_id.value, face_id.value, edge_id.value};
+                        return false;
+                    }
+                    if (!detail::has_curve(*state, e_it->second.curve_id)) {
+                        reason = "边引用了不存在的三维曲线";
+                        related = {body_id.value, face_id.value, edge_id.value, e_it->second.curve_id.value};
+                        return false;
+                    }
+                    const PCurveId pid = co_it->second.pcurve_id;
+                    if (pid.value != 0 && !detail::has_pcurve(*state, pid)) {
+                        reason = "共边引用了不存在的参数曲线";
+                        related = {body_id.value, face_id.value, coedge_id.value, pid.value};
+                        return false;
+                    }
+                    for (const auto vid : {e_it->second.v0, e_it->second.v1}) {
+                        if (vid.value == 0 || !detail::has_vertex(*state, vid)) {
+                            reason = "边引用了不存在的顶点";
+                            related = {body_id.value, edge_id.value, vid.value};
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
 // Strict：遍历 owned 壳上的面，校验支撑曲面 UV 定义域为合法开区间（有限则 min<max；含无穷时仍须可比较有序）。
 bool validate_strict_owned_surface_domains(const std::shared_ptr<detail::KernelState>& state,
                                            BodyId body_id,

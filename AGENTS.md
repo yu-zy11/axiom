@@ -194,7 +194,8 @@ ctest --test-dir build
 - **geometry**：`axiom_geometry_test`
 - **topology**：`axiom_topology_test`
 - **math**：`axiom_math_services_test`
-- **ops/heal**：`axiom_ops_heal_test`
+- **ops workflow**：`axiom_ops_heal_test`
+- **heal**：`axiom_heal_test`
 - **io workflow**：`axiom_io_workflow_test`
 - **representation + io**：`axiom_representation_io_test`
 - **query + eval**：`axiom_query_eval_test`

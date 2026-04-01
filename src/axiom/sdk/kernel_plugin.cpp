@@ -7,10 +7,30 @@
 #include "axiom/plugin/plugin_sdk_version.h"
 
 #include <algorithm>
+#include <cmath>
 #include <sstream>
 #include <string>
 
 namespace axiom {
+namespace {
+
+Result<void> plugin_curve_host_consistency_core(detail::KernelState& st, CurveService& cs, CurveId cid) {
+  if (!detail::has_curve(st, cid)) {
+    return error_void(StatusCode::InvalidInput, {}, {});
+  }
+  const auto dom = cs.domain(cid);
+  if (dom.status != StatusCode::Ok || !dom.value.has_value()) {
+    return error_void(dom.status, dom.diagnostic_id, std::move(dom.warnings));
+  }
+  const auto& d = *dom.value;
+  if (!std::isless(d.min, d.max)) {
+    return error_void(StatusCode::OperationFailed, {}, {});
+  }
+  return ok_void({});
+}
+
+}  // namespace
+
 using namespace kernel_plugin_helpers;
 
 Result<std::vector<std::string>> Kernel::plugin_manifest_names() const {
@@ -399,6 +419,18 @@ Result<bool> Kernel::has_service_plugin_curve() const {
   return ok_result(true, state_->create_diagnostic("已查询插件曲线宿主封装可用性"));
 }
 
+Result<bool> Kernel::has_service_plugin_verify_curve() const {
+  return ok_result(true, state_->create_diagnostic("已查询插件曲线显式一致性校验可用性"));
+}
+
+Result<void> Kernel::verify_after_plugin_curve(CurveId curve_id) {
+  const auto v = plugin_curve_host_consistency_core(*state_, curve_service(), curve_id);
+  if (v.status != StatusCode::Ok) {
+    return attach_plugin_curve_consistency_verify_diag(*state_, curve_id, std::move(v));
+  }
+  return ok_void(state_->create_diagnostic("插件曲线一致性校验通过"));
+}
+
 Result<CurveId> Kernel::plugin_create_curve(std::string_view implementation_type_name, PluginCurveDesc desc) {
   auto r = state_->plugin_registry.invoke_registered_curve(implementation_type_name, desc);
   if (r.status != StatusCode::Ok || !r.value.has_value()) {
@@ -406,21 +438,9 @@ Result<CurveId> Kernel::plugin_create_curve(std::string_view implementation_type
   }
   const CurveId cid = *r.value;
   if (state_->config.plugin_host_policy.auto_verify_curve_after_plugin_curve) {
-    if (!detail::has_curve(*state_, cid)) {
-      return attach_plugin_post_curve_verify_fail_diag(
-          *state_, cid,
-          error_result<void>(StatusCode::InvalidInput, {}, std::vector<Warning> {}));
-    }
-    const auto dom = curve_service().domain(cid);
-    if (dom.status != StatusCode::Ok || !dom.value.has_value()) {
-      return attach_plugin_post_curve_verify_fail_diag(*state_, cid,
-                                                       error_result<void>(dom.status, dom.diagnostic_id, std::move(dom.warnings)));
-    }
-    const auto& d = *dom.value;
-    if (!(d.max > d.min)) {
-      return attach_plugin_post_curve_verify_fail_diag(
-          *state_, cid,
-          error_result<void>(StatusCode::OperationFailed, {}, std::vector<Warning> {}));
+    const auto v = plugin_curve_host_consistency_core(*state_, curve_service(), cid);
+    if (v.status != StatusCode::Ok) {
+      return attach_plugin_post_curve_verify_fail_diag(*state_, cid, std::move(v));
     }
   }
   return ok_result(cid, state_->create_diagnostic("插件曲线创建完成"));

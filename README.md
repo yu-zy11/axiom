@@ -40,11 +40,19 @@ ctest --test-dir build
 ## 目录结构
 
 - `include/axiom/`: 对外公开头文件（Public API）
-- `src/`: 实现源码（包含 `src/axiom/internal/**`：模块私有 internal 头，不安装、不对外暴露）
+- `src/axiom/`: 模块实现真源
+- `src/axiom/internal/`: 模块私有 internal 头与实现分片，不安装、不对外暴露
 - `tests/`: 自动化测试（按模块分子目录，如 `tests/geo/`、`tests/ops/`）
 - `cmake/`: 构建片段（如 `AxiomKernelLibraries.cmake` 定义各模块静态库）
 - `examples/`: 示例程序
 - `docs/`: 设计/接口/质量/诊断等文档
+
+当前文档与结构治理约定要求：
+
+- 公开 API 以 `include/axiom/**` 为准
+- 实现路径以 `src/axiom/**` 为准
+- 构建与模块依赖以 `cmake/AxiomKernelLibraries.cmake` 为准
+- `ctest` 清单以根目录 `CMakeLists.txt` 为准
 
 ## 构建产物（模块化 targets）
 
@@ -58,5 +66,11 @@ ctest --test-dir build
 
 ## 文档索引
 
-更完整的架构、接口、测试与诊断规范请阅读 `AGENTS.md` 与 `docs/` 下文档。
+建议阅读顺序：
+
+1. `docs/README.md`
+2. `docs/plan/AxiomKernel_当前开发进度.md`
+3. `docs/architecture/AxiomKernel_项目结构与文档治理建议.md`
+4. `docs/plan/AxiomKernel_主开发计划与阶段路线图.md`
+5. `AGENTS.md`
 

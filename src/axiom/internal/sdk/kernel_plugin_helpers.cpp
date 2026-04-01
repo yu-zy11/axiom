@@ -133,6 +133,21 @@ Result<CurveId> attach_plugin_post_curve_verify_fail_diag(detail::KernelState& s
   return error_result<CurveId>(v.status, id, std::move(v.warnings));
 }
 
+Result<void> attach_plugin_curve_consistency_verify_diag(detail::KernelState& st, CurveId curve_id, Result<void> v) {
+  if (v.status == StatusCode::Ok) {
+    return v;
+  }
+  if (!st.config.enable_diagnostics) {
+    return v;
+  }
+  std::vector<Issue> issues;
+  issues.push_back(Issue {std::string(diag_codes::kPluginResultValidationWarning), IssueSeverity::Error,
+                          "显式宿主曲线一致性校验未通过（CurveId 未注册或参数域无效）",
+                          {curve_id.value}, "plugin.curve.verify_explicit"});
+  const DiagnosticId id = st.create_diagnostic("插件曲线一致性校验未通过", std::move(issues));
+  return error_void(v.status, id, std::move(v.warnings));
+}
+
 Result<BodyId> attach_plugin_import_body_diag(detail::KernelState& st, Result<BodyId> r) {
   if (r.status == StatusCode::Ok) {
     return r;

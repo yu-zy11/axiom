@@ -17,7 +17,7 @@ description: Develop and harden AxiomKernel Plugin/SDK surface (Kernel facade st
 - Plugin：`include/axiom/plugin/plugin_registry.h` + `src/axiom/plugin/plugin_registry.cpp`
 - 插件 SDK API 版本常量：`include/axiom/plugin/plugin_sdk_version.h`（`kPluginSdkApiVersion`，与 `Kernel::plugin_sdk_api_version` 一致）
 - 关键回归：`tests/sdk/smoke_test.cpp`、`tests/sdk/plugin_sdk_test.cpp`、`tests/diag/diagnostics_test.cpp`
-- 宿主策略扩展：`PluginSandboxLevel`、`PluginApiVersionMatchMode`、`auto_validate_body_after_plugin_importer`、`auto_validate_body_before_plugin_exporter`、`auto_validate_body_after_plugin_repair`、`auto_verify_curve_after_plugin_curve`（`types.h`）；`sandbox_level`、`plugin_api_version_match_mode`、导入/导出/修复/曲线校验开关在能力报告/JSON 可见；`Kernel::plugin_import_file` / `plugin_export_file` / `plugin_run_repair` / `plugin_create_curve`、`PluginRegistry::invoke_registered_importer` / `invoke_registered_exporter` / `invoke_registered_repair` / `invoke_registered_curve`；执行仍为进程内
+- 宿主策略扩展：`PluginSandboxLevel`、`PluginApiVersionMatchMode`、`auto_validate_body_after_plugin_importer`、`auto_validate_body_before_plugin_exporter`、`auto_validate_body_after_plugin_repair`、`auto_verify_curve_after_plugin_curve`（`types.h`）；`sandbox_level`、`plugin_api_version_match_mode`、导入/导出/修复/曲线校验开关在能力报告/JSON 可见；`Kernel::plugin_import_file` / `plugin_export_file` / `plugin_run_repair` / `plugin_create_curve`、`Kernel::verify_after_plugin_curve`（与 `plugin_create_curve` 自动校验语义一致，供绕过门面路径）、`PluginRegistry::invoke_registered_importer` / `invoke_registered_exporter` / `invoke_registered_repair` / `invoke_registered_curve`；执行仍为进程内
 
 ## 硬规则（必须遵守）
 

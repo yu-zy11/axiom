@@ -753,6 +753,45 @@ int main() {
         return 1;
     }
 
+    const auto bad_ext_path = tmp / ("axiom_io_unknown_ext_" + uniq + ".unsupported_io_ext");
+    {
+        std::ofstream bf(bad_ext_path);
+        bf << "not a registered interchange format\n";
+    }
+    auto imp_unknown = kernel.io().import_auto(bad_ext_path.string(), import_options);
+    if (imp_unknown.status != axiom::StatusCode::InvalidInput) {
+        std::cerr << "expected InvalidInput for import_auto with unknown extension\n";
+        std::filesystem::remove(bad_ext_path);
+        return 1;
+    }
+    auto imp_unknown_diag = kernel.diagnostics().get(imp_unknown.diagnostic_id);
+    if (imp_unknown_diag.status != axiom::StatusCode::Ok || !imp_unknown_diag.value.has_value() ||
+        !has_issue_code(*imp_unknown_diag.value, axiom::diag_codes::kIoImportFailure)) {
+        std::cerr << "missing kIoImportFailure diagnostic for unknown format import\n";
+        std::filesystem::remove(bad_ext_path);
+        return 1;
+    }
+    auto exp_unknown = kernel.io().export_auto(*body.value, bad_ext_path.string(), export_options);
+    if (exp_unknown.status != axiom::StatusCode::InvalidInput) {
+        std::cerr << "expected InvalidInput for export_auto with unknown extension\n";
+        std::filesystem::remove(bad_ext_path);
+        return 1;
+    }
+    auto exp_unknown_diag = kernel.diagnostics().get(exp_unknown.diagnostic_id);
+    if (exp_unknown_diag.status != axiom::StatusCode::Ok || !exp_unknown_diag.value.has_value() ||
+        !has_issue_code(*exp_unknown_diag.value, axiom::diag_codes::kIoExportFailure)) {
+        std::cerr << "missing kIoExportFailure diagnostic for unknown format export\n";
+        std::filesystem::remove(bad_ext_path);
+        return 1;
+    }
+    std::filesystem::remove(bad_ext_path);
+
+    auto imp_empty = kernel.io().import_auto("", import_options);
+    if (imp_empty.status != axiom::StatusCode::InvalidInput) {
+        std::cerr << "expected InvalidInput for empty import path\n";
+        return 1;
+    }
+
     std::filesystem::remove(*rename_dst.value);
     std::filesystem::remove(scan_a);
     std::filesystem::remove(scan_b);
