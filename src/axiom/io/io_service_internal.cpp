@@ -1,14 +1,18 @@
 #include "axiom/internal/io/io_service_internal.h"
 
+#include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <regex>
 #include <sstream>
 #include <system_error>
 
+#include "axiom/diag/error_codes.h"
 #include "axiom/heal/heal_services.h"
 #include "axiom/internal/core/diagnostic_helpers.h"
 #include "axiom/internal/rep/representation_internal_utils.h"
@@ -16,6 +20,208 @@
 namespace axiom {
 namespace io_internal {
 
+Result<void> reject_if_export_directory_not_writable(detail::KernelState& state, std::string_view path_sv) {
+    if (path_sv.empty()) {
+        return detail::invalid_input_void(state, diag_codes::kIoExportFailure, "导出路径校验失败：路径为空", "导出路径校验失败");
+    }
+    const std::filesystem::path file_path {std::string(path_sv)};
+    std::filesystem::path dir = file_path.parent_path();
+    if (dir.empty()) {
+        std::error_code ec;
+        dir = std::filesystem::current_path(ec);
+        if (ec) {
+            return detail::failed_void(state, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+                                     "导出路径校验失败：无法解析当前工作目录", "导出路径校验失败");
+        }
+    }
+    std::error_code ec;
+    if (!std::filesystem::exists(dir, ec) || ec) {
+        return detail::invalid_input_void(state, diag_codes::kIoExportFailure, "导出路径校验失败：输出目录不存在", "导出路径校验失败");
+    }
+    if (!std::filesystem::is_directory(dir, ec)) {
+        return detail::invalid_input_void(state, diag_codes::kIoExportFailure, "导出路径校验失败：输出路径父级不是目录", "导出路径校验失败");
+    }
+    static std::atomic<std::uint64_t> wchk_seq {0};
+    const auto probe = dir / (".axiom_export_wchk_" + std::to_string(wchk_seq.fetch_add(1, std::memory_order_relaxed)) + "_" +
+                              std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    bool wrote = false;
+    {
+        std::ofstream out {probe.string(), std::ios::out | std::ios::binary | std::ios::trunc};
+        if (out && out.put('1') && out.flush()) {
+            wrote = true;
+        }
+    }
+    std::filesystem::remove(probe, ec);
+    if (!wrote) {
+        auto issue = detail::make_error_issue(diag_codes::kIoExportPathNotWritable,
+                                              "导出失败：无法在输出目录创建探测文件（目录可能只读或无写权限）");
+        issue.stage = "io.export.path";
+        return error_void(StatusCode::OperationFailed, state.create_diagnostic("导出路径不可写", {std::move(issue)}));
+    }
+    return ok_void({});
+}
+
+namespace {
+
+std::size_t find_ci_substr(std::string_view hay, std::string_view needle) {
+    if (needle.empty() || needle.size() > hay.size()) {
+        return std::string_view::npos;
+    }
+    for (std::size_t i = 0; i + needle.size() <= hay.size(); ++i) {
+        bool match = true;
+        for (std::size_t j = 0; j < needle.size(); ++j) {
+            if (std::tolower(static_cast<unsigned char>(hay[i + j])) !=
+                std::tolower(static_cast<unsigned char>(needle[j]))) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            return i;
+        }
+    }
+    return std::string_view::npos;
+}
+
+std::string strip_c_style_block_comments(std::string_view in) {
+    std::string out;
+    out.reserve(in.size());
+    bool in_comment = false;
+    for (std::size_t i = 0; i < in.size(); ++i) {
+        if (!in_comment && i + 1 < in.size() && in[i] == '/' && in[i + 1] == '*') {
+            in_comment = true;
+            ++i;
+            continue;
+        }
+        if (in_comment && i + 1 < in.size() && in[i] == '*' && in[i + 1] == '/') {
+            in_comment = false;
+            ++i;
+            continue;
+        }
+        if (!in_comment) {
+            out.push_back(in[i]);
+        }
+    }
+    return out;
+}
+
+bool step_text_is_axiom_interchange_subset(std::string_view text) {
+    if (text.find("AXIOM_") != std::string_view::npos) {
+        return true;
+    }
+    if (text.find("('AxiomKernel export')") != std::string_view::npos) {
+        return true;
+    }
+    if (text.find("'AxiomKernel export'") != std::string_view::npos) {
+        return true;
+    }
+    return false;
+}
+
+bool step_data_section_has_express_instance_entities(std::string_view text) {
+    const std::size_t data_pos = find_ci_substr(text, "DATA;");
+    if (data_pos == std::string_view::npos) {
+        return false;
+    }
+    const std::size_t search_from = data_pos + 5;
+    const std::size_t endsec = find_ci_substr(text.substr(search_from), "ENDSEC;");
+    if (endsec == std::string_view::npos) {
+        return false;
+    }
+    const std::string_view data_chunk = text.substr(search_from, endsec);
+    const std::string stripped = strip_c_style_block_comments(data_chunk);
+    static const std::regex kInstance(R"(#[0-9]+\s*=\s*[A-Za-z_][A-Za-z0-9_]*\s*[\(;])");
+    return std::regex_search(stripped, kInstance);
+}
+
+bool iges_text_is_axiom_interchange_subset(std::string_view text) {
+    if (text.find("AXIOM_") != std::string_view::npos) {
+        return true;
+    }
+    if (text.find("1HAXIOM") != std::string_view::npos) {
+        return true;
+    }
+    if (text.find("AxiomKernel IGES metadata") != std::string_view::npos) {
+        return true;
+    }
+    return false;
+}
+
+bool iges_text_looks_like_standard_fixed_deck(std::string_view text) {
+    std::size_t hollerith_tokens = 0;
+    std::size_t lines_len80 = 0;
+    std::size_t de_pattern_lines = 0;
+    std::size_t line_start = 0;
+    for (std::size_t i = 0; i <= text.size(); ++i) {
+        if (i < text.size() && text[i] != '\n') {
+            continue;
+        }
+        std::string_view line = text.substr(line_start, i - line_start);
+        if (!line.empty() && line.back() == '\r') {
+            line.remove_suffix(1);
+        }
+        while (!line.empty() && std::isspace(static_cast<unsigned char>(line.back())) != 0) {
+            line.remove_suffix(1);
+        }
+        if (line.size() == 80) {
+            ++lines_len80;
+        }
+        for (std::size_t k = 0; k + 1 < line.size(); ++k) {
+            if (std::isdigit(static_cast<unsigned char>(line[k])) != 0 && line[k + 1] == 'H') {
+                ++hollerith_tokens;
+            }
+        }
+        static const std::regex kDeTail(R"([0-9]{1,9}D[0-9]{1,9}\s*$)");
+        if (std::regex_search(std::string(line), kDeTail)) {
+            ++de_pattern_lines;
+        }
+        line_start = i + 1;
+    }
+    if (lines_len80 >= 2) {
+        return true;
+    }
+    if (hollerith_tokens >= 4) {
+        return true;
+    }
+    if (de_pattern_lines >= 2) {
+        return true;
+    }
+    return false;
+}
+
+}  // namespace
+
+std::optional<std::string> read_regular_file_bytes_limited(std::string_view path, std::size_t max_bytes) {
+    if (path.empty() || max_bytes == 0) {
+        return std::string{};
+    }
+    std::ifstream in {std::string(path), std::ios::binary};
+    if (!in) {
+        return std::nullopt;
+    }
+    std::string out;
+    out.resize(max_bytes);
+    in.read(out.data(), static_cast<std::streamsize>(max_bytes));
+    out.resize(static_cast<std::size_t>(in.gcount()));
+    return out;
+}
+
+bool step_file_requires_full_standard_importer(std::string_view file_text) {
+    if (find_ci_substr(file_text, "ISO-10303-21") == std::string_view::npos) {
+        return false;
+    }
+    if (!step_data_section_has_express_instance_entities(file_text)) {
+        return false;
+    }
+    return !step_text_is_axiom_interchange_subset(file_text);
+}
+
+bool iges_file_requires_full_standard_importer(std::string_view file_text) {
+    if (!iges_text_looks_like_standard_fixed_deck(file_text)) {
+        return false;
+    }
+    return !iges_text_is_axiom_interchange_subset(file_text);
+}
 
 std::string_view body_kind_name(detail::BodyKind kind) {
     switch (kind) {
@@ -167,16 +373,43 @@ void append_padding_4(std::vector<std::uint8_t>& out) {
     while ((out.size() % 4) != 0) out.push_back(0);
 }
 
+namespace {
+void trim_ascii_inplace(std::string& s) {
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front())) != 0) {
+        s.erase(s.begin());
+    }
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back())) != 0) {
+        s.pop_back();
+    }
+}
+}  // namespace
+
 void parse_axiom_interchange_metadata_lines(std::istream& in, detail::BodyRecord& record) {
     std::string line;
     while (std::getline(in, line)) {
         line = trim_comment(std::move(line));
         if (line.rfind("AXIOM_LABEL ", 0) == 0) {
             record.label = line.substr(std::string("AXIOM_LABEL ").size());
+            trim_ascii_inplace(record.label);
             continue;
         }
         if (line.rfind("AXIOM_BODY_KIND ", 0) == 0) {
             record.kind = parse_body_kind(line.substr(std::string("AXIOM_BODY_KIND ").size()));
+            continue;
+        }
+        if (line.rfind("AXIOM_STEP_SCHEMA ", 0) == 0) {
+            record.io_step_file_schema = line.substr(std::string("AXIOM_STEP_SCHEMA ").size());
+            trim_ascii_inplace(record.io_step_file_schema);
+            continue;
+        }
+        if (line.rfind("AXIOM_STEP_ENTITY ", 0) == 0) {
+            record.io_step_entity_name = line.substr(std::string("AXIOM_STEP_ENTITY ").size());
+            trim_ascii_inplace(record.io_step_entity_name);
+            continue;
+        }
+        if (line.rfind("AXIOM_IGES_ENTITY ", 0) == 0) {
+            record.io_iges_entity_hint = line.substr(std::string("AXIOM_IGES_ENTITY ").size());
+            trim_ascii_inplace(record.io_iges_entity_hint);
             continue;
         }
         if (parse_triplet_line(line, "AXIOM_ORIGIN", record.origin.x, record.origin.y, record.origin.z)) {
@@ -478,6 +711,9 @@ std::optional<std::string> parse_obj_text_to_mesh(std::string_view text, detail:
                 return std::string("OBJ 解析失败：顶点行非法");
             }
             mesh.vertices.push_back(Point3 {x, y, z});
+        } else if (tag == "vn" || tag == "vt" || tag == "vp" || tag == "o" || tag == "g" || tag == "s" ||
+                   tag == "usemtl" || tag == "mtllib" || tag == "l") {
+            continue;
         } else if (tag == "f") {
             std::vector<Index> face;
             std::string part;
@@ -545,7 +781,8 @@ bool extract_3mf_model_xml(const std::vector<std::pair<std::string, std::vector<
                            std::string& out_xml) {
     for (const auto& e : files) {
         const std::string& n = e.first;
-        if (n.size() >= 13 && n.compare(n.size() - 13, 13, "3dmodel.model") == 0) {
+        const std::string nl = lower_copy(n);
+        if (nl.find("3dmodel.model") != std::string::npos) {
             out_xml.assign(e.second.begin(), e.second.end());
             return true;
         }
@@ -557,12 +794,23 @@ std::optional<std::string> parse_3mf_model_xml_to_mesh(std::string_view xml, det
     mesh.vertices.clear();
     mesh.indices.clear();
     static const std::regex vtx(R"(<vertex\s+x=\"([^\"]+)\"\s+y=\"([^\"]+)\"\s+z=\"([^\"]+)\"\s*/>)");
+    static const std::regex vtx_loose(
+        R"(<vertex\s+[^>]*?x\s*=\s*\"([^\"]+)\"\s+[^>]*?y\s*=\s*\"([^\"]+)\"\s+[^>]*?z\s*=\s*\"([^\"]+)\"[^>]*/>)");
     static const std::regex tri(R"(<triangle\s+v1=\"([0-9]+)\"\s+v2=\"([0-9]+)\"\s+v3=\"([0-9]+)\"\s*/>)");
+    static const std::regex tri_loose(
+        R"(<triangle\s+[^>]*?v1\s*=\s*\"([0-9]+)\"\s+[^>]*?v2\s*=\s*\"([0-9]+)\"\s+[^>]*?v3\s*=\s*\"([0-9]+)\"[^>]*/>)");
     const std::string s {xml};
     for (std::sregex_iterator it(s.begin(), s.end(), vtx), end; it != end; ++it) {
         const auto& m = *it;
         mesh.vertices.push_back(
             Point3 {std::stod(m[1].str()), std::stod(m[2].str()), std::stod(m[3].str())});
+    }
+    if (mesh.vertices.empty()) {
+        for (std::sregex_iterator it(s.begin(), s.end(), vtx_loose), end; it != end; ++it) {
+            const auto& m = *it;
+            mesh.vertices.push_back(
+                Point3 {std::stod(m[1].str()), std::stod(m[2].str()), std::stod(m[3].str())});
+        }
     }
     for (std::sregex_iterator it(s.begin(), s.end(), tri), end; it != end; ++it) {
         const auto& m = *it;
@@ -570,8 +818,29 @@ std::optional<std::string> parse_3mf_model_xml_to_mesh(std::string_view xml, det
         mesh.indices.push_back(static_cast<Index>(std::stoul(m[2].str())));
         mesh.indices.push_back(static_cast<Index>(std::stoul(m[3].str())));
     }
+    if (mesh.indices.empty()) {
+        for (std::sregex_iterator it(s.begin(), s.end(), tri_loose), end; it != end; ++it) {
+            const auto& m = *it;
+            mesh.indices.push_back(static_cast<Index>(std::stoul(m[1].str())));
+            mesh.indices.push_back(static_cast<Index>(std::stoul(m[2].str())));
+            mesh.indices.push_back(static_cast<Index>(std::stoul(m[3].str())));
+        }
+    }
     if (mesh.vertices.empty() || mesh.indices.empty() || (mesh.indices.size() % 3) != 0) {
         return std::string("3MF 解析失败：网格数据不完整");
+    }
+    {
+        Index mx = 0;
+        Index mn = std::numeric_limits<Index>::max();
+        for (Index ix : mesh.indices) {
+            mx = std::max(mx, ix);
+            mn = std::min(mn, ix);
+        }
+        if (mx == static_cast<Index>(mesh.vertices.size()) && mn >= 1) {
+            for (auto& ix : mesh.indices) {
+                ix -= 1;
+            }
+        }
     }
     if (detail::has_out_of_range_indices(mesh.vertices, mesh.indices)) {
         return std::string("3MF 解析失败：三角形索引越界");
@@ -902,6 +1171,205 @@ std::optional<std::string> parse_gltf_embedded_minimal(std::string_view json, de
     mesh.tessellation_strategy = "io_import_gltf";
     mesh.bbox = detail::mesh_bbox_from_vertices(mesh.vertices);
     return std::nullopt;
+}
+
+DiagnosticId merge_batch_import_failure_diagnostic(detail::KernelState& state, std::string_view format_label_cn,
+                                                   std::size_t index, std::string_view path, DiagnosticId child_diag_id) {
+    std::vector<Issue> issues;
+    auto ctx = detail::make_error_issue(
+        diag_codes::kIoBatchImportItemContext,
+        std::string("批量") + std::string(format_label_cn) + "导入在第 " + std::to_string(index + 1) + " 项失败，路径: " +
+            std::string(path));
+    ctx.stage = "io.batch_import";
+    ctx.related_entities = {static_cast<std::uint64_t>(index)};
+    issues.push_back(std::move(ctx));
+    if (child_diag_id.value != 0) {
+        const auto it = state.diagnostics.find(child_diag_id.value);
+        if (it != state.diagnostics.end()) {
+            for (const auto& iss : it->second.issues) {
+                issues.push_back(iss);
+            }
+        }
+    }
+    return state.create_diagnostic(std::string("批量") + std::string(format_label_cn) + "导入失败", std::move(issues));
+}
+
+DiagnosticId merge_batch_export_failure_diagnostic(detail::KernelState& state, std::string_view format_label_cn,
+                                                   std::size_t index, BodyId body_id, std::string_view path,
+                                                   DiagnosticId child_diag_id) {
+    std::vector<Issue> issues;
+    auto ctx = detail::make_error_issue(
+        diag_codes::kIoBatchExportItemContext,
+        std::string("批量") + std::string(format_label_cn) + "导出在第 " + std::to_string(index + 1) + " 项失败，路径: " +
+            std::string(path));
+    ctx.stage = "io.batch_export";
+    ctx.related_entities = {body_id.value, static_cast<std::uint64_t>(index)};
+    issues.push_back(std::move(ctx));
+    if (child_diag_id.value != 0) {
+        const auto it = state.diagnostics.find(child_diag_id.value);
+        if (it != state.diagnostics.end()) {
+            for (const auto& iss : it->second.issues) {
+                issues.push_back(iss);
+            }
+        }
+    }
+    return state.create_diagnostic(std::string("批量") + std::string(format_label_cn) + "导出失败", std::move(issues));
+}
+
+DiagnosticId merge_batch_detect_format_failure_diagnostic(detail::KernelState& state, std::size_t index,
+                                                          std::string_view path, DiagnosticId child_diag_id) {
+    std::vector<Issue> issues;
+    auto ctx = detail::make_error_issue(
+        diag_codes::kIoBatchDetectFormatItemContext,
+        std::string("批量格式识别在第 ") + std::to_string(index + 1) + " 项失败，路径: " + std::string(path));
+    ctx.stage = "io.batch_detect_format";
+    ctx.related_entities = {static_cast<std::uint64_t>(index)};
+    issues.push_back(std::move(ctx));
+    if (child_diag_id.value != 0) {
+        const auto it = state.diagnostics.find(child_diag_id.value);
+        if (it != state.diagnostics.end()) {
+            for (const auto& iss : it->second.issues) {
+                issues.push_back(iss);
+            }
+        }
+    }
+    return state.create_diagnostic("批量格式识别失败", std::move(issues));
+}
+
+DiagnosticId merge_batch_read_failure_diagnostic(detail::KernelState& state, std::size_t index, std::string_view path,
+                                                 DiagnosticId child_diag_id) {
+    std::vector<Issue> issues;
+    auto ctx = detail::make_error_issue(diag_codes::kIoBatchReadItemContext,
+                                        std::string("批量读取在第 ") + std::to_string(index + 1) + " 项失败，路径: " +
+                                            std::string(path));
+    ctx.stage = "io.batch_read";
+    ctx.related_entities = {static_cast<std::uint64_t>(index)};
+    issues.push_back(std::move(ctx));
+    if (child_diag_id.value != 0) {
+        const auto it = state.diagnostics.find(child_diag_id.value);
+        if (it != state.diagnostics.end()) {
+            for (const auto& iss : it->second.issues) {
+                issues.push_back(iss);
+            }
+        }
+    }
+    return state.create_diagnostic("批量读取失败", std::move(issues));
+}
+
+DiagnosticId merge_batch_compare_failure_diagnostic(detail::KernelState& state, std::size_t index, std::string_view lhs_path,
+                                                    std::string_view rhs_path, DiagnosticId child_diag_id) {
+    std::vector<Issue> issues;
+    auto ctx = detail::make_error_issue(
+        diag_codes::kIoBatchCompareItemContext,
+        std::string("批量文本比较在第 ") + std::to_string(index + 1) + " 项失败，左路径: " + std::string(lhs_path) +
+            " 右路径: " + std::string(rhs_path));
+    ctx.stage = "io.batch_compare";
+    ctx.related_entities = {static_cast<std::uint64_t>(index)};
+    issues.push_back(std::move(ctx));
+    if (child_diag_id.value != 0) {
+        const auto it = state.diagnostics.find(child_diag_id.value);
+        if (it != state.diagnostics.end()) {
+            for (const auto& iss : it->second.issues) {
+                issues.push_back(iss);
+            }
+        }
+    }
+    return state.create_diagnostic("批量文本比较失败", std::move(issues));
+}
+
+DiagnosticId merge_batch_path_op_failure_diagnostic(detail::KernelState& state, std::size_t index, std::string_view path,
+                                                    DiagnosticId child_diag_id, std::string_view op_label_cn) {
+    std::vector<Issue> issues;
+    auto ctx = detail::make_error_issue(
+        diag_codes::kIoBatchPathOpItemContext,
+        std::string("批量") + std::string(op_label_cn) + "在第 " + std::to_string(index + 1) + " 项失败，路径: " + std::string(path));
+    ctx.stage = "io.batch_path_op";
+    ctx.related_entities = {static_cast<std::uint64_t>(index)};
+    issues.push_back(std::move(ctx));
+    if (child_diag_id.value != 0) {
+        const auto it = state.diagnostics.find(child_diag_id.value);
+        if (it != state.diagnostics.end()) {
+            for (const auto& iss : it->second.issues) {
+                issues.push_back(iss);
+            }
+        }
+    }
+    return state.create_diagnostic(std::string("批量") + std::string(op_label_cn) + "失败", std::move(issues));
+}
+
+DiagnosticId merge_batch_path_transform_failure_diagnostic(detail::KernelState& state, std::size_t index,
+                                                           std::string_view path_hint, DiagnosticId child_diag_id,
+                                                           std::string_view op_label_cn, std::string_view stage_sv) {
+    std::vector<Issue> issues;
+    auto ctx = detail::make_error_issue(
+        diag_codes::kIoBatchPathTransformItemContext,
+        std::string("批量") + std::string(op_label_cn) + "在第 " + std::to_string(index + 1) + " 项失败，路径/上下文: " +
+            std::string(path_hint));
+    ctx.stage = std::string(stage_sv);
+    ctx.related_entities = {static_cast<std::uint64_t>(index)};
+    issues.push_back(std::move(ctx));
+    if (child_diag_id.value != 0) {
+        const auto it = state.diagnostics.find(child_diag_id.value);
+        if (it != state.diagnostics.end()) {
+            for (const auto& iss : it->second.issues) {
+                issues.push_back(iss);
+            }
+        }
+    }
+    return state.create_diagnostic(std::string("批量") + std::string(op_label_cn) + "失败", std::move(issues));
+}
+
+bool normalize_user_export_extension(std::string_view ext, std::string& out_dotless_lower) {
+    while (!ext.empty() && (ext.front() == ' ' || ext.front() == '\t')) {
+        ext.remove_prefix(1);
+    }
+    while (!ext.empty() && (ext.back() == ' ' || ext.back() == '\t')) {
+        ext.remove_suffix(1);
+    }
+    if (ext.empty()) {
+        return false;
+    }
+    out_dotless_lower = lower_copy(std::string(ext));
+    if (!out_dotless_lower.empty() && out_dotless_lower.front() == '.') {
+        out_dotless_lower.erase(out_dotless_lower.begin());
+    }
+    return !out_dotless_lower.empty();
+}
+
+bool export_format_from_extension_token(std::string_view token, std::string& out_format_id) {
+    if (token == "step" || token == "stp") {
+        out_format_id = "step";
+        return true;
+    }
+    if (token == "axmjson" || token == "json") {
+        out_format_id = "axmjson";
+        return true;
+    }
+    if (token == "gltf") {
+        out_format_id = "gltf";
+        return true;
+    }
+    if (token == "stl") {
+        out_format_id = "stl";
+        return true;
+    }
+    if (token == "iges" || token == "igs") {
+        out_format_id = "iges";
+        return true;
+    }
+    if (token == "brep") {
+        out_format_id = "brep";
+        return true;
+    }
+    if (token == "obj") {
+        out_format_id = "obj";
+        return true;
+    }
+    if (token == "3mf") {
+        out_format_id = "3mf";
+        return true;
+    }
+    return false;
 }
 
 void append_issues_from_import_diag(detail::KernelState* state, std::vector<Issue>& issues, std::vector<Warning>& warnings,

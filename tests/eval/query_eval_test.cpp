@@ -335,6 +335,27 @@ int main() {
         return 1;
     }
 
+    auto egm_after_first = kernel.eval_graph_metrics();
+    if (egm_after_first.status != axiom::StatusCode::Ok || !egm_after_first.value.has_value() ||
+        egm_after_first.value->recompute_events_total != *total_recompute_before_reset.value ||
+        egm_after_first.value->max_per_node_recompute_count != 1 ||
+        egm_after_first.value->nodes_with_recompute_nonzero != 3 ||
+        !approx(egm_after_first.value->mean_recompute_events_per_node, 1.0, 1e-9) ||
+        !approx(egm_after_first.value->mean_recompute_events_per_touched_node, 1.0, 1e-9)) {
+        std::cerr << "eval_graph_metrics recompute distribution unexpected after first recompute\n";
+        return 1;
+    }
+
+    auto tel_after_first_recompute = kernel.eval_graph().telemetry();
+    if (tel_after_first_recompute.status != axiom::StatusCode::Ok || !tel_after_first_recompute.value.has_value() ||
+        tel_after_first_recompute.value->invalidate_body_calls != 1 ||
+        tel_after_first_recompute.value->recompute_finish_events != 3 ||
+        tel_after_first_recompute.value->recompute_single_root_max_finish_nodes != 3 ||
+        tel_after_first_recompute.value->recompute_single_root_max_stack_depth != 3) {
+        std::cerr << "unexpected eval graph telemetry after first recompute\n";
+        return 1;
+    }
+
     auto analysis_invalid_after = kernel.eval_graph().is_invalid(*analysis_node.value);
     if (analysis_invalid_after.status != axiom::StatusCode::Ok || !analysis_invalid_after.value.has_value() ||
         *analysis_invalid_after.value) {
@@ -384,6 +405,28 @@ int main() {
         std::cerr << "unexpected recompute counts after topology-linked invalidation\n";
         return 1;
     }
+
+    auto tel_after_second_recompute = kernel.eval_graph().telemetry();
+    if (tel_after_second_recompute.status != axiom::StatusCode::Ok || !tel_after_second_recompute.value.has_value() ||
+        tel_after_second_recompute.value->recompute_finish_events != 6) {
+        std::cerr << "unexpected eval graph telemetry after second recompute\n";
+        return 1;
+    }
+    if (kernel.eval_graph().reset_telemetry().status != axiom::StatusCode::Ok) {
+        std::cerr << "failed to reset eval graph telemetry\n";
+        return 1;
+    }
+    auto tel_reset = kernel.eval_graph().telemetry();
+    if (tel_reset.status != axiom::StatusCode::Ok || !tel_reset.value.has_value() ||
+        tel_reset.value->invalidate_body_calls != 0 || tel_reset.value->recompute_finish_events != 0 ||
+        tel_reset.value->invalidate_node_redundant_calls != 0 ||
+        tel_reset.value->recompute_root_already_valid_calls != 0 ||
+        tel_reset.value->recompute_single_root_max_finish_nodes != 0 ||
+        tel_reset.value->recompute_single_root_max_stack_depth != 0) {
+        std::cerr << "eval graph telemetry not cleared by reset_telemetry\n";
+        return 1;
+    }
+
     if (kernel.eval_graph().reset_recompute_count(*analysis_node.value).status != axiom::StatusCode::Ok ||
         kernel.eval_graph().reset_all_recompute_counts().status != axiom::StatusCode::Ok) {
         std::cerr << "failed to reset recompute counters\n";
@@ -425,6 +468,13 @@ int main() {
     if (kernel.eval_graph().invalidate_many(std::array<axiom::NodeId, 2>{*cache_branch_1.value, *cache_branch_2.value}).status != axiom::StatusCode::Ok ||
         kernel.eval_graph().recompute_many(std::array<axiom::NodeId, 2>{*cache_branch_1.value, *cache_branch_2.value}).status != axiom::StatusCode::Ok) {
         std::cerr << "batch invalidate/recompute failed\n";
+        return 1;
+    }
+    auto tel_recompute_many = kernel.eval_graph().telemetry();
+    if (tel_recompute_many.status != axiom::StatusCode::Ok || !tel_recompute_many.value.has_value() ||
+        tel_recompute_many.value->recompute_many_batches != 1 ||
+        tel_recompute_many.value->recompute_many_root_total != 2) {
+        std::cerr << "unexpected recompute_many telemetry\n";
         return 1;
     }
     if (kernel.eval_graph().clear_dependencies(*analysis_root.value).status != axiom::StatusCode::Ok ||
@@ -545,6 +595,55 @@ int main() {
     if (invalid_body_pred.status != axiom::StatusCode::InvalidInput || invalid_body_pred.diagnostic_id.value == 0) {
         std::cerr << "invalid body predicate should return structured failure\n";
         return 1;
+    }
+
+    {
+        axiom::Kernel k_tel;
+        auto n = k_tel.eval_graph().register_node(axiom::NodeKind::Cache, "telemetry:probe");
+        if (n.status != axiom::StatusCode::Ok || !n.value.has_value()) {
+            std::cerr << "telemetry probe node register failed\n";
+            return 1;
+        }
+        auto ex0 = k_tel.eval_graph().exists(*n.value);
+        auto inv0 = k_tel.eval_graph().is_invalid(*n.value);
+        auto rc0 = k_tel.eval_graph().recompute_count(*n.value);
+        if (ex0.status != axiom::StatusCode::Ok || !ex0.value.has_value() || !*ex0.value ||
+            inv0.status != axiom::StatusCode::Ok || !inv0.value.has_value() || *inv0.value ||
+            rc0.status != axiom::StatusCode::Ok || !rc0.value.has_value() || *rc0.value != 0) {
+            std::cerr << "telemetry probe initial state reads failed\n";
+            return 1;
+        }
+        if (k_tel.eval_graph().invalidate(*n.value).status != axiom::StatusCode::Ok ||
+            k_tel.eval_graph().invalidate(*n.value).status != axiom::StatusCode::Ok) {
+            std::cerr << "telemetry probe double invalidate failed\n";
+            return 1;
+        }
+        auto t1 = k_tel.eval_graph().telemetry();
+        if (t1.status != axiom::StatusCode::Ok || !t1.value.has_value() ||
+            t1.value->invalidate_node_redundant_calls != 1U) {
+            std::cerr << "expected one redundant invalidate_node call on already-invalid root\n";
+            return 1;
+        }
+        if (k_tel.eval_graph().recompute(*n.value).status != axiom::StatusCode::Ok ||
+            k_tel.eval_graph().recompute(*n.value).status != axiom::StatusCode::Ok) {
+            std::cerr << "telemetry probe double recompute failed\n";
+            return 1;
+        }
+        auto t2 = k_tel.eval_graph().telemetry();
+        if (t2.status != axiom::StatusCode::Ok || !t2.value.has_value() ||
+            t2.value->recompute_root_already_valid_calls != 1U) {
+            std::cerr << "expected one recompute_root_already_valid when root was not invalid\n";
+            return 1;
+        }
+        (void)k_tel.eval_graph().exists(*n.value);
+        (void)k_tel.eval_graph().is_invalid(*n.value);
+        (void)k_tel.eval_graph().recompute_count(*n.value);
+        auto t3 = k_tel.eval_graph().telemetry();
+        if (t3.status != axiom::StatusCode::Ok || !t3.value.has_value() ||
+            t3.value->eval_graph_state_read_calls != t2.value->eval_graph_state_read_calls + 3U) {
+            std::cerr << "expected eval_graph_state_read_calls to increase by three per read batch\n";
+            return 1;
+        }
     }
 
     return 0;

@@ -220,6 +220,7 @@
 | `AXM-GEO-E-0007` | Warning | 曲率结果数值不稳定 |
 | `AXM-GEO-E-0008` | Error | 修剪域非法 |
 | `AXM-GEO-E-0009` | Error | 求值器不可用 |
+| `AXM-GEO-E-0010` | Error | 偏置曲面有效半径非正（球/圆柱等解析基面下偏置自交或退化壳） |
 
 ## 7.4 `TOPO` 拓扑层错误码
 
@@ -232,14 +233,14 @@
 | `AXM-TOPO-E-0005` | Error | 壳未封闭（含：`validate_indices_consistency` 发现体记录中 `shells` 列表含重复壳 id） |
 | `AXM-TOPO-E-0006` | Error | 非法悬挂边（含：`validate_edge` 与 `validate_indices_consistency` 反向索引发现边无共边引用） |
 | `AXM-TOPO-E-0007` | Error | 拓扑关系不一致（含：`edge_to_coedges` 重复定向边、`face_to_shells`/`shell_to_bodies` 反向列表重复条目、`loop_to_faces` 重复面或同一环对应多面等索引自洽性失败） |
-| `AXM-TOPO-E-0008` | Error | 参数曲线与空间曲线不一致（含 `validate_face_trim_consistency`：PCurve 绑定不完整、PCurve 控制点不足、边/曲线/顶点缺失时带 `face/loop/coedge/edge/pcurve` 等；**全量 trim 数据**下 `SurfaceService::closest_uv` 失败亦归此类；端点/曲面与 3D 边不一致时常含 `face/loop/coedge/edge/pcurve`；`validate_indices_consistency` 发现边记录引用不存在顶点时 `related_entities` 含 `edge` 与端点 id） |
+| `AXM-TOPO-E-0008` | Error | 参数曲线与空间曲线不一致（含 `validate_face_trim_consistency`：PCurve 绑定不完整、PCurve 控制点不足、边/曲线/顶点缺失时带 `face/loop/coedge/edge/pcurve` 等；**全量 trim 数据**下 `SurfaceService::closest_uv` 失败亦归此类；**全量 trim** 下 PCurve 定义域非法导致无法完成内点采样一致性校验；端点/曲面与 3D 边不一致时常含 `face/loop/coedge/edge/pcurve`；`validate_indices_consistency` 发现边记录引用不存在顶点时 `related_entities` 含 `edge` 与端点 id） |
 | `AXM-TOPO-E-0009` | Fatal | 拓扑不变量被破坏 |
 | `AXM-TOPO-E-0010` | Error | 壳内存在开放边界（边引用次数不足） |
 | `AXM-TOPO-E-0011` | Error | 壳内存在非流形边（边被过多拓扑面共享） |
 | `AXM-TOPO-E-0012` | Error | 派生/传播来源引用无效或丢失 |
 | `AXM-TOPO-E-0013` | Error | 面/壳/体的来源集合不一致 |
 | `AXM-TOPO-E-0014` | Error | 同一环内重复引用同一条拓扑边 |
-| `AXM-TOPO-E-0015` | Error | 修剪面外环与内环在 UV 空间方向不符合孔洞规则 |
+| `AXM-TOPO-E-0015` | Error | 面环方向与外向规则不一致（含：内外环在 UV 空间绕向不符合孔洞规则；**全量 PCurve** 且基曲面为**平面**时，外环 UV 映射到 3D 的 Newell 与基平面法向不一致；无 PCurve 时平面/球/柱/锥/环面外环与解析外向一致性等） |
 | `AXM-TOPO-E-0016` | Error | 定向边已归属其他环（共边跨环复用） |
 | `AXM-TOPO-E-0017` | Warning / Error | 壳内重复面：`validate_shell` 对同曲面同边界环签名给 **Warning**；`create_shell` / `validate_indices_consistency` 对壳 `faces` 列表中重复 `FaceId` 给 **Error** |
 | `AXM-TOPO-E-0018` | Warning | 壳不连通（面集合存在多个连通分量） |
@@ -330,7 +331,7 @@
 
 | 错误码 | 严重级别 | 含义 |
 |---|---|---|
-| `AXM-IO-E-0001` | Error | 文件不存在 |
+| `AXM-IO-E-0001` | Error | 文件不存在（如 `IOService::validate_import_path` 校验时目标路径不存在） |
 | `AXM-IO-E-0002` | Error | 文件格式无法识别 |
 | `AXM-IO-E-0003` | Error | 文件内容损坏 |
 | `AXM-IO-E-0004` | Error | 导入解析失败 |
@@ -338,6 +339,9 @@
 | `AXM-IO-E-0006` | Warning | 导入后发生几何近似 |
 | `AXM-IO-E-0007` | Warning | 导入后存在未映射属性 |
 | `AXM-IO-E-0008` | Warning | 导出采用兼容模式降级 |
+| `AXM-IO-E-0009` | Error | 导出目标目录不可写（`kIoExportPathNotWritable`，`Issue.stage=io.export.path`） |
+| `AXM-IO-E-0010` | Error | 检测到标准 STEP 物理文件 DATA 段含 EXPRESS 实例，非 Axiom 子集；完整交换未实现（`kIoStepStandardEntitiesUnsupported`，`Issue.stage=io.import.step`） |
+| `AXM-IO-E-0011` | Error | 检测到典型 IGES 卡片/DE 流，非 Axiom 子集；完整交换未实现（`kIgesStandardEntitiesUnsupported`，`Issue.stage=io.import.iges`） |
 
 ## 7.12 `TES` 三角化错误码
 
@@ -459,7 +463,17 @@
 | `AXM-IO-D-0002` | 解析实体中 |
 | `AXM-IO-D-0003` | 发现未映射属性 |
 | `AXM-IO-D-0004` | 导入后触发自动验证 |
-| `AXM-IO-D-0005` | 导出采用兼容模式 |
+| `AXM-IO-D-0005` | 导入后自动修复策略提示（`kIoPostImportRepairMode`） |
+| `AXM-IO-D-0008` | 网格验证 JSON 侧车已写出（`kIoExportMeshReportSidecar`） |
+| `AXM-IO-D-0009` | 批量导入在指定项失败（`Issue.stage=io.batch_import`，`kIoBatchImportItemContext`） |
+| `AXM-IO-D-0010` | 批量导出在指定项失败（`Issue.stage=io.batch_export`，`kIoBatchExportItemContext`） |
+| `AXM-IO-D-0011` | 批量格式识别在指定项失败（`Issue.stage=io.batch_detect_format`，`kIoBatchDetectFormatItemContext`） |
+| `AXM-IO-D-0012` | 批量读取/行数统计/文本预览在指定项失败（`Issue.stage=io.batch_read`，`kIoBatchReadItemContext`） |
+| `AXM-IO-D-0013` | 批量文本比较在指定项失败（`Issue.stage=io.batch_compare`，`kIoBatchCompareItemContext`） |
+| `AXM-IO-D-0014` | 批量路径写操作在指定项失败（`Issue.stage=io.batch_path_op`，`kIoBatchPathOpItemContext`；如追加/touch/删文件/创建父目录） |
+| `AXM-IO-D-0015` | 批量路径变换/校验在指定项失败（`Issue.stage` 多为 `io.batch_path_transform`、`io.batch_validate_import` 或 `io.batch_validate_export`，`kIoBatchPathTransformItemContext`；如 `normalize_paths` / `compose_paths` / `change_extensions` / `validate_import_paths` / `validate_export_paths`） |
+| `AXM-IO-D-0016` | 标准 STEP：物理层 `#id=TYPE` 实例类型频度扫描摘要（`kIoStepStandardFileScanSummary`，`Issue.severity=Info`，`Issue.stage=io.import.step`；与 `E-0010` 同报告） |
+| `AXM-IO-D-0017` | 标准 IGES：Directory Entry 实体类型号频度扫描摘要（`kIgesStandardFileScanSummary`，`Issue.severity=Info`，`Issue.stage=io.import.iges`；与 `E-0011` 同报告） |
 
 ## 10. 诊断报告结构建议
 

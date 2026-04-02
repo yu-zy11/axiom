@@ -27,6 +27,10 @@ if (AXM_ENABLE_TESTS)
     target_link_libraries(axiom_smoke_test PRIVATE axiom_kernel)
     add_test(NAME axiom_smoke_test COMMAND axiom_smoke_test)
 
+    add_executable(axiom_kernel_runtime_invariant_test tests/sdk/kernel_runtime_invariant_test.cpp)
+    target_link_libraries(axiom_kernel_runtime_invariant_test PRIVATE axiom_kernel)
+    add_test(NAME axiom_kernel_runtime_invariant_test COMMAND axiom_kernel_runtime_invariant_test)
+
     add_executable(axiom_plugin_sdk_test tests/sdk/plugin_sdk_test.cpp)
     target_link_libraries(axiom_plugin_sdk_test PRIVATE axiom_kernel)
     add_test(NAME axiom_plugin_sdk_test COMMAND axiom_plugin_sdk_test)
@@ -38,6 +42,10 @@ if (AXM_ENABLE_TESTS)
     add_executable(axiom_io_workflow_test tests/io/io_workflow_test.cpp)
     target_link_libraries(axiom_io_workflow_test PRIVATE axiom_kernel)
     add_test(NAME axiom_io_workflow_test COMMAND axiom_io_workflow_test)
+
+    add_executable(axiom_io_dataset_test tests/io/io_dataset_test.cpp)
+    target_link_libraries(axiom_io_dataset_test PRIVATE axiom_kernel)
+    add_test(NAME axiom_io_dataset_test COMMAND axiom_io_dataset_test "${CMAKE_SOURCE_DIR}/tests/data/io")
 
     add_executable(axiom_diagnostics_test tests/diag/diagnostics_test.cpp)
     target_link_libraries(axiom_diagnostics_test PRIVATE axiom_kernel)

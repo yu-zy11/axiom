@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -110,6 +111,21 @@ int main() {
             return 1;
         }
     }
+    {
+        auto empty_stage_total = kernel.diagnostics().total_issues_with_stage_prefix("");
+        if (empty_stage_total.status != axiom::StatusCode::InvalidInput || empty_stage_total.diagnostic_id.value == 0) {
+            std::cerr << "total_issues_with_stage_prefix(\"\") should be invalid input\n";
+            std::filesystem::remove(invalid_import_path);
+            return 1;
+        }
+        auto io_stage_total = kernel.diagnostics().total_issues_with_stage_prefix("io.");
+        if (io_stage_total.status != axiom::StatusCode::Ok || !io_stage_total.value.has_value() ||
+            *io_stage_total.value == 0) {
+            std::cerr << "expected non-zero issue count for io. stage prefix after import validation\n";
+            std::filesystem::remove(invalid_import_path);
+            return 1;
+        }
+    }
 
     import_options.auto_repair = true;
     auto repaired_import = kernel.io().import_step(invalid_import_path.string(), import_options);
@@ -183,6 +199,7 @@ int main() {
     extra_issue.severity = axiom::IssueSeverity::Warning;
     extra_issue.message = "manual issue \"quoted\"\nnext line";
     extra_issue.related_entities = {42, 84};
+    extra_issue.stage = "diag.test.stage";
     auto append_issue = kernel.diagnostics().append_issue(valid_box.diagnostic_id, extra_issue);
     if (append_issue.status != axiom::StatusCode::Ok) {
         std::cerr << "failed to append issue to diagnostic\n";
@@ -238,10 +255,67 @@ int main() {
         std::filesystem::remove(invalid_import_path);
         return 1;
     }
+    auto find_heal_prefix = kernel.diagnostics().find_by_issue_code_prefix("AXM-HEAL", 20);
+    if (find_heal_prefix.status != axiom::StatusCode::Ok || !find_heal_prefix.value.has_value() ||
+        find_heal_prefix.value->empty()) {
+        std::cerr << "expected to find diagnostics by issue code prefix\n";
+        std::filesystem::remove(invalid_import_path);
+        return 1;
+    }
+    const bool code_prefix_has_valid =
+        std::any_of(find_heal_prefix.value->begin(), find_heal_prefix.value->end(),
+                    [&](axiom::DiagnosticId id) { return id.value == valid_box.diagnostic_id.value; });
+    if (!code_prefix_has_valid) {
+        std::cerr << "find_by_issue_code_prefix should include valid_box diagnostic for AXM-HEAL-*\n";
+        std::filesystem::remove(invalid_import_path);
+        return 1;
+    }
+    if (kernel.diagnostics().find_by_issue_code_prefix("", 5).status != axiom::StatusCode::InvalidInput) {
+        std::cerr << "empty issue code prefix must be rejected\n";
+        std::filesystem::remove(invalid_import_path);
+        return 1;
+    }
     auto find_related = kernel.diagnostics().find_by_related_entity(42, 5);
     if (find_related.status != axiom::StatusCode::Ok || !find_related.value.has_value() ||
         find_related.value->empty()) {
         std::cerr << "expected to find diagnostics by related entity\n";
+        std::filesystem::remove(invalid_import_path);
+        return 1;
+    }
+
+    auto find_staged = kernel.diagnostics().find_by_issue_stage("diag.test.stage", 10);
+    if (find_staged.status != axiom::StatusCode::Ok || !find_staged.value.has_value() ||
+        find_staged.value->empty()) {
+        std::cerr << "expected to find diagnostics by issue stage\n";
+        std::filesystem::remove(invalid_import_path);
+        return 1;
+    }
+    const bool staged_has_valid =
+        std::any_of(find_staged.value->begin(), find_staged.value->end(),
+                    [&](axiom::DiagnosticId id) { return id.value == valid_box.diagnostic_id.value; });
+    if (!staged_has_valid) {
+        std::cerr << "find_by_issue_stage should include valid_box diagnostic\n";
+        std::filesystem::remove(invalid_import_path);
+        return 1;
+    }
+
+    auto find_staged_prefix = kernel.diagnostics().find_by_issue_stage_prefix("diag.test.", 10);
+    if (find_staged_prefix.status != axiom::StatusCode::Ok || !find_staged_prefix.value.has_value() ||
+        find_staged_prefix.value->empty()) {
+        std::cerr << "expected to find diagnostics by issue stage prefix\n";
+        std::filesystem::remove(invalid_import_path);
+        return 1;
+    }
+    const bool prefix_has_valid =
+        std::any_of(find_staged_prefix.value->begin(), find_staged_prefix.value->end(),
+                    [&](axiom::DiagnosticId id) { return id.value == valid_box.diagnostic_id.value; });
+    if (!prefix_has_valid) {
+        std::cerr << "find_by_issue_stage_prefix should include valid_box diagnostic\n";
+        std::filesystem::remove(invalid_import_path);
+        return 1;
+    }
+    if (kernel.diagnostics().find_by_issue_stage_prefix("", 5).status != axiom::StatusCode::InvalidInput) {
+        std::cerr << "empty stage prefix must be rejected\n";
         std::filesystem::remove(invalid_import_path);
         return 1;
     }
@@ -332,6 +406,10 @@ int main() {
     std::array<axiom::DiagnosticId, 2> export_ids {valid_box.diagnostic_id, invalid_box.diagnostic_id};
     auto export_many_txt = kernel.diagnostics().export_reports_txt(export_ids, exported_diag_many_path.string());
     auto export_many_json = kernel.diagnostics().export_reports_json(export_ids, exported_diag_many_json_path.string());
+    const auto exported_all_json_path = std::filesystem::temp_directory_path() / "axiom_diagnostic_export_all.json";
+    const auto exported_all_txt_path = std::filesystem::temp_directory_path() / "axiom_diagnostic_export_all.txt";
+    auto export_all_json = kernel.diagnostics().export_all_reports_json(exported_all_json_path.string());
+    auto export_all_txt = kernel.diagnostics().export_all_reports_txt(exported_all_txt_path.string());
     auto append_many = kernel.diagnostics().append_issue_many(export_ids, extra_issue);
     auto ids_by_sev = kernel.diagnostics().report_ids_by_severity(axiom::IssueSeverity::Warning, 10);
     auto ids_by_code = kernel.diagnostics().report_ids_by_code(axiom::diag_codes::kHealFeatureRemovedWarning, 10);
@@ -340,6 +418,7 @@ int main() {
     auto sev_hist = kernel.diagnostics().severity_histogram();
     auto entity_hist = kernel.diagnostics().entity_histogram();
     auto top_codes = kernel.diagnostics().top_issue_codes(5);
+    auto top_stages = kernel.diagnostics().top_issue_stages(10);
     auto top_entities = kernel.diagnostics().top_entities(5);
     std::array<axiom::BodyId, 1> body_ids_for_diag {*valid_box.value};
     std::array<axiom::FaceId, 1> face_ids_for_diag {axiom::FaceId{42}};
@@ -357,12 +436,17 @@ int main() {
     const auto grouped_code_json = std::filesystem::temp_directory_path() / "axiom_diag_group_code.json";
     const auto grouped_entity_json = std::filesystem::temp_directory_path() / "axiom_diag_group_entity.json";
     const auto grouped_sev_json = std::filesystem::temp_directory_path() / "axiom_diag_group_sev.json";
+    const auto grouped_stage_txt = std::filesystem::temp_directory_path() / "axiom_diag_group_stage.txt";
+    const auto grouped_stage_json = std::filesystem::temp_directory_path() / "axiom_diag_group_stage.json";
     auto export_group_code_txt = kernel.diagnostics().export_grouped_by_code_txt(grouped_code_txt.string());
     auto export_group_entity_txt = kernel.diagnostics().export_grouped_by_entity_txt(grouped_entity_txt.string());
     auto export_group_sev_txt = kernel.diagnostics().export_grouped_by_severity_txt(grouped_sev_txt.string());
     auto export_group_code_json = kernel.diagnostics().export_grouped_by_code_json(grouped_code_json.string());
     auto export_group_entity_json = kernel.diagnostics().export_grouped_by_entity_json(grouped_entity_json.string());
     auto export_group_sev_json = kernel.diagnostics().export_grouped_by_severity_json(grouped_sev_json.string());
+    auto export_group_stage_txt = kernel.diagnostics().export_grouped_by_stage_txt(grouped_stage_txt.string());
+    auto export_group_stage_json = kernel.diagnostics().export_grouped_by_stage_json(grouped_stage_json.string());
+    auto stage_hist = kernel.diagnostics().issue_stage_histogram();
     auto summaries_by_ids = kernel.diagnostics().summaries_by_ids(export_ids);
     auto merged_report = kernel.diagnostics().merge_reports(export_ids, "merged");
     auto copied_id = kernel.diagnostics().copy_report(valid_box.diagnostic_id);
@@ -378,6 +462,7 @@ int main() {
     auto removed_count = kernel.diagnostics().remove_reports(remove_ids);
     auto keep_only = kernel.diagnostics().keep_only(export_ids);
     if (export_many_txt.status != axiom::StatusCode::Ok || export_many_json.status != axiom::StatusCode::Ok ||
+        export_all_json.status != axiom::StatusCode::Ok || export_all_txt.status != axiom::StatusCode::Ok ||
         append_many.status != axiom::StatusCode::Ok ||
         ids_by_sev.status != axiom::StatusCode::Ok || !ids_by_sev.value.has_value() ||
         ids_by_code.status != axiom::StatusCode::Ok || !ids_by_code.value.has_value() ||
@@ -386,6 +471,8 @@ int main() {
         sev_hist.status != axiom::StatusCode::Ok || !sev_hist.value.has_value() ||
         entity_hist.status != axiom::StatusCode::Ok || !entity_hist.value.has_value() ||
         top_codes.status != axiom::StatusCode::Ok || !top_codes.value.has_value() ||
+        top_stages.status != axiom::StatusCode::Ok || !top_stages.value.has_value() ||
+        top_stages.value->empty() ||
         top_entities.status != axiom::StatusCode::Ok || !top_entities.value.has_value() ||
         by_bodies.status != axiom::StatusCode::Ok || !by_bodies.value.has_value() ||
         by_faces.status != axiom::StatusCode::Ok || !by_faces.value.has_value() ||
@@ -398,6 +485,9 @@ int main() {
         export_group_code_json.status != axiom::StatusCode::Ok ||
         export_group_entity_json.status != axiom::StatusCode::Ok ||
         export_group_sev_json.status != axiom::StatusCode::Ok ||
+        export_group_stage_txt.status != axiom::StatusCode::Ok ||
+        export_group_stage_json.status != axiom::StatusCode::Ok ||
+        stage_hist.status != axiom::StatusCode::Ok || !stage_hist.value.has_value() ||
         summaries_by_ids.status != axiom::StatusCode::Ok || !summaries_by_ids.value.has_value() ||
         merged_report.status != axiom::StatusCode::Ok || !merged_report.value.has_value() ||
         copied_id.status != axiom::StatusCode::Ok || !copied_id.value.has_value() ||
@@ -440,6 +530,52 @@ int main() {
     if (exported_diag_json_text.find("\"code\":") != std::string::npos &&
         exported_diag_json_text.find("\"stage\":") == std::string::npos) {
         std::cerr << "exported diagnostic json missing stage on issues\n";
+        std::filesystem::remove(invalid_import_path);
+        std::filesystem::remove(exported_diag_path);
+        std::filesystem::remove(exported_diag_json_path);
+        return 1;
+    }
+
+    std::ifstream export_all_json_in {exported_all_json_path};
+    std::string export_all_json_text((std::istreambuf_iterator<char>(export_all_json_in)),
+                                     std::istreambuf_iterator<char>());
+    if (export_all_json_text.find("\"diagnostics\":[") == std::string::npos ||
+        export_all_json_text.find("\"issues\":[") == std::string::npos ||
+        export_all_json_text.find("\"summary\":") == std::string::npos) {
+        std::cerr << "export_all_reports_json missing expected structure\n";
+        std::filesystem::remove(invalid_import_path);
+        std::filesystem::remove(exported_diag_path);
+        std::filesystem::remove(exported_diag_json_path);
+        std::filesystem::remove(exported_all_json_path);
+        std::filesystem::remove(exported_all_txt_path);
+        return 1;
+    }
+    std::ifstream export_all_txt_in {exported_all_txt_path};
+    std::string export_all_txt_text((std::istreambuf_iterator<char>(export_all_txt_in)),
+                                    std::istreambuf_iterator<char>());
+    if (export_all_txt_text.find("DiagnosticId:") == std::string::npos ||
+        export_all_txt_text.find("Summary:") == std::string::npos) {
+        std::cerr << "export_all_reports_txt missing expected structure\n";
+        std::filesystem::remove(invalid_import_path);
+        std::filesystem::remove(exported_diag_path);
+        std::filesystem::remove(exported_diag_json_path);
+        std::filesystem::remove(exported_all_json_path);
+        std::filesystem::remove(exported_all_txt_path);
+        return 1;
+    }
+
+    std::ifstream stage_grouped_json_in {grouped_stage_json.string()};
+    std::string stage_grouped_json((std::istreambuf_iterator<char>(stage_grouped_json_in)),
+                                   std::istreambuf_iterator<char>());
+    if (stage_grouped_json.find("\"stages\":") == std::string::npos) {
+        std::cerr << "grouped-by-stage diagnostic json missing stages object\n";
+        std::filesystem::remove(invalid_import_path);
+        std::filesystem::remove(exported_diag_path);
+        std::filesystem::remove(exported_diag_json_path);
+        return 1;
+    }
+    if (stage_hist.value->find("io.post_import.validation") == stage_hist.value->end()) {
+        std::cerr << "issue_stage_histogram missing io.post_import.validation bucket\n";
         std::filesystem::remove(invalid_import_path);
         std::filesystem::remove(exported_diag_path);
         std::filesystem::remove(exported_diag_json_path);
@@ -519,6 +655,8 @@ int main() {
     std::filesystem::remove(exported_diag_json_path);
     std::filesystem::remove(exported_diag_many_path);
     std::filesystem::remove(exported_diag_many_json_path);
+    std::filesystem::remove(exported_all_json_path);
+    std::filesystem::remove(exported_all_txt_path);
     std::filesystem::remove(grouped_code_txt);
     std::filesystem::remove(grouped_entity_txt);
     std::filesystem::remove(grouped_sev_txt);

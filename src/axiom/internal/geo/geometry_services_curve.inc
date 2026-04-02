@@ -224,13 +224,10 @@ Result<CurveEvalResult> CurveService::eval(CurveId curve_id, Scalar t,
         r2_raw = bezier_second_derivative(curve.poles, clamped_t);
         have_r2 = true;
       } else if (curve.kind == detail::CurveKind::BSpline) {
-        bspline_curve_eval_all(
-            std::span<const Point3>(curve.poles.data(), curve.poles.size()), clamped_t,
-            result.point, r1_raw, r2_raw);
+        bspline_curve_eval_record(curve, clamped_t, result.point, r1_raw, r2_raw);
         have_r2 = true;
       } else {
-        detail::rational_bezier_eval_all(curve.poles, curve.weights, clamped_t, result.point,
-                                         r1_raw, r2_raw);
+        nurbs_curve_eval_all_record(curve, clamped_t, result.point, r1_raw, r2_raw);
         have_r2 = true;
       }
     } else {

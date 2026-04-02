@@ -104,6 +104,8 @@ struct SurfaceRecord {
     Scalar trim_v_max {1.0};
     /// 非空时：在轴对齐盒内的 **UV 多边形修剪**（折线顶点，首尾闭合隐含；与 PCurve 折线采样一致）。
     std::vector<Point2> trim_uv_loop;
+    /// 内环（孔）：每项为 UV 闭合折线（≥3 点）；有效区域为「在外环内且不在任内环内」。
+    std::vector<std::vector<Point2>> trim_uv_holes;
     Scalar offset_distance {0.0};
     std::vector<Point3> poles;
     std::vector<Scalar> weights;
@@ -161,6 +163,8 @@ struct BodyRecord {
     Point3 extrude_mass_centroid {};
     /// 多边形 `revolve`：子午面轮廓副本，供真实旋转体 BRep 物化（轴须在轮廓平面内，转角 `< 2π`）。
     std::vector<Point3> revolve_profile_xyz;
+    /// 多边形 `extrude`：轮廓副本，供 **平面多边形 + 非退化拉伸方向** 的棱柱 BRep 物化（见 `try_materialize_sweep_extrude_prism_body`）。
+    std::vector<Point3> extrude_profile_xyz;
     /// 三角网格闭壳（ρ=1）质量：体积/质心/惯性（关于质心，世界系行主序 3×3）；与 `sweep_cached_surface_area` 在 `sweep_polyhedral_mass_valid` 时由物化写入。
     bool sweep_polyhedral_mass_valid {false};
     Scalar sweep_polyhedral_volume {0.0};
@@ -176,6 +180,11 @@ struct BodyRecord {
     /// 由 `BooleanService::run` 写入，供 `mass_properties` 等在 bbox 占位语义下区分 Union/Subtract/Intersect/Split。
     bool has_boolean_op {false};
     BooleanOp boolean_op {BooleanOp::Union};
+    /// STEP 子集：与 HEADER 中 `AXIOM_STEP_SCHEMA` / `AXIOM_STEP_ENTITY` 往返（空则导出使用内核默认占位）。
+    std::string io_step_file_schema;
+    std::string io_step_entity_name;
+    /// IGES 子集：`AXIOM_IGES_ENTITY` 元数据（空则导出默认占位）。
+    std::string io_iges_entity_hint;
 };
 
 struct MeshRecord {
@@ -229,6 +238,8 @@ struct KernelState {
     std::unordered_map<std::string, MeshId> tessellation_cache;
     // key: stable hash of (face topology + tessellation options) for local re-tessellation.
     std::unordered_map<std::string, MeshId> face_tessellation_cache;
+    /// Rep：`brep_to_mesh` / 面级缓存命中与未命中统计（与 `clear_mesh_store` 一并清零）。
+    TessellationCacheStats tessellation_cache_stats{};
     std::unordered_map<std::uint64_t, IntersectionRecord> intersections;
     std::unordered_map<std::string, CurveEvalResult> curve_eval_cache;
     std::unordered_map<std::string, SurfaceEvalResult> surface_eval_cache;
@@ -240,10 +251,23 @@ struct KernelState {
     std::unordered_map<std::uint64_t, bool> eval_invalid;
     std::unordered_map<std::uint64_t, std::uint64_t> eval_recompute_count;
     std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> eval_body_bindings;
+    EvalGraphTelemetry eval_telemetry{};
+    EvalInvalidationBridgeMetrics eval_invalidation_bridge{};
     PluginRegistry plugin_registry;
 
     /// 拓扑只读查询累计次数（`TopologyQueryService` 顶层调用；嵌套查询通过 thread_local 深度只计一次）。
     mutable std::uint64_t topology_query_op_count{0};
+
+    /// 成功 `TopologyTransaction::commit()` 次数（回滚不计入）。
+    std::uint64_t topology_commit_success_count{0};
+    /// 各次成功提交时 `write_operation_count` 之和（用于与 `topology_query_op_count` 等联合审计）。
+    std::uint64_t topology_committed_write_operations_total{0};
+    /// 最近一次成功提交分配的 `VersionId`；尚无成功提交时为 0。
+    VersionId topology_last_committed_version{0};
+    /// 最近一次成功提交时的拓扑写操作累计次数（与当时 `TopologyTransaction::write_operation_count` 一致）。
+    std::uint64_t topology_last_commit_write_operations{0};
+    TopologyCommitWriteBreakdown topology_last_commit_write_breakdown{};
+    TopologyCommitWriteBreakdown topology_committed_write_breakdown_totals{};
 
     std::uint64_t allocate_id() {
         return next_id++;

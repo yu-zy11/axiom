@@ -114,6 +114,64 @@ void hom4_quotient_derivative(const Hom4 &a, const Hom4 &da, Vec3 &out) {
   out.z = (da.z * a.w - a.z * da.w) / w2;
 }
 
+inline Scalar hom4_weight_safe(Scalar w) {
+  return std::abs(w) > static_cast<Scalar>(1e-30)
+             ? w
+             : (w >= static_cast<Scalar>(0) ? static_cast<Scalar>(1e-30)
+                                            : static_cast<Scalar>(-1e-30));
+}
+
+void hom4_rational_second_pure_u(const Hom4 &a, const Hom4 &au, const Hom4 &auu, Vec3 &out) {
+  auto comp = [&](Scalar A, Scalar Au, Scalar Auu) -> Scalar {
+    const Scalar w = hom4_weight_safe(a.w);
+    const Scalar Wu = au.w;
+    const Scalar Wuu = auu.w;
+    const Scalar T = Au * w - A * Wu;
+    const Scalar Tp = Auu * w - A * Wuu;
+    const Scalar w2 = w * w;
+    const Scalar w4 = w2 * w2;
+    const Scalar two = static_cast<Scalar>(2.0) * w * Wu;
+    return (Tp * w2 - T * two) / w4;
+  };
+  out.x = comp(a.x, au.x, auu.x);
+  out.y = comp(a.y, au.y, auu.y);
+  out.z = comp(a.z, au.z, auu.z);
+}
+
+void hom4_rational_second_pure_v(const Hom4 &a, const Hom4 &av, const Hom4 &avv, Vec3 &out) {
+  auto comp = [&](Scalar A, Scalar Av, Scalar Avv) -> Scalar {
+    const Scalar w = hom4_weight_safe(a.w);
+    const Scalar Wv = av.w;
+    const Scalar Wvv = avv.w;
+    const Scalar T = Av * w - A * Wv;
+    const Scalar Tp = Avv * w - A * Wvv;
+    const Scalar w2 = w * w;
+    const Scalar w4 = w2 * w2;
+    const Scalar two = static_cast<Scalar>(2.0) * w * Wv;
+    return (Tp * w2 - T * two) / w4;
+  };
+  out.x = comp(a.x, av.x, avv.x);
+  out.y = comp(a.y, av.y, avv.y);
+  out.z = comp(a.z, av.z, avv.z);
+}
+
+void hom4_rational_suv(const Hom4 &a, const Hom4 &au, const Hom4 &av, const Hom4 &auv, Vec3 &out) {
+  auto comp = [&](Scalar A, Scalar Au, Scalar Av, Scalar Auv) -> Scalar {
+    const Scalar w = hom4_weight_safe(a.w);
+    const Scalar Wu = au.w;
+    const Scalar Wv = av.w;
+    const Scalar Wuv = auv.w;
+    const Scalar num = Au * w - A * Wu;
+    const Scalar den = w * w;
+    const Scalar numv = Auv * w + Au * Wv - Av * Wu - A * Wuv;
+    const Scalar denv = static_cast<Scalar>(2.0) * w * Wv;
+    return (numv * den - num * denv) / (den * den);
+  };
+  out.x = comp(a.x, au.x, av.x, auv.x);
+  out.y = comp(a.y, au.y, av.y, auv.y);
+  out.z = comp(a.z, au.z, av.z, auv.z);
+}
+
 std::vector<Hom4> nurbs_surface_homogeneous_net(const detail::SurfaceRecord &surface,
                                                 int nu, int nv) {
   std::vector<Hom4> h(static_cast<std::size_t>(nu * nv));
@@ -273,6 +331,174 @@ bool nurbs_tensor_surface_eval_with_partials(const detail::SurfaceRecord &surfac
 
   hom4_quotient_derivative(a, dau, out_du);
   hom4_quotient_derivative(a, dav, out_dv);
+  return true;
+}
+
+bool nurbs_tensor_surface_eval_with_partials2(const detail::SurfaceRecord &surface, Scalar u,
+                                              Scalar v, Point3 &out_p, Vec3 &out_du, Vec3 &out_dv,
+                                              Vec3 &out_duu, Vec3 &out_dvv, Vec3 &out_duv) {
+  out_du = out_dv = out_duu = out_dvv = out_duv = Vec3{0.0, 0.0, 0.0};
+  int nu = 0;
+  int nv = 0;
+  int pu = 0;
+  int pv = 0;
+  std::vector<Scalar> U;
+  std::vector<Scalar> V;
+  if (!nurbs_tensor_surface_prepare(surface, nu, nv, pu, pv, U, V)) {
+    return false;
+  }
+  const auto dom = surface_domain(surface);
+  const Scalar cu = std::clamp(u, dom.u.min, dom.u.max);
+  const Scalar cv = std::clamp(v, dom.v.min, dom.v.max);
+  const auto h_net = nurbs_surface_homogeneous_net(surface, nu, nv);
+  const Hom4 a = tensor_hom4_eval(h_net, nu, nv, U, V, pu, pv, cu, cv);
+  out_p = hom4_to_euclidean(a);
+
+  Hom4 dau{0.0, 0.0, 0.0, 0.0};
+  Hom4 dav{0.0, 0.0, 0.0, 0.0};
+  std::vector<Hom4> hdu;
+  std::vector<Hom4> hdv;
+  if (pu > 0) {
+    const std::vector<Scalar> ut = bspline_trim_knots_for_derivative(U);
+    const int nu1 = nu - 1;
+    const int pu1 = pu - 1;
+    if (static_cast<int>(ut.size()) >= nu1 + pu1 + 1 && nu1 > 0) {
+      hdu.resize(static_cast<std::size_t>(nu1 * nv));
+      for (int j = 0; j < nv; ++j) {
+        for (int i = 0; i < nu1; ++i) {
+          const Scalar den = U[static_cast<std::size_t>(i + pu + 1)] -
+                             U[static_cast<std::size_t>(i + 1)];
+          Scalar s = 0.0;
+          if (std::abs(den) > 1e-30) {
+            s = static_cast<Scalar>(pu) / den;
+          }
+          const Hom4 &aa = h_net[static_cast<std::size_t>(i * nv + j)];
+          const Hom4 &bb = h_net[static_cast<std::size_t>((i + 1) * nv + j)];
+          hdu[static_cast<std::size_t>(i * nv + j)] =
+              Hom4{s * (bb.x - aa.x), s * (bb.y - aa.y), s * (bb.z - aa.z),
+                   s * (bb.w - aa.w)};
+        }
+      }
+      dau = tensor_hom4_eval(hdu, nu1, nv, ut, V, pu1, pv, cu, cv);
+    }
+  }
+  if (pv > 0) {
+    const std::vector<Scalar> vt = bspline_trim_knots_for_derivative(V);
+    const int nv1 = nv - 1;
+    const int pv1 = pv - 1;
+    if (static_cast<int>(vt.size()) >= nv1 + pv1 + 1 && nv1 > 0) {
+      hdv.resize(static_cast<std::size_t>(nu * nv1));
+      for (int i = 0; i < nu; ++i) {
+        for (int j = 0; j < nv1; ++j) {
+          const Scalar den = V[static_cast<std::size_t>(j + pv + 1)] -
+                             V[static_cast<std::size_t>(j + 1)];
+          Scalar s = 0.0;
+          if (std::abs(den) > 1e-30) {
+            s = static_cast<Scalar>(pv) / den;
+          }
+          const Hom4 &aa = h_net[static_cast<std::size_t>(i * nv + j)];
+          const Hom4 &bb = h_net[static_cast<std::size_t>(i * nv + j + 1)];
+          hdv[static_cast<std::size_t>(i * nv1 + j)] =
+              Hom4{s * (bb.x - aa.x), s * (bb.y - aa.y), s * (bb.z - aa.z),
+                   s * (bb.w - aa.w)};
+        }
+      }
+      dav = tensor_hom4_eval(hdv, nu, nv1, U, vt, pu, pv1, cu, cv);
+    }
+  }
+
+  Hom4 dauu{0.0, 0.0, 0.0, 0.0};
+  if (pu >= 2 && !hdu.empty()) {
+    const std::vector<Scalar> ut = bspline_trim_knots_for_derivative(U);
+    const std::vector<Scalar> ut2 = bspline_trim_knots_for_derivative(ut);
+    const int pu1 = pu - 1;
+    const int nu2 = nu - 2;
+    const int pu2 = pu - 2;
+    if (static_cast<int>(ut2.size()) >= nu2 + pu2 + 1 && nu2 > 0) {
+      std::vector<Hom4> hduu(static_cast<std::size_t>(nu2 * nv));
+      for (int j = 0; j < nv; ++j) {
+        for (int i = 0; i < nu2; ++i) {
+          const Scalar den = ut[static_cast<std::size_t>(i + pu1 + 1)] -
+                             ut[static_cast<std::size_t>(i + 1)];
+          Scalar s = 0.0;
+          if (std::abs(den) > 1e-30) {
+            s = static_cast<Scalar>(pu1) / den;
+          }
+          const Hom4 &aa = hdu[static_cast<std::size_t>(i * nv + j)];
+          const Hom4 &bb = hdu[static_cast<std::size_t>((i + 1) * nv + j)];
+          hduu[static_cast<std::size_t>(i * nv + j)] =
+              Hom4{s * (bb.x - aa.x), s * (bb.y - aa.y), s * (bb.z - aa.z),
+                   s * (bb.w - aa.w)};
+        }
+      }
+      dauu = tensor_hom4_eval(hduu, nu2, nv, ut2, V, pu2, pv, cu, cv);
+    }
+  }
+
+  Hom4 davv{0.0, 0.0, 0.0, 0.0};
+  if (pv >= 2 && !hdv.empty()) {
+    const std::vector<Scalar> vt = bspline_trim_knots_for_derivative(V);
+    const std::vector<Scalar> vt2 = bspline_trim_knots_for_derivative(vt);
+    const int nv1 = nv - 1;
+    const int pv1 = pv - 1;
+    const int nv2 = nv - 2;
+    const int pv2 = pv - 2;
+    if (static_cast<int>(vt2.size()) >= nv2 + pv2 + 1 && nv2 > 0) {
+      std::vector<Hom4> hdvv(static_cast<std::size_t>(nu * nv2));
+      for (int i = 0; i < nu; ++i) {
+        for (int j = 0; j < nv2; ++j) {
+          const Scalar den = vt[static_cast<std::size_t>(j + pv1 + 1)] -
+                             vt[static_cast<std::size_t>(j + 1)];
+          Scalar s = 0.0;
+          if (std::abs(den) > 1e-30) {
+            s = static_cast<Scalar>(pv1) / den;
+          }
+          const Hom4 &aa = hdv[static_cast<std::size_t>(i * nv1 + j)];
+          const Hom4 &bb = hdv[static_cast<std::size_t>(i * nv1 + j + 1)];
+          hdvv[static_cast<std::size_t>(i * nv2 + j)] =
+              Hom4{s * (bb.x - aa.x), s * (bb.y - aa.y), s * (bb.z - aa.z),
+                   s * (bb.w - aa.w)};
+        }
+      }
+      davv = tensor_hom4_eval(hdvv, nu, nv2, U, vt2, pu, pv2, cu, cv);
+    }
+  }
+
+  Hom4 dauv{0.0, 0.0, 0.0, 0.0};
+  if (pu >= 1 && pv >= 1 && !hdu.empty()) {
+    const std::vector<Scalar> ut = bspline_trim_knots_for_derivative(U);
+    const std::vector<Scalar> vt = bspline_trim_knots_for_derivative(V);
+    const int nu1 = nu - 1;
+    const int nv1 = nv - 1;
+    const int pu1 = pu - 1;
+    const int pv1 = pv - 1;
+    if (static_cast<int>(ut.size()) >= nu1 + pu1 + 1 && static_cast<int>(vt.size()) >= nv1 + pv1 + 1 &&
+        nu1 > 0 && nv1 > 0) {
+      std::vector<Hom4> hduv(static_cast<std::size_t>(nu1 * nv1));
+      for (int i = 0; i < nu1; ++i) {
+        for (int j = 0; j < nv1; ++j) {
+          const Scalar den = V[static_cast<std::size_t>(j + pv + 1)] -
+                             V[static_cast<std::size_t>(j + 1)];
+          Scalar s = 0.0;
+          if (std::abs(den) > 1e-30) {
+            s = static_cast<Scalar>(pv) / den;
+          }
+          const Hom4 &aa = hdu[static_cast<std::size_t>(i * nv + j)];
+          const Hom4 &bb = hdu[static_cast<std::size_t>(i * nv + j + 1)];
+          hduv[static_cast<std::size_t>(i * nv1 + j)] =
+              Hom4{s * (bb.x - aa.x), s * (bb.y - aa.y), s * (bb.z - aa.z),
+                   s * (bb.w - aa.w)};
+        }
+      }
+      dauv = tensor_hom4_eval(hduv, nu1, nv1, ut, vt, pu1, pv1, cu, cv);
+    }
+  }
+
+  hom4_quotient_derivative(a, dau, out_du);
+  hom4_quotient_derivative(a, dav, out_dv);
+  hom4_rational_second_pure_u(a, dau, dauu, out_duu);
+  hom4_rational_second_pure_v(a, dav, davv, out_dvv);
+  hom4_rational_suv(a, dau, dav, dauv, out_duv);
   return true;
 }
 
@@ -548,6 +774,68 @@ std::pair<Scalar, Scalar> approximate_surface_uv(
   return {best_u, best_v};
 }
 
+std::pair<Scalar, Scalar> rep_project_point_to_surface_uv(
+    detail::KernelState *state, SurfaceId surface_id,
+    const detail::SurfaceRecord &surface, const Point3 &point) {
+  const bool use_closest =
+      surface.kind == detail::SurfaceKind::Revolved ||
+      surface.kind == detail::SurfaceKind::Swept ||
+      surface.kind == detail::SurfaceKind::Offset ||
+      surface.kind == detail::SurfaceKind::Trimmed;
+  if (use_closest && state != nullptr && surface_id.value != 0) {
+    std::shared_ptr<detail::KernelState> holder(state, [](detail::KernelState *) {});
+    SurfaceService svc(holder);
+    const auto r = svc.closest_uv(surface_id, point);
+    if (r.status == StatusCode::Ok && r.value.has_value()) {
+      return *r.value;
+    }
+  }
+  return approximate_surface_uv(surface, point);
+}
+
+bool rep_surface_eval_grid_partials(detail::KernelState *state, SurfaceId surface_id, Scalar u,
+                                    Scalar v, Point3 &out_p, Vec3 &out_du, Vec3 &out_dv, Vec3 &out_n) {
+  if (state == nullptr || surface_id.value == 0) {
+    return false;
+  }
+  const auto it = state->surfaces.find(surface_id.value);
+  if (it == state->surfaces.end()) {
+    return false;
+  }
+  const auto &rec = it->second;
+  switch (rec.kind) {
+  case detail::SurfaceKind::Revolved:
+  case detail::SurfaceKind::Swept:
+  case detail::SurfaceKind::Offset:
+    break;
+  default:
+    return false;
+  }
+  std::shared_ptr<detail::KernelState> holder(state, [](detail::KernelState *) {});
+  SurfaceService svc(holder);
+  const auto res = svc.eval(surface_id, u, v, 1);
+  if (res.status != StatusCode::Ok || !res.value.has_value()) {
+    return false;
+  }
+  const auto &ev = *res.value;
+  out_p = ev.point;
+  out_du = ev.du;
+  out_dv = ev.dv;
+  out_n = normalize_or_default(detail::cross(out_du, out_dv), Vec3{0.0, 0.0, 1.0});
+  if (!(detail::dot(out_n, out_n) > static_cast<Scalar>(1e-30)) || !std::isfinite(out_n.x) ||
+      !std::isfinite(out_n.y) || !std::isfinite(out_n.z)) {
+    out_n = Vec3{0.0, 0.0, 1.0};
+  }
+  return true;
+}
+
+bool rep_surface_eval_grid_point(detail::KernelState *state, SurfaceId surface_id, Scalar u,
+                                 Scalar v, Point3 &out_p, Vec3 &out_n) {
+  Vec3 du{};
+  Vec3 dv{};
+  return rep_surface_eval_grid_partials(state, surface_id, u, v, out_p, du, dv, out_n);
+}
+
 // Principal curvatures from first/second fundamental forms: W = I^{-1} II, k1/k2 = eig(W).
 bool principal_curvatures_from_fundamental(Scalar E, Scalar F, Scalar G, Scalar L,
                                            Scalar M_coef, Scalar N, Scalar &k1,
@@ -600,6 +888,25 @@ void bilinear_patch_principal_curvatures_non_rational(const Point3 &p00,
   const Scalar L = 0.0;
   const Scalar M_coef = detail::dot(n_vec, ruv);
   const Scalar Nn = 0.0;
+  principal_curvatures_from_fundamental(E, Fp, G, L, M_coef, Nn, k1, k2);
+}
+
+void parametric_surface_principal_curvature_from_second_partials(
+    const Vec3 &ru, const Vec3 &rv, const Vec3 &ruu, const Vec3 &rvv, const Vec3 &ruv,
+    Scalar &k1, Scalar &k2) {
+  k1 = k2 = 0.0;
+  Vec3 n_raw = detail::cross(ru, rv);
+  const Scalar n_len = detail::norm(n_raw);
+  if (!(n_len > static_cast<Scalar>(1e-20)) || !std::isfinite(n_len)) {
+    return;
+  }
+  const Vec3 n_vec = detail::scale(n_raw, static_cast<Scalar>(1.0) / n_len);
+  const Scalar E = detail::dot(ru, ru);
+  const Scalar Fp = detail::dot(ru, rv);
+  const Scalar G = detail::dot(rv, rv);
+  const Scalar L = detail::dot(ruu, n_vec);
+  const Scalar M_coef = detail::dot(ruv, n_vec);
+  const Scalar Nn = detail::dot(rvv, n_vec);
   principal_curvatures_from_fundamental(E, Fp, G, L, M_coef, Nn, k1, k2);
 }
 
@@ -762,6 +1069,21 @@ void spline_surface_principal_curvature_fd(const detail::SurfaceRecord &surface,
       u, v, domain, k1, k2);
 }
 
+// 已知解析一阶偏导 (du,dv) 时，用 hybrid 二阶（位置差分）求主曲率；供 BSpline/NURBS/Bezier 张量路径复用。
+void spline_surface_principal_curvature_hybrid_from_partials(
+    const detail::SurfaceRecord &surface, Scalar u, Scalar v, const Range2D &domain,
+    const Vec3 &du, const Vec3 &dv, Scalar &k1, Scalar &k2) {
+  k1 = k2 = 0.0;
+  if (!(detail::norm(detail::cross(du, dv)) > static_cast<Scalar>(1e-20))) {
+    return;
+  }
+  parametric_surface_principal_curvature_hybrid(
+      [&surface](Scalar uu, Scalar vv) {
+        return evaluate_surface_point(surface, uu, vv);
+      },
+      u, v, domain, du, dv, k1, k2);
+}
+
 void tensor_spline_surface_principal_curvature_improved(
     const detail::SurfaceRecord &surface, Scalar u, Scalar v, const Range2D &domain,
     Scalar &k1, Scalar &k2) {
@@ -779,18 +1101,37 @@ void tensor_spline_surface_principal_curvature_improved(
     spline_surface_principal_curvature_fd(surface, u, v, domain, k1, k2);
     return;
   }
-  if (!(detail::norm(detail::cross(du, dv)) > static_cast<Scalar>(1e-20))) {
-    k1 = k2 = 0.0;
-    return;
-  }
-  parametric_surface_principal_curvature_hybrid(
-      [&surface](Scalar uu, Scalar vv) {
-        return evaluate_surface_point(surface, uu, vv);
-      },
-      u, v, domain, du, dv, k1, k2);
+  spline_surface_principal_curvature_hybrid_from_partials(surface, u, v, domain, du, dv, k1,
+                                                            k2);
 }
 
-
+bool rep_patch_principal_curvatures_max(detail::KernelState *state, SurfaceId surface_id,
+                                        const detail::SurfaceRecord &surf, Scalar u, Scalar v,
+                                        Scalar &k_max_abs) {
+  k_max_abs = 0.0;
+  if (state != nullptr && surface_id.value != 0) {
+    std::shared_ptr<detail::KernelState> holder(state, [](detail::KernelState *) {});
+    SurfaceService svc(holder);
+    const auto res = svc.eval(surface_id, u, v, 1);
+    if (res.status == StatusCode::Ok && res.value.has_value()) {
+      const auto &ev = *res.value;
+      k_max_abs = std::max(std::abs(ev.k1), std::abs(ev.k2));
+      return std::isfinite(k_max_abs);
+    }
+  }
+  if (surf.kind == detail::SurfaceKind::Bezier || surf.kind == detail::SurfaceKind::BSpline ||
+      surf.kind == detail::SurfaceKind::Nurbs) {
+    const auto dom = surface_domain(surf);
+    const Scalar cu = std::clamp(u, dom.u.min, dom.u.max);
+    const Scalar cv = std::clamp(v, dom.v.min, dom.v.max);
+    Scalar k1 = 0.0;
+    Scalar k2 = 0.0;
+    tensor_spline_surface_principal_curvature_improved(surf, cu, cv, dom, k1, k2);
+    k_max_abs = std::max(std::abs(k1), std::abs(k2));
+    return std::isfinite(k_max_abs);
+  }
+  return false;
+}
 
 // 1D 最近参数阻尼 GN 需要 ∂C/∂t 的**真实速度**；`tangent` 常为归一化方向，CompositeChain 等会错标度步长。
 Vec3 curve_velocity_for_closest(const CurveEvalResult &r) {
@@ -956,6 +1297,7 @@ detail::SurfaceRecord make_surface_record(detail::SurfaceKind kind,
                                           Scalar trim_v_min = 0.0,
                                           Scalar trim_v_max = 1.0,
                                           std::vector<Point2> trim_uv_loop = {},
+                                          std::vector<std::vector<Point2>> trim_uv_holes = {},
                                           Scalar offset_distance = 0.0,
                                           int spline_degree_u = -1,
                                           int spline_degree_v = -1) {
@@ -976,6 +1318,7 @@ detail::SurfaceRecord make_surface_record(detail::SurfaceKind kind,
   record.trim_v_min = trim_v_min;
   record.trim_v_max = trim_v_max;
   record.trim_uv_loop = std::move(trim_uv_loop);
+  record.trim_uv_holes = std::move(trim_uv_holes);
   record.offset_distance = offset_distance;
   record.poles = std::move(poles);
   record.weights = std::move(weights);

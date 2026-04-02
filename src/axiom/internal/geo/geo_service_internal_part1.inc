@@ -458,6 +458,8 @@ Vec3 bezier_second_derivative(std::span<const Point3> poles, Scalar t) {
   return Vec3{p.x, p.y, p.z};
 }
 
+bool bspline_knots_valid_for_curve(const detail::CurveRecord &curve, int &p_out);
+
 Range1D curve_domain(const detail::CurveRecord &curve) {
   const auto inf = std::numeric_limits<Scalar>::infinity();
   const auto two_pi = std::acos(-1.0) * 2.0;
@@ -472,13 +474,34 @@ Range1D curve_domain(const detail::CurveRecord &curve) {
   case detail::CurveKind::Parabola:
   case detail::CurveKind::Hyperbola:
     return Range1D{-10.0, 10.0};
-  case detail::CurveKind::BSpline:
+  case detail::CurveKind::BSpline: {
+    const auto n = curve.poles.size();
+    if (n < 2) {
+      return Range1D{0.0, 1.0};
+    }
+    int pk = 0;
+    if (bspline_knots_valid_for_curve(curve, pk)) {
+      return Range1D{curve.knots_u[static_cast<std::size_t>(pk)], curve.knots_u[n]};
+    }
+    return Range1D{0.0, std::max<Scalar>(1.0, static_cast<Scalar>(n - 1))};
+  }
   case detail::CurveKind::CompositePolyline:
     return Range1D{0.0, std::max<Scalar>(1.0, static_cast<Scalar>(curve.poles.size() - 1))};
   case detail::CurveKind::CompositeChain:
     return Range1D{0.0, std::max<Scalar>(1.0, static_cast<Scalar>(curve.children.size()))};
   case detail::CurveKind::Bezier:
-  case detail::CurveKind::Nurbs:
+    return Range1D{0.0, 1.0};
+  case detail::CurveKind::Nurbs: {
+    const auto n = curve.poles.size();
+    if (n < 2) {
+      return Range1D{0.0, 1.0};
+    }
+    int pk = 0;
+    if (bspline_knots_valid_for_curve(curve, pk)) {
+      return Range1D{curve.knots_u[static_cast<std::size_t>(pk)], curve.knots_u[n]};
+    }
+    return Range1D{0.0, 1.0};
+  }
   default:
     return Range1D{0.0, 1.0};
   }
@@ -588,6 +611,21 @@ void bspline_affine_scale_knots_to_span(std::vector<Scalar> &U, int p, std::size
   }
 }
 
+/// 单段 clamped NURBS（与 `poles.size()-1` 次有理 Bézier 段同构）：结点前 `p+1` 个为 0、后 `p+1` 个为 1。
+std::vector<Scalar> nurbs_clamped_bezier_knots(std::size_t n) {
+  if (n <= 1) {
+    return {0.0, 1.0};
+  }
+  const int ni = static_cast<int>(n);
+  const int p = ni - 1;
+  const int m = ni + p + 1;
+  std::vector<Scalar> U(static_cast<std::size_t>(m), 0.0);
+  for (int j = ni; j < m; ++j) {
+    U[static_cast<std::size_t>(j)] = 1.0;
+  }
+  return U;
+}
+
 int bspline_find_span(std::size_t n, int p, Scalar u, const std::vector<Scalar> &U) {
   const int ni = static_cast<int>(n);
   if (ni <= 0 || static_cast<int>(U.size()) < ni + p + 1) {
@@ -673,6 +711,98 @@ Vec3 bspline_de_boor_vec(std::span<const Vec3> coeffs, const std::vector<Scalar>
   return d[static_cast<std::size_t>(p)];
 }
 
+Scalar bspline_de_boor_scalar(std::span<const Scalar> coeffs, const std::vector<Scalar> &U, int p, int k,
+                              Scalar u) {
+  if (p == 0) {
+    return coeffs[static_cast<std::size_t>(k)];
+  }
+  std::vector<Scalar> d(static_cast<std::size_t>(p + 1));
+  for (int i = 0; i <= p; ++i) {
+    d[static_cast<std::size_t>(i)] = coeffs[static_cast<std::size_t>(k - p + i)];
+  }
+  for (int r = 1; r <= p; ++r) {
+    for (int i = p; i >= r; --i) {
+      const int idx = k - p + i;
+      const Scalar left = U[static_cast<std::size_t>(idx)];
+      const Scalar right = U[static_cast<std::size_t>(idx + p - r + 1)];
+      const Scalar denom = right - left;
+      Scalar alpha = 0.0;
+      if (std::abs(denom) > 1e-24) {
+        alpha = (u - left) / denom;
+      }
+      d[static_cast<std::size_t>(i)] =
+          d[static_cast<std::size_t>(i - 1)] +
+          (d[static_cast<std::size_t>(i)] - d[static_cast<std::size_t>(i - 1)]) * alpha;
+    }
+  }
+  return d[static_cast<std::size_t>(p)];
+}
+
+std::vector<Scalar> bspline_trim_knots_for_derivative(const std::vector<Scalar> &U);
+
+void bspline_scalar_curve_eval_all_impl(std::span<const Scalar> coeffs, const std::vector<Scalar> &U, int p,
+                                        Scalar t, Scalar &out_s, Scalar &out_ds, Scalar &out_d2s) {
+  out_ds = 0.0;
+  out_d2s = 0.0;
+  const std::size_t n = coeffs.size();
+  if (n == 0) {
+    out_s = 0.0;
+    return;
+  }
+  if (n == 1) {
+    out_s = coeffs[0];
+    return;
+  }
+  if (p < 0 || n + static_cast<std::size_t>(p) + 1 != U.size()) {
+    out_s = coeffs[0];
+    return;
+  }
+  const Scalar ulo = U[static_cast<std::size_t>(p)];
+  const Scalar uhi = U[n];
+  const Scalar uu = std::clamp(t, ulo, uhi);
+  const int k = bspline_find_span(n, p, uu, U);
+  out_s = bspline_de_boor_scalar(coeffs, U, p, k, uu);
+  if (p < 1) {
+    return;
+  }
+  std::vector<Scalar> qw;
+  qw.reserve(n - 1);
+  for (std::size_t i = 0; i + 1 < n; ++i) {
+    const Scalar den = U[i + static_cast<std::size_t>(p) + 1] - U[i + 1];
+    if (std::abs(den) < 1e-24) {
+      qw.push_back(0.0);
+    } else {
+      qw.push_back(static_cast<Scalar>(p) * (coeffs[i + 1] - coeffs[i]) / den);
+    }
+  }
+  std::vector<Scalar> Uk = bspline_trim_knots_for_derivative(U);
+  const int p1 = p - 1;
+  const int n1 = static_cast<int>(n) - 1;
+  const int k1 = bspline_find_span(static_cast<std::size_t>(n1), p1, uu, Uk);
+  out_ds = bspline_de_boor_scalar(std::span<const Scalar>(qw.data(), qw.size()), Uk, p1, k1, uu);
+  if (p < 2) {
+    return;
+  }
+  std::vector<Scalar> rw;
+  rw.reserve(static_cast<std::size_t>(n1 - 1));
+  for (int i = 0; i < n1 - 1; ++i) {
+    const Scalar den =
+        Uk[static_cast<std::size_t>(i + p1 + 1)] - Uk[static_cast<std::size_t>(i + 1)];
+    if (std::abs(den) < 1e-24) {
+      rw.push_back(0.0);
+    } else {
+      rw.push_back(static_cast<Scalar>(p1) * (qw[static_cast<std::size_t>(i + 1)] -
+                                               qw[static_cast<std::size_t>(i)]) /
+                   den);
+    }
+  }
+  std::vector<Scalar> Uk2 = bspline_trim_knots_for_derivative(Uk);
+  const int p2 = p - 2;
+  const int n2 = n1 - 1;
+  const int k2 = bspline_find_span(static_cast<std::size_t>(n2), p2, uu, Uk2);
+  out_d2s = bspline_de_boor_scalar(std::span<const Scalar>(rw.data(), rw.size()), Uk2, p2, k2, uu);
+}
+
 std::vector<Scalar> bspline_trim_knots_for_derivative(const std::vector<Scalar> &U) {
   std::vector<Scalar> out;
   if (U.size() < 3) {
@@ -685,8 +815,8 @@ std::vector<Scalar> bspline_trim_knots_for_derivative(const std::vector<Scalar> 
   return out;
 }
 
-void bspline_curve_eval_all(std::span<const Point3> poles, Scalar t, Point3 &out_p, Vec3 &out_d1,
-                            Vec3 &out_d2) {
+void bspline_curve_eval_all_impl(std::span<const Point3> poles, const std::vector<Scalar> &U, int p,
+                                 Scalar t, Point3 &out_p, Vec3 &out_d1, Vec3 &out_d2) {
   out_d1 = Vec3{0.0, 0.0, 0.0};
   out_d2 = Vec3{0.0, 0.0, 0.0};
   const std::size_t n = poles.size();
@@ -698,10 +828,10 @@ void bspline_curve_eval_all(std::span<const Point3> poles, Scalar t, Point3 &out
     out_p = poles[0];
     return;
   }
-  const int p = bspline_degree_for_control_count(n);
-  std::vector<Scalar> U = bspline_open_uniform_knots(n, p);
-  const Scalar target_end = std::max<Scalar>(1.0, static_cast<Scalar>(n - 1));
-  bspline_affine_scale_knots_to_span(U, p, n, target_end);
+  if (p < 0 || static_cast<std::size_t>(n) + static_cast<std::size_t>(p) + 1 != U.size()) {
+    out_p = poles[0];
+    return;
+  }
   const Scalar ulo = U[static_cast<std::size_t>(p)];
   const Scalar uhi = U[n];
   const Scalar uu = std::clamp(t, ulo, uhi);
@@ -752,6 +882,202 @@ void bspline_curve_eval_all(std::span<const Point3> poles, Scalar t, Point3 &out
   out_d2 = bspline_de_boor_vec(std::span<const Vec3>(rw.data(), rw.size()), Uk2, p2, k2, uu);
 }
 
+void bspline_curve_eval_all(std::span<const Point3> poles, Scalar t, Point3 &out_p, Vec3 &out_d1,
+                            Vec3 &out_d2) {
+  const std::size_t n = poles.size();
+  if (n == 0) {
+    out_p = Point3{};
+    out_d1 = out_d2 = Vec3{0.0, 0.0, 0.0};
+    return;
+  }
+  if (n == 1) {
+    out_p = poles[0];
+    out_d1 = out_d2 = Vec3{0.0, 0.0, 0.0};
+    return;
+  }
+  const int p = bspline_degree_for_control_count(n);
+  std::vector<Scalar> U = bspline_open_uniform_knots(n, p);
+  const Scalar target_end = std::max<Scalar>(1.0, static_cast<Scalar>(n - 1));
+  bspline_affine_scale_knots_to_span(U, p, n, target_end);
+  bspline_curve_eval_all_impl(poles, U, p, t, out_p, out_d1, out_d2);
+}
+
+bool bspline_knots_valid_for_curve(const detail::CurveRecord &curve, int &p_out) {
+  const std::size_t n = curve.poles.size();
+  if (n < 2) {
+    return false;
+  }
+  const auto &U = curve.knots_u;
+  if (U.size() < n + 2) {
+    return false;
+  }
+  const int p = static_cast<int>(U.size()) - static_cast<int>(n) - 1;
+  if (p < 1 || static_cast<std::size_t>(n) + static_cast<std::size_t>(p) + 1 != U.size()) {
+    return false;
+  }
+  if (p >= static_cast<int>(n)) {
+    return false;
+  }
+  for (std::size_t i = 1; i < U.size(); ++i) {
+    if (!std::isfinite(U[i]) || U[i] < U[i - 1] - static_cast<Scalar>(1e-14)) {
+      return false;
+    }
+  }
+  p_out = p;
+  return true;
+}
+
+void bspline_curve_eval_record(const detail::CurveRecord &curve, Scalar t, Point3 &out_p, Vec3 &out_d1,
+                               Vec3 &out_d2) {
+  const std::size_t n = curve.poles.size();
+  if (n == 0) {
+    out_p = Point3{};
+    out_d1 = out_d2 = Vec3{0.0, 0.0, 0.0};
+    return;
+  }
+  if (n == 1) {
+    out_p = curve.poles[0];
+    out_d1 = out_d2 = Vec3{0.0, 0.0, 0.0};
+    return;
+  }
+  int p = 0;
+  if (bspline_knots_valid_for_curve(curve, p)) {
+    bspline_curve_eval_all_impl(std::span<const Point3>(curve.poles.data(), curve.poles.size()),
+                                curve.knots_u, p, t, out_p, out_d1, out_d2);
+  } else {
+    bspline_curve_eval_all(std::span<const Point3>(curve.poles.data(), curve.poles.size()), t, out_p,
+                           out_d1, out_d2);
+  }
+}
+
+Point3 nurbs_de_boor_point(std::span<const Point3> poles, std::span<const Scalar> w,
+                           const std::vector<Scalar> &U, int p, int k, Scalar u) {
+  struct R4 {
+    Scalar x{}, y{}, z{}, ww{};
+  };
+  auto lerp_r4 = [](const R4 &a, const R4 &b, Scalar s) -> R4 {
+    return R4{a.x + (b.x - a.x) * s, a.y + (b.y - a.y) * s, a.z + (b.z - a.z) * s,
+              a.ww + (b.ww - a.ww) * s};
+  };
+  std::vector<R4> d(static_cast<std::size_t>(p + 1));
+  for (int i = 0; i <= p; ++i) {
+    const int idx = k - p + i;
+    const Scalar ww = w[static_cast<std::size_t>(idx)];
+    const auto &P = poles[static_cast<std::size_t>(idx)];
+    d[static_cast<std::size_t>(i)] = {P.x * ww, P.y * ww, P.z * ww, ww};
+  }
+  for (int r = 1; r <= p; ++r) {
+    for (int i = p; i >= r; --i) {
+      const int idx = k - p + i;
+      const Scalar left = U[static_cast<std::size_t>(idx)];
+      const Scalar right = U[static_cast<std::size_t>(idx + p - r + 1)];
+      Scalar denom = right - left;
+      Scalar alpha = 0.0;
+      if (std::abs(denom) > 1e-24) {
+        alpha = (u - left) / denom;
+      }
+      d[static_cast<std::size_t>(i)] =
+          lerp_r4(d[static_cast<std::size_t>(i - 1)], d[static_cast<std::size_t>(i)], alpha);
+    }
+  }
+  const auto &h = d[static_cast<std::size_t>(p)];
+  const Scalar wout = std::abs(h.ww) > 1e-18 ? h.ww : 1e-18;
+  return Point3{h.x / wout, h.y / wout, h.z / wout};
+}
+
+Point3 nurbs_curve_eval_point(std::span<const Point3> poles, std::span<const Scalar> w,
+                              const std::vector<Scalar> &U, int p, Scalar u) {
+  const std::size_t n = poles.size();
+  if (n == 0) {
+    return Point3{};
+  }
+  if (n == 1) {
+    return poles[0];
+  }
+  if (w.size() != n || p < 0 ||
+      static_cast<std::size_t>(n) + static_cast<std::size_t>(p) + 1 != U.size()) {
+    return poles[0];
+  }
+  const Scalar ulo = U[static_cast<std::size_t>(p)];
+  const Scalar uhi = U[n];
+  const Scalar uu = std::clamp(u, ulo, uhi);
+  const int k = bspline_find_span(n, p, uu, U);
+  return nurbs_de_boor_point(poles, w, U, p, k, uu);
+}
+
+void nurbs_curve_eval_all_record(const detail::CurveRecord &curve, Scalar t, Point3 &out_p, Vec3 &out_d1,
+                                 Vec3 &out_d2) {
+  out_d1 = Vec3{0.0, 0.0, 0.0};
+  out_d2 = Vec3{0.0, 0.0, 0.0};
+  const std::size_t n = curve.poles.size();
+  if (n == 0) {
+    out_p = Point3{};
+    return;
+  }
+  if (n == 1) {
+    out_p = curve.poles[0];
+    return;
+  }
+  if (curve.weights.size() != n) {
+    out_p = curve.poles[0];
+    return;
+  }
+  int p = 0;
+  if (!bspline_knots_valid_for_curve(curve, p)) {
+    detail::rational_bezier_eval_all(curve.poles, curve.weights, t, out_p, out_d1, out_d2);
+    return;
+  }
+  const auto &U = curve.knots_u;
+  const Scalar ulo = U[static_cast<std::size_t>(p)];
+  const Scalar uhi = U[n];
+  const Scalar uu = std::clamp(t, ulo, uhi);
+
+  std::vector<Scalar> cx(n);
+  std::vector<Scalar> cy(n);
+  std::vector<Scalar> cz(n);
+  std::vector<Scalar> cw(n);
+  for (std::size_t i = 0; i < n; ++i) {
+    const Scalar wi = curve.weights[i];
+    const auto &Pi = curve.poles[i];
+    cx[i] = Pi.x * wi;
+    cy[i] = Pi.y * wi;
+    cz[i] = Pi.z * wi;
+    cw[i] = wi;
+  }
+  Scalar X{}, Xd{}, Xdd{};
+  Scalar Y{}, Yd{}, Ydd{};
+  Scalar Z{}, Zd{}, Zdd{};
+  Scalar W{}, Wd{}, Wdd{};
+  bspline_scalar_curve_eval_all_impl(std::span<const Scalar>(cx.data(), cx.size()), U, p, uu, X, Xd,
+                                     Xdd);
+  bspline_scalar_curve_eval_all_impl(std::span<const Scalar>(cy.data(), cy.size()), U, p, uu, Y, Yd,
+                                     Ydd);
+  bspline_scalar_curve_eval_all_impl(std::span<const Scalar>(cz.data(), cz.size()), U, p, uu, Z, Zd,
+                                     Zdd);
+  bspline_scalar_curve_eval_all_impl(std::span<const Scalar>(cw.data(), cw.size()), U, p, uu, W, Wd,
+                                     Wdd);
+
+  const Scalar w_safe =
+      std::abs(W) > static_cast<Scalar>(1e-30)
+          ? W
+          : (W >= static_cast<Scalar>(0) ? static_cast<Scalar>(1e-30) : static_cast<Scalar>(-1e-30));
+  const Scalar w2 = w_safe * w_safe;
+  const Scalar w4 = w2 * w2;
+  const Scalar two_wwd = static_cast<Scalar>(2.0) * w_safe * Wd;
+  out_p = Point3{X / w_safe, Y / w_safe, Z / w_safe};
+
+  const Scalar t1x = Xd * w_safe - X * Wd;
+  const Scalar t1y = Yd * w_safe - Y * Wd;
+  const Scalar t1z = Zd * w_safe - Z * Wd;
+  out_d1 = Vec3{t1x / w2, t1y / w2, t1z / w2};
+
+  const Scalar t2x = Xdd * w_safe - X * Wdd;
+  const Scalar t2y = Ydd * w_safe - Y * Wdd;
+  const Scalar t2z = Zdd * w_safe - Z * Wdd;
+  out_d2 = Vec3{(t2x * w2 - t1x * two_wwd) / w4, (t2y * w2 - t1y * two_wwd) / w4,
+                (t2z * w2 - t1z * two_wwd) / w4};
+}
+
 Point3 evaluate_bspline_curve_point(std::span<const Point3> poles, Scalar t) {
   Point3 p{};
   Vec3 d1{};
@@ -788,16 +1114,23 @@ Point3 evaluate_curve_point(const detail::CurveRecord &curve, Scalar t) {
   }
   case detail::CurveKind::Bezier:
     return evaluate_bezier_point(std::vector<Point3>(curve.poles.begin(), curve.poles.end()), t);
-  case detail::CurveKind::BSpline:
+  case detail::CurveKind::BSpline: {
     if (curve.poles.empty()) {
       return curve.origin;
     }
-    return evaluate_bspline_curve_point(
-        std::span<const Point3>(curve.poles.data(), curve.poles.size()), t);
+    Point3 ep{};
+    Vec3 e1{}, e2{};
+    bspline_curve_eval_record(curve, t, ep, e1, e2);
+    return ep;
+  }
   case detail::CurveKind::CompositePolyline:
     return evaluate_polyline_point(curve.poles, t);
-  case detail::CurveKind::Nurbs:
-    return evaluate_rational_bezier_point(curve.poles, curve.weights, t);
+  case detail::CurveKind::Nurbs: {
+    Point3 ep{};
+    Vec3 e1{}, e2{};
+    nurbs_curve_eval_all_record(curve, t, ep, e1, e2);
+    return ep;
+  }
   default:
     return curve.origin;
   }
@@ -917,20 +1250,7 @@ bool point_in_uv_polygon_raycast(Point2 p, std::span<const Point2> poly) {
   if (poly.size() < 3) {
     return true;
   }
-  bool inside = false;
-  const std::size_t n = poly.size();
-  for (std::size_t i = 0, j = n - 1; i < n; j = i++) {
-    const auto &a = poly[i];
-    const auto &b = poly[j];
-    if ((a.y > p.y) != (b.y > p.y)) {
-      const Scalar xint =
-          (b.x - a.x) * (p.y - a.y) / (b.y - a.y + static_cast<Scalar>(1e-30)) + a.x;
-      if (p.x < xint) {
-        inside = !inside;
-      }
-    }
-  }
-  return inside;
+  return detail::point_in_polygon_2d_raycast(p, poly);
 }
 
 Point2 closest_point_on_segment_2d(Point2 p, Point2 a, Point2 b) {
@@ -952,24 +1272,55 @@ void apply_trimmed_surface_uv_in_parameter_space(const detail::SurfaceRecord &su
     return;
   }
   const Point2 p{u, v};
-  if (point_in_uv_polygon_raycast(p, surf.trim_uv_loop)) {
+  const bool in_outer = point_in_uv_polygon_raycast(p, surf.trim_uv_loop);
+  bool in_hole = false;
+  for (const auto &hole : surf.trim_uv_holes) {
+    if (hole.size() >= 3 && point_in_uv_polygon_raycast(p, hole)) {
+      in_hole = true;
+      break;
+    }
+  }
+  if (in_outer && !in_hole) {
     return;
   }
-  Scalar best_d2 = std::numeric_limits<Scalar>::infinity();
+
+  auto project_to_loop_boundary = [&](std::span<const Point2> poly, Scalar &bu, Scalar &bv) {
+    Scalar best_d2 = std::numeric_limits<Scalar>::infinity();
+    const std::size_t n = poly.size();
+    for (std::size_t i = 0; i < n; ++i) {
+      const Point2 q = closest_point_on_segment_2d(p, poly[i], poly[(i + 1) % n]);
+      const Scalar dx = p.x - q.x;
+      const Scalar dy = p.y - q.y;
+      const Scalar d2 = dx * dx + dy * dy;
+      if (d2 < best_d2) {
+        best_d2 = d2;
+        bu = q.x;
+        bv = q.y;
+      }
+    }
+  };
+
   Scalar bu = u;
   Scalar bv = v;
-  const auto &poly = surf.trim_uv_loop;
-  const std::size_t n = poly.size();
-  for (std::size_t i = 0; i < n; ++i) {
-    const Point2 q =
-        closest_point_on_segment_2d(p, poly[i], poly[(i + 1) % n]);
-    const Scalar dx = p.x - q.x;
-    const Scalar dy = p.y - q.y;
-    const Scalar d2 = dx * dx + dy * dy;
-    if (d2 < best_d2) {
-      best_d2 = d2;
-      bu = q.x;
-      bv = q.y;
+  if (!in_outer) {
+    project_to_loop_boundary(surf.trim_uv_loop, bu, bv);
+  } else {
+    Scalar best_d2 = std::numeric_limits<Scalar>::infinity();
+    for (const auto &hole : surf.trim_uv_holes) {
+      if (hole.size() < 3) {
+        continue;
+      }
+      Scalar hu = u;
+      Scalar hv = v;
+      project_to_loop_boundary(std::span<const Point2>(hole.data(), hole.size()), hu, hv);
+      const Scalar dx = p.x - hu;
+      const Scalar dy = p.y - hv;
+      const Scalar d2 = dx * dx + dy * dy;
+      if (d2 < best_d2) {
+        best_d2 = d2;
+        bu = hu;
+        bv = hv;
+      }
     }
   }
   u = std::clamp(bu, surf.trim_u_min, surf.trim_u_max);
@@ -987,16 +1338,32 @@ bool trimmed_surface_uv_feasible(Scalar u, Scalar v,
     return true;
   }
   const Point2 p{u, v};
-  if (point_in_uv_polygon_raycast(p, surf.trim_uv_loop)) {
-    return true;
+  const bool in_outer = point_in_uv_polygon_raycast(p, surf.trim_uv_loop);
+  if (!in_outer) {
+    const auto &poly = surf.trim_uv_loop;
+    const std::size_t n = poly.size();
+    for (std::size_t i = 0; i < n; ++i) {
+      const Point2 q = closest_point_on_segment_2d(p, poly[i], poly[(i + 1) % n]);
+      if (std::hypot(p.x - q.x, p.y - q.y) <= tol * static_cast<Scalar>(50.0)) {
+        return true;
+      }
+    }
+    return false;
   }
-  const auto &poly = surf.trim_uv_loop;
-  const std::size_t n = poly.size();
-  for (std::size_t i = 0; i < n; ++i) {
-    const Point2 q = closest_point_on_segment_2d(p, poly[i], poly[(i + 1) % n]);
-    if (std::hypot(p.x - q.x, p.y - q.y) <= tol * static_cast<Scalar>(50.0)) {
-      return true;
+  for (const auto &hole : surf.trim_uv_holes) {
+    if (hole.size() < 3) {
+      continue;
+    }
+    if (point_in_uv_polygon_raycast(p, hole)) {
+      const std::size_t n = hole.size();
+      for (std::size_t i = 0; i < n; ++i) {
+        const Point2 q = closest_point_on_segment_2d(p, hole[i], hole[(i + 1) % n]);
+        if (std::hypot(p.x - q.x, p.y - q.y) <= tol * static_cast<Scalar>(50.0)) {
+          return true;
+        }
+      }
+      return false;
     }
   }
-  return false;
+  return true;
 }

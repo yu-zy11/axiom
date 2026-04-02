@@ -30,6 +30,8 @@ public:
     Result<std::vector<FaceId>> faces_of_edge(EdgeId edge_id) const;
     Result<std::vector<ShellId>> shells_of_edge(EdgeId edge_id) const;
     Result<std::vector<EdgeId>> edges_of_loop(LoopId loop_id) const;
+    /// 按环上 coedge 顺序返回每条边的起点顶点（闭合环长度为 coedge 数）。
+    Result<std::vector<VertexId>> vertices_of_loop(LoopId loop_id) const;
     Result<std::vector<LoopId>> loops_of_face(FaceId face_id) const;
     Result<SurfaceId> surface_of_face(FaceId face_id) const;
     Result<std::vector<ShellId>> shells_of_face(FaceId face_id) const;
@@ -91,6 +93,8 @@ public:
     Result<Range2D> face_outer_loop_uv_bounds(FaceId face_id) const;
     /// 外环 PCurve（折线）按 coedge 顺序串联的 UV 折线（闭合环，已去重相邻重复点）；供 `make_trimmed_polygon`。
     Result<std::vector<Point2>> face_outer_loop_uv_polyline(FaceId face_id) const;
+    /// 指定外环或内环：按 coedge 顺序串联 UV 折线（须为该 `face_id` 的 `outer_loop` 或 `inner_loops` 之一）。
+    Result<std::vector<Point2>> face_loop_uv_polyline(FaceId face_id, LoopId loop_id) const;
     /// 返回该面引用曲面的「修剪基曲面」：`Trimmed` 则沿 `base_surface_id` 解引用直至非 Trimmed。
     Result<SurfaceId> underlying_surface_for_face_trim(FaceId face_id) const;
 

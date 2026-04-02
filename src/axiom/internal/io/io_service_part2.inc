@@ -112,9 +112,13 @@ Result<std::vector<BodyId>> IOService::import_many_step(std::span<const std::str
     }
     std::vector<BodyId> out;
     out.reserve(paths.size());
-    for (const auto& p : paths) {
+    for (std::size_t i = 0; i < paths.size(); ++i) {
+        const auto& p = paths[i];
         const auto r = import_step(p, options);
-        if (r.status != StatusCode::Ok || !r.value.has_value()) return error_result<std::vector<BodyId>>(r.status, r.diagnostic_id);
+        if (r.status != StatusCode::Ok || !r.value.has_value()) {
+            return error_result<std::vector<BodyId>>(
+                r.status, merge_batch_import_failure_diagnostic(*state_, "STEP", i, p, r.diagnostic_id));
+        }
         out.push_back(*r.value);
     }
     return ok_result(std::move(out), state_->create_diagnostic("已完成批量STEP导入"));
@@ -127,9 +131,13 @@ Result<std::vector<BodyId>> IOService::import_many_axmjson(std::span<const std::
     }
     std::vector<BodyId> out;
     out.reserve(paths.size());
-    for (const auto& p : paths) {
+    for (std::size_t i = 0; i < paths.size(); ++i) {
+        const auto& p = paths[i];
         const auto r = import_axmjson(p, options);
-        if (r.status != StatusCode::Ok || !r.value.has_value()) return error_result<std::vector<BodyId>>(r.status, r.diagnostic_id);
+        if (r.status != StatusCode::Ok || !r.value.has_value()) {
+            return error_result<std::vector<BodyId>>(
+                r.status, merge_batch_import_failure_diagnostic(*state_, "AXMJSON", i, p, r.diagnostic_id));
+        }
         out.push_back(*r.value);
     }
     return ok_result(std::move(out), state_->create_diagnostic("已完成批量AXMJSON导入"));
@@ -141,7 +149,9 @@ Result<void> IOService::export_many_step(std::span<const BodyId> body_ids, std::
     }
     for (std::size_t i = 0; i < body_ids.size(); ++i) {
         const auto r = export_step(body_ids[i], paths[i], options);
-        if (r.status != StatusCode::Ok) return r;
+        if (r.status != StatusCode::Ok) {
+            return error_void(r.status, merge_batch_export_failure_diagnostic(*state_, "STEP", i, body_ids[i], paths[i], r.diagnostic_id));
+        }
     }
     return ok_void(state_->create_diagnostic("已完成批量STEP导出"));
 }
@@ -152,7 +162,10 @@ Result<void> IOService::export_many_axmjson(std::span<const BodyId> body_ids, st
     }
     for (std::size_t i = 0; i < body_ids.size(); ++i) {
         const auto r = export_axmjson(body_ids[i], paths[i], options);
-        if (r.status != StatusCode::Ok) return r;
+        if (r.status != StatusCode::Ok) {
+            return error_void(
+                r.status, merge_batch_export_failure_diagnostic(*state_, "AXMJSON", i, body_ids[i], paths[i], r.diagnostic_id));
+        }
     }
     return ok_void(state_->create_diagnostic("已完成批量AXMJSON导出"));
 }
@@ -164,9 +177,13 @@ Result<std::vector<BodyId>> IOService::import_many_auto(std::span<const std::str
     }
     std::vector<BodyId> out;
     out.reserve(paths.size());
-    for (const auto& p : paths) {
+    for (std::size_t i = 0; i < paths.size(); ++i) {
+        const auto& p = paths[i];
         const auto r = import_auto(p, options);
-        if (r.status != StatusCode::Ok || !r.value.has_value()) return error_result<std::vector<BodyId>>(r.status, r.diagnostic_id);
+        if (r.status != StatusCode::Ok || !r.value.has_value()) {
+            return error_result<std::vector<BodyId>>(
+                r.status, merge_batch_import_failure_diagnostic(*state_, "自动", i, p, r.diagnostic_id));
+        }
         out.push_back(*r.value);
     }
     return ok_result(std::move(out), state_->create_diagnostic("已完成批量自动导入"));
@@ -178,7 +195,10 @@ Result<void> IOService::export_many_auto(std::span<const BodyId> body_ids, std::
     }
     for (std::size_t i = 0; i < body_ids.size(); ++i) {
         const auto r = export_auto(body_ids[i], paths[i], options);
-        if (r.status != StatusCode::Ok) return r;
+        if (r.status != StatusCode::Ok) {
+            return error_void(
+                r.status, merge_batch_export_failure_diagnostic(*state_, "自动", i, body_ids[i], paths[i], r.diagnostic_id));
+        }
     }
     return ok_void(state_->create_diagnostic("已完成批量自动导出"));
 }
@@ -240,21 +260,48 @@ Result<void> IOService::export_body_summary_txt(BodyId body_id, std::string_view
 }
 
 Result<void> IOService::validate_import_path(std::string_view path) const {
-    if (path.empty() || !std::filesystem::exists(path) || !std::filesystem::is_regular_file(path)) {
-        return detail::invalid_input_void(*state_, diag_codes::kIoImportFailure, "导入路径校验失败：路径无效", "导入路径校验失败");
+    if (path.empty()) {
+        return detail::invalid_input_void(*state_, diag_codes::kIoImportFailure, "导入路径校验失败：路径为空", "导入路径校验失败");
+    }
+    if (!std::filesystem::exists(path)) {
+        return detail::invalid_input_void(*state_, diag_codes::kIoFileNotFound, "导入路径校验失败：文件不存在", "导入路径校验失败");
+    }
+    if (!std::filesystem::is_regular_file(path)) {
+        return detail::invalid_input_void(*state_, diag_codes::kIoImportFailure, "导入路径校验失败：路径不是常规文件", "导入路径校验失败");
     }
     return ok_void(state_->create_diagnostic("导入路径校验通过"));
 }
 
-Result<void> IOService::validate_export_path(std::string_view path) const {
-    if (path.empty()) {
-        return detail::invalid_input_void(*state_, diag_codes::kIoExportFailure, "导出路径校验失败：路径为空", "导出路径校验失败");
+Result<void> IOService::validate_import_paths(std::span<const std::string> paths) const {
+    for (std::size_t i = 0; i < paths.size(); ++i) {
+        const auto& p = paths[i];
+        const auto r = validate_import_path(p);
+        if (r.status != StatusCode::Ok) {
+            return error_void(r.status, merge_batch_path_transform_failure_diagnostic(*state_, i, p, r.diagnostic_id, "导入路径校验",
+                                                                                     "io.batch_validate_import"));
+        }
     }
-    const auto p = std::filesystem::path(path).parent_path();
-    if (!p.empty() && !std::filesystem::exists(p)) {
-        return detail::invalid_input_void(*state_, diag_codes::kIoExportFailure, "导出路径校验失败：父目录不存在", "导出路径校验失败");
+    return ok_void(state_->create_diagnostic("批量导入路径校验通过"));
+}
+
+Result<void> IOService::validate_export_path(std::string_view path) const {
+    const auto wx = reject_if_export_directory_not_writable(*state_, path);
+    if (wx.status != StatusCode::Ok) {
+        return wx;
     }
     return ok_void(state_->create_diagnostic("导出路径校验通过"));
+}
+
+Result<void> IOService::validate_export_paths(std::span<const std::string> paths) const {
+    for (std::size_t i = 0; i < paths.size(); ++i) {
+        const auto& p = paths[i];
+        const auto r = validate_export_path(p);
+        if (r.status != StatusCode::Ok) {
+            return error_void(r.status, merge_batch_path_transform_failure_diagnostic(*state_, i, p, r.diagnostic_id, "导出路径校验",
+                                                                                      "io.batch_validate_export"));
+        }
+    }
+    return ok_void(state_->create_diagnostic("批量导出路径校验通过"));
 }
 
 Result<std::string> IOService::temp_path_for(std::string_view stem, std::string_view ext) const {
@@ -713,9 +760,13 @@ Result<std::vector<std::string>> IOService::filter_unknown_format_paths(std::spa
 Result<std::vector<std::string>> IOService::normalize_paths(std::span<const std::string> paths) const {
     std::vector<std::string> out;
     out.reserve(paths.size());
-    for (const auto& p : paths) {
+    for (std::size_t i = 0; i < paths.size(); ++i) {
+        const auto& p = paths[i];
         const auto n = normalize_path(p);
-        if (n.status != StatusCode::Ok || !n.value.has_value()) return error_result<std::vector<std::string>>(n.status, n.diagnostic_id);
+        if (n.status != StatusCode::Ok || !n.value.has_value()) {
+            return error_result<std::vector<std::string>>(
+                n.status, merge_batch_path_transform_failure_diagnostic(*state_, i, p, n.diagnostic_id, "路径规范化"));
+        }
         out.push_back(*n.value);
     }
     return ok_result(std::move(out), state_->create_diagnostic("已批量规范化路径"));
@@ -724,9 +775,14 @@ Result<std::vector<std::string>> IOService::normalize_paths(std::span<const std:
 Result<std::vector<std::string>> IOService::compose_paths(std::string_view dir, std::span<const std::string> names, std::string_view ext) const {
     std::vector<std::string> out;
     out.reserve(names.size());
-    for (const auto& n : names) {
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        const auto& n = names[i];
         const auto p = compose_path(dir, n, ext);
-        if (p.status != StatusCode::Ok || !p.value.has_value()) return error_result<std::vector<std::string>>(p.status, p.diagnostic_id);
+        if (p.status != StatusCode::Ok || !p.value.has_value()) {
+            const std::string hint = std::string("目录=") + std::string(dir) + " 名称=" + std::string(n);
+            return error_result<std::vector<std::string>>(
+                p.status, merge_batch_path_transform_failure_diagnostic(*state_, i, hint, p.diagnostic_id, "路径拼装"));
+        }
         out.push_back(*p.value);
     }
     return ok_result(std::move(out), state_->create_diagnostic("已批量拼装路径"));
@@ -735,9 +791,13 @@ Result<std::vector<std::string>> IOService::compose_paths(std::string_view dir, 
 Result<std::vector<std::string>> IOService::change_extensions(std::span<const std::string> paths, std::string_view ext) const {
     std::vector<std::string> out;
     out.reserve(paths.size());
-    for (const auto& p : paths) {
+    for (std::size_t i = 0; i < paths.size(); ++i) {
+        const auto& p = paths[i];
         const auto changed = change_extension(p, ext);
-        if (changed.status != StatusCode::Ok || !changed.value.has_value()) return error_result<std::vector<std::string>>(changed.status, changed.diagnostic_id);
+        if (changed.status != StatusCode::Ok || !changed.value.has_value()) {
+            return error_result<std::vector<std::string>>(
+                changed.status, merge_batch_path_transform_failure_diagnostic(*state_, i, p, changed.diagnostic_id, "修改扩展名"));
+        }
         out.push_back(*changed.value);
     }
     return ok_result(std::move(out), state_->create_diagnostic("已批量修改扩展名"));
@@ -772,33 +832,49 @@ Result<std::vector<std::uint64_t>> IOService::file_mtimes(std::span<const std::s
 }
 
 Result<void> IOService::ensure_parent_directories(std::span<const std::string> paths) const {
-    for (const auto& p : paths) {
+    for (std::size_t i = 0; i < paths.size(); ++i) {
+        const auto& p = paths[i];
         const auto r = ensure_parent_directory(p);
-        if (r.status != StatusCode::Ok) return r;
+        if (r.status != StatusCode::Ok) {
+            return error_void(
+                r.status, io_internal::merge_batch_path_op_failure_diagnostic(*state_, i, p, r.diagnostic_id, "创建父目录"));
+        }
     }
     return ok_void(state_->create_diagnostic("已批量确认父目录可用"));
 }
 
 Result<void> IOService::touch_empty_files(std::span<const std::string> paths) const {
-    for (const auto& p : paths) {
+    for (std::size_t i = 0; i < paths.size(); ++i) {
+        const auto& p = paths[i];
         const auto r = touch_empty_file(p);
-        if (r.status != StatusCode::Ok) return r;
+        if (r.status != StatusCode::Ok) {
+            return error_void(
+                r.status, io_internal::merge_batch_path_op_failure_diagnostic(*state_, i, p, r.diagnostic_id, "touch"));
+        }
     }
     return ok_void(state_->create_diagnostic("已批量touch文件"));
 }
 
 Result<void> IOService::remove_files(std::span<const std::string> paths) const {
-    for (const auto& p : paths) {
+    for (std::size_t i = 0; i < paths.size(); ++i) {
+        const auto& p = paths[i];
         const auto r = remove_file(p);
-        if (r.status != StatusCode::Ok) return r;
+        if (r.status != StatusCode::Ok) {
+            return error_void(
+                r.status, io_internal::merge_batch_path_op_failure_diagnostic(*state_, i, p, r.diagnostic_id, "删除文件"));
+        }
     }
     return ok_void(state_->create_diagnostic("已批量删除文件"));
 }
 
 Result<void> IOService::append_text_many(std::span<const std::string> paths, std::string_view content) const {
-    for (const auto& p : paths) {
+    for (std::size_t i = 0; i < paths.size(); ++i) {
+        const auto& p = paths[i];
         const auto r = append_text(p, content);
-        if (r.status != StatusCode::Ok) return r;
+        if (r.status != StatusCode::Ok) {
+            return error_void(
+                r.status, io_internal::merge_batch_path_op_failure_diagnostic(*state_, i, p, r.diagnostic_id, "追加文本"));
+        }
     }
     return ok_void(state_->create_diagnostic("已批量追加文本"));
 }
@@ -806,9 +882,12 @@ Result<void> IOService::append_text_many(std::span<const std::string> paths, std
 Result<std::vector<std::string>> IOService::read_all_text_many(std::span<const std::string> paths) const {
     std::vector<std::string> out;
     out.reserve(paths.size());
-    for (const auto& p : paths) {
+    for (std::size_t i = 0; i < paths.size(); ++i) {
+        const auto& p = paths[i];
         const auto r = read_all_text(p);
-        if (r.status != StatusCode::Ok || !r.value.has_value()) return error_result<std::vector<std::string>>(r.status, r.diagnostic_id);
+        if (r.status != StatusCode::Ok || !r.value.has_value()) {
+            return error_result<std::vector<std::string>>(r.status, merge_batch_read_failure_diagnostic(*state_, i, p, r.diagnostic_id));
+        }
         out.push_back(*r.value);
     }
     return ok_result(std::move(out), state_->create_diagnostic("已批量读取全文"));
@@ -817,9 +896,12 @@ Result<std::vector<std::string>> IOService::read_all_text_many(std::span<const s
 Result<std::vector<std::uint64_t>> IOService::count_lines_many(std::span<const std::string> paths) const {
     std::vector<std::uint64_t> out;
     out.reserve(paths.size());
-    for (const auto& p : paths) {
+    for (std::size_t i = 0; i < paths.size(); ++i) {
+        const auto& p = paths[i];
         const auto r = count_lines(p);
-        if (r.status != StatusCode::Ok || !r.value.has_value()) return error_result<std::vector<std::uint64_t>>(r.status, r.diagnostic_id);
+        if (r.status != StatusCode::Ok || !r.value.has_value()) {
+            return error_result<std::vector<std::uint64_t>>(r.status, merge_batch_read_failure_diagnostic(*state_, i, p, r.diagnostic_id));
+        }
         out.push_back(*r.value);
     }
     return ok_result(std::move(out), state_->create_diagnostic("已批量统计行数"));
@@ -828,9 +910,12 @@ Result<std::vector<std::uint64_t>> IOService::count_lines_many(std::span<const s
 Result<std::vector<std::string>> IOService::read_text_preview_many(std::span<const std::string> paths, std::uint64_t max_chars) const {
     std::vector<std::string> out;
     out.reserve(paths.size());
-    for (const auto& p : paths) {
+    for (std::size_t i = 0; i < paths.size(); ++i) {
+        const auto& p = paths[i];
         const auto r = read_text_preview(p, max_chars);
-        if (r.status != StatusCode::Ok || !r.value.has_value()) return error_result<std::vector<std::string>>(r.status, r.diagnostic_id);
+        if (r.status != StatusCode::Ok || !r.value.has_value()) {
+            return error_result<std::vector<std::string>>(r.status, merge_batch_read_failure_diagnostic(*state_, i, p, r.diagnostic_id));
+        }
         out.push_back(*r.value);
     }
     return ok_result(std::move(out), state_->create_diagnostic("已批量读取文本预览"));
@@ -840,7 +925,9 @@ Result<void> IOService::export_body_summaries_many(std::span<const BodyId> body_
     if (body_ids.size() != paths.size()) return detail::invalid_input_void(*state_, diag_codes::kIoExportFailure, "批量导出失败：输入数量不一致", "批量导出失败");
     for (std::size_t i = 0; i < body_ids.size(); ++i) {
         const auto r = export_body_summary_txt(body_ids[i], paths[i]);
-        if (r.status != StatusCode::Ok) return r;
+        if (r.status != StatusCode::Ok) {
+            return error_void(r.status, merge_batch_export_failure_diagnostic(*state_, "体摘要", i, body_ids[i], paths[i], r.diagnostic_id));
+        }
     }
     return ok_void(state_->create_diagnostic("已批量导出体摘要"));
 }
@@ -850,7 +937,10 @@ Result<std::uint64_t> IOService::compare_file_text_many_equal(std::span<const st
     std::uint64_t eq = 0;
     for (std::size_t i = 0; i < lhs.size(); ++i) {
         const auto r = compare_file_text(lhs[i], rhs[i]);
-        if (r.status != StatusCode::Ok || !r.value.has_value()) return error_result<std::uint64_t>(r.status, r.diagnostic_id);
+        if (r.status != StatusCode::Ok || !r.value.has_value()) {
+            return error_result<std::uint64_t>(
+                r.status, merge_batch_compare_failure_diagnostic(*state_, i, lhs[i], rhs[i], r.diagnostic_id));
+        }
         if (*r.value) ++eq;
     }
     return ok_result<std::uint64_t>(eq, state_->create_diagnostic("已批量比较文件文本"));
@@ -859,9 +949,13 @@ Result<std::uint64_t> IOService::compare_file_text_many_equal(std::span<const st
 Result<std::vector<std::pair<std::string, std::string>>> IOService::detect_formats_with_paths(std::span<const std::string> paths) const {
     std::vector<std::pair<std::string, std::string>> out;
     out.reserve(paths.size());
-    for (const auto& p : paths) {
+    for (std::size_t i = 0; i < paths.size(); ++i) {
+        const auto& p = paths[i];
         const auto fmt = detect_format(p);
-        if (fmt.status != StatusCode::Ok || !fmt.value.has_value()) return error_result<std::vector<std::pair<std::string, std::string>>>(fmt.status, fmt.diagnostic_id);
+        if (fmt.status != StatusCode::Ok || !fmt.value.has_value()) {
+            return error_result<std::vector<std::pair<std::string, std::string>>>(
+                fmt.status, merge_batch_detect_format_failure_diagnostic(*state_, i, p, fmt.diagnostic_id));
+        }
         out.emplace_back(p, *fmt.value);
     }
     return ok_result(std::move(out), state_->create_diagnostic("已查询路径格式对"));
@@ -890,10 +984,24 @@ Result<std::vector<BodyId>> IOService::import_existing_auto(std::span<const std:
 
 Result<void> IOService::export_auto_to_directory(std::span<const BodyId> body_ids, std::string_view directory, std::string_view ext, const ExportOptions& options) {
     if (directory.empty()) return detail::invalid_input_void(*state_, diag_codes::kIoExportFailure, "目录导出失败：目录为空", "目录导出失败");
+    std::string ext_token;
+    if (!normalize_user_export_extension(ext, ext_token)) {
+        return detail::invalid_input_void(*state_, diag_codes::kIoExportFailure, "目录自动导出失败：扩展名为空", "目录自动导出失败");
+    }
+    std::string fmt_check;
+    if (!export_format_from_extension_token(ext_token, fmt_check)) {
+        return detail::invalid_input_void(*state_, diag_codes::kIoUnknownFormat, "目录自动导出失败：扩展名无法映射到支持的导出格式", "目录自动导出失败");
+    }
+    (void)fmt_check;
+    {
+        const auto probe = (std::filesystem::path(std::string(directory)) / "body_0.step").string();
+        const auto w = reject_if_export_directory_not_writable(*state_, probe);
+        if (w.status != StatusCode::Ok) return w;
+    }
     std::vector<std::string> paths;
     paths.reserve(body_ids.size());
     for (std::size_t i = 0; i < body_ids.size(); ++i) {
-        auto p = compose_path(directory, "body_" + std::to_string(i), ext);
+        auto p = compose_path(directory, "body_" + std::to_string(i), ext_token);
         if (p.status != StatusCode::Ok || !p.value.has_value()) return error_result<void>(p.status, p.diagnostic_id);
         paths.push_back(*p.value);
     }
@@ -978,9 +1086,13 @@ Result<std::vector<std::string>> IOService::sort_paths_lex(std::span<const std::
 
 Result<std::vector<std::pair<std::string, std::uint64_t>>> IOService::count_by_format(std::span<const std::string> paths) const {
     std::unordered_map<std::string, std::uint64_t> counts;
-    for (const auto& p : paths) {
+    for (std::size_t i = 0; i < paths.size(); ++i) {
+        const auto& p = paths[i];
         const auto fmt = detect_format(p);
-        if (fmt.status != StatusCode::Ok || !fmt.value.has_value()) return error_result<std::vector<std::pair<std::string, std::uint64_t>>>(fmt.status, fmt.diagnostic_id);
+        if (fmt.status != StatusCode::Ok || !fmt.value.has_value()) {
+            return error_result<std::vector<std::pair<std::string, std::uint64_t>>>(
+                fmt.status, merge_batch_detect_format_failure_diagnostic(*state_, i, p, fmt.diagnostic_id));
+        }
         ++counts[*fmt.value];
     }
     std::vector<std::pair<std::string, std::uint64_t>> out;
@@ -992,9 +1104,14 @@ Result<std::vector<std::pair<std::string, std::uint64_t>>> IOService::count_by_f
 
 Result<std::vector<std::string>> IOService::paths_of_format(std::span<const std::string> paths, std::string_view format) const {
     std::vector<std::string> out;
-    for (const auto& p : paths) {
+    for (std::size_t i = 0; i < paths.size(); ++i) {
+        const auto& p = paths[i];
         const auto fmt = detect_format(p);
-        if (fmt.status != StatusCode::Ok || !fmt.value.has_value()) return error_result<std::vector<std::string>>(fmt.status, fmt.diagnostic_id);
+        if (fmt.status != StatusCode::Ok || !fmt.value.has_value()) {
+            return error_result<std::vector<std::string>>(
+                fmt.status, merge_batch_detect_format_failure_diagnostic(*state_, i, p, fmt.diagnostic_id));
+        }
         if (*fmt.value == format) out.push_back(p);
     }
     return ok_result(std::move(out), state_->create_diagnostic("已按格式筛选路径"));
+}

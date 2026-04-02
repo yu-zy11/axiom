@@ -64,6 +64,11 @@ public:
     /// 轴对齐盒 + UV 平面闭合折线环（≥3 点，有限）；用于 PCurve/外环驱动的真实修剪（Geo 侧不含 Topo 遍历）。
     Result<SurfaceId> make_trimmed_polygon(SurfaceId base_surface, Scalar u_min, Scalar u_max, Scalar v_min,
                                          Scalar v_max, std::span<const Point2> uv_boundary_loop);
+    /// 外环 + 若干内环（孔）：有效 UV 为「外环内且不在任一内环内」；与 Topo PCurve 外/内环语义对齐的 Geo 最小实现。
+    Result<SurfaceId> make_trimmed_polygon_with_holes(
+        SurfaceId base_surface, Scalar u_min, Scalar u_max, Scalar v_min, Scalar v_max,
+        std::span<const Point2> uv_outer_loop,
+        const std::vector<std::vector<Point2>> &uv_holes);
     Result<SurfaceId> make_offset(SurfaceId base_surface, Scalar offset_distance);
 
 private:

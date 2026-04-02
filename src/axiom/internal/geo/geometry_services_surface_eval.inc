@@ -152,15 +152,26 @@ Result<SurfaceEvalResult> SurfaceService::eval(SurfaceId surface_id, Scalar u,
     const auto domain = surface_domain(surface);
     const auto cu = std::clamp(u, domain.u.min, domain.u.max);
     const auto cv = std::clamp(v, domain.v.min, domain.v.max);
-    if (nurbs_tensor_surface_eval_with_partials(surface, cu, cv, result.point, result.du,
-                                                 result.dv)) {
+    Vec3 duu{};
+    Vec3 dvv{};
+    Vec3 duv{};
+    if (nurbs_tensor_surface_eval_with_partials2(surface, cu, cv, result.point, result.du,
+                                                  result.dv, duu, dvv, duv)) {
+      if (deriv_order >= 2) {
+        result.duu = duu;
+        result.dvv = dvv;
+        result.duv = duv;
+      }
       result.normal = normalize_or_default(detail::cross(result.du, result.dv),
                                            Vec3{0.0, 0.0, 1.0});
-      parametric_surface_principal_curvature_fd(
-          [&surface](Scalar uu, Scalar vv) {
-            return evaluate_surface_point(surface, uu, vv);
-          },
-          cu, cv, domain, result.k1, result.k2);
+      if (!(detail::norm(detail::cross(result.du, result.dv)) >
+            static_cast<Scalar>(1e-20))) {
+        result.k1 = 0.0;
+        result.k2 = 0.0;
+      } else {
+        parametric_surface_principal_curvature_from_second_partials(
+            result.du, result.dv, duu, dvv, duv, result.k1, result.k2);
+      }
     } else {
       Point3 p00{};
       Point3 p01{};
@@ -178,8 +189,9 @@ Result<SurfaceEvalResult> SurfaceService::eval(SurfaceId surface_id, Scalar u,
         if (rational) {
           rational_bilinear_patch_partials(p00, p01, p10, p11, w00, w01, w10, w11, lu,
                                            lv, result.point, result.du, result.dv);
-          spline_surface_principal_curvature_fd(surface, cu, cv, domain, result.k1,
-                                                result.k2);
+          spline_surface_principal_curvature_hybrid_from_partials(surface, cu, cv, domain,
+                                                                  result.du, result.dv,
+                                                                  result.k1, result.k2);
         } else {
           bilinear_patch_partials_non_rational(p00, p01, p10, p11, lu, lv, result.point,
                                                result.du, result.dv);
@@ -365,8 +377,96 @@ Result<SurfaceEvalResult> SurfaceService::eval(SurfaceId surface_id, Scalar u,
     result.dv = surface_partial_v_from_eval(eval_offset_pt, cu, cv, dom);
     result.normal = normalize_or_default(detail::cross(result.du, result.dv),
                                          Vec3{0.0, 0.0, 1.0});
-    parametric_surface_principal_curvature_fd(eval_offset_pt, cu, cv, dom,
+    const auto &base_rec = state_->surfaces.at(base_id.value);
+    if (base_rec.kind == detail::SurfaceKind::Sphere) {
+      const Scalar R = base_rec.radius_a;
+      const Scalar re = R + off_d;
+      if (re <= kEpsilon) {
+        return detail::failed_result<SurfaceEvalResult>(
+            *state_, StatusCode::OperationFailed, diag_codes::kGeoOffsetSelfIntersection,
+            "偏置球面求值失败：有效半径非正（偏置自交/退化）", "偏置曲面求值失败");
+      }
+    } else if (base_rec.kind == detail::SurfaceKind::Cylinder) {
+      const Scalar R = base_rec.radius_a;
+      const Scalar re = R + off_d;
+      if (re <= kEpsilon) {
+        return detail::failed_result<SurfaceEvalResult>(
+            *state_, StatusCode::OperationFailed, diag_codes::kGeoOffsetSelfIntersection,
+            "偏置圆柱面求值失败：有效半径非正（偏置自交/退化）", "偏置曲面求值失败");
+      }
+    }
+    if (base_rec.kind == detail::SurfaceKind::Plane) {
+      result.k1 = 0.0;
+      result.k2 = 0.0;
+    } else if (base_rec.kind == detail::SurfaceKind::Sphere) {
+      const Scalar R = base_rec.radius_a;
+      const Scalar re = R + off_d;
+      const Scalar k = 1.0 / re;
+      result.k1 = k;
+      result.k2 = k;
+    } else if (base_rec.kind == detail::SurfaceKind::Cylinder) {
+      const Scalar R = base_rec.radius_a;
+      const Scalar re = R + off_d;
+      result.k1 = 1.0 / re;
+      result.k2 = 0.0;
+    } else if (base_rec.kind == detail::SurfaceKind::Cone) {
+      // 可展锥面：基面 k1=0、k2 由 eval 给出；平行曲面沿用 κ' = κ / (1 + d κ)。
+      const auto base_k = base_svc.eval(base_id, cu, cv, 1);
+      if (base_k.status != StatusCode::Ok || !base_k.value.has_value()) {
+        result.k1 = 0.0;
+        result.k2 = 0.0;
+      } else {
+        const Scalar kb1 = base_k.value->k1;
+        const Scalar kb2 = base_k.value->k2;
+        const Scalar den1 = static_cast<Scalar>(1.0) + off_d * kb1;
+        const Scalar den2 = static_cast<Scalar>(1.0) + off_d * kb2;
+        if (std::abs(den1) > static_cast<Scalar>(1e-12) &&
+            std::abs(den2) > static_cast<Scalar>(1e-12)) {
+          const Scalar k1p = kb1 / den1;
+          const Scalar k2p = kb2 / den2;
+          if (std::isfinite(k1p) && std::isfinite(k2p)) {
+            result.k1 = k1p;
+            result.k2 = k2p;
+          } else {
+            parametric_surface_principal_curvature_fd(eval_offset_pt, cu, cv, dom,
+                                                      result.k1, result.k2);
+          }
+        } else {
+          parametric_surface_principal_curvature_fd(eval_offset_pt, cu, cv, dom,
+                                                    result.k1, result.k2);
+        }
+      }
+    } else if (base_rec.kind == detail::SurfaceKind::Torus) {
+      // 平行曲面：沿基面法向偏移 d 时，主曲率满足 κ' = κ / (1 + d κ)（与球/柱特例一致）。
+      const auto base_k = base_svc.eval(base_id, cu, cv, 1);
+      if (base_k.status != StatusCode::Ok || !base_k.value.has_value()) {
+        result.k1 = 0.0;
+        result.k2 = 0.0;
+      } else {
+        const Scalar kb1 = base_k.value->k1;
+        const Scalar kb2 = base_k.value->k2;
+        const Scalar den1 = static_cast<Scalar>(1.0) + off_d * kb1;
+        const Scalar den2 = static_cast<Scalar>(1.0) + off_d * kb2;
+        if (std::abs(den1) > static_cast<Scalar>(1e-12) &&
+            std::abs(den2) > static_cast<Scalar>(1e-12)) {
+          const Scalar k1p = kb1 / den1;
+          const Scalar k2p = kb2 / den2;
+          if (std::isfinite(k1p) && std::isfinite(k2p)) {
+            result.k1 = k1p;
+            result.k2 = k2p;
+          } else {
+            parametric_surface_principal_curvature_fd(eval_offset_pt, cu, cv, dom,
+                                                      result.k1, result.k2);
+          }
+        } else {
+          parametric_surface_principal_curvature_fd(eval_offset_pt, cu, cv, dom,
+                                                    result.k1, result.k2);
+        }
+      }
+    } else {
+      parametric_surface_principal_curvature_fd(eval_offset_pt, cu, cv, dom,
                                                 result.k1, result.k2);
+    }
     break;
   }
   default:

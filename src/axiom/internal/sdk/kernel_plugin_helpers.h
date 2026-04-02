@@ -6,6 +6,8 @@
 #include "axiom/core/result.h"
 #include "axiom/core/types.h"
 
+#include <memory>
+
 namespace axiom {
 
 namespace detail {
@@ -36,6 +38,9 @@ Result<OpReport> attach_plugin_post_repair_validate_fail_diag(detail::KernelStat
                                                                Result<void> v);
 
 BodyId plugin_repair_validation_body(const detail::KernelState& st, BodyId input, const OpReport& rep);
+
+/// 与 `Kernel::verify_after_plugin_curve` / `plugin_create_curve` 自动校验共用的曲线句柄与参数域检查（需有效 `KernelState` 共享指针）。
+Result<void> plugin_curve_host_consistency_check(const std::shared_ptr<detail::KernelState>& st, CurveId curve_id);
 
 }  // namespace kernel_plugin_helpers
 }  // namespace axiom

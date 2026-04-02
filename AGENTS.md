@@ -189,6 +189,7 @@ ctest --test-dir build
 这些名字可以直接用于 `ctest -R`：
 
 - **smoke**：`axiom_smoke_test`
+- **core / runtime reset**：`axiom_kernel_runtime_invariant_test`（`runtime_store_counts` / `reset_runtime_stores`、拓扑审计与 Eval 指标含 **`EvalInvalidationBridgeMetrics`**、`export_runtime_observability_json` 合并快照、容差失败不污染）
 - **plugin / sdk**：`axiom_plugin_sdk_test`（宿主策略、能力发现 JSON、`register_plugin_*` 诊断闭环）
 - **diagnostics**：`axiom_diagnostics_test`
 - **geometry**：`axiom_geometry_test`
@@ -197,6 +198,7 @@ ctest --test-dir build
 - **ops workflow**：`axiom_ops_heal_test`
 - **heal**：`axiom_heal_test`
 - **io workflow**：`axiom_io_workflow_test`
+- **io dataset**：`axiom_io_dataset_test`（`tests/data/io` 最小 STEP/OBJ + STL 策略组合 + 3MF 往返）
 - **representation + io**：`axiom_representation_io_test`
 - **query + eval**：`axiom_query_eval_test`
 - **boolean workflow**：`axiom_boolean_workflow_test`

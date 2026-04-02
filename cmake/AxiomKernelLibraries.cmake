@@ -77,14 +77,20 @@ target_include_directories(axiom_eval PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 add_library(axiom_io STATIC
     src/axiom/io/io_service.cpp
     src/axiom/io/io_service_internal.cpp
+    src/axiom/internal/io/step_iges_standard_scan.cpp
 )
 target_link_libraries(axiom_io PUBLIC axiom_core axiom_rep axiom_geo axiom_topo axiom_diag axiom_heal)
 target_include_directories(axiom_io PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+# `io_service.cpp` 通过 #include 拉入 part*.inc；显式依赖避免仅改 .inc 时增量编译漏重编。
+set_source_files_properties(src/axiom/io/io_service.cpp PROPERTIES OBJECT_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/axiom/internal/io/io_service_part1.inc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/axiom/internal/io/io_service_part2.inc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/axiom/internal/io/io_service_part3.inc")
 
 add_library(axiom_plugin STATIC
     src/axiom/plugin/plugin_registry.cpp
 )
-target_link_libraries(axiom_plugin PUBLIC axiom_core axiom_diag)
+target_link_libraries(axiom_plugin PUBLIC axiom_core axiom_diag axiom_heal)
 target_include_directories(axiom_plugin PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 add_library(axiom_sdk STATIC

@@ -332,6 +332,30 @@ int main() {
         std::cerr << "unexpected bspline curve curvature on straight segment\n";
         return 1;
     }
+    // 自定义 clamped 二次 B 样条结点 [0,1]，几何应与同控制点的二次 Bézier 在 u=0.5 一致。
+    {
+        axiom::BSplineCurveDesc custom_knot{};
+        custom_knot.poles = {{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {1.0, 1.0, 0.0}};
+        custom_knot.knots = {0.0, 0.0, 0.0, 1.0, 1.0, 1.0};
+        auto custom_b = kernel.curves().make_bspline(custom_knot);
+        if (custom_b.status != axiom::StatusCode::Ok || !custom_b.value.has_value()) {
+            std::cerr << "failed to create bspline with custom knots\n";
+            return 1;
+        }
+        auto custom_dom = kernel.curve_service().domain(*custom_b.value);
+        if (custom_dom.status != axiom::StatusCode::Ok || !custom_dom.value.has_value() ||
+            !approx(custom_dom.value->min, 0.0) || !approx(custom_dom.value->max, 1.0)) {
+            std::cerr << "unexpected bspline custom-knot domain\n";
+            return 1;
+        }
+        auto custom_ev = kernel.curve_service().eval(*custom_b.value, 0.5, 0);
+        if (custom_ev.status != axiom::StatusCode::Ok || !custom_ev.value.has_value() ||
+            !approx(custom_ev.value->point.x, 0.75) || !approx(custom_ev.value->point.y, 0.25)) {
+            std::cerr << "unexpected bspline custom-knot eval at midpoint\n";
+            return 1;
+        }
+    }
+
     auto bspline_cubic = kernel.curves().make_bspline(
         {{{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {1.0, 1.0, 0.0}, {2.0, 1.0, 0.0}}});
     if (bspline_cubic.status != axiom::StatusCode::Ok || !bspline_cubic.value.has_value()) {
@@ -636,6 +660,28 @@ int main() {
         return 1;
     }
 
+    // NURBS 一阶导：解析（齐次 B 样条 + 商法则）应与细中心差分一致
+    {
+        const double h = 1e-6;
+        auto em = kernel.curve_service().eval(*nurbs.value, 0.5 - h, 0);
+        auto ep = kernel.curve_service().eval(*nurbs.value, 0.5 + h, 0);
+        auto ed = kernel.curve_service().eval(*nurbs.value, 0.5, 1);
+        if (em.status != axiom::StatusCode::Ok || ep.status != axiom::StatusCode::Ok ||
+            ed.status != axiom::StatusCode::Ok || !em.value.has_value() || !ep.value.has_value() ||
+            !ed.value.has_value() || ed.value->derivatives.empty()) {
+            std::cerr << "nurbs derivative fd regression setup failed\n";
+            return 1;
+        }
+        const double fdx = (ep.value->point.x - em.value->point.x) / (2.0 * h);
+        const double fdy = (ep.value->point.y - em.value->point.y) / (2.0 * h);
+        const double fdz = (ep.value->point.z - em.value->point.z) / (2.0 * h);
+        const auto& d1 = ed.value->derivatives[0];
+        if (!approx(d1.x, fdx, 5e-5) || !approx(d1.y, fdy, 5e-5) || !approx(d1.z, fdz, 5e-5)) {
+            std::cerr << "nurbs first derivative mismatch vs finite difference\n";
+            return 1;
+        }
+    }
+
     // Rational Bézier with unit weights matches polynomial Bézier: analytic second derivative.
     {
         const std::array<axiom::Point3, 3> poles{{{0.0, 0.0, 0.0}, {0.5, 1.0, 0.0}, {1.0, 0.0, 0.0}}};
@@ -704,6 +750,34 @@ int main() {
         if (!std::isfinite(k1) || !std::isfinite(k2) || std::abs(k1) < 0.12 || std::abs(k2) < 0.12 ||
             (k1 * k2 >= 0.0)) {
             std::cerr << "unexpected bspline surface principal curvature at saddle-like patch\n";
+            return 1;
+        }
+    }
+
+    // 单位权张量 NURBS 与同控制网 BSpline 在 (0.5,0.5) 点值与主曲率一致（同一 hybrid 曲率路径）
+    {
+        axiom::NURBSSurfaceDesc n_same;
+        n_same.poles = {{0.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {1.0, 0.0, 0.0}, {1.0, 1.0, 1.0}};
+        n_same.weights = {1.0, 1.0, 1.0, 1.0};
+        auto n_surf = kernel.surfaces().make_nurbs(n_same);
+        if (n_surf.status != axiom::StatusCode::Ok || !n_surf.value.has_value()) {
+            std::cerr << "failed to create unit-weight nurbs tensor surface\n";
+            return 1;
+        }
+        auto ev_n = kernel.surface_service().eval(*n_surf.value, 0.5, 0.5, 1);
+        if (ev_n.status != axiom::StatusCode::Ok || !ev_n.value.has_value()) {
+            std::cerr << "failed eval unit-weight nurbs surface\n";
+            return 1;
+        }
+        const auto& eb = *bspline_surface_eval.value;
+        const auto& en = *ev_n.value;
+        if (!approx(eb.point.x, en.point.x, 1e-6) || !approx(eb.point.y, en.point.y, 1e-6) ||
+            !approx(eb.point.z, en.point.z, 1e-6)) {
+            std::cerr << "unit-weight nurbs vs bspline point mismatch at saddle patch\n";
+            return 1;
+        }
+        if (!approx(eb.k1, en.k1, 2e-5) || !approx(eb.k2, en.k2, 2e-5)) {
+            std::cerr << "unit-weight nurbs vs bspline principal curvature mismatch\n";
             return 1;
         }
     }
@@ -817,6 +891,31 @@ int main() {
     if (invalid_ellipse.status != axiom::StatusCode::InvalidInput) {
         std::cerr << "expected invalid input for collinear ellipse axes\n";
         return 1;
+    }
+    {
+        axiom::BSplineCurveDesc bad_knot_count;
+        bad_knot_count.poles = {{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {1.0, 1.0, 0.0}};
+        bad_knot_count.degree = 2;
+        bad_knot_count.knots = {0.0, 0.0, 1.0, 1.0};
+        if (kernel.curves().make_bspline(bad_knot_count).status != axiom::StatusCode::InvalidInput) {
+            std::cerr << "expected invalid bspline curve for knot count vs degree\n";
+            return 1;
+        }
+        axiom::BSplineCurveDesc bad_mono;
+        bad_mono.poles = {{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {1.0, 1.0, 0.0}};
+        bad_mono.knots = {0.0, 0.0, 0.0, 0.5, 0.3, 1.0};
+        if (kernel.curves().make_bspline(bad_mono).status != axiom::StatusCode::InvalidInput) {
+            std::cerr << "expected invalid bspline curve for non-monotone knots\n";
+            return 1;
+        }
+        axiom::NURBSCurveDesc bad_nurbs_knots;
+        bad_nurbs_knots.poles = {{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {1.0, 1.0, 0.0}};
+        bad_nurbs_knots.weights = {1.0, 1.0, 1.0};
+        bad_nurbs_knots.knots = {0.0, 0.0, 0.0, 0.5, 0.3, 1.0};
+        if (kernel.curves().make_nurbs(bad_nurbs_knots).status != axiom::StatusCode::InvalidInput) {
+            std::cerr << "expected invalid nurbs curve for non-monotone knots\n";
+            return 1;
+        }
     }
     axiom::NURBSCurveDesc invalid_nurbs_curve;
     invalid_nurbs_curve.poles = {{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}};
@@ -991,9 +1090,111 @@ int main() {
             return 1;
         }
         const double exp_off_k = 1.0 / 3.0;
-        if (!approx(off_curv.value->k1, exp_off_k, 8e-3) ||
-            !approx(off_curv.value->k2, exp_off_k, 8e-3)) {
+        if (!approx(off_curv.value->k1, exp_off_k, 1e-9) ||
+            !approx(off_curv.value->k2, exp_off_k, 1e-9)) {
             std::cerr << "unexpected offset sphere principal curvatures\n";
+            return 1;
+        }
+
+        // 圆柱偏置：圆周方向曲率 1/(R+d)，母线方向 0（解析；避免 FD）
+        auto cyl = kernel.surfaces().make_cylinder({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, 2.0);
+        if (cyl.status != axiom::StatusCode::Ok || !cyl.value.has_value()) {
+            std::cerr << "failed to create cylinder for offset curvature\n";
+            return 1;
+        }
+        auto cyl_off = kernel.surfaces().make_offset(*cyl.value, 0.5);
+        if (cyl_off.status != axiom::StatusCode::Ok || !cyl_off.value.has_value()) {
+            std::cerr << "failed to create offset cylinder\n";
+            return 1;
+        }
+        auto cyl_curv = kernel.surface_service().eval(*cyl_off.value, 1.0, 0.3, 1);
+        if (cyl_curv.status != axiom::StatusCode::Ok || !cyl_curv.value.has_value()) {
+            std::cerr << "unexpected offset cylinder eval for curvature\n";
+            return 1;
+        }
+        const double exp_cyl_k1 = 1.0 / 2.5;
+        if (!approx(cyl_curv.value->k1, exp_cyl_k1, 1e-9) ||
+            !approx(cyl_curv.value->k2, 0.0, 1e-12)) {
+            std::cerr << "unexpected offset cylinder principal curvatures\n";
+            return 1;
+        }
+
+        // 圆锥偏置：可展面 k1=0，k2' = k2 / (1 + d k2)（与 Torus 分支同式；避免 FD）
+        {
+            const double semi = std::acos(-1.0) / 6.0;
+            auto cone_b =
+                kernel.surfaces().make_cone({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, semi);
+            if (cone_b.status != axiom::StatusCode::Ok || !cone_b.value.has_value()) {
+                std::cerr << "failed to create cone for offset curvature\n";
+                return 1;
+            }
+            auto cone_base_k = kernel.surface_service().eval(*cone_b.value, 1.0, 2.0, 1);
+            if (cone_base_k.status != axiom::StatusCode::Ok || !cone_base_k.value.has_value()) {
+                std::cerr << "unexpected cone base eval for curvature\n";
+                return 1;
+            }
+            const double d_cone = 0.1;
+            const double kb2 = cone_base_k.value->k2;
+            const double exp_cone_k2 = kb2 / (1.0 + d_cone * kb2);
+            auto cone_off = kernel.surfaces().make_offset(*cone_b.value, d_cone);
+            if (cone_off.status != axiom::StatusCode::Ok || !cone_off.value.has_value()) {
+                std::cerr << "failed to create offset cone\n";
+                return 1;
+            }
+            auto cone_off_k = kernel.surface_service().eval(*cone_off.value, 1.0, 2.0, 1);
+            if (cone_off_k.status != axiom::StatusCode::Ok || !cone_off_k.value.has_value()) {
+                std::cerr << "unexpected offset cone eval for curvature\n";
+                return 1;
+            }
+            if (!approx(cone_off_k.value->k1, 0.0, 1e-12) ||
+                !approx(cone_off_k.value->k2, exp_cone_k2, 1e-9)) {
+                std::cerr << "unexpected offset cone principal curvatures\n";
+                return 1;
+            }
+        }
+
+        // 环面偏置：κ' = κ / (1 + d κ)（与基面 eval 主曲率一致；避免 FD）
+        auto tor_base = kernel.surfaces().make_torus({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, 3.0, 1.0);
+        if (tor_base.status != axiom::StatusCode::Ok || !tor_base.value.has_value()) {
+            std::cerr << "failed to create torus for offset curvature\n";
+            return 1;
+        }
+        auto tor_off = kernel.surfaces().make_offset(*tor_base.value, 0.5);
+        if (tor_off.status != axiom::StatusCode::Ok || !tor_off.value.has_value()) {
+            std::cerr << "failed to create offset torus\n";
+            return 1;
+        }
+        auto tor_off_k = kernel.surface_service().eval(*tor_off.value, 0.2, 0.0, 1);
+        if (tor_off_k.status != axiom::StatusCode::Ok || !tor_off_k.value.has_value()) {
+            std::cerr << "unexpected offset torus eval for curvature\n";
+            return 1;
+        }
+        // 基面在 (0.2,0)：k1=1/r=1，k2=1/(R+r)=1/4 → d=0.5 时 2/3 与 2/9
+        const double exp_tor_k1 = (2.0 / 3.0);
+        const double exp_tor_k2 = (2.0 / 9.0);
+        if (!approx(tor_off_k.value->k1, exp_tor_k1, 1e-9) ||
+            !approx(tor_off_k.value->k2, exp_tor_k2, 1e-9)) {
+            std::cerr << "unexpected offset torus principal curvatures\n";
+            return 1;
+        }
+
+        // 平面偏置仍为平面：主曲率解析为 0（避免 FD 噪声；对齐 Geo 曲面曲率语义）
+        auto pl_base = kernel.surfaces().make_plane({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0});
+        if (pl_base.status != axiom::StatusCode::Ok || !pl_base.value.has_value()) {
+            std::cerr << "failed plane for offset-plane test\n";
+            return 1;
+        }
+        auto pl_off = kernel.surfaces().make_offset(*pl_base.value, 0.25);
+        if (pl_off.status != axiom::StatusCode::Ok || !pl_off.value.has_value()) {
+            std::cerr << "failed offset of plane\n";
+            return 1;
+        }
+        auto pl_off_ev = kernel.surface_service().eval(*pl_off.value, 0.5, -0.25, 1);
+        if (pl_off_ev.status != axiom::StatusCode::Ok || !pl_off_ev.value.has_value() ||
+            !approx(pl_off_ev.value->point.z, 0.25, 1e-9) ||
+            !approx(pl_off_ev.value->k1, 0.0, 1e-12) ||
+            !approx(pl_off_ev.value->k2, 0.0, 1e-12)) {
+            std::cerr << "unexpected offset plane eval or principal curvatures\n";
             return 1;
         }
 
@@ -1131,6 +1332,103 @@ int main() {
                                                           std::span<const axiom::Point2>(tri.data(), 2));
         if (bad.status != axiom::StatusCode::InvalidInput) {
             std::cerr << "expected invalid trim polygon with <3 points\n";
+            return 1;
+        }
+    }
+
+    // UV 外环 + 内环（孔）：孔内参数应投影到孔边界附近，且仍在轴对齐盒内
+    {
+        auto pl = kernel.surfaces().make_plane({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0});
+        if (pl.status != axiom::StatusCode::Ok || !pl.value.has_value()) {
+            std::cerr << "failed plane for trim-with-holes test\n";
+            return 1;
+        }
+        const std::vector<axiom::Point2> outer{{0.0, 0.0}, {4.0, 0.0}, {4.0, 4.0}, {0.0, 4.0}};
+        const std::vector<std::vector<axiom::Point2>> holes{
+            {{1.0, 1.0}, {3.0, 1.0}, {3.0, 3.0}, {1.0, 3.0}}};
+        auto trh = kernel.surfaces().make_trimmed_polygon_with_holes(*pl.value, -0.5, 5.0, -0.5, 5.0,
+                                                                     outer, holes);
+        if (trh.status != axiom::StatusCode::Ok || !trh.value.has_value()) {
+            std::cerr << "failed make_trimmed_polygon_with_holes\n";
+            return 1;
+        }
+        auto ev_hole = kernel.surface_service().eval(*trh.value, 2.0, 2.0, 0);
+        if (ev_hole.status != axiom::StatusCode::Ok || !ev_hole.value.has_value()) {
+            std::cerr << "eval trim-with-holes failed\n";
+            return 1;
+        }
+        // (2,2) 在孔内：投影后应离开孔内部（到边或外环）；至少不应仍在孔心邻域
+        if (std::abs(ev_hole.value->point.x - 2.0) < 0.05 &&
+            std::abs(ev_hole.value->point.y - 2.0) < 0.05) {
+            std::cerr << "expected UV inside hole to project off hole interior\n";
+            return 1;
+        }
+        if (!approx(ev_hole.value->point.z, 0.0, 1e-9)) {
+            std::cerr << "trim-with-holes plane z unexpected\n";
+            return 1;
+        }
+    }
+
+    // 偏置球/柱：有效半径非正时创建与求值均应失败（自交/退化）
+    {
+        auto sph = kernel.surfaces().make_sphere({0.0, 0.0, 0.0}, 2.0);
+        if (sph.status != axiom::StatusCode::Ok || !sph.value.has_value()) {
+            std::cerr << "failed sphere for offset degenerate test\n";
+            return 1;
+        }
+        auto bad_off = kernel.surfaces().make_offset(*sph.value, -2.5);
+        if (bad_off.status == axiom::StatusCode::Ok) {
+            std::cerr << "expected make_offset failure for self-intersecting sphere offset\n";
+            return 1;
+        }
+        auto cyl = kernel.surfaces().make_cylinder({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, 1.5);
+        if (cyl.status != axiom::StatusCode::Ok || !cyl.value.has_value()) {
+            std::cerr << "failed cylinder for offset degenerate test\n";
+            return 1;
+        }
+        auto bad_cyl = kernel.surfaces().make_offset(*cyl.value, -1.6);
+        if (bad_cyl.status == axiom::StatusCode::Ok) {
+            std::cerr << "expected make_offset failure for self-intersecting cylinder offset\n";
+            return 1;
+        }
+        auto good = kernel.surfaces().make_offset(*sph.value, 0.5);
+        if (good.status != axiom::StatusCode::Ok || !good.value.has_value()) {
+            std::cerr << "expected valid positive sphere offset\n";
+            return 1;
+        }
+        auto gev = kernel.surface_service().eval(*good.value, 1.0, 0.7, 1);
+        if (gev.status != axiom::StatusCode::Ok || !gev.value.has_value()) {
+            std::cerr << "valid offset sphere eval failed\n";
+            return 1;
+        }
+    }
+
+    // 张量 BSpline 曲面：解析二阶偏导 + 第一/第二基本形式主曲率；平面型控制点 κ≈0
+    {
+        axiom::BSplineSurfaceDesc planar;
+        planar.poles = {{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {2.0, 0.0, 0.0}, {0.0, 1.0, 0.0},
+                        {1.0, 1.0, 0.0}, {2.0, 1.0, 0.0}, {0.0, 2.0, 0.0}, {1.0, 2.0, 0.0},
+                        {2.0, 2.0, 0.0}};
+        auto surf = kernel.surfaces().make_bspline(planar);
+        if (surf.status != axiom::StatusCode::Ok || !surf.value.has_value()) {
+            std::cerr << "failed 3x3 bspline for curvature analytic test\n";
+            return 1;
+        }
+        auto ev2 = kernel.surface_service().eval(*surf.value, 0.55, 0.45, 2);
+        if (ev2.status != axiom::StatusCode::Ok || !ev2.value.has_value()) {
+            std::cerr << "bspline surface eval order 2 failed\n";
+            return 1;
+        }
+        if (std::abs(ev2.value->k1) > 0.02 || std::abs(ev2.value->k2) > 0.02) {
+            std::cerr << "planar bspline patch principal curvatures expected near zero\n";
+            return 1;
+        }
+        const auto& duu = ev2.value->duu;
+        const auto& dvv = ev2.value->dvv;
+        const auto& duv = ev2.value->duv;
+        if (std::abs(duu.z) > 0.05 || std::abs(dvv.z) > 0.05 ||
+            std::abs(duv.z) > 0.05) {
+            std::cerr << "planar bspline second partials in z should be small\n";
             return 1;
         }
     }

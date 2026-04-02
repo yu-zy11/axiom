@@ -100,7 +100,11 @@ public:
   Result<void> export_body_summary_txt(BodyId body_id,
                                        std::string_view path) const;
   Result<void> validate_import_path(std::string_view path) const;
+  /// 逐项调用 `validate_import_path`；失败时合并 `AXM-IO-D-0015`，`Issue.stage=io.batch_validate_import`。
+  Result<void> validate_import_paths(std::span<const std::string> paths) const;
   Result<void> validate_export_path(std::string_view path) const;
+  /// 逐项调用 `validate_export_path`；失败时合并 `AXM-IO-D-0015`，`Issue.stage=io.batch_validate_export`。
+  Result<void> validate_export_paths(std::span<const std::string> paths) const;
   Result<std::string> temp_path_for(std::string_view stem,
                                     std::string_view ext) const;
   Result<void> copy_file(std::string_view from, std::string_view to) const;

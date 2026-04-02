@@ -1,5 +1,7 @@
 #include "axiom/internal/rep/representation_internal_utils.h"
 
+#include "axiom/internal/geo/geo_rep_tessellation_link.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -122,7 +124,8 @@ bool is_valid_bbox(const BoundingBox& bbox) {
 bool has_valid_tessellation_options(const TessellationOptions& options) {
     return options.chordal_error > 0.0 && options.angular_error > 0.0 &&
            options.weld_shading_split_angle_deg >= 0.0 &&
-           options.weld_shading_split_angle_deg <= 180.0;
+           options.weld_shading_split_angle_deg <= 180.0 &&
+           options.refine_patch_chordal_max_passes >= 0 && options.refine_patch_chordal_max_passes <= 12;
 }
 
 std::size_t tessellation_slices_per_face(const TessellationOptions& options) {
@@ -149,7 +152,8 @@ std::string tessellation_cache_key(const BodyRecord& body, const TessellationOpt
         << "|tess=" << options.chordal_error << "," << options.angular_error
         << "," << (options.compute_normals ? 1 : 0)
         << "," << (options.generate_texcoords ? 1 : 0)
-        << "," << options.weld_shading_split_angle_deg;
+        << "," << options.weld_shading_split_angle_deg << "," << (options.use_principal_curvature_refinement ? 1 : 0)
+        << "," << options.refine_patch_chordal_max_passes << "," << (options.uv_parametric_seam ? 1 : 0);
     return oss.str();
 }
 
@@ -162,17 +166,34 @@ std::string tessellation_budget_digest_json(const TessellationOptions& options) 
         << ",\"compute_normals\":" << (options.compute_normals ? "true" : "false")
         << ",\"generate_texcoords\":" << (options.generate_texcoords ? "true" : "false")
         << ",\"weld_shading_split_angle_deg\":" << options.weld_shading_split_angle_deg
+        << ",\"use_principal_curvature_refinement\":" << (options.use_principal_curvature_refinement ? "true" : "false")
+        << ",\"refine_patch_chordal_max_passes\":" << options.refine_patch_chordal_max_passes
+        << ",\"uv_parametric_seam\":" << (options.uv_parametric_seam ? "true" : "false")
         << "}";
     return oss.str();
 }
 
 ConversionErrorBudget conversion_error_budget_from_tessellation(const TessellationOptions& options) {
     ConversionErrorBudget b;
+    b.chordal_error_basis = options.chordal_error;
+    b.angular_error_basis_deg = options.angular_error;
     const auto e = std::max<Scalar>(options.chordal_error, std::numeric_limits<Scalar>::epsilon());
     b.bbox_abs_tol = e * 2.0;
     b.max_point_abs_tol = e;
     b.normal_angle_deg_tol = std::max<Scalar>(options.angular_error, 1e-6);
     return b;
+}
+
+std::string conversion_error_budget_digest_json(const ConversionErrorBudget& b) {
+    std::ostringstream oss;
+    oss.setf(std::ios::fixed);
+    oss << std::setprecision(12);
+    oss << "{\"bbox_abs_tol\":" << b.bbox_abs_tol << ",\"max_point_abs_tol\":" << b.max_point_abs_tol
+        << ",\"normal_angle_deg_tol\":" << b.normal_angle_deg_tol
+        << ",\"chordal_error_basis\":" << b.chordal_error_basis
+        << ",\"angular_error_basis_deg\":" << b.angular_error_basis_deg
+        << ",\"derivation\":\"tessellation_options_v1\"}";
+    return oss.str();
 }
 
 std::string face_tessellation_cache_key(const KernelState& state, FaceId face_id, const TessellationOptions& options) {
@@ -183,7 +204,8 @@ std::string face_tessellation_cache_key(const KernelState& state, FaceId face_id
         << "|tess=" << options.chordal_error << "," << options.angular_error
         << "," << (options.compute_normals ? 1 : 0)
         << "," << (options.generate_texcoords ? 1 : 0)
-        << "," << options.weld_shading_split_angle_deg;
+        << "," << options.weld_shading_split_angle_deg << "," << (options.use_principal_curvature_refinement ? 1 : 0)
+        << "," << options.refine_patch_chordal_max_passes << "," << (options.uv_parametric_seam ? 1 : 0);
     const auto face_it = state.faces.find(face_id.value);
     if (face_it != state.faces.end()) {
         oss << "|surf=" << face_it->second.surface_id.value
@@ -195,7 +217,8 @@ std::string face_tessellation_cache_key(const KernelState& state, FaceId face_id
             if (s.kind == SurfaceKind::Trimmed) {
                 oss << "|base=" << s.base_surface_id.value << "|tu=" << s.trim_u_min << ","
                     << s.trim_u_max << "|tv=" << s.trim_v_min << "," << s.trim_v_max
-                    << "|tuvn=" << s.trim_uv_loop.size();
+                    << "|tuvn=" << s.trim_uv_loop.size()
+                    << "|holes=" << s.trim_uv_holes.size();
             }
         }
     }
@@ -221,6 +244,22 @@ std::size_t segments_for_length(Scalar length, const TessellationOptions& option
     const auto e = std::max<Scalar>(options.chordal_error, std::numeric_limits<Scalar>::epsilon());
     const auto n = static_cast<std::size_t>(std::ceil(L / (e * 2.0)));
     return std::max<std::size_t>(1, std::min<std::size_t>(2048, n));
+}
+
+/// 参数域 patch 上沿某一等参方向的近似 3D 弧长 `L`：同时满足弦长步长（`segments_for_length`）与
+/// 等效圆周上的弦高+角度约束（`segments_for_circle`，与 primitive 一致）。
+std::size_t segments_for_tensor_direction(Scalar approximate_arclength, const TessellationOptions& options) {
+    const Scalar L = std::max<Scalar>(approximate_arclength, 0.0);
+    const Scalar e = std::max<Scalar>(options.chordal_error, std::numeric_limits<Scalar>::epsilon());
+    const std::size_t n_len = segments_for_length(L, options);
+    if (!(L > static_cast<Scalar>(1e-24))) {
+        return std::max<std::size_t>(2, std::min<std::size_t>(256, n_len));
+    }
+    const Scalar two_pi = 2.0 * std::acos(-1.0);
+    const Scalar R_eff = std::max(L / two_pi, e);
+    const std::size_t n_circ = segments_for_circle(R_eff, options);
+    const std::size_t n = std::max(n_len, n_circ);
+    return std::max<std::size_t>(2, std::min<std::size_t>(256, n));
 }
 
 MeshRecord tessellate_box(const BodyRecord& body, const TessellationOptions& options) {
@@ -294,14 +333,15 @@ MeshRecord tessellate_box(const BodyRecord& body, const TessellationOptions& opt
     emit_face_grid(Axis::Y, Axis::Z, Axis::X, xs.back(), Vec3{1,0,0}, ny, nz);
     emit_face_grid(Axis::Y, Axis::Z, Axis::X, xs.front(), Vec3{-1,0,0}, ny, nz);
 
-    weld_mesh_vertices(mesh, options.compute_normals);
+    weld_mesh_vertices(mesh, options);
     if (!options.generate_texcoords) {
         mesh.texcoords.clear();
     }
     return mesh;
 }
 
-void weld_mesh_vertices_quantized(MeshRecord& mesh, bool weld_normals, Scalar position_quant_step) {
+void weld_mesh_vertices_quantized(MeshRecord& mesh, bool weld_normals, Scalar position_quant_step,
+                                  Scalar shading_split_angle_deg) {
     if (mesh.vertices.empty() || mesh.indices.empty()) {
         return;
     }
@@ -315,41 +355,84 @@ void weld_mesh_vertices_quantized(MeshRecord& mesh, bool weld_normals, Scalar po
     std::vector<Point3> new_vertices;
     std::vector<Vec3> new_normals;
     std::vector<Point2> new_uvs;
+    std::vector<Vec3> rep_normal;
     std::vector<Index> remap(mesh.vertices.size(), 0);
     new_vertices.reserve(mesh.vertices.size());
     if (weld_normals && !mesh.normals.empty()) new_normals.reserve(mesh.vertices.size());
     if (!mesh.texcoords.empty()) new_uvs.reserve(mesh.vertices.size());
     const bool use_uv_key =
         !mesh.texcoords.empty() && mesh.texcoords.size() == mesh.vertices.size();
+    const bool split_by_shading =
+        weld_normals && !mesh.normals.empty() && mesh.normals.size() == mesh.vertices.size() &&
+        shading_split_angle_deg + static_cast<Scalar>(1e-6) < static_cast<Scalar>(180);
+    const Scalar cos_thresh =
+        split_by_shading ? std::cos(radians_from_degrees(
+                               clamp(shading_split_angle_deg, static_cast<Scalar>(0), static_cast<Scalar>(180))))
+                         : static_cast<Scalar>(-2);
 
     for (std::size_t i = 0; i < mesh.vertices.size(); ++i) {
         const auto& p = mesh.vertices[i];
-        std::string key =
+        std::string base_key =
             std::to_string(quant(p.x)) + "," + std::to_string(quant(p.y)) + "," + std::to_string(quant(p.z));
         if (use_uv_key) {
             const auto& uv = mesh.texcoords[i];
-            key += "|uv=" + std::to_string(quant(uv.x)) + "," + std::to_string(quant(uv.y));
+            base_key += "|uv=" + std::to_string(quant(uv.x)) + "," + std::to_string(quant(uv.y));
         }
-        const auto it = map.find(key);
-        if (it == map.end()) {
+
+        auto push_new_vertex = [&](const std::string& key) -> Index {
             const auto ni = static_cast<Index>(new_vertices.size());
             map.emplace(key, ni);
             new_vertices.push_back(p);
             if (weld_normals && !mesh.normals.empty()) {
                 new_normals.push_back(mesh.normals[i]);
+                if (split_by_shading) {
+                    rep_normal.push_back(normalize(mesh.normals[i]));
+                }
             }
             if (use_uv_key) {
                 new_uvs.push_back(mesh.texcoords[i]);
             }
-            remap[i] = ni;
-        } else {
-            remap[i] = it->second;
-            if (weld_normals && !mesh.normals.empty()) {
-                auto& acc = new_normals[it->second];
-                acc.x += mesh.normals[i].x;
-                acc.y += mesh.normals[i].y;
-                acc.z += mesh.normals[i].z;
+            return ni;
+        };
+
+        if (!split_by_shading) {
+            const auto it = map.find(base_key);
+            if (it == map.end()) {
+                remap[i] = push_new_vertex(base_key);
+            } else {
+                remap[i] = it->second;
+                if (weld_normals && !mesh.normals.empty()) {
+                    auto& acc = new_normals[it->second];
+                    acc.x += mesh.normals[i].x;
+                    acc.y += mesh.normals[i].y;
+                    acc.z += mesh.normals[i].z;
+                }
             }
+            continue;
+        }
+
+        bool placed = false;
+        for (unsigned s = 0; s < 8192u && !placed; ++s) {
+            const std::string key = s == 0 ? base_key : base_key + "|sh=" + std::to_string(s);
+            const auto it = map.find(key);
+            if (it == map.end()) {
+                remap[i] = push_new_vertex(key);
+                placed = true;
+            } else {
+                const Vec3 ni = normalize(mesh.normals[i]);
+                const Vec3 nr = rep_normal[static_cast<std::size_t>(it->second)];
+                if (dot(ni, nr) >= cos_thresh) {
+                    remap[i] = it->second;
+                    auto& acc = new_normals[it->second];
+                    acc.x += mesh.normals[i].x;
+                    acc.y += mesh.normals[i].y;
+                    acc.z += mesh.normals[i].z;
+                    placed = true;
+                }
+            }
+        }
+        if (!placed) {
+            remap[i] = push_new_vertex(base_key + "|sh=ovf");
         }
     }
     for (auto& idx : mesh.indices) {
@@ -365,11 +448,9 @@ void weld_mesh_vertices_quantized(MeshRecord& mesh, bool weld_normals, Scalar po
     }
 }
 
-void weld_mesh_vertices(MeshRecord& mesh, bool weld_normals) {
-    // Welding uses quantization to tolerate floating noise from face-wise generation.
-    // Keep it small enough to not collapse meaningful features, but large enough to merge shared box edges.
+void weld_mesh_vertices(MeshRecord& mesh, const TessellationOptions& options) {
     constexpr Scalar q = 1e-7;
-    weld_mesh_vertices_quantized(mesh, weld_normals, q);
+    weld_mesh_vertices_quantized(mesh, options.compute_normals, q, options.weld_shading_split_angle_deg);
 }
 
 MeshRecord tessellate_sphere(const BodyRecord& body, const TessellationOptions& options) {
@@ -754,8 +835,8 @@ std::array<Scalar, 3> to_local(Vec3 rel, const OrthoFrame& frame) {
     return {dot(rel, frame.u), dot(rel, frame.v), dot(rel, frame.w)};
 }
 
-bool eval_surface_grid_point(const SurfaceRecord& surface, Scalar u, Scalar v, Point3& p,
-                             Vec3& n) {
+bool eval_surface_grid_point(const KernelState* state, SurfaceId surface_id, const SurfaceRecord& surface,
+                             Scalar u, Scalar v, Point3& p, Vec3& n) {
     const auto frame = make_frame_from_w(surface.normal);
     switch (surface.kind) {
     case SurfaceKind::Plane:
@@ -806,6 +887,44 @@ bool eval_surface_grid_point(const SurfaceRecord& surface, Scalar u, Scalar v, P
                    surface.origin.z + dir_major.z * R + dir_minor.z * r};
         n = normalize(dir_minor);
         return true;
+    }
+    case SurfaceKind::Bezier: {
+        Point3 out_p;
+        Vec3 du{};
+        Vec3 dv{};
+        if (!geo_internal::bezier_tensor_surface_eval_with_partials(surface, u, v, out_p, du, dv)) {
+            return false;
+        }
+        p = out_p;
+        n = normalize(cross(du, dv));
+        if (!(dot(n, n) > 1e-30) || !std::isfinite(n.x) || !std::isfinite(n.y) || !std::isfinite(n.z)) {
+            n = Vec3{0.0, 0.0, 1.0};
+        }
+        return true;
+    }
+    case SurfaceKind::BSpline:
+    case SurfaceKind::Nurbs: {
+        Point3 out_p;
+        Vec3 du{};
+        Vec3 dv{};
+        if (!geo_internal::nurbs_tensor_surface_eval_with_partials(surface, u, v, out_p, du, dv)) {
+            return false;
+        }
+        p = out_p;
+        n = normalize(cross(du, dv));
+        if (!(dot(n, n) > 1e-30) || !std::isfinite(n.x) || !std::isfinite(n.y) || !std::isfinite(n.z)) {
+            n = Vec3{0.0, 0.0, 1.0};
+        }
+        return true;
+    }
+    case SurfaceKind::Revolved:
+    case SurfaceKind::Swept:
+    case SurfaceKind::Offset: {
+        if (state == nullptr || surface_id.value == 0) {
+            return false;
+        }
+        return geo_internal::rep_surface_eval_grid_point(const_cast<KernelState*>(state), surface_id, u, v,
+                                                           p, n);
     }
     default:
         return false;
@@ -894,8 +1013,196 @@ UvBounds uv_bounds_from_boundary(const KernelState& state, FaceId face_id,
     return out;
 }
 
-MeshRecord tessellate_surface_patch(const SurfaceRecord& surf, Scalar u0, Scalar u1, Scalar v0,
-                                  Scalar v1, const TessellationOptions& options, const char* label) {
+UvBounds uv_bounds_from_boundary_tensor(const KernelState& state, FaceId face_id,
+                                        const SurfaceRecord& surf) {
+    UvBounds out;
+    const auto boundary = face_outer_boundary_vertices(state, face_id);
+    if (boundary.size() < 3) {
+        return out;
+    }
+    const auto dom = geo_internal::surface_domain(surf);
+    Scalar u_min = std::numeric_limits<Scalar>::infinity();
+    Scalar u_max = -u_min;
+    Scalar v_min = u_min;
+    Scalar v_max = u_max;
+    for (const auto& pt : boundary) {
+        const auto uv = geo_internal::approximate_surface_uv(surf, pt);
+        u_min = std::min(u_min, uv.first);
+        u_max = std::max(u_max, uv.first);
+        v_min = std::min(v_min, uv.second);
+        v_max = std::max(v_max, uv.second);
+    }
+    const auto du = dom.u.max - dom.u.min;
+    const auto dv = dom.v.max - dom.v.min;
+    const auto eps_u = std::max(du * static_cast<Scalar>(1e-4), static_cast<Scalar>(1e-9));
+    const auto eps_v = std::max(dv * static_cast<Scalar>(1e-4), static_cast<Scalar>(1e-9));
+    u_min = std::max(dom.u.min, std::min(dom.u.max, u_min - eps_u));
+    u_max = std::max(dom.u.min, std::min(dom.u.max, u_max + eps_u));
+    v_min = std::max(dom.v.min, std::min(dom.v.max, v_min - eps_v));
+    v_max = std::max(dom.v.min, std::min(dom.v.max, v_max + eps_v));
+    if (!(u_min < u_max) || !(v_min < v_max)) {
+        return out;
+    }
+    out.ok = true;
+    out.u0 = u_min;
+    out.u1 = u_max;
+    out.v0 = v_min;
+    out.v1 = v_max;
+    return out;
+}
+
+UvBounds uv_bounds_from_boundary_closest(const KernelState& state, SurfaceId surface_id, FaceId face_id,
+                                         const SurfaceRecord& surf) {
+    UvBounds out;
+    const auto boundary = face_outer_boundary_vertices(state, face_id);
+    if (boundary.size() < 3) {
+        return out;
+    }
+    const auto dom = geo_internal::surface_domain(surf);
+    Scalar u_min = std::numeric_limits<Scalar>::infinity();
+    Scalar u_max = -u_min;
+    Scalar v_min = u_min;
+    Scalar v_max = u_max;
+    auto* st = const_cast<KernelState*>(&state);
+    for (const auto& pt : boundary) {
+        const auto uv = geo_internal::rep_project_point_to_surface_uv(st, surface_id, surf, pt);
+        u_min = std::min(u_min, uv.first);
+        u_max = std::max(u_max, uv.first);
+        v_min = std::min(v_min, uv.second);
+        v_max = std::max(v_max, uv.second);
+    }
+    const auto du = dom.u.max - dom.u.min;
+    const auto dv = dom.v.max - dom.v.min;
+    const auto eps_u = std::max(du * static_cast<Scalar>(1e-4), static_cast<Scalar>(1e-9));
+    const auto eps_v = std::max(dv * static_cast<Scalar>(1e-4), static_cast<Scalar>(1e-9));
+    u_min = std::max(dom.u.min, std::min(dom.u.max, u_min - eps_u));
+    u_max = std::max(dom.u.min, std::min(dom.u.max, u_max + eps_u));
+    v_min = std::max(dom.v.min, std::min(dom.v.max, v_min - eps_v));
+    v_max = std::max(dom.v.min, std::min(dom.v.max, v_max + eps_v));
+    if (!(u_min < u_max) || !(v_min < v_max)) {
+        return out;
+    }
+    out.ok = true;
+    out.u0 = u_min;
+    out.u1 = u_max;
+    out.v0 = v_min;
+    out.v1 = v_max;
+    return out;
+}
+
+constexpr std::size_t kPatchRefineCap = 256;
+
+bool patch_kind_uses_bilinear_chordal_refine(SurfaceKind k) {
+    switch (k) {
+    case SurfaceKind::Bezier:
+    case SurfaceKind::BSpline:
+    case SurfaceKind::Nurbs:
+    case SurfaceKind::Revolved:
+    case SurfaceKind::Swept:
+    case SurfaceKind::Offset:
+        return true;
+    default:
+        return false;
+    }
+}
+
+Scalar patch_max_bilinear_cell_sag(const KernelState* state, SurfaceId surface_id, const SurfaceRecord& surf,
+                                   Scalar u0, Scalar u1, Scalar v0, Scalar v1, std::size_t nu, std::size_t nv) {
+    const Scalar span_u = u1 - u0;
+    const Scalar span_v = v1 - v0;
+    if (nu < 1 || nv < 1) {
+        return 0.0;
+    }
+    Scalar max_sag = 0.0;
+    Vec3 tmp_n {};
+    for (std::size_t j = 0; j < nv; ++j) {
+        for (std::size_t i = 0; i < nu; ++i) {
+            const Scalar u_a = u0 + (static_cast<Scalar>(i) / static_cast<Scalar>(nu)) * span_u;
+            const Scalar u_b = u0 + (static_cast<Scalar>(i + 1) / static_cast<Scalar>(nu)) * span_u;
+            const Scalar v_a = v0 + (static_cast<Scalar>(j) / static_cast<Scalar>(nv)) * span_v;
+            const Scalar v_b = v0 + (static_cast<Scalar>(j + 1) / static_cast<Scalar>(nv)) * span_v;
+            Point3 p00 {};
+            Point3 p10 {};
+            Point3 p11 {};
+            Point3 p01 {};
+            Point3 pc {};
+            if (!eval_surface_grid_point(state, surface_id, surf, u_a, v_a, p00, tmp_n)) {
+                return max_sag;
+            }
+            if (!eval_surface_grid_point(state, surface_id, surf, u_b, v_a, p10, tmp_n)) {
+                return max_sag;
+            }
+            if (!eval_surface_grid_point(state, surface_id, surf, u_b, v_b, p11, tmp_n)) {
+                return max_sag;
+            }
+            if (!eval_surface_grid_point(state, surface_id, surf, u_a, v_b, p01, tmp_n)) {
+                return max_sag;
+            }
+            const Scalar um = u0 + (static_cast<Scalar>(i) + static_cast<Scalar>(0.5)) / static_cast<Scalar>(nu) * span_u;
+            const Scalar vm = v0 + (static_cast<Scalar>(j) + static_cast<Scalar>(0.5)) / static_cast<Scalar>(nv) * span_v;
+            if (!eval_surface_grid_point(state, surface_id, surf, um, vm, pc, tmp_n)) {
+                return max_sag;
+            }
+            const Point3 pb {0.25 * (p00.x + p10.x + p11.x + p01.x), 0.25 * (p00.y + p10.y + p11.y + p01.y),
+                             0.25 * (p00.z + p10.z + p11.z + p01.z)};
+            const Vec3 d = subtract(pc, pb);
+            const Scalar s = std::sqrt(dot(d, d));
+            if (std::isfinite(s)) {
+                max_sag = std::max(max_sag, s);
+            }
+        }
+    }
+    return max_sag;
+}
+
+void bump_patch_nu_nv_for_curvature(const KernelState* state, SurfaceId surface_id, const SurfaceRecord& surf,
+                                    Scalar u0, Scalar u1, Scalar v0, Scalar v1, const TessellationOptions& options,
+                                    std::size_t& nu, std::size_t& nv) {
+    if (!options.use_principal_curvature_refinement || !patch_kind_uses_bilinear_chordal_refine(surf.kind)) {
+        return;
+    }
+    const Scalar um = 0.5 * (u0 + u1);
+    const Scalar vm = 0.5 * (v0 + v1);
+    Scalar k_max = 0.0;
+    if (!geo_internal::rep_patch_principal_curvatures_max(const_cast<KernelState*>(state), surface_id, surf, um, vm,
+                                                          k_max)) {
+        return;
+    }
+    if (!(k_max > static_cast<Scalar>(1e-15)) || !std::isfinite(k_max)) {
+        return;
+    }
+    const Scalar e = std::max(options.chordal_error, std::numeric_limits<Scalar>::epsilon());
+    const Scalar k_clamped = clamp(k_max, static_cast<Scalar>(1e-12), static_cast<Scalar>(1e6));
+    const Scalar Rc = static_cast<Scalar>(1.0) / k_clamped;
+    const std::size_t nk = segments_for_circle(std::max(Rc, e), options);
+    const std::size_t bump = std::min<std::size_t>(kPatchRefineCap, std::max<std::size_t>(2u, nk / 8u));
+    nu = std::max(nu, bump);
+    nv = std::max(nv, bump);
+}
+
+void refine_patch_nu_nv_for_chordal(const KernelState* state, SurfaceId surface_id, const SurfaceRecord& surf,
+                                    Scalar u0, Scalar u1, Scalar v0, Scalar v1, const TessellationOptions& options,
+                                    std::size_t& nu, std::size_t& nv) {
+    if (options.refine_patch_chordal_max_passes <= 0 || !patch_kind_uses_bilinear_chordal_refine(surf.kind)) {
+        return;
+    }
+    const Scalar tol = std::max(options.chordal_error, static_cast<Scalar>(1e-12));
+    for (int pass = 0; pass < options.refine_patch_chordal_max_passes; ++pass) {
+        const Scalar sag = patch_max_bilinear_cell_sag(state, surface_id, surf, u0, u1, v0, v1, nu, nv);
+        if (!(sag > tol) || !std::isfinite(sag)) {
+            break;
+        }
+        if (nu >= kPatchRefineCap && nv >= kPatchRefineCap) {
+            break;
+        }
+        nu = std::min(kPatchRefineCap, std::max<std::size_t>(2, nu * 2));
+        nv = std::min(kPatchRefineCap, std::max<std::size_t>(2, nv * 2));
+    }
+}
+
+MeshRecord tessellate_surface_patch(const KernelState* state, SurfaceId surface_id, const SurfaceRecord& surf,
+                                    Scalar u0, Scalar u1, Scalar v0, Scalar v1,
+                                    const TessellationOptions& options, const char* label) {
     MeshRecord mesh;
     mesh.source_body = BodyId{0};
     mesh.label = label;
@@ -948,9 +1255,53 @@ MeshRecord tessellate_surface_patch(const SurfaceRecord& surf, Scalar u0, Scalar
             2, std::min<std::size_t>(2048, static_cast<std::size_t>(std::ceil(base_v * span_v / (2.0 * kPi)))));
         break;
     }
+    case SurfaceKind::Bezier:
+    case SurfaceKind::BSpline:
+    case SurfaceKind::Nurbs:
+    case SurfaceKind::Revolved:
+    case SurfaceKind::Swept:
+    case SurfaceKind::Offset: {
+        const Scalar um = 0.5 * (u0 + u1);
+        const Scalar vm = 0.5 * (v0 + v1);
+        Vec3 du{};
+        Vec3 dv{};
+        Point3 pm{};
+        Vec3 nm{};
+        bool got = false;
+        switch (surf.kind) {
+        case SurfaceKind::Bezier:
+            got = geo_internal::bezier_tensor_surface_eval_with_partials(surf, um, vm, pm, du, dv);
+            break;
+        case SurfaceKind::BSpline:
+        case SurfaceKind::Nurbs:
+            got = geo_internal::nurbs_tensor_surface_eval_with_partials(surf, um, vm, pm, du, dv);
+            break;
+        case SurfaceKind::Revolved:
+        case SurfaceKind::Swept:
+        case SurfaceKind::Offset:
+            got = geo_internal::rep_surface_eval_grid_partials(const_cast<KernelState*>(state), surface_id, um, vm,
+                                                             pm, du, dv, nm);
+            break;
+        default:
+            break;
+        }
+        if (got && norm(du) > 1e-30 && norm(dv) > 1e-30) {
+            const Scalar Lu = norm(du) * span_u;
+            const Scalar Lv = norm(dv) * span_v;
+            nu = segments_for_tensor_direction(Lu, options);
+            nv = segments_for_tensor_direction(Lv, options);
+        } else {
+            nu = std::max<std::size_t>(2, std::min<std::size_t>(256, segments_for_length(span_u, options)));
+            nv = std::max<std::size_t>(2, std::min<std::size_t>(256, segments_for_length(span_v, options)));
+        }
+        break;
+    }
     default:
         return mesh;
     }
+
+    bump_patch_nu_nv_for_curvature(state, surface_id, surf, u0, u1, v0, v1, options, nu, nv);
+    refine_patch_nu_nv_for_chordal(state, surface_id, surf, u0, u1, v0, v1, options, nu, nv);
 
     for (std::size_t j = 0; j <= nv; ++j) {
         const auto tv = static_cast<Scalar>(j) / static_cast<Scalar>(nv);
@@ -960,7 +1311,7 @@ MeshRecord tessellate_surface_patch(const SurfaceRecord& surf, Scalar u0, Scalar
             const auto u = u0 + tu * (u1 - u0);
             Point3 p;
             Vec3 n;
-            if (!eval_surface_grid_point(surf, u, v, p, n)) {
+            if (!eval_surface_grid_point(state, surface_id, surf, u, v, p, n)) {
                 mesh.vertices.clear();
                 mesh.indices.clear();
                 mesh.normals.clear();
@@ -971,7 +1322,13 @@ MeshRecord tessellate_surface_patch(const SurfaceRecord& surf, Scalar u0, Scalar
             if (options.compute_normals) {
                 mesh.normals.push_back(n);
             }
-            mesh.texcoords.push_back(Point2{tu, tv});
+            if (options.generate_texcoords) {
+                if (options.uv_parametric_seam) {
+                    mesh.texcoords.push_back(Point2{u, v});
+                } else {
+                    mesh.texcoords.push_back(Point2{tu, tv});
+                }
+            }
         }
     }
     mesh.bbox = mesh_bbox_from_vertices(mesh.vertices);
@@ -1040,9 +1397,10 @@ MeshRecord tessellate_face(const KernelState& state, FaceId face_id, const Tesse
         if (base_it == state.surfaces.end()) {
             return rep_internal::tessellate_face_planar_mesh(state, face_id, options);
         }
-        auto patch = tessellate_surface_patch(base_it->second, surf.trim_u_min, surf.trim_u_max,
-                                              surf.trim_v_min, surf.trim_v_max, options,
-                                              "mesh_from_face_trimmed_patch");
+        auto patch =
+            tessellate_surface_patch(&state, surf.base_surface_id, base_it->second, surf.trim_u_min,
+                                     surf.trim_u_max, surf.trim_v_min, surf.trim_v_max, options,
+                                     "mesh_from_face_trimmed_patch");
         if (!patch.vertices.empty() && !patch.indices.empty()) {
             return patch;
         }
@@ -1055,8 +1413,33 @@ MeshRecord tessellate_face(const KernelState& state, FaceId face_id, const Tesse
         surf.kind == SurfaceKind::Torus || surf.kind == SurfaceKind::Cone) {
         const auto ub = uv_bounds_from_boundary(state, face_id, surf);
         if (ub.ok) {
-            auto patch = tessellate_surface_patch(surf, ub.u0, ub.u1, ub.v0, ub.v1, options,
-                                                  "mesh_from_face_analytic_patch");
+            auto patch = tessellate_surface_patch(nullptr, SurfaceId{}, surf, ub.u0, ub.u1, ub.v0, ub.v1,
+                                                  options, "mesh_from_face_analytic_patch");
+            if (!patch.vertices.empty() && !patch.indices.empty()) {
+                return patch;
+            }
+        }
+        return rep_internal::tessellate_face_planar_mesh(state, face_id, options);
+    }
+    if (surf.kind == SurfaceKind::Bezier || surf.kind == SurfaceKind::BSpline ||
+        surf.kind == SurfaceKind::Nurbs) {
+        const auto ub = uv_bounds_from_boundary_tensor(state, face_id, surf);
+        if (ub.ok) {
+            auto patch = tessellate_surface_patch(&state, face_it->second.surface_id, surf, ub.u0, ub.u1, ub.v0, ub.v1,
+                                                  options, "mesh_from_face_tensor_patch");
+            if (!patch.vertices.empty() && !patch.indices.empty()) {
+                return patch;
+            }
+        }
+        return rep_internal::tessellate_face_planar_mesh(state, face_id, options);
+    }
+    if (surf.kind == SurfaceKind::Revolved || surf.kind == SurfaceKind::Swept ||
+        surf.kind == SurfaceKind::Offset) {
+        const auto ub = uv_bounds_from_boundary_closest(state, face_it->second.surface_id, face_id, surf);
+        if (ub.ok) {
+            auto patch =
+                tessellate_surface_patch(&state, face_it->second.surface_id, surf, ub.u0, ub.u1, ub.v0, ub.v1,
+                                         options, "mesh_from_face_derived_patch");
             if (!patch.vertices.empty() && !patch.indices.empty()) {
                 return patch;
             }

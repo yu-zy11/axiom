@@ -1,5 +1,6 @@
 #include "axiom/eval/eval_services.h"
 
+#include <algorithm>
 #include <functional>
 #include <unordered_set>
 
@@ -51,6 +52,11 @@ Result<void> EvalGraphService::invalidate(NodeId node_id) {
                                       "求值图失效失败：目标节点不存在",
                                       "求值图失效失败");
   }
+  const auto inv_it = state_->eval_invalid.find(node_id.value);
+  if (inv_it != state_->eval_invalid.end() && inv_it->second) {
+    ++state_->eval_telemetry.invalidate_node_redundant_calls;
+  }
+  ++state_->eval_telemetry.invalidate_node_calls;
   detail::invalidate_eval_downstream(*state_, node_id.value);
   return ok_void(state_->create_diagnostic("已标记节点失效"));
 }
@@ -62,6 +68,7 @@ Result<void> EvalGraphService::invalidate_body(BodyId body_id) {
                                       "体相关节点失效失败");
   }
 
+  ++state_->eval_telemetry.invalidate_body_calls;
   detail::invalidate_eval_for_body(*state_, body_id);
   return ok_void(state_->create_diagnostic("已标记体相关节点失效"));
 }
@@ -72,11 +79,20 @@ Result<void> EvalGraphService::recompute(NodeId node_id) {
                                       "求值图重算失败：目标节点不存在",
                                       "求值图重算失败");
   }
+  {
+    const auto inv_it = state_->eval_invalid.find(node_id.value);
+    if (inv_it == state_->eval_invalid.end() || !inv_it->second) {
+      ++state_->eval_telemetry.recompute_root_already_valid_calls;
+    }
+  }
 
   std::unordered_set<std::uint64_t> recomputed_nodes;
-  std::function<Result<void>(std::uint64_t)> recompute_node =
-      [&](std::uint64_t current) -> Result<void> {
+  std::uint64_t local_max_stack_depth = 0;
+  std::function<Result<void>(std::uint64_t, std::uint64_t)> recompute_node;
+  recompute_node = [&](std::uint64_t current, std::uint64_t depth) -> Result<void> {
+    local_max_stack_depth = std::max(local_max_stack_depth, depth);
     if (recomputed_nodes.contains(current)) {
+      ++state_->eval_telemetry.recompute_transitive_dedup_skips;
       return ok_void(state_->create_diagnostic("已跳过重复重算节点"));
     }
 
@@ -90,7 +106,7 @@ Result<void> EvalGraphService::recompute(NodeId node_id) {
                                      "求值图重算失败");
         }
         if (state_->eval_invalid[dependency]) {
-          const auto dep_result = recompute_node(dependency);
+          const auto dep_result = recompute_node(dependency, depth + 1);
           if (dep_result.status != StatusCode::Ok) {
             return dep_result;
           }
@@ -99,18 +115,25 @@ Result<void> EvalGraphService::recompute(NodeId node_id) {
     }
     state_->eval_invalid[current] = false;
     state_->eval_recompute_count[current] += 1;
+    ++state_->eval_telemetry.recompute_finish_events;
     recomputed_nodes.insert(current);
     return ok_void(state_->create_diagnostic("已完成单节点重算"));
   };
 
-  const auto recompute_result = recompute_node(node_id.value);
+  const auto recompute_result = recompute_node(node_id.value, 1);
   if (recompute_result.status != StatusCode::Ok) {
     return recompute_result;
   }
+  state_->eval_telemetry.recompute_single_root_max_finish_nodes = std::max(
+      state_->eval_telemetry.recompute_single_root_max_finish_nodes,
+      static_cast<std::uint64_t>(recomputed_nodes.size()));
+  state_->eval_telemetry.recompute_single_root_max_stack_depth =
+      std::max(state_->eval_telemetry.recompute_single_root_max_stack_depth, local_max_stack_depth);
   return ok_void(state_->create_diagnostic("已完成节点重算"));
 }
 
 Result<bool> EvalGraphService::is_invalid(NodeId node_id) const {
+  ++state_->eval_telemetry.eval_graph_state_read_calls;
   if (!detail::eval_has_node(*state_, node_id)) {
     return detail::invalid_input_result<bool>(
         *state_, diag_codes::kCoreInvalidHandle,
@@ -121,6 +144,7 @@ Result<bool> EvalGraphService::is_invalid(NodeId node_id) const {
 }
 
 Result<std::uint64_t> EvalGraphService::recompute_count(NodeId node_id) const {
+  ++state_->eval_telemetry.eval_graph_state_read_calls;
   if (!detail::eval_has_node(*state_, node_id)) {
     return detail::invalid_input_result<std::uint64_t>(
         *state_, diag_codes::kCoreInvalidHandle,
@@ -165,6 +189,7 @@ Result<std::vector<NodeId>> EvalGraphService::dependents_of(NodeId node_id) cons
 }
 
 Result<bool> EvalGraphService::exists(NodeId node_id) const {
+  ++state_->eval_telemetry.eval_graph_state_read_calls;
   return ok_result(detail::eval_has_node(*state_, node_id),
                    state_->create_diagnostic("已查询节点存在性"));
 }
@@ -391,6 +416,8 @@ Result<void> EvalGraphService::invalidate_many(std::span<const NodeId> nodes) {
     return detail::invalid_input_void(*state_, diag_codes::kCoreParameterOutOfRange,
                                       "批量失效失败：节点列表为空", "批量失效失败");
   }
+  ++state_->eval_telemetry.invalidate_many_batches;
+  state_->eval_telemetry.invalidate_many_node_total += static_cast<std::uint64_t>(nodes.size());
   for (const auto node : nodes) {
     const auto r = invalidate(node);
     if (r.status != StatusCode::Ok) return r;
@@ -403,6 +430,8 @@ Result<void> EvalGraphService::recompute_many(std::span<const NodeId> nodes) {
     return detail::invalid_input_void(*state_, diag_codes::kCoreParameterOutOfRange,
                                       "批量重算失败：节点列表为空", "批量重算失败");
   }
+  ++state_->eval_telemetry.recompute_many_batches;
+  state_->eval_telemetry.recompute_many_root_total += static_cast<std::uint64_t>(nodes.size());
   for (const auto node : nodes) {
     const auto r = recompute(node);
     if (r.status != StatusCode::Ok) return r;
@@ -436,6 +465,8 @@ Result<void> EvalGraphService::clear_graph() {
   state_->eval_dependencies.clear();
   state_->eval_reverse_dependencies.clear();
   state_->eval_body_bindings.clear();
+  state_->eval_telemetry = {};
+  state_->eval_invalidation_bridge = {};
   return ok_void(state_->create_diagnostic("已清空求值图"));
 }
 
@@ -697,6 +728,15 @@ Result<std::vector<NodeId>> EvalGraphService::valid_nodes_of_kind(NodeKind kind)
   std::vector<NodeId> out;
   for (const auto& [id, k] : state_->eval_nodes) if (k == kind && !state_->eval_invalid.at(id)) out.push_back(NodeId{id});
   return ok_result(std::move(out), state_->create_diagnostic("已查询指定类型有效节点"));
+}
+
+Result<EvalGraphTelemetry> EvalGraphService::telemetry() const {
+  return ok_result(state_->eval_telemetry, state_->create_diagnostic("已查询求值图可观测性计数"));
+}
+
+Result<void> EvalGraphService::reset_telemetry() {
+  state_->eval_telemetry = {};
+  return ok_void(state_->create_diagnostic("已重置求值图可观测性计数"));
 }
 
 } // namespace axiom

@@ -87,6 +87,9 @@ public:
     Result<std::vector<NodeId>> invalid_nodes_of_kind(NodeKind kind) const;
     Result<std::vector<NodeId>> valid_nodes_of_kind(NodeKind kind) const;
 
+    Result<EvalGraphTelemetry> telemetry() const;
+    Result<void> reset_telemetry();
+
 private:
     std::shared_ptr<detail::KernelState> state_;
 };

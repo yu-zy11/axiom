@@ -1,6 +1,8 @@
 #include "axiom/rep/representation_conversion_service.h"
 
+#include <cmath>
 #include <fstream>
+#include <iomanip>
 #include <limits>
 
 #include "axiom/internal/core/diagnostic_helpers.h"
@@ -9,6 +11,15 @@
 #include "axiom/internal/rep/representation_internal_utils.h"
 
 namespace {
+
+constexpr axiom::Scalar kRoundTripPi = 3.14159265358979323846;
+
+/// 无向夹角（0°～90°）：与解析径向对比时允许网格法向整体翻转。
+axiom::Scalar angle_deg_unoriented_unit_normals(const axiom::Vec3& a, const axiom::Vec3& b) {
+    const axiom::Scalar d = std::abs(axiom::detail::dot(a, b));
+    const axiom::Scalar c = std::min(static_cast<axiom::Scalar>(1.0), d);
+    return std::acos(c) * (static_cast<axiom::Scalar>(180.0) / kRoundTripPi);
+}
 
 std::string json_escape_strategy(std::string_view s) {
     std::string o;
@@ -160,11 +171,14 @@ Result<MeshId> RepresentationConversionService::brep_to_mesh(BodyId body_id, con
     if (cache_it != state_->tessellation_cache.end()) {
         const auto mesh_it = state_->meshes.find(cache_it->second.value);
         if (mesh_it != state_->meshes.end()) {
+            ++state_->tessellation_cache_stats.body_cache_hits;
             return ok_result(cache_it->second, state_->create_diagnostic("已命中三角化缓存"));
         }
         // stale cache entry
+        ++state_->tessellation_cache_stats.body_cache_stale_evictions;
         state_->tessellation_cache.erase(cache_it);
     }
+    ++state_->tessellation_cache_stats.body_cache_misses;
 
     detail::MeshRecord mesh;
     mesh.source_body = body_id;
@@ -195,6 +209,7 @@ Result<MeshId> RepresentationConversionService::brep_to_mesh(BodyId body_id, con
                 if (cache_it != state_->face_tessellation_cache.end()) {
                     const auto mesh_it = state_->meshes.find(cache_it->second.value);
                     if (mesh_it == state_->meshes.end()) {
+                        ++state_->tessellation_cache_stats.face_cache_stale_evictions;
                         state_->face_tessellation_cache.erase(cache_it);
                         cache_it = state_->face_tessellation_cache.end();
                     }
@@ -202,8 +217,10 @@ Result<MeshId> RepresentationConversionService::brep_to_mesh(BodyId body_id, con
 
                 MeshId face_mesh_id{};
                 if (cache_it != state_->face_tessellation_cache.end()) {
+                    ++state_->tessellation_cache_stats.face_cache_hits;
                     face_mesh_id = cache_it->second;
                 } else {
+                    ++state_->tessellation_cache_stats.face_cache_misses;
                     auto face_mesh = detail::tessellate_face(*state_, face_id, options);
                     if (face_mesh.vertices.empty() || face_mesh.indices.empty()) {
                         // If face tessellation fails, fall back to analytic primitive or bbox proxy below.
@@ -243,7 +260,7 @@ Result<MeshId> RepresentationConversionService::brep_to_mesh(BodyId body_id, con
 
         if (!assembled.vertices.empty() && !assembled.indices.empty()) {
             // Improve connectivity across faces.
-            detail::weld_mesh_vertices(assembled, options.compute_normals);
+            detail::weld_mesh_vertices(assembled, options);
             assembled.tessellation_budget_digest = tess_budget_digest;
             assembled.tessellation_strategy = "owned_topo_welded";
             mesh = std::move(assembled);
@@ -372,6 +389,7 @@ Result<MeshId> RepresentationConversionService::brep_to_mesh_local(
                 if (mesh_it != state_->meshes.end()) {
                     // reuse cached face mesh
                 } else {
+                    ++state_->tessellation_cache_stats.face_cache_stale_evictions;
                     state_->face_tessellation_cache.erase(cache_it);
                     cache_it = state_->face_tessellation_cache.end();
                 }
@@ -379,8 +397,10 @@ Result<MeshId> RepresentationConversionService::brep_to_mesh_local(
 
             MeshId face_mesh_id{};
             if (!need_rebuild && cache_it != state_->face_tessellation_cache.end()) {
+                ++state_->tessellation_cache_stats.face_cache_hits;
                 face_mesh_id = cache_it->second;
             } else {
+                ++state_->tessellation_cache_stats.face_cache_misses;
                 auto face_mesh = detail::tessellate_face(*state_, face_id, options);
                 if (face_mesh.vertices.empty() || face_mesh.indices.empty()) {
                     // If we can't tessellate the face boundary, fallback to full body mesh.
@@ -418,7 +438,7 @@ Result<MeshId> RepresentationConversionService::brep_to_mesh_local(
         return brep_to_mesh(body_id, options);
     }
 
-    detail::weld_mesh_vertices(assembled, options.compute_normals);
+    detail::weld_mesh_vertices(assembled, options);
     assembled.tessellation_budget_digest = tess_budget_digest;
     assembled.tessellation_strategy = "local_faces_welded";
 
@@ -473,6 +493,7 @@ Result<MeshId> RepresentationConversionService::brep_to_mesh_shell(BodyId body_i
         if (cache_it != state_->face_tessellation_cache.end()) {
             const auto mesh_it = state_->meshes.find(cache_it->second.value);
             if (mesh_it == state_->meshes.end()) {
+                ++state_->tessellation_cache_stats.face_cache_stale_evictions;
                 state_->face_tessellation_cache.erase(cache_it);
                 cache_it = state_->face_tessellation_cache.end();
             }
@@ -480,8 +501,10 @@ Result<MeshId> RepresentationConversionService::brep_to_mesh_shell(BodyId body_i
 
         MeshId face_mesh_id{};
         if (cache_it != state_->face_tessellation_cache.end()) {
+            ++state_->tessellation_cache_stats.face_cache_hits;
             face_mesh_id = cache_it->second;
         } else {
+            ++state_->tessellation_cache_stats.face_cache_misses;
             auto face_mesh = detail::tessellate_face(*state_, face_id, options);
             if (face_mesh.vertices.empty() || face_mesh.indices.empty()) {
                 return detail::failed_result<MeshId>(
@@ -526,7 +549,7 @@ Result<MeshId> RepresentationConversionService::brep_to_mesh_shell(BodyId body_i
             {body_id.value, shell_id.value});
     }
 
-    detail::weld_mesh_vertices(assembled, options.compute_normals);
+    detail::weld_mesh_vertices(assembled, options);
     assembled.tessellation_budget_digest = tess_budget_digest;
     assembled.tessellation_strategy = "shell_faces_welded";
 
@@ -569,6 +592,11 @@ Result<BodyId> RepresentationConversionService::mesh_to_brep(MeshId mesh_id) {
     record.label = "brep_from_mesh";
     record.bbox = detail::is_valid_bbox(it->second.bbox) ? it->second.bbox : detail::mesh_bbox_from_vertices(it->second.vertices);
     state_->bodies.emplace(body_id.value, record);
+    // 将网格记录关联到新建的 MeshRep 体：`brep_to_mesh` 可优先返回同一网格，避免占位体误走 bbox 代理路径。
+    auto mesh_rec_it = state_->meshes.find(mesh_id.value);
+    if (mesh_rec_it != state_->meshes.end()) {
+        mesh_rec_it->second.source_body = body_id;
+    }
     return ok_result(body_id, state_->create_diagnostic("已完成网格转BRep"));
 }
 
@@ -594,6 +622,12 @@ Result<MeshId> RepresentationConversionService::implicit_to_mesh(ImplicitFieldId
     mesh.bbox = detail::make_bbox({-extent, -extent, -extent}, {extent, extent, extent});
     mesh.vertices = detail::bbox_corners(mesh.bbox);
     mesh.indices = detail::triangulate_bbox(detail::tessellation_slices_per_face(options));
+    if (options.compute_normals) {
+        mesh.normals.assign(mesh.vertices.size(), Vec3{0.0, 0.0, 1.0});
+    }
+    if (options.generate_texcoords) {
+        mesh.texcoords.assign(mesh.vertices.size(), Point2{0.0, 0.0});
+    }
     state_->meshes.emplace(id.value, std::move(mesh));
     return ok_result(id, state_->create_diagnostic("已完成隐式体转网格"));
 }
@@ -723,6 +757,7 @@ Result<MeshInspectionReport> RepresentationConversionService::inspect_mesh(MeshI
     report.has_degenerate_triangles = detail::has_degenerate_triangles(it->second.vertices, it->second.indices);
     report.connected_components =
         detail::mesh_connected_components(it->second.indices, it->second.vertices.size());
+    report.mesh_label = it->second.label;
     report.tessellation_strategy = it->second.tessellation_strategy;
     report.tessellation_budget_digest = it->second.tessellation_budget_digest;
     return ok_result(report, state_->create_diagnostic("已完成网格统计检查"));
@@ -757,7 +792,8 @@ Result<void> RepresentationConversionService::export_mesh_report_json(
     out << "\"has_out_of_range_indices\":"
         << (r.has_out_of_range_indices ? "true" : "false") << ",";
     out << "\"has_degenerate_triangles\":"
-        << (r.has_degenerate_triangles ? "true" : "false");
+        << (r.has_degenerate_triangles ? "true" : "false") << ",";
+    out << "\"mesh_label\":\"" << json_escape_strategy(r.mesh_label) << "\"";
 
     // Extended stats (Stage 1.5): bbox + simple quality metrics.
     const auto mesh_it = state_->meshes.find(mesh_id.value);
@@ -823,6 +859,94 @@ Result<void> RepresentationConversionService::export_mesh_report_json(
     return ok_void(state_->create_diagnostic("已导出网格统计报告"));
 }
 
+Result<void> RepresentationConversionService::export_tessellation_cache_stats_json(std::string_view path) const {
+    if (path.empty()) {
+        return detail::invalid_input_void(
+            *state_, diag_codes::kIoExportFailure,
+            "三角化缓存统计导出失败：输出路径为空", "三角化缓存统计导出失败");
+    }
+    std::ofstream out {std::string(path)};
+    if (!out) {
+        return detail::failed_void(
+            *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+            "三角化缓存统计导出失败：无法打开输出文件", "三角化缓存统计导出失败");
+    }
+    const auto& s = state_->tessellation_cache_stats;
+    out << "{\"body_cache_hits\":" << s.body_cache_hits << ",\"body_cache_misses\":" << s.body_cache_misses
+        << ",\"body_cache_stale_evictions\":" << s.body_cache_stale_evictions
+        << ",\"face_cache_hits\":" << s.face_cache_hits << ",\"face_cache_misses\":" << s.face_cache_misses
+        << ",\"face_cache_stale_evictions\":" << s.face_cache_stale_evictions << "}";
+    return ok_void(state_->create_diagnostic("已导出三角化缓存统计"));
+}
+
+Result<void> RepresentationConversionService::export_round_trip_report_json(const RoundTripReport& report,
+                                                                            std::string_view path) const {
+    if (path.empty()) {
+        return detail::invalid_input_void(
+            *state_, diag_codes::kIoExportFailure,
+            "round-trip 报告导出失败：输出路径为空", "round-trip 报告导出失败");
+    }
+    std::ofstream out {std::string(path)};
+    if (!out) {
+        return detail::failed_void(
+            *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+            "round-trip 报告导出失败：无法打开输出文件", "round-trip 报告导出失败");
+    }
+    out.setf(std::ios::fixed);
+    out << std::setprecision(12);
+    out << "{\"passed\":" << (report.passed ? "true" : "false") << ",\"bbox_max_abs_delta\":" << report.bbox_max_abs_delta
+        << ",\"max_point_abs_delta\":" << report.max_point_abs_delta << ",\"max_normal_angle_deg_delta\":"
+        << report.max_normal_angle_deg_delta << ",\"normal_deviation_measured\":"
+        << (report.normal_deviation_measured ? "true" : "false") << ",\"source_triangles\":" << report.source_triangles
+        << ",\"roundtrip_triangles\":" << report.roundtrip_triangles << ",\"tessellation_strategy\":\""
+        << json_escape_strategy(report.tessellation_strategy) << "\",\"tessellation_budget_digest\":";
+    if (report.tessellation_budget_digest.empty()) {
+        out << "null";
+    } else {
+        out << report.tessellation_budget_digest;
+    }
+    out << ",\"budget\":{\"bbox_abs_tol\":" << report.budget.bbox_abs_tol
+        << ",\"max_point_abs_tol\":" << report.budget.max_point_abs_tol
+        << ",\"normal_angle_deg_tol\":" << report.budget.normal_angle_deg_tol
+        << ",\"chordal_error_basis\":" << report.budget.chordal_error_basis
+        << ",\"angular_error_basis_deg\":" << report.budget.angular_error_basis_deg << "}}";
+    return ok_void(state_->create_diagnostic("已导出 round-trip 报告"));
+}
+
+Result<ConversionErrorBudget> RepresentationConversionService::conversion_error_budget_for_tessellation(
+    const TessellationOptions& options) const {
+    if (!detail::has_valid_tessellation_options(options)) {
+        return detail::invalid_input_result<ConversionErrorBudget>(
+            *state_, diag_codes::kCoreParameterOutOfRange,
+            "转换误差预算查询失败：三角化误差参数必须为正数且在允许范围内", "转换误差预算查询失败");
+    }
+    return ok_result(detail::conversion_error_budget_from_tessellation(options),
+                     state_->create_diagnostic("已查询三角化派生转换误差预算"));
+}
+
+Result<void> RepresentationConversionService::export_conversion_error_budget_json(const TessellationOptions& options,
+                                                                                std::string_view path) const {
+    if (path.empty()) {
+        return detail::invalid_input_void(
+            *state_, diag_codes::kIoExportFailure,
+            "转换误差预算导出失败：输出路径为空", "转换误差预算导出失败");
+    }
+    const auto b = conversion_error_budget_for_tessellation(options);
+    if (b.status != StatusCode::Ok || !b.value.has_value()) {
+        return detail::failed_void(
+            *state_, b.status, diag_codes::kIoExportFailure,
+            "转换误差预算导出失败：无法从三角化选项派生预算", "转换误差预算导出失败");
+    }
+    std::ofstream out {std::string(path)};
+    if (!out) {
+        return detail::failed_void(
+            *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+            "转换误差预算导出失败：无法打开输出文件", "转换误差预算导出失败");
+    }
+    out << detail::conversion_error_budget_digest_json(*b.value);
+    return ok_void(state_->create_diagnostic("已导出转换误差预算 JSON"));
+}
+
 Result<RoundTripReport> RepresentationConversionService::verify_brep_mesh_round_trip(
     BodyId body_id, const TessellationOptions& options) {
     if (!detail::has_body(*state_, body_id)) {
@@ -857,6 +981,9 @@ Result<RoundTripReport> RepresentationConversionService::verify_brep_mesh_round_
     RoundTripReport report;
     report.budget = detail::conversion_error_budget_from_tessellation(options);
     report.tessellation_strategy = mesh_it->second.tessellation_strategy;
+    report.tessellation_budget_digest = mesh_it->second.tessellation_budget_digest.empty()
+                                          ? detail::tessellation_budget_digest_json(options)
+                                          : mesh_it->second.tessellation_budget_digest;
 
     const auto& src_bbox = body_it->second.bbox;
     const auto& rt_bbox = rt_it->second.bbox;
@@ -912,10 +1039,89 @@ Result<RoundTripReport> RepresentationConversionService::verify_brep_mesh_round_
     }
     report.max_point_abs_delta = max_point_err;
 
+    Scalar max_norm_deg = 0.0;
+    bool norm_measured = false;
+    if (options.compute_normals && !mesh.normals.empty() && mesh.vertices.size() == mesh.normals.size()) {
+        switch (body.kind) {
+            case detail::BodyKind::Sphere: {
+                norm_measured = true;
+                const auto c = body.origin;
+                for (std::size_t i = 0; i < mesh.vertices.size(); ++i) {
+                    const Vec3 d {mesh.vertices[i].x - c.x, mesh.vertices[i].y - c.y, mesh.vertices[i].z - c.z};
+                    const auto len = std::sqrt(detail::dot(d, d));
+                    if (len <= std::numeric_limits<Scalar>::epsilon() * 1024.0) {
+                        continue;
+                    }
+                    const Vec3 na {d.x / len, d.y / len, d.z / len};
+                    const auto nb = detail::normalize(mesh.normals[i]);
+                    max_norm_deg = std::max(max_norm_deg, angle_deg_unoriented_unit_normals(na, nb));
+                }
+                break;
+            }
+            case detail::BodyKind::Cylinder: {
+                norm_measured = true;
+                const auto cent = body.origin;
+                const auto ax = detail::normalize(body.axis);
+                const auto ref_r = std::max<Scalar>(body.a, std::numeric_limits<Scalar>::epsilon());
+                const auto h = std::max<Scalar>(body.b, std::numeric_limits<Scalar>::epsilon());
+                const auto half_h = h * static_cast<Scalar>(0.5);
+                const auto plane_tol = std::max(h * static_cast<Scalar>(1e-8), static_cast<Scalar>(1e-9));
+                const auto eps_radial = std::max(ref_r * static_cast<Scalar>(1e-9), static_cast<Scalar>(1e-12));
+                const Vec3 neg_ax {-ax.x, -ax.y, -ax.z};
+                for (std::size_t i = 0; i < mesh.vertices.size(); ++i) {
+                    const Vec3 d {mesh.vertices[i].x - cent.x, mesh.vertices[i].y - cent.y,
+                                  mesh.vertices[i].z - cent.z};
+                    const auto along = detail::dot(d, ax);
+                    const Vec3 proj {ax.x * along, ax.y * along, ax.z * along};
+                    Vec3 radial {d.x - proj.x, d.y - proj.y, d.z - proj.z};
+                    const auto rlen = std::sqrt(detail::dot(radial, radial));
+                    const auto nb = detail::normalize(mesh.normals[i]);
+                    const bool near_bot = along <= -half_h + plane_tol;
+                    const bool near_top = along >= half_h - plane_tol;
+                    Scalar err = 0.0;
+                    if (rlen < eps_radial) {
+                        if (near_top && !near_bot) {
+                            err = angle_deg_unoriented_unit_normals(ax, nb);
+                        } else if (near_bot && !near_top) {
+                            err = angle_deg_unoriented_unit_normals(neg_ax, nb);
+                        } else if (near_top && near_bot) {
+                            err = std::min(angle_deg_unoriented_unit_normals(ax, nb),
+                                          angle_deg_unoriented_unit_normals(neg_ax, nb));
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        radial = Vec3 {radial.x / rlen, radial.y / rlen, radial.z / rlen};
+                        if (!near_bot && !near_top) {
+                            err = angle_deg_unoriented_unit_normals(radial, nb);
+                        } else if (near_bot && !near_top) {
+                            err = std::min(angle_deg_unoriented_unit_normals(radial, nb),
+                                           angle_deg_unoriented_unit_normals(neg_ax, nb));
+                        } else if (near_top && !near_bot) {
+                            err = std::min(angle_deg_unoriented_unit_normals(radial, nb),
+                                           angle_deg_unoriented_unit_normals(ax, nb));
+                        } else {
+                            err = std::min({angle_deg_unoriented_unit_normals(radial, nb),
+                                           angle_deg_unoriented_unit_normals(ax, nb),
+                                           angle_deg_unoriented_unit_normals(neg_ax, nb)});
+                        }
+                    }
+                    max_norm_deg = std::max(max_norm_deg, err);
+                }
+                break;
+            }
+            default:
+                break;
+        }
+    }
+    report.max_normal_angle_deg_delta = max_norm_deg;
+    report.normal_deviation_measured = norm_measured;
+
     report.source_triangles = static_cast<std::uint64_t>(mesh.indices.size() / 3);
     report.roundtrip_triangles = report.source_triangles;
     report.passed = report.bbox_max_abs_delta <= report.budget.bbox_abs_tol &&
-                    report.max_point_abs_delta <= report.budget.max_point_abs_tol;
+                    report.max_point_abs_delta <= report.budget.max_point_abs_tol &&
+                    (!norm_measured || max_norm_deg <= report.budget.normal_angle_deg_tol + static_cast<Scalar>(1e-9));
     return ok_result(report, state_->create_diagnostic("已完成 BRep->Mesh->BRep round-trip 验证"));
 }
 
@@ -953,6 +1159,10 @@ Result<RoundTripReport> RepresentationConversionService::verify_mesh_brep_round_
 
     RoundTripReport report;
     report.budget = detail::conversion_error_budget_from_tessellation(options);
+    report.tessellation_strategy = rt.tessellation_strategy;
+    report.tessellation_budget_digest = rt.tessellation_budget_digest.empty()
+                                            ? detail::tessellation_budget_digest_json(options)
+                                            : rt.tessellation_budget_digest;
 
     report.bbox_max_abs_delta = std::max({
         std::abs(src.bbox.min.x - rt.bbox.min.x), std::abs(src.bbox.min.y - rt.bbox.min.y), std::abs(src.bbox.min.z - rt.bbox.min.z),
@@ -964,6 +1174,10 @@ Result<RoundTripReport> RepresentationConversionService::verify_mesh_brep_round_
     report.passed = report.bbox_max_abs_delta <= report.budget.bbox_abs_tol;
 
     return ok_result(report, state_->create_diagnostic("已完成 Mesh->BRep->Mesh round-trip 验证"));
+}
+
+Result<TessellationCacheStats> RepresentationConversionService::tessellation_cache_stats() const {
+    return ok_result(state_->tessellation_cache_stats, state_->create_diagnostic("已查询三角化缓存统计"));
 }
 
 }  // namespace axiom

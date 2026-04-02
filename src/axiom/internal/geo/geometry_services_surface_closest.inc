@@ -191,7 +191,7 @@ SurfaceService::closest_uv(SurfaceId surface_id, const Point3 &point) const {
     const auto domain = surface_domain(surface);
     auto uv = approximate_surface_uv(surface, point);
     // 多起点粗采样，减轻样条反求陷入局部极小（工业内核常用策略的极简版）。
-    const int grid = 5;
+    const int grid = 7;
     Scalar best_u = uv.first;
     Scalar best_v = uv.second;
     auto best_cost = std::numeric_limits<Scalar>::max();
@@ -214,6 +214,27 @@ SurfaceService::closest_uv(SurfaceId surface_id, const Point3 &point) const {
           }
         }
       }
+    }
+    auto consider = [&](Scalar su, Scalar sv) {
+      const auto evs = eval(surface_id, su, sv, 0);
+      if (evs.status == StatusCode::Ok && evs.value.has_value()) {
+        const Scalar c = squared_distance(evs.value->point, point);
+        if (c < best_cost) {
+          best_cost = c;
+          best_u = su;
+          best_v = sv;
+        }
+      }
+    };
+    // 边界与域心补充种子，减轻大弯曲面片上「内部网格错过全局极小」的情况。
+    {
+      const Scalar uc = static_cast<Scalar>(0.5) * (domain.u.min + domain.u.max);
+      const Scalar vc = static_cast<Scalar>(0.5) * (domain.v.min + domain.v.max);
+      consider(uc, vc);
+      consider(domain.u.min, vc);
+      consider(domain.u.max, vc);
+      consider(uc, domain.v.min);
+      consider(uc, domain.v.max);
     }
     uv.first = best_u;
     uv.second = best_v;
@@ -346,6 +367,20 @@ SurfaceService::closest_uv(SurfaceId surface_id, const Point3 &point) const {
       const auto &b = surface.trim_uv_loop[(i + 1) % npl];
       consider(std::clamp((a.x + b.x) * static_cast<Scalar>(0.5), d.u.min, d.u.max),
                std::clamp((a.y + b.y) * static_cast<Scalar>(0.5), d.v.min, d.v.max));
+    }
+    for (const auto &hole : surface.trim_uv_holes) {
+      for (const auto &p2 : hole) {
+        consider(std::clamp(p2.x, d.u.min, d.u.max), std::clamp(p2.y, d.v.min, d.v.max));
+      }
+      const std::size_t nh = hole.size();
+      if (nh >= 3) {
+        for (std::size_t i = 0; i < nh; ++i) {
+          const auto &a = hole[i];
+          const auto &b = hole[(i + 1) % nh];
+          consider(std::clamp((a.x + b.x) * static_cast<Scalar>(0.5), d.u.min, d.u.max),
+                   std::clamp((a.y + b.y) * static_cast<Scalar>(0.5), d.v.min, d.v.max));
+        }
+      }
     }
     {
       SurfaceService base{state_};

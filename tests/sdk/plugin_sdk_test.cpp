@@ -5,6 +5,7 @@
 
 #include <iostream>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -92,6 +93,14 @@ int main() {
     if (kernel.plugins().register_curve_type(m1, std::make_unique<SampleCurvePlugin>()).status != axiom::StatusCode::Ok) {
         std::cerr << "first register failed\n";
         return 1;
+    }
+    {
+        auto impl_names = kernel.plugins().registered_implementation_type_names_sorted();
+        if (impl_names.status != axiom::StatusCode::Ok || !impl_names.value.has_value() ||
+            impl_names.value->size() != 1 || (*impl_names.value)[0] != "sample_curve") {
+            std::cerr << "registered_implementation_type_names_sorted mismatch after curve register\n";
+            return 1;
+        }
     }
     auto over = kernel.plugins().register_curve_type(m2, std::make_unique<SampleCurvePlugin>());
     if (over.status != axiom::StatusCode::InvalidInput ||
@@ -536,6 +545,18 @@ int main() {
             return 1;
         }
 
+        auto via_reg_imp = k_imp.plugins().invoke_registered_importer("kernel_box_importer", "d.path");
+        if (via_reg_imp.status != axiom::StatusCode::Ok || !via_reg_imp.value.has_value() ||
+            via_reg_imp.value->value == 0) {
+            std::cerr << "invoke_registered_importer with host policy auto_validate should pass on valid box\n";
+            return 1;
+        }
+        auto via_reg_bad = k_imp.plugins().invoke_registered_importer("bogus_body_importer", "e.path");
+        if (via_reg_bad.status == axiom::StatusCode::Ok) {
+            std::cerr << "invoke_registered_importer expected post-import validate failure for invalid body id\n";
+            return 1;
+        }
+
         auto jsn_pol = k_imp.plugin_discovery_report_json();
         if (jsn_pol.status != axiom::StatusCode::Ok || !jsn_pol.value.has_value() ||
             jsn_pol.value->find("auto_validate_body_after_plugin_importer") == std::string::npos ||
@@ -844,6 +865,61 @@ int main() {
         if (mm.status != axiom::StatusCode::InvalidInput || mm.warnings.empty() ||
             mm.warnings[0].code != axiom::diag_codes::kPluginCapabilityIncomplete) {
             std::cerr << "plugin_create_curve desc type_name mismatch expected\n";
+            return 1;
+        }
+    }
+
+    {
+        axiom::Kernel kv;
+        axiom::PluginHostPolicy p0;
+        p0.require_plugin_api_version_match = false;
+        if (kv.set_plugin_host_policy(p0).status != axiom::StatusCode::Ok) {
+            std::cerr << "validate_plugin_manifests prep: set policy\n";
+            return 1;
+        }
+        axiom::PluginManifest ok_m;
+        ok_m.name = "ok_manifest_api";
+        ok_m.version = "1";
+        ok_m.vendor = "v";
+        ok_m.capabilities = {"x"};
+        ok_m.plugin_api_version = std::string(axiom::kPluginSdkApiVersion);
+        if (kv.plugins().register_manifest_only(ok_m).status != axiom::StatusCode::Ok) {
+            std::cerr << "validate_plugin_manifests prep: register ok\n";
+            return 1;
+        }
+        axiom::PluginManifest bad_m = ok_m;
+        bad_m.name = "bad_manifest_api";
+        bad_m.plugin_api_version = "0.0.0-axiom-test-incompatible";
+        if (kv.plugins().register_manifest_only(bad_m).status != axiom::StatusCode::Ok) {
+            std::cerr << "validate_plugin_manifests prep: register bad\n";
+            return 1;
+        }
+        axiom::PluginHostPolicy p1;
+        p1.require_plugin_api_version_match = true;
+        p1.plugin_api_version_match_mode = axiom::PluginApiVersionMatchMode::Exact;
+        if (kv.set_plugin_host_policy(p1).status != axiom::StatusCode::Ok) {
+            std::cerr << "validate_plugin_manifests prep: tighten policy\n";
+            return 1;
+        }
+        std::vector<std::string> details;
+        auto vr = kv.validate_plugin_manifests(&details);
+        if (vr.status != axiom::StatusCode::InvalidInput || details.size() != 1) {
+            std::cerr << "validate_plugin_manifests expected one failure\n";
+            return 1;
+        }
+        if (details[0].find("bad_manifest_api") == std::string::npos) {
+            std::cerr << "validate_plugin_manifests detail should name failing manifest\n";
+            return 1;
+        }
+        auto vr2 = kv.validate_plugin_manifests(nullptr);
+        if (vr2.status != axiom::StatusCode::InvalidInput) {
+            std::cerr << "validate_plugin_manifests without details should still fail\n";
+            return 1;
+        }
+        axiom::Kernel kclean;
+        details.clear();
+        if (kclean.validate_plugin_manifests(&details).status != axiom::StatusCode::Ok || !details.empty()) {
+            std::cerr << "validate_plugin_manifests empty registry should ok\n";
             return 1;
         }
     }

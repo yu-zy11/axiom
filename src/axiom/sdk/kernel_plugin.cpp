@@ -7,29 +7,10 @@
 #include "axiom/plugin/plugin_sdk_version.h"
 
 #include <algorithm>
-#include <cmath>
 #include <sstream>
 #include <string>
 
 namespace axiom {
-namespace {
-
-Result<void> plugin_curve_host_consistency_core(detail::KernelState& st, CurveService& cs, CurveId cid) {
-  if (!detail::has_curve(st, cid)) {
-    return error_void(StatusCode::InvalidInput, {}, {});
-  }
-  const auto dom = cs.domain(cid);
-  if (dom.status != StatusCode::Ok || !dom.value.has_value()) {
-    return error_void(dom.status, dom.diagnostic_id, std::move(dom.warnings));
-  }
-  const auto& d = *dom.value;
-  if (!std::isless(d.min, d.max)) {
-    return error_void(StatusCode::OperationFailed, {}, {});
-  }
-  return ok_void({});
-}
-
-}  // namespace
 
 using namespace kernel_plugin_helpers;
 
@@ -352,24 +333,21 @@ Result<std::vector<std::string>> Kernel::plugin_api_compatibility_report_lines()
   return ok_result(std::move(lines), state_->create_diagnostic("已生成插件 API 兼容性报告"));
 }
 
+Result<void> Kernel::validate_plugin_manifests(std::vector<std::string>* failure_details) const {
+  return state_->plugin_registry.validate_all_manifests(failure_details);
+}
+
 Result<void> Kernel::validate_after_plugin_mutation(BodyId body_id, ValidationMode mode) {
   return validate().validate_all(body_id, mode);
 }
 
 Result<BodyId> Kernel::plugin_import_file(std::string_view implementation_type_name, std::string_view path,
                                           ValidationMode validation_mode) {
-  auto r = state_->plugin_registry.invoke_registered_importer(implementation_type_name, path);
+  auto r = state_->plugin_registry.invoke_registered_importer(implementation_type_name, path, validation_mode);
   if (r.status != StatusCode::Ok || !r.value.has_value()) {
     return attach_plugin_import_body_diag(*state_, std::move(r));
   }
-  const BodyId bid = *r.value;
-  if (state_->config.plugin_host_policy.auto_validate_body_after_plugin_importer) {
-    const auto v = validate().validate_all(bid, validation_mode);
-    if (v.status != StatusCode::Ok) {
-      return attach_plugin_post_import_validate_fail_diag(*state_, bid, v);
-    }
-  }
-  return ok_result(bid, state_->create_diagnostic("插件导入完成"));
+  return ok_result(*r.value, state_->create_diagnostic("插件导入完成"));
 }
 
 Result<void> Kernel::plugin_export_file(std::string_view implementation_type_name, BodyId body_id, std::string_view path,
@@ -379,14 +357,7 @@ Result<void> Kernel::plugin_export_file(std::string_view implementation_type_nam
         *state_, error_void(StatusCode::InvalidInput, {},
                             {Warning {std::string(diag_codes::kPluginExecutionFailure), "插件导出失败：Body 不存在"}}));
   }
-  const auto& pol = state_->config.plugin_host_policy;
-  if (pol.auto_validate_body_before_plugin_exporter) {
-    const auto v = validate().validate_all(body_id, validation_mode);
-    if (v.status != StatusCode::Ok) {
-      return attach_plugin_pre_export_validate_fail_diag(*state_, body_id, v);
-    }
-  }
-  auto r = state_->plugin_registry.invoke_registered_exporter(implementation_type_name, body_id, path);
+  auto r = state_->plugin_registry.invoke_registered_exporter(implementation_type_name, body_id, path, validation_mode);
   if (r.status != StatusCode::Ok) {
     return attach_plugin_export_body_diag(*state_, std::move(r));
   }
@@ -400,19 +371,11 @@ Result<OpReport> Kernel::plugin_run_repair(std::string_view implementation_type_
         *state_, error_result<OpReport>(StatusCode::InvalidInput, {},
                                         {Warning {std::string(diag_codes::kPluginExecutionFailure), "插件修复失败：Body 不存在"}}));
   }
-  auto r = state_->plugin_registry.invoke_registered_repair(implementation_type_name, body_id, repair_mode);
+  auto r = state_->plugin_registry.invoke_registered_repair(implementation_type_name, body_id, repair_mode, validation_mode);
   if (r.status != StatusCode::Ok || !r.value.has_value()) {
     return attach_plugin_repair_exec_diag(*state_, std::move(r));
   }
-  OpReport report = *r.value;
-  if (state_->config.plugin_host_policy.auto_validate_body_after_plugin_repair) {
-    const BodyId target = plugin_repair_validation_body(*state_, body_id, report);
-    const auto v = validate().validate_all(target, validation_mode);
-    if (v.status != StatusCode::Ok) {
-      return attach_plugin_post_repair_validate_fail_diag(*state_, target, v);
-    }
-  }
-  return ok_result(std::move(report), state_->create_diagnostic("插件修复完成"));
+  return ok_result(std::move(*r.value), state_->create_diagnostic("插件修复完成"));
 }
 
 Result<bool> Kernel::has_service_plugin_curve() const {
@@ -424,7 +387,7 @@ Result<bool> Kernel::has_service_plugin_verify_curve() const {
 }
 
 Result<void> Kernel::verify_after_plugin_curve(CurveId curve_id) {
-  const auto v = plugin_curve_host_consistency_core(*state_, curve_service(), curve_id);
+  const auto v = plugin_curve_host_consistency_check(state_, curve_id);
   if (v.status != StatusCode::Ok) {
     return attach_plugin_curve_consistency_verify_diag(*state_, curve_id, std::move(v));
   }
@@ -436,14 +399,7 @@ Result<CurveId> Kernel::plugin_create_curve(std::string_view implementation_type
   if (r.status != StatusCode::Ok || !r.value.has_value()) {
     return attach_plugin_curve_create_diag(*state_, std::move(r));
   }
-  const CurveId cid = *r.value;
-  if (state_->config.plugin_host_policy.auto_verify_curve_after_plugin_curve) {
-    const auto v = plugin_curve_host_consistency_core(*state_, curve_service(), cid);
-    if (v.status != StatusCode::Ok) {
-      return attach_plugin_post_curve_verify_fail_diag(*state_, cid, std::move(v));
-    }
-  }
-  return ok_result(cid, state_->create_diagnostic("插件曲线创建完成"));
+  return ok_result(*r.value, state_->create_diagnostic("插件曲线创建完成"));
 }
 
 }  // namespace axiom

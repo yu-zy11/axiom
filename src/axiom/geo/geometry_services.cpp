@@ -4,12 +4,14 @@
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <span>
 #include <sstream>
 
 #include "axiom/internal/core/diagnostic_helpers.h"
 #include "axiom/internal/core/kernel_state.h"
 #include "axiom/internal/geo/geo_service_internal.h"
+#include "axiom/internal/math/math_internal_utils.h"
 #include "axiom/internal/geo/geometry_detail_bezier.h"
 
 namespace axiom {

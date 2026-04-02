@@ -22,6 +22,7 @@
 #include "axiom/internal/rep/representation_internal_utils.h"
 
 #include "axiom/internal/io/io_service_internal.h"
+#include "axiom/internal/io/step_iges_standard_scan.h"
 
 namespace axiom {
 

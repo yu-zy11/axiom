@@ -41,6 +41,15 @@ const axiom::Issue* find_issue(const axiom::DiagnosticReport& report, std::strin
     return nullptr;
 }
 
+bool has_issue_stage(const axiom::DiagnosticReport& report, std::string_view stage) {
+    for (const auto& issue : report.issues) {
+        if (issue.stage == stage) {
+            return true;
+        }
+    }
+    return false;
+}
+
 }  // namespace
 
 int main() {
@@ -388,9 +397,21 @@ int main() {
         std::cerr << "expected failed inward offset\n";
         return 1;
     }
+    auto bad_offset_diag = kernel.diagnostics().get(bad_offset.diagnostic_id);
+    if (bad_offset_diag.status != axiom::StatusCode::Ok || !bad_offset_diag.value.has_value() ||
+        !has_issue_stage(*bad_offset_diag.value, "modify.offset.self_intersection")) {
+        std::cerr << "expected staged diagnostic for failed inward offset\n";
+        return 1;
+    }
     auto shell_too_thick = kernel.modify().shell_body(*box_a.value, {}, 4.9999995);
     if (shell_too_thick.status != axiom::StatusCode::OperationFailed) {
         std::cerr << "expected failed shell for tolerance-near thick wall\n";
+        return 1;
+    }
+    auto shell_thick_diag = kernel.diagnostics().get(shell_too_thick.diagnostic_id);
+    if (shell_thick_diag.status != axiom::StatusCode::Ok || !shell_thick_diag.value.has_value() ||
+        !has_issue_stage(*shell_thick_diag.value, "modify.shell.cavity_tolerance")) {
+        std::cerr << "expected staged diagnostic for shell cavity tolerance failure\n";
         return 1;
     }
     auto original_box_bbox_after_shell_fail = kernel.representation().bbox_of_body(*box_a.value);
@@ -522,7 +543,7 @@ int main() {
         return 1;
     }
 
-    // Stage-2 minimal: polygon profile extrude should materialize a real prism shell (6 faces).
+    // Stage-2 minimal: 矩形拉伸物化为三角剖分棱柱 BRep（顶/底各 2 三角 + 侧面 4×2，共 12 面；非工业「合并共面」语义）。
     axiom::ProfileRef rect;
     rect.label = "rect";
     rect.polygon_xyz = {{0.0, 0.0, 0.0}, {2.0, 0.0, 0.0}, {2.0, 1.0, 0.0}, {0.0, 1.0, 0.0}};
@@ -553,8 +574,8 @@ int main() {
         return 1;
     }
     auto prism_faces = kernel.topology().query().faces_of_shell(prism_shells.value->front());
-    if (prism_faces.status != axiom::StatusCode::Ok || !prism_faces.value.has_value() || prism_faces.value->size() != 6) {
-        std::cerr << "polygon extrude expected 6 faces\n";
+    if (prism_faces.status != axiom::StatusCode::Ok || !prism_faces.value.has_value() || prism_faces.value->size() != 12) {
+        std::cerr << "polygon rect extrude expected 12 triangulated prism faces\n";
         return 1;
     }
 
@@ -568,6 +589,12 @@ int main() {
     auto fillet_ok = kernel.blends().fillet_edges(*box_a.value, single_edge, 0.5);
     if (fillet_ok.status != axiom::StatusCode::Ok || !fillet_ok.value.has_value()) {
         std::cerr << "fillet_edges failed\n";
+        return 1;
+    }
+    auto fillet_ok_diag = kernel.diagnostics().get(fillet_ok.value->diagnostic_id);
+    if (fillet_ok_diag.status != axiom::StatusCode::Ok || !fillet_ok_diag.value.has_value() ||
+        !has_issue_stage(*fillet_ok_diag.value, "blend.fillet.placeholder")) {
+        std::cerr << "expected blend.fillet.placeholder staged diagnostic for fillet\n";
         return 1;
     }
     if (!has_warning_code(fillet_ok.value->warnings, axiom::diag_codes::kBlendApproximatePlaceholder)) {
@@ -600,7 +627,8 @@ int main() {
     }
     auto fillet_multi_diag = kernel.diagnostics().get(fillet_multi.value->diagnostic_id);
     if (fillet_multi_diag.status != axiom::StatusCode::Ok || !fillet_multi_diag.value.has_value() ||
-        !has_issue_code(*fillet_multi_diag.value, axiom::diag_codes::kBlendMultiEdgeCornerPlaceholder)) {
+        !has_issue_code(*fillet_multi_diag.value, axiom::diag_codes::kBlendMultiEdgeCornerPlaceholder) ||
+        !has_issue_stage(*fillet_multi_diag.value, "blend.fillet.multi_edge")) {
         std::cerr << "expected diagnostic issue kBlendMultiEdgeCornerPlaceholder for multi-edge fillet\n";
         return 1;
     }
@@ -705,7 +733,8 @@ int main() {
 
     auto delete_face_diag = kernel.diagnostics().get(delete_face_and_heal.value->diagnostic_id);
     if (delete_face_diag.status != axiom::StatusCode::Ok || !delete_face_diag.value.has_value() ||
-        !has_issue_code(*delete_face_diag.value, axiom::diag_codes::kHealFeatureRemovedWarning)) {
+        !has_issue_code(*delete_face_diag.value, axiom::diag_codes::kHealFeatureRemovedWarning) ||
+        !has_issue_stage(*delete_face_diag.value, "modify.delete_face.heal")) {
         std::cerr << "expected warning diagnostic for delete_face_and_heal\n";
         return 1;
     }

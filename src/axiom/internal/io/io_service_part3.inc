@@ -1,5 +1,3 @@
-}
-
 Result<void> IOService::rename_file(std::string_view from, std::string_view to) const {
     return move_file(from, to);
 }

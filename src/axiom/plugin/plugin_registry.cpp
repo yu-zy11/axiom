@@ -1,6 +1,9 @@
 #include "axiom/plugin/plugin_registry.h"
 
 #include "axiom/diag/error_codes.h"
+#include "axiom/heal/heal_services.h"
+#include "axiom/internal/core/kernel_state.h"
+#include "axiom/internal/sdk/kernel_plugin_helpers.h"
 #include "axiom/plugin/plugin_sdk_version.h"
 
 #include <algorithm>
@@ -185,6 +188,14 @@ Result<PluginHostPolicy> PluginRegistry::host_policy() const {
     return ok_result(host_policy_);
 }
 
+void PluginRegistry::bind_host_kernel_for_plugin_invocation(std::weak_ptr<detail::KernelState> kernel) {
+    host_kernel_ = std::move(kernel);
+}
+
+void PluginRegistry::clear_host_kernel_binding() {
+    host_kernel_ = {};
+}
+
 Result<void> PluginRegistry::validate_manifest(const PluginManifest& manifest) const {
     if (host_policy_.require_non_empty_manifest_name) {
         if (manifest.name.empty() || is_all_whitespace(manifest.name)) {
@@ -210,6 +221,28 @@ Result<void> PluginRegistry::validate_manifest(const PluginManifest& manifest) c
         }
     }
     return ok_void();
+}
+
+Result<void> PluginRegistry::validate_all_manifests(std::vector<std::string>* failure_details) const {
+    Result<void> first_fail = ok_void();
+    bool seen_fail = false;
+    for (const auto& m : manifests_) {
+        const auto v = validate_manifest(m);
+        if (v.status != StatusCode::Ok) {
+            if (failure_details) {
+                std::string line =
+                    (m.name.empty() || is_all_whitespace(m.name)) ? std::string("<unnamed>") : m.name;
+                line += ": ";
+                line += v.warnings.empty() ? std::string("validation failed") : v.warnings.front().message;
+                failure_details->push_back(std::move(line));
+            }
+            if (!seen_fail) {
+                first_fail = v;
+                seen_fail = true;
+            }
+        }
+    }
+    return seen_fail ? first_fail : ok_void();
 }
 
 Result<void> PluginRegistry::preflight_register_with_plugin(const PluginManifest& manifest, std::string_view impl_type_name,
@@ -309,7 +342,19 @@ Result<CurveId> PluginRegistry::invoke_registered_curve(std::string_view impleme
     }
     for (const auto& p : curve_plugins_) {
         if (p && trim_manifest_field(p->type_name()) == key) {
-            return p->create(desc);
+            auto r = p->create(desc);
+            if (r.status != StatusCode::Ok || !r.value.has_value()) {
+                return r;
+            }
+            if (host_policy_.auto_verify_curve_after_plugin_curve) {
+                if (auto sp = host_kernel_.lock()) {
+                    const auto v = kernel_plugin_helpers::plugin_curve_host_consistency_check(sp, *r.value);
+                    if (v.status != StatusCode::Ok) {
+                        return kernel_plugin_helpers::attach_plugin_post_curve_verify_fail_diag(*sp, *r.value, std::move(v));
+                    }
+                }
+            }
+            return r;
         }
     }
     return error_result<CurveId>(StatusCode::InvalidInput, {},
@@ -352,7 +397,8 @@ Result<void> PluginRegistry::register_importer(const PluginManifest& manifest, s
     return ok_void();
 }
 
-Result<BodyId> PluginRegistry::invoke_registered_importer(std::string_view implementation_type_name, std::string_view path) {
+Result<BodyId> PluginRegistry::invoke_registered_importer(std::string_view implementation_type_name, std::string_view path,
+                                                            ValidationMode validation_mode) {
     const auto key = trim_manifest_field(implementation_type_name);
     if (key.empty()) {
         return error_result<BodyId>(StatusCode::InvalidInput, {},
@@ -361,7 +407,21 @@ Result<BodyId> PluginRegistry::invoke_registered_importer(std::string_view imple
     }
     for (const auto& p : importer_plugins_) {
         if (p && trim_manifest_field(p->type_name()) == key) {
-            return p->import_file(path);
+            auto r = p->import_file(path);
+            if (r.status != StatusCode::Ok || !r.value.has_value()) {
+                return r;
+            }
+            const BodyId bid = *r.value;
+            if (host_policy_.auto_validate_body_after_plugin_importer) {
+                if (auto sp = host_kernel_.lock()) {
+                    ValidationService vs(sp);
+                    const auto v = vs.validate_all(bid, validation_mode);
+                    if (v.status != StatusCode::Ok) {
+                        return kernel_plugin_helpers::attach_plugin_post_import_validate_fail_diag(*sp, bid, std::move(v));
+                    }
+                }
+            }
+            return r;
         }
     }
     return error_result<BodyId>(StatusCode::InvalidInput, {},
@@ -387,7 +447,7 @@ Result<void> PluginRegistry::register_exporter(const PluginManifest& manifest, s
 }
 
 Result<void> PluginRegistry::invoke_registered_exporter(std::string_view implementation_type_name, BodyId body_id,
-                                                        std::string_view path) {
+                                                          std::string_view path, ValidationMode validation_mode) {
     const auto key = trim_manifest_field(implementation_type_name);
     if (key.empty()) {
         return error_void(StatusCode::InvalidInput, {},
@@ -396,6 +456,21 @@ Result<void> PluginRegistry::invoke_registered_exporter(std::string_view impleme
     }
     for (const auto& p : exporter_plugins_) {
         if (p && trim_manifest_field(p->type_name()) == key) {
+            if (host_policy_.auto_validate_body_before_plugin_exporter) {
+                if (auto sp = host_kernel_.lock()) {
+                    if (!detail::has_body(*sp, body_id)) {
+                        return kernel_plugin_helpers::attach_plugin_export_body_diag(
+                            *sp,
+                            error_void(StatusCode::InvalidInput, {},
+                                       {make_warn(diag_codes::kPluginExecutionFailure, "插件导出失败：Body 不存在")}));
+                    }
+                    ValidationService vs(sp);
+                    const auto v = vs.validate_all(body_id, validation_mode);
+                    if (v.status != StatusCode::Ok) {
+                        return kernel_plugin_helpers::attach_plugin_pre_export_validate_fail_diag(*sp, body_id, std::move(v));
+                    }
+                }
+            }
             return p->export_file(body_id, path);
         }
     }
@@ -404,7 +479,7 @@ Result<void> PluginRegistry::invoke_registered_exporter(std::string_view impleme
 }
 
 Result<OpReport> PluginRegistry::invoke_registered_repair(std::string_view implementation_type_name, BodyId body_id,
-                                                            RepairMode mode) {
+                                                            RepairMode mode, ValidationMode validation_mode) {
     const auto key = trim_manifest_field(implementation_type_name);
     if (key.empty()) {
         return error_result<OpReport>(StatusCode::InvalidInput, {},
@@ -413,7 +488,21 @@ Result<OpReport> PluginRegistry::invoke_registered_repair(std::string_view imple
     }
     for (const auto& p : repair_plugins_) {
         if (p && trim_manifest_field(p->type_name()) == key) {
-            return p->run(body_id, mode);
+            auto r = p->run(body_id, mode);
+            if (r.status != StatusCode::Ok || !r.value.has_value()) {
+                return r;
+            }
+            if (host_policy_.auto_validate_body_after_plugin_repair) {
+                if (auto sp = host_kernel_.lock()) {
+                    const BodyId target = kernel_plugin_helpers::plugin_repair_validation_body(*sp, body_id, *r.value);
+                    ValidationService vs(sp);
+                    const auto v = vs.validate_all(target, validation_mode);
+                    if (v.status != StatusCode::Ok) {
+                        return kernel_plugin_helpers::attach_plugin_post_repair_validate_fail_diag(*sp, target, std::move(v));
+                    }
+                }
+            }
+            return r;
         }
     }
     return error_result<OpReport>(StatusCode::InvalidInput, {},
@@ -743,6 +832,47 @@ Result<std::vector<std::string>> PluginRegistry::plugin_types_present() const {
     if (!importer_plugins_.empty()) out.push_back("importer");
     if (!exporter_plugins_.empty()) out.push_back("exporter");
     return ok_result(std::move(out));
+}
+
+Result<std::vector<std::string>> PluginRegistry::registered_implementation_type_names_sorted() const {
+    std::set<std::string> names;
+    for (const auto& p : curve_plugins_) {
+        if (!p) {
+            continue;
+        }
+        const auto t = trim_manifest_field(p->type_name());
+        if (!t.empty()) {
+            names.insert(std::string(t));
+        }
+    }
+    for (const auto& p : repair_plugins_) {
+        if (!p) {
+            continue;
+        }
+        const auto t = trim_manifest_field(p->type_name());
+        if (!t.empty()) {
+            names.insert(std::string(t));
+        }
+    }
+    for (const auto& p : importer_plugins_) {
+        if (!p) {
+            continue;
+        }
+        const auto t = trim_manifest_field(p->type_name());
+        if (!t.empty()) {
+            names.insert(std::string(t));
+        }
+    }
+    for (const auto& p : exporter_plugins_) {
+        if (!p) {
+            continue;
+        }
+        const auto t = trim_manifest_field(p->type_name());
+        if (!t.empty()) {
+            names.insert(std::string(t));
+        }
+    }
+    return ok_result(std::vector<std::string>(names.begin(), names.end()));
 }
 
 Result<std::vector<std::string>> PluginRegistry::infer_supported_io_formats() const {

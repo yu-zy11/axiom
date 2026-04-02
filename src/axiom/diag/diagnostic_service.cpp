@@ -49,6 +49,31 @@ std::string json_escape(std::string_view input) {
     return out;
 }
 
+void write_diagnostic_report_json_object(std::ostream& out, const DiagnosticReport& report) {
+    out << "{";
+    out << "\"id\":" << report.id.value << ",";
+    out << "\"summary\":\"" << json_escape(report.summary) << "\",";
+    out << "\"issues\":[";
+    for (std::size_t i = 0; i < report.issues.size(); ++i) {
+        const auto& issue = report.issues[i];
+        out << "{";
+        out << "\"code\":\"" << json_escape(issue.code) << "\",";
+        out << "\"severity\":\"" << json_escape(issue_severity_name(issue.severity)) << "\",";
+        out << "\"message\":\"" << json_escape(issue.message) << "\",";
+        out << "\"stage\":\"" << json_escape(issue.stage) << "\",";
+        out << "\"related_entities\":[";
+        for (std::size_t j = 0; j < issue.related_entities.size(); ++j) {
+            out << issue.related_entities[j];
+            if (j + 1 < issue.related_entities.size()) out << ",";
+        }
+        out << "]";
+        out << "}";
+        if (i + 1 < report.issues.size()) out << ",";
+    }
+    out << "]";
+    out << "}";
+}
+
 }  // namespace
 
 DiagnosticService::DiagnosticService(std::shared_ptr<detail::KernelState> state) : state_(std::move(state)) {}
@@ -132,28 +157,7 @@ Result<void> DiagnosticService::export_report_json(DiagnosticId id, std::string_
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
             "诊断JSON导出失败：无法打开输出文件", "诊断JSON导出失败");
     }
-    out << "{";
-    out << "\"id\":" << it->second.id.value << ",";
-    out << "\"summary\":\"" << json_escape(it->second.summary) << "\",";
-    out << "\"issues\":[";
-    for (std::size_t i = 0; i < it->second.issues.size(); ++i) {
-        const auto& issue = it->second.issues[i];
-        out << "{";
-        out << "\"code\":\"" << json_escape(issue.code) << "\",";
-        out << "\"severity\":\"" << json_escape(issue_severity_name(issue.severity)) << "\",";
-        out << "\"message\":\"" << json_escape(issue.message) << "\",";
-        out << "\"stage\":\"" << json_escape(issue.stage) << "\",";
-        out << "\"related_entities\":[";
-        for (std::size_t j = 0; j < issue.related_entities.size(); ++j) {
-            out << issue.related_entities[j];
-            if (j + 1 < issue.related_entities.size()) out << ",";
-        }
-        out << "]";
-        out << "}";
-        if (i + 1 < it->second.issues.size()) out << ",";
-    }
-    out << "]";
-    out << "}";
+    write_diagnostic_report_json_object(out, it->second);
     return ok_void(id);
 }
 
@@ -185,6 +189,32 @@ Result<std::vector<DiagnosticId>> DiagnosticService::find_by_issue_code(
     return ok_result(
         detail::diagnostic_find_by_issue_code(*state_, code, max_results),
         state_->create_diagnostic("已完成按问题码检索诊断"));
+}
+
+Result<std::vector<DiagnosticId>> DiagnosticService::find_by_issue_code_prefix(std::string_view code_prefix,
+                                                                               std::uint64_t max_results) const {
+    if (code_prefix.empty() || max_results == 0) {
+        return detail::invalid_input_result<std::vector<DiagnosticId>>(
+            *state_, diag_codes::kCoreParameterOutOfRange,
+            "按问题码前缀检索诊断失败：前缀为空或结果上限非法", "按问题码前缀检索诊断失败");
+    }
+    std::vector<DiagnosticId> out;
+    for (const auto& [id, report] : state_->diagnostics) {
+        if (out.size() >= max_results) {
+            break;
+        }
+        const bool hit = std::any_of(report.issues.begin(), report.issues.end(),
+                                     [&code_prefix](const Issue& issue) {
+                                         const std::string_view c = issue.code;
+                                         return c.size() >= code_prefix.size() &&
+                                                c.substr(0, code_prefix.size()) == code_prefix;
+                                     });
+        if (hit) {
+            out.push_back(DiagnosticId{id});
+        }
+    }
+    std::sort(out.begin(), out.end(), [](DiagnosticId a, DiagnosticId b) { return a.value < b.value; });
+    return ok_result(std::move(out), state_->create_diagnostic("已按问题码前缀检索诊断"));
 }
 
 Result<std::vector<DiagnosticId>> DiagnosticService::find_by_related_entity(
@@ -471,6 +501,151 @@ Result<void> DiagnosticService::export_reports_json(std::span<const DiagnosticId
     return ok_void(state_->create_diagnostic("已批量导出诊断JSON"));
 }
 
+Result<void> DiagnosticService::export_all_reports_json(std::string_view path) const {
+    if (path.empty()) {
+        return detail::invalid_input_void(
+            *state_, diag_codes::kIoExportFailure,
+            "全量诊断JSON导出失败：输出路径为空", "全量诊断JSON导出失败");
+    }
+    const auto sorted = ids_sorted_asc();
+    if (sorted.status != StatusCode::Ok || !sorted.value.has_value()) {
+        return error_result<void>(sorted.status, sorted.diagnostic_id);
+    }
+    std::ofstream out{std::string(path)};
+    if (!out) {
+        return detail::failed_void(
+            *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+            "全量诊断JSON导出失败：无法打开输出文件", "全量诊断JSON导出失败");
+    }
+    out << "{\"diagnostics\":[";
+    bool first = true;
+    for (const auto id : *sorted.value) {
+        const auto it = state_->diagnostics.find(id.value);
+        if (it == state_->diagnostics.end()) {
+            continue;
+        }
+        if (!first) {
+            out << ",";
+        }
+        first = false;
+        write_diagnostic_report_json_object(out, it->second);
+    }
+    out << "]}";
+    return ok_void(state_->create_diagnostic("已全量导出诊断JSON"));
+}
+
+Result<void> DiagnosticService::export_all_reports_txt(std::string_view path) const {
+    if (path.empty()) {
+        return detail::invalid_input_void(
+            *state_, diag_codes::kIoExportFailure,
+            "全量诊断文本导出失败：输出路径为空", "全量诊断文本导出失败");
+    }
+    const auto sorted = ids_sorted_asc();
+    if (sorted.status != StatusCode::Ok || !sorted.value.has_value()) {
+        return error_result<void>(sorted.status, sorted.diagnostic_id);
+    }
+    std::ofstream out{std::string(path)};
+    if (!out) {
+        return detail::failed_void(
+            *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+            "全量诊断文本导出失败：无法打开输出文件", "全量诊断文本导出失败");
+    }
+    bool first_report = true;
+    for (const auto id : *sorted.value) {
+        const auto it = state_->diagnostics.find(id.value);
+        if (it == state_->diagnostics.end()) {
+            continue;
+        }
+        if (!first_report) {
+            out << "\n";
+        }
+        first_report = false;
+        out << "DiagnosticId: " << it->second.id.value << '\n';
+        out << "Summary: " << it->second.summary << '\n';
+        for (const auto& issue : it->second.issues) {
+            out << "- [" << issue_severity_name(issue.severity) << "] "
+                << issue.code << ": " << issue.message;
+            if (!issue.stage.empty()) {
+                out << " | Stage:" << issue.stage;
+            }
+            if (!issue.related_entities.empty()) {
+                out << " | RelatedEntities:";
+                for (const auto entity : issue.related_entities) {
+                    out << ' ' << entity;
+                }
+            }
+            out << '\n';
+        }
+    }
+    return ok_void(state_->create_diagnostic("已全量导出诊断文本"));
+}
+
+Result<std::vector<DiagnosticId>> DiagnosticService::find_by_issue_stage(std::string_view stage,
+                                                                         std::uint64_t max_results) const {
+    if (stage.empty() || max_results == 0) {
+        return detail::invalid_input_result<std::vector<DiagnosticId>>(
+            *state_, diag_codes::kCoreParameterOutOfRange,
+            "按阶段检索诊断失败：阶段字符串为空或结果上限非法", "按阶段检索诊断失败");
+    }
+    std::vector<DiagnosticId> out;
+    for (const auto& [id, report] : state_->diagnostics) {
+        if (out.size() >= max_results) {
+            break;
+        }
+        const bool hit = std::any_of(report.issues.begin(), report.issues.end(),
+                                     [&stage](const Issue& issue) { return issue.stage == stage; });
+        if (hit) {
+            out.push_back(DiagnosticId{id});
+        }
+    }
+    std::sort(out.begin(), out.end(), [](DiagnosticId a, DiagnosticId b) { return a.value < b.value; });
+    return ok_result(std::move(out), state_->create_diagnostic("已按问题阶段检索诊断"));
+}
+
+Result<std::vector<DiagnosticId>> DiagnosticService::find_by_issue_stage_prefix(std::string_view stage_prefix,
+                                                                              std::uint64_t max_results) const {
+    if (stage_prefix.empty() || max_results == 0) {
+        return detail::invalid_input_result<std::vector<DiagnosticId>>(
+            *state_, diag_codes::kCoreParameterOutOfRange,
+            "按阶段前缀检索诊断失败：前缀为空或结果上限非法", "按阶段前缀检索诊断失败");
+    }
+    std::vector<DiagnosticId> out;
+    for (const auto& [id, report] : state_->diagnostics) {
+        if (out.size() >= max_results) {
+            break;
+        }
+        const bool hit =
+            std::any_of(report.issues.begin(), report.issues.end(), [&stage_prefix](const Issue& issue) {
+                const std::string_view st = issue.stage;
+                return st.size() >= stage_prefix.size() && st.substr(0, stage_prefix.size()) == stage_prefix;
+            });
+        if (hit) {
+            out.push_back(DiagnosticId{id});
+        }
+    }
+    std::sort(out.begin(), out.end(), [](DiagnosticId a, DiagnosticId b) { return a.value < b.value; });
+    return ok_result(std::move(out), state_->create_diagnostic("已按问题阶段前缀检索诊断"));
+}
+
+Result<std::uint64_t> DiagnosticService::total_issues_with_stage_prefix(std::string_view stage_prefix) const {
+    if (stage_prefix.empty()) {
+        return detail::invalid_input_result<std::uint64_t>(
+            *state_, diag_codes::kCoreParameterOutOfRange,
+            "按阶段前缀累计 issue 失败：前缀为空", "按阶段前缀累计 issue 失败");
+    }
+    std::uint64_t total = 0;
+    for (const auto& [id, report] : state_->diagnostics) {
+        (void)id;
+        for (const auto& issue : report.issues) {
+            const std::string_view st = issue.stage;
+            if (st.size() >= stage_prefix.size() && st.substr(0, stage_prefix.size()) == stage_prefix) {
+                ++total;
+            }
+        }
+    }
+    return ok_result(total, state_->create_diagnostic("已累计阶段前缀匹配的 issue 条数"));
+}
+
 Result<std::vector<DiagnosticId>> DiagnosticService::all_ids() const {
     std::vector<DiagnosticId> out;
     out.reserve(state_->diagnostics.size());
@@ -534,6 +709,24 @@ Result<std::vector<std::pair<std::string, std::uint64_t>>> DiagnosticService::to
     std::sort(out.begin(), out.end(), [](const auto& a, const auto& b){ return a.second > b.second; });
     if (out.size() > max_results) out.resize(static_cast<std::size_t>(max_results));
     return ok_result(std::move(out), state_->create_diagnostic("已生成问题码排行"));
+}
+
+Result<std::vector<std::pair<std::string, std::uint64_t>>> DiagnosticService::top_issue_stages(
+    std::uint64_t max_results) const {
+    if (max_results == 0) {
+        return detail::invalid_input_result<std::vector<std::pair<std::string, std::uint64_t>>>(
+            *state_, diag_codes::kCoreParameterOutOfRange, "问题阶段排行失败：上限非法", "问题阶段排行失败");
+    }
+    const auto hist = issue_stage_histogram();
+    if (hist.status != StatusCode::Ok || !hist.value.has_value()) {
+        return error_result<std::vector<std::pair<std::string, std::uint64_t>>>(hist.status, hist.diagnostic_id);
+    }
+    std::vector<std::pair<std::string, std::uint64_t>> out(hist.value->begin(), hist.value->end());
+    std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+    if (out.size() > max_results) {
+        out.resize(static_cast<std::size_t>(max_results));
+    }
+    return ok_result(std::move(out), state_->create_diagnostic("已生成问题阶段排行"));
 }
 
 Result<std::vector<std::pair<std::uint64_t, std::uint64_t>>> DiagnosticService::top_entities(std::uint64_t max_results) const {
@@ -653,6 +846,44 @@ Result<void> DiagnosticService::export_grouped_by_severity_json(std::string_view
     for (const auto& [sev, count] : *hist.value) { if (!first) out << ","; first = false; out << "\"" << sev << "\":" << count; }
     out << "}}";
     return ok_void(state_->create_diagnostic("已按严重级别导出JSON分组"));
+}
+
+Result<std::unordered_map<std::string, std::uint64_t>> DiagnosticService::issue_stage_histogram() const {
+    std::unordered_map<std::string, std::uint64_t> out;
+    for (const auto& [id, rep] : state_->diagnostics) {
+        (void)id;
+        for (const auto& issue : rep.issues) {
+            ++out[issue.stage.empty() ? std::string("(unset)") : issue.stage];
+        }
+    }
+    return ok_result(std::move(out), state_->create_diagnostic("已统计问题阶段直方图"));
+}
+
+Result<void> DiagnosticService::export_grouped_by_stage_txt(std::string_view path) const {
+    if (path.empty()) return detail::invalid_input_void(*state_, diag_codes::kIoExportFailure, "分组导出失败：路径为空", "分组导出失败");
+    std::ofstream out{std::string(path)};
+    if (!out) return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure, "分组导出失败：无法打开文件", "分组导出失败");
+    const auto hist = issue_stage_histogram();
+    if (hist.status != StatusCode::Ok || !hist.value.has_value()) return error_result<void>(hist.status, hist.diagnostic_id);
+    for (const auto& [stage, count] : *hist.value) out << stage << ": " << count << "\n";
+    return ok_void(state_->create_diagnostic("已按工作流阶段导出文本分组"));
+}
+
+Result<void> DiagnosticService::export_grouped_by_stage_json(std::string_view path) const {
+    if (path.empty()) return detail::invalid_input_void(*state_, diag_codes::kIoExportFailure, "分组导出失败：路径为空", "分组导出失败");
+    std::ofstream out{std::string(path)};
+    if (!out) return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure, "分组导出失败：无法打开文件", "分组导出失败");
+    const auto hist = issue_stage_histogram();
+    if (hist.status != StatusCode::Ok || !hist.value.has_value()) return error_result<void>(hist.status, hist.diagnostic_id);
+    out << "{\"stages\":{";
+    bool first = true;
+    for (const auto& [stage, count] : *hist.value) {
+        if (!first) out << ",";
+        first = false;
+        out << "\"" << json_escape(stage) << "\":" << count;
+    }
+    out << "}}";
+    return ok_void(state_->create_diagnostic("已按工作流阶段导出JSON分组"));
 }
 
 Result<std::vector<std::string>> DiagnosticService::summaries_by_ids(std::span<const DiagnosticId> ids) const {

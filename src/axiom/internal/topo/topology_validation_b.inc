@@ -219,14 +219,16 @@ Result<void> TopologyValidationService::validate_shell(ShellId shell_id) const {
       const auto msg = "壳可能未闭合：边 " + std::to_string(edge_value) +
                        " 使用次数为 " + std::to_string(use_count);
       out.warnings.push_back(detail::make_warning(diag_codes::kTopoOpenBoundary, msg));
-      state_->append_diagnostic_issue(
-          diag, detail::make_warning_issue(diag_codes::kTopoOpenBoundary, msg));
+      auto ob = detail::make_warning_issue(diag_codes::kTopoOpenBoundary, msg);
+      ob.related_entities = {shell_id.value, edge_value};
+      state_->append_diagnostic_issue(diag, std::move(ob));
     } else if (use_count > 2) {
       const auto msg = "壳可能存在非流形边：边 " + std::to_string(edge_value) +
                        " 使用次数为 " + std::to_string(use_count);
       out.warnings.push_back(detail::make_warning(diag_codes::kTopoNonManifoldEdge, msg));
-      state_->append_diagnostic_issue(
-          diag, detail::make_warning_issue(diag_codes::kTopoNonManifoldEdge, msg));
+      auto nm = detail::make_warning_issue(diag_codes::kTopoNonManifoldEdge, msg);
+      nm.related_entities = {shell_id.value, edge_value};
+      state_->append_diagnostic_issue(diag, std::move(nm));
     }
   }
   return out;
@@ -441,6 +443,33 @@ Result<void> TopologyValidationService::validate_body(BodyId body_id) const {
           diag_codes::kTopoRelationInconsistent,
           "体验证失败：shell_to_bodies 未列出本体（索引与体成员不一致）",
           "体验证失败", {body_id.value, shell_id.value});
+    }
+  }
+  // 同一拓扑面在标准 B-Rep 语义下只能属于一个壳；跨壳复用面通常表示索引/装配错误。
+  {
+    std::unordered_map<std::uint64_t, ShellId> face_owner_shell;
+    face_owner_shell.reserve(32);
+    for (const auto shell_id : body_it->second.shells) {
+      const auto shell_it = state_->shells.find(shell_id.value);
+      if (shell_it == state_->shells.end()) {
+        continue;
+      }
+      for (const auto face_id : shell_it->second.faces) {
+        const auto ins = face_owner_shell.emplace(face_id.value, shell_id);
+        if (!ins.second && ins.first->second.value != shell_id.value) {
+          return detail::failed_void(
+              *state_, StatusCode::InvalidTopology,
+              diag_codes::kTopoRelationInconsistent,
+              "体验证失败：同一拓扑面被体的多个壳同时引用（面应唯一属于一个壳）"
+              " (face=" +
+                  std::to_string(face_id.value) + ", shell_a=" +
+                  std::to_string(ins.first->second.value) + ", shell_b=" +
+                  std::to_string(shell_id.value) + ")",
+              "体验证失败",
+              {body_id.value, face_id.value, ins.first->second.value,
+               shell_id.value});
+        }
+      }
     }
   }
   for (const auto shell_id : body_it->second.shells) {

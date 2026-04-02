@@ -47,11 +47,14 @@ MeshRecord tessellate_face(const KernelState& state, FaceId face_id, const Tesse
 // Weld vertices by quantized position to improve connectivity across faces.
 // If normals are present, they are averaged on weld.
 // When texcoords are present (per-vertex), weld key includes quantized UV so seams stay valid.
-void weld_mesh_vertices_quantized(MeshRecord& mesh, bool weld_normals, Scalar position_quant_step);
-void weld_mesh_vertices(MeshRecord& mesh, bool weld_normals);
+void weld_mesh_vertices_quantized(MeshRecord& mesh, bool weld_normals, Scalar position_quant_step,
+                                  Scalar shading_split_angle_deg = static_cast<Scalar>(180));
+void weld_mesh_vertices(MeshRecord& mesh, const TessellationOptions& options);
 
 // Derive conversion/round-trip budgets from user tessellation options (explicit industrial closure).
 ConversionErrorBudget conversion_error_budget_from_tessellation(const TessellationOptions& options);
+/// Resolved budget + 输入基准，供 `export_conversion_error_budget_json` / CI 归档（与 `RoundTripReport::budget` 同形）。
+std::string conversion_error_budget_digest_json(const ConversionErrorBudget& budget);
 
 }  // namespace axiom::detail
 

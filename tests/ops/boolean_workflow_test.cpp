@@ -204,5 +204,129 @@ int main() {
         return 1;
     }
 
+    // Intersect 里程碑：重叠体在开启诊断时走求交/imprint 链；owned 拓扑可含多壳（来源面局部物化），
+    // 总面数须 > 6（非单壳纯 bbox 六面体占位）；Strict 须通过。
+    {
+        auto bx = kernel.primitives().box({0.0, 0.0, 0.0}, 100.0, 80.0, 30.0);
+        auto cy = kernel.primitives().cylinder({20.0, 20.0, 0.0}, {0.0, 0.0, 1.0}, 10.0, 30.0);
+        if (bx.status != axiom::StatusCode::Ok || cy.status != axiom::StatusCode::Ok ||
+            !bx.value.has_value() || !cy.value.has_value()) {
+            std::cerr << "failed to create boolean intersect inputs\n";
+            return 1;
+        }
+        axiom::BooleanOptions ix_opts;
+        ix_opts.diagnostics = true;
+        ix_opts.tolerance = kernel.tolerance().global_policy();
+        ix_opts.auto_repair = true;
+        auto ix = kernel.booleans().run(axiom::BooleanOp::Intersect, *bx.value, *cy.value, ix_opts);
+        if (ix.status != axiom::StatusCode::Ok || !ix.value.has_value()) {
+            std::cerr << "boolean intersect run failed\n";
+            return 1;
+        }
+        auto ix_faces_all = kernel.topology().query().faces_of_body(ix.value->output);
+        auto ix_strict = kernel.validate().validate_topology(ix.value->output, axiom::ValidationMode::Strict);
+        auto ix_valid = kernel.validate().validate_all(ix.value->output, axiom::ValidationMode::Standard);
+        if (ix_faces_all.status != axiom::StatusCode::Ok || !ix_faces_all.value.has_value() ||
+            ix_strict.status != axiom::StatusCode::Ok || ix_valid.status != axiom::StatusCode::Ok ||
+            ix_faces_all.value->size() < 7) {
+            std::cerr << "boolean intersect expected non-bbox owned topology (>=7 faces total) and strict/standard ok\n";
+            std::cerr << "  faces status=" << static_cast<int>(ix_faces_all.status)
+                      << " face_count=" << (ix_faces_all.value.has_value() ? ix_faces_all.value->size() : 0U) << "\n";
+            std::cerr << "  strict status=" << static_cast<int>(ix_strict.status)
+                      << " validate_all status=" << static_cast<int>(ix_valid.status) << "\n";
+            return 1;
+        }
+        auto ix_diag = kernel.diagnostics().get(ix.value->diagnostic_id);
+        bool ix_imprint = false;
+        if (ix_diag.status == axiom::StatusCode::Ok && ix_diag.value.has_value()) {
+            for (const auto& issue : ix_diag.value->issues) {
+                if (issue.code == axiom::diag_codes::kBoolImprintApplied ||
+                    issue.code == axiom::diag_codes::kBoolImprintSegmentApplied) {
+                    ix_imprint = true;
+                    break;
+                }
+            }
+        }
+        if (!ix_imprint) {
+            std::cerr << "boolean intersect expected imprint stage diagnostic\n";
+            return 1;
+        }
+        auto ix_props = kernel.query().mass_properties(ix.value->output);
+        if (ix_props.status != axiom::StatusCode::Ok || !ix_props.value.has_value() || ix_props.value->volume <= 0.0) {
+            std::cerr << "boolean intersect output mass properties invalid\n";
+            return 1;
+        }
+    }
+
+    // Union 里程碑：重叠并集体经来源面物化可产生多壳；总 owned 面数 > 6 且 Strict 通过（非仅合并包围盒的六面体单壳）。
+    {
+        auto u1 = kernel.primitives().box({0.0, 0.0, 0.0}, 40.0, 40.0, 20.0);
+        auto u2 = kernel.primitives().box({20.0, 20.0, 0.0}, 40.0, 40.0, 20.0);
+        if (u1.status != axiom::StatusCode::Ok || u2.status != axiom::StatusCode::Ok ||
+            !u1.value.has_value() || !u2.value.has_value()) {
+            std::cerr << "failed to create boolean union inputs\n";
+            return 1;
+        }
+        axiom::BooleanOptions un_opts;
+        un_opts.diagnostics = true;
+        un_opts.tolerance = kernel.tolerance().global_policy();
+        un_opts.auto_repair = true;
+        auto un = kernel.booleans().run(axiom::BooleanOp::Union, *u1.value, *u2.value, un_opts);
+        if (un.status != axiom::StatusCode::Ok || !un.value.has_value()) {
+            std::cerr << "boolean union run failed\n";
+            return 1;
+        }
+        auto un_faces_all = kernel.topology().query().faces_of_body(un.value->output);
+        auto un_strict = kernel.validate().validate_topology(un.value->output, axiom::ValidationMode::Strict);
+        auto un_valid = kernel.validate().validate_all(un.value->output, axiom::ValidationMode::Standard);
+        if (un_faces_all.status != axiom::StatusCode::Ok || !un_faces_all.value.has_value() ||
+            un_strict.status != axiom::StatusCode::Ok || un_valid.status != axiom::StatusCode::Ok ||
+            un_faces_all.value->size() < 7) {
+            std::cerr << "boolean union expected non-bbox owned topology (>=7 faces total) and strict/standard ok\n";
+            std::cerr << "  face_count=" << (un_faces_all.value.has_value() ? un_faces_all.value->size() : 0U) << "\n";
+            return 1;
+        }
+        auto un_props = kernel.query().mass_properties(un.value->output);
+        if (un_props.status != axiom::StatusCode::Ok || !un_props.value.has_value() || un_props.value->volume <= 0.0) {
+            std::cerr << "boolean union output mass properties invalid\n";
+            return 1;
+        }
+    }
+
+    // 解析球体 rhs：分类阶段应走 sphere_point_classification（工业布尔前置链路的可观测里程碑）。
+    {
+        auto box_sp = kernel.primitives().box({0.0, 0.0, 0.0}, 50.0, 50.0, 50.0);
+        auto sph = kernel.primitives().sphere({25.0, 25.0, 15.0}, 8.0);
+        if (box_sp.status != axiom::StatusCode::Ok || sph.status != axiom::StatusCode::Ok ||
+            !box_sp.value.has_value() || !sph.value.has_value()) {
+            std::cerr << "failed to create box/sphere boolean inputs\n";
+            return 1;
+        }
+        axiom::BooleanOptions sph_opts;
+        sph_opts.diagnostics = true;
+        sph_opts.tolerance = kernel.tolerance().global_policy();
+        sph_opts.auto_repair = true;
+        auto rsp = kernel.booleans().run(axiom::BooleanOp::Subtract, *box_sp.value, *sph.value, sph_opts);
+        if (rsp.status != axiom::StatusCode::Ok || !rsp.value.has_value()) {
+            std::cerr << "box minus sphere boolean failed\n";
+            return 1;
+        }
+        auto sp_diag = kernel.diagnostics().get(rsp.value->diagnostic_id);
+        bool found_sphere_cls = false;
+        if (sp_diag.status == axiom::StatusCode::Ok && sp_diag.value.has_value()) {
+            for (const auto& issue : sp_diag.value->issues) {
+                if (issue.code == axiom::diag_codes::kBoolClassificationCompleted &&
+                    issue.message.find("sphere_point_classification") != std::string::npos) {
+                    found_sphere_cls = true;
+                    break;
+                }
+            }
+        }
+        if (!found_sphere_cls) {
+            std::cerr << "expected sphere_point_classification in boolean classification diagnostic\n";
+            return 1;
+        }
+    }
+
     return 0;
 }

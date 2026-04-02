@@ -38,7 +38,7 @@
 
 - 代码实现路径按 `src/axiom/<module>/` 与 `include/axiom/<module>/` 对齐。
 - `cmake/AxiomKernelLibraries.cmake` 与文档路径引用已同步到新结构。
-- 当前仍观察到 `src/math/` 漂移迹象，后续需要做单独清理。
+- 未参与构建的 `src/math/**` 平行副本已随 **§2.7** 清理；`MathCore` 真源以 `src/axiom/math/**` 为准。
 
 ### 2.6 2026-04 文档治理批次
 
@@ -52,6 +52,11 @@
 - 删除未参与构建的 `src/math/math_internal_utils.cpp`，统一 `MathCore` 源码真源为 `src/axiom/math/**`。
 - 将纯验证/修复回归从 `tests/ops/ops_heal_test.cpp` 拆到 `tests/heal/heal_test.cpp`。
 - `axiom_ops_heal_test` 继续保留跨模块 ops/heal 工作流语义，`axiom_heal_test` 承载独立 HealCore 回归。
+
+### 2.8 2026-04-02 进度文档事实对齐
+
+- 《当前开发进度》增补 **§1.1 仓库事实入口**（`ctest` 以 `CMakeLists.txt` 为准、当前 **16** 条；实现/测试目录与 `MathCore` 真源约定）与 **§1.2 模块一句话快照**。
+- **§7 结论** 与上述事实入口、多入口回归（`heal` / `io` / `sdk`）及最大工业化缺口（`OpsCore`）表述对齐。
 
 ## 3. 仍需继续拆分的历史负担
 

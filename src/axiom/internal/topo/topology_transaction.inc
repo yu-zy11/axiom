@@ -104,7 +104,7 @@ TopologyTransaction::create_loop(std::span<const CoedgeId> coedges) {
   }
   if (has_duplicate_ids(coedges)) {
     return detail::failed_result<LoopId>(
-        *state_, StatusCode::InvalidTopology, diag_codes::kTopoLoopNotClosed,
+        *state_, StatusCode::InvalidTopology, diag_codes::kTopoLoopDuplicateEdge,
         "创建环失败：定向边序列包含重复引用", "创建环失败");
   }
   const auto id = LoopId{state_->allocate_id()};
@@ -113,7 +113,7 @@ TopologyTransaction::create_loop(std::span<const CoedgeId> coedges) {
   std::string reason;
   if (!validate_loop_record(*state_, loop, reason)) {
     std::string_view fail_code = diag_codes::kTopoLoopNotClosed;
-    if (reason == "环包含重复边引用") {
+    if (reason == "环包含重复边引用" || reason == "环包含重复定向边引用") {
       fail_code = diag_codes::kTopoLoopDuplicateEdge;
     }
     return detail::failed_result<LoopId>(*state_, StatusCode::InvalidTopology, fail_code,
@@ -530,8 +530,42 @@ Result<VersionId> TopologyTransaction::commit() {
         "事务提交失败：事务已关闭", "事务提交失败");
   }
   active_ = false;
-  return ok_result<VersionId>(state_->next_version++,
-                              state_->create_diagnostic("事务已提交"));
+  const VersionId assigned = state_->next_version;
+  state_->topology_commit_success_count += 1;
+  state_->topology_committed_write_operations_total += txn_write_ops_;
+  state_->topology_last_committed_version = assigned;
+  state_->topology_last_commit_write_operations = txn_write_ops_;
+  TopologyCommitWriteBreakdown snap{};
+  snap.created_vertices = static_cast<std::uint64_t>(created_vertices_.size());
+  snap.created_edges = static_cast<std::uint64_t>(created_edges_.size());
+  snap.created_coedges = static_cast<std::uint64_t>(created_coedges_.size());
+  snap.created_loops = static_cast<std::uint64_t>(created_loops_.size());
+  snap.created_faces = static_cast<std::uint64_t>(created_faces_.size());
+  snap.created_shells = static_cast<std::uint64_t>(created_shells_.size());
+  snap.created_bodies = static_cast<std::uint64_t>(created_bodies_.size());
+  snap.deleted_faces = txn_deleted_faces_;
+  snap.deleted_shells = txn_deleted_shells_;
+  snap.deleted_bodies = txn_deleted_bodies_;
+  snap.replaced_surfaces = txn_replaced_surfaces_;
+  snap.coedge_pcurve_binds = txn_coedge_pcurve_binds_;
+  snap.coedge_pcurve_clears = txn_coedge_pcurve_clears_;
+  state_->topology_last_commit_write_breakdown = snap;
+  auto& tot = state_->topology_committed_write_breakdown_totals;
+  tot.created_vertices += snap.created_vertices;
+  tot.created_edges += snap.created_edges;
+  tot.created_coedges += snap.created_coedges;
+  tot.created_loops += snap.created_loops;
+  tot.created_faces += snap.created_faces;
+  tot.created_shells += snap.created_shells;
+  tot.created_bodies += snap.created_bodies;
+  tot.deleted_faces += snap.deleted_faces;
+  tot.deleted_shells += snap.deleted_shells;
+  tot.deleted_bodies += snap.deleted_bodies;
+  tot.replaced_surfaces += snap.replaced_surfaces;
+  tot.coedge_pcurve_binds += snap.coedge_pcurve_binds;
+  tot.coedge_pcurve_clears += snap.coedge_pcurve_clears;
+  ++state_->next_version;
+  return ok_result<VersionId>(assigned, state_->create_diagnostic("事务已提交"));
 }
 
 Result<void> TopologyTransaction::rollback() {

@@ -1,9 +1,11 @@
 #include "axiom/internal/sdk/kernel_plugin_helpers.h"
 
 #include "axiom/diag/error_codes.h"
+#include "axiom/geo/geometry_services.h"
 #include "axiom/internal/core/kernel_state.h"
 
 #include <cctype>
+#include <cmath>
 #include <sstream>
 
 namespace axiom {
@@ -252,6 +254,25 @@ BodyId plugin_repair_validation_body(const detail::KernelState& st, BodyId input
     return rep.output;
   }
   return input;
+}
+
+Result<void> plugin_curve_host_consistency_check(const std::shared_ptr<detail::KernelState>& st, CurveId curve_id) {
+  if (!st) {
+    return error_void(StatusCode::InternalError, {}, {});
+  }
+  if (!detail::has_curve(*st, curve_id)) {
+    return error_void(StatusCode::InvalidInput, {}, {});
+  }
+  CurveService cs(st);
+  const auto dom = cs.domain(curve_id);
+  if (dom.status != StatusCode::Ok || !dom.value.has_value()) {
+    return error_void(dom.status, dom.diagnostic_id, std::move(dom.warnings));
+  }
+  const auto& d = *dom.value;
+  if (!std::isless(d.min, d.max)) {
+    return error_void(StatusCode::OperationFailed, {}, {});
+  }
+  return ok_void({});
 }
 
 }  // namespace kernel_plugin_helpers

@@ -17,6 +17,7 @@
 3. `docs/plan/AxiomKernel_几何引擎功能需求文档.md`
 4. `docs/plan/AxiomKernel_近期迭代与Backlog.md`
 5. `docs/plan/AxiomKernel_变更纪要.md`
+6. `docs/plan/AxiomKernel_STEP_IGES_标准交换实施路线.md`（标准 STEP/IGES 与当前子集边界、里程碑）
 
 ### 1.3 想看“公开接口和调用方式”
 
@@ -27,9 +28,10 @@
 ### 1.4 想看“测试、质量和发布约束”
 
 1. `docs/quality/AxiomKernel_测试与验收方案.md`
-2. `docs/quality/AxiomKernel_基准数据集与性能管理规范.md`
-3. `docs/templates/AxiomKernel_合并请求模板.md`
-4. `docs/templates/AxiomKernel_代码评审清单模板.md`
+2. `docs/quality/AxiomKernel_IO_导出策略矩阵.md`（`ExportOptions` 与网格导出门禁口径）
+3. `docs/quality/AxiomKernel_基准数据集与性能管理规范.md`
+4. `docs/templates/AxiomKernel_合并请求模板.md`
+5. `docs/templates/AxiomKernel_代码评审清单模板.md`
 
 ## 2. 单一事实来源
 

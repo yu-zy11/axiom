@@ -97,5 +97,21 @@ inline Result<void> failed_void(KernelState& state, StatusCode status, std::stri
     return error_void(status, error_diag(state, std::move(summary), code, std::move(message), std::move(related_entities)));
 }
 
+/// 失败诊断 issue 带工作流 `stage`（如 `heal.validation.tolerance`），供阶段检索与 CI 聚合。
+inline Result<void> failed_void(KernelState& state, StatusCode status, std::string_view code, std::string message,
+                                std::string summary, std::string_view stage) {
+    Issue issue = make_error_issue(code, std::move(message));
+    issue.stage = std::string(stage);
+    return error_void(status, state.create_diagnostic(std::move(summary), {std::move(issue)}));
+}
+
+inline Result<void> failed_void(KernelState& state, StatusCode status, std::string_view code, std::string message,
+                                std::string summary, std::vector<std::uint64_t> related_entities,
+                                std::string_view stage) {
+    Issue issue = make_error_issue(code, std::move(message), std::move(related_entities));
+    issue.stage = std::string(stage);
+    return error_void(status, state.create_diagnostic(std::move(summary), {std::move(issue)}));
+}
+
 }  // namespace axiom::detail
 

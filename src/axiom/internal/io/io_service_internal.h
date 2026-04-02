@@ -51,6 +51,13 @@ std::vector<std::uint8_t> build_zip_store_archive(
     const std::vector<std::pair<std::string, std::vector<std::uint8_t>>>& files);
 bool zip_parse_stored_locals(const std::vector<std::uint8_t>& z,
                              std::vector<std::pair<std::string, std::vector<std::uint8_t>>>& out_files);
+Result<void> reject_if_export_directory_not_writable(detail::KernelState& state, std::string_view path);
+/// 读取常规文件至多 `max_bytes`（用于 STEP/IGES 子集/探测）；失败返回 nullopt。
+std::optional<std::string> read_regular_file_bytes_limited(std::string_view path, std::size_t max_bytes);
+/// 若内容像 **标准 STEP 物理文件**（DATA 段含 `#n=ENTITY` 实例）且非 Axiom 可解析子集，返回 true（应拒绝导入并提示集成全量内核）。
+bool step_file_requires_full_standard_importer(std::string_view file_text);
+/// 若内容像 **标准 IGES 卡片流**且非 Axiom 元数据子集，返回 true。
+bool iges_file_requires_full_standard_importer(std::string_view file_text);
 Result<void> mesh_export_strict_gate(detail::KernelState& state, RepresentationConversionService& convert, MeshId mesh_id,
                                      const ExportOptions& options, BodyId body_id);
 Result<void> mesh_export_write_validation_sidecar(detail::KernelState& state, RepresentationConversionService& convert,
@@ -74,6 +81,27 @@ std::optional<std::string> parse_gltf_embedded_minimal(std::string_view json, de
 void append_issues_from_import_diag(detail::KernelState* state, std::vector<Issue>& issues, std::vector<Warning>& warnings,
                                     DiagnosticId diagnostic_id,
                                     std::initializer_list<std::uint64_t> fallback_related_entities);
+DiagnosticId merge_batch_import_failure_diagnostic(detail::KernelState& state, std::string_view format_label_cn,
+                                                   std::size_t index, std::string_view path, DiagnosticId child_diag_id);
+DiagnosticId merge_batch_export_failure_diagnostic(detail::KernelState& state, std::string_view format_label_cn,
+                                                   std::size_t index, BodyId body_id, std::string_view path,
+                                                   DiagnosticId child_diag_id);
+DiagnosticId merge_batch_detect_format_failure_diagnostic(detail::KernelState& state, std::size_t index,
+                                                          std::string_view path, DiagnosticId child_diag_id);
+DiagnosticId merge_batch_read_failure_diagnostic(detail::KernelState& state, std::size_t index, std::string_view path,
+                                                 DiagnosticId child_diag_id);
+DiagnosticId merge_batch_compare_failure_diagnostic(detail::KernelState& state, std::size_t index, std::string_view lhs_path,
+                                                    std::string_view rhs_path, DiagnosticId child_diag_id);
+DiagnosticId merge_batch_path_op_failure_diagnostic(detail::KernelState& state, std::size_t index, std::string_view path,
+                                                    DiagnosticId child_diag_id, std::string_view op_label_cn);
+DiagnosticId merge_batch_path_transform_failure_diagnostic(detail::KernelState& state, std::size_t index,
+                                                         std::string_view path_hint, DiagnosticId child_diag_id,
+                                                         std::string_view op_label_cn,
+                                                         std::string_view stage_sv = "io.batch_path_transform");
+/// 将用户给出的扩展名字符串（可含 `.`、前后空白）规范为无点小写 token；若去除空白后为空则返回 false。
+bool normalize_user_export_extension(std::string_view ext, std::string& out_dotless_lower);
+/// 将无点扩展名 token（小写）映射到与 `detect_format` / `export_auto` 一致的格式 id。
+bool export_format_from_extension_token(std::string_view token, std::string& out_format_id);
 BodyId run_post_import_validation_pipeline(const std::shared_ptr<detail::KernelState>& state, BodyId body_id,
                                              const ImportOptions& options, const std::string& format_cn,
                                              std::vector<Issue>& issues, std::vector<Warning>& warnings);

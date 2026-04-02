@@ -169,6 +169,29 @@ TopologyQueryService::edges_of_loop(LoopId loop_id) const {
   return ok_result(edges, state_->create_diagnostic("已查询环边集合"));
 }
 
+Result<std::vector<VertexId>>
+TopologyQueryService::vertices_of_loop(LoopId loop_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
+  const auto lit = state_->loops.find(loop_id.value);
+  if (lit == state_->loops.end()) {
+    return detail::invalid_input_result<std::vector<VertexId>>(
+        *state_, diag_codes::kTopoLoopNotClosed, "环查询失败：目标环不存在",
+        "环顶点序列查询失败");
+  }
+  std::vector<VertexId> vertices;
+  vertices.reserve(lit->second.coedges.size());
+  for (const auto coedge_id : lit->second.coedges) {
+    const auto ov = oriented_vertices(*state_, coedge_id);
+    if (!ov.has_value()) {
+      return detail::failed_result<std::vector<VertexId>>(
+          *state_, StatusCode::InvalidTopology, diag_codes::kTopoLoopNotClosed,
+          "环查询失败：无法解析定向边的端点顺序", "环顶点序列查询失败");
+    }
+    vertices.push_back((*ov)[0]);
+  }
+  return ok_result(vertices, state_->create_diagnostic("已查询环顶点序列"));
+}
+
 Result<std::vector<LoopId>>
 TopologyQueryService::loops_of_face(FaceId face_id) const {
   TopoQueryAuditScope _topo_query_audit{state_};
@@ -1086,22 +1109,37 @@ TopologyQueryService::face_outer_loop_uv_bounds(FaceId face_id) const {
 }
 
 Result<std::vector<Point2>>
-TopologyQueryService::face_outer_loop_uv_polyline(FaceId face_id) const {
+TopologyQueryService::face_loop_uv_polyline(FaceId face_id, LoopId loop_id) const {
   TopoQueryAuditScope _topo_query_audit{state_};
   if (!detail::has_face(*state_, face_id)) {
     return detail::invalid_input_result<std::vector<Point2>>(
         *state_, diag_codes::kCoreInvalidHandle,
-        "面外环 UV 折线查询失败：目标面不存在", "面外环 UV 折线查询失败");
+        "面环 UV 折线查询失败：目标面不存在", "面环 UV 折线查询失败");
   }
   const auto &face = state_->faces.at(face_id.value);
-  const auto loop_it = state_->loops.find(face.outer_loop.value);
+  bool loop_ok = (loop_id.value == face.outer_loop.value);
+  if (!loop_ok) {
+    for (const auto &il : face.inner_loops) {
+      if (il.value == loop_id.value) {
+        loop_ok = true;
+        break;
+      }
+    }
+  }
+  if (!loop_ok) {
+    return detail::failed_result<std::vector<Point2>>(
+        *state_, StatusCode::InvalidInput, diag_codes::kCoreInvalidHandle,
+        "面环 UV 折线查询失败：环不属于该面", "面环 UV 折线查询失败",
+        std::vector<std::uint64_t>{face_id.value, loop_id.value});
+  }
+  const auto loop_it = state_->loops.find(loop_id.value);
   if (loop_it == state_->loops.end() || loop_it->second.coedges.empty()) {
     return error_result<std::vector<Point2>>(
         StatusCode::InvalidTopology,
         detail::error_diag(
-            *state_, "面外环 UV 折线查询失败", diag_codes::kTopoFaceOuterLoopInvalid,
-            "面外环 UV 折线查询失败：外环不存在或为空",
-            std::vector<std::uint64_t>{face_id.value, face.outer_loop.value}));
+            *state_, "面环 UV 折线查询失败", diag_codes::kTopoFaceOuterLoopInvalid,
+            "面环 UV 折线查询失败：环不存在或为空",
+            std::vector<std::uint64_t>{face_id.value, loop_id.value}));
   }
   std::vector<Point2> out;
   out.reserve(32);
@@ -1111,8 +1149,8 @@ TopologyQueryService::face_outer_loop_uv_polyline(FaceId face_id) const {
       return error_result<std::vector<Point2>>(
           StatusCode::InvalidTopology,
           detail::error_diag(
-              *state_, "面外环 UV 折线查询失败", diag_codes::kTopoFaceOuterLoopInvalid,
-              "面外环 UV 折线查询失败：共边记录缺失",
+              *state_, "面环 UV 折线查询失败", diag_codes::kTopoFaceOuterLoopInvalid,
+              "面环 UV 折线查询失败：共边记录缺失",
               std::vector<std::uint64_t>{face_id.value, coedge_id.value}));
     }
     const PCurveId pc_id = ce_it->second.pcurve_id;
@@ -1120,8 +1158,8 @@ TopologyQueryService::face_outer_loop_uv_polyline(FaceId face_id) const {
       return error_result<std::vector<Point2>>(
           StatusCode::InvalidTopology,
           detail::error_diag(
-              *state_, "面外环 UV 折线查询失败", diag_codes::kTopoRelationInconsistent,
-              "面外环 UV 折线查询失败：共边未绑定有效 PCurve",
+              *state_, "面环 UV 折线查询失败", diag_codes::kTopoRelationInconsistent,
+              "面环 UV 折线查询失败：共边未绑定有效 PCurve",
               std::vector<std::uint64_t>{face_id.value, coedge_id.value, pc_id.value}));
     }
     const auto &pc = state_->pcurves.at(pc_id.value);
@@ -1129,8 +1167,8 @@ TopologyQueryService::face_outer_loop_uv_polyline(FaceId face_id) const {
       return error_result<std::vector<Point2>>(
           StatusCode::NotImplemented,
           detail::error_diag(
-              *state_, "面外环 UV 折线查询失败", diag_codes::kCoreOperationUnsupported,
-              "面外环 UV 折线查询失败：暂仅支持折线型 PCurve",
+              *state_, "面环 UV 折线查询失败", diag_codes::kCoreOperationUnsupported,
+              "面环 UV 折线查询失败：暂仅支持折线型 PCurve",
               std::vector<std::uint64_t>{face_id.value, coedge_id.value, pc_id.value}));
     }
     for (const auto &q : pc.poles) {
@@ -1138,8 +1176,8 @@ TopologyQueryService::face_outer_loop_uv_polyline(FaceId face_id) const {
         return error_result<std::vector<Point2>>(
             StatusCode::DegenerateGeometry,
             detail::error_diag(
-                *state_, "面外环 UV 折线查询失败", diag_codes::kGeoDegenerateGeometry,
-                "面外环 UV 折线查询失败：PCurve 顶点含非法数值",
+                *state_, "面环 UV 折线查询失败", diag_codes::kGeoDegenerateGeometry,
+                "面环 UV 折线查询失败：PCurve 顶点含非法数值",
                 std::vector<std::uint64_t>{face_id.value, pc_id.value}));
       }
     }
@@ -1156,11 +1194,23 @@ TopologyQueryService::face_outer_loop_uv_polyline(FaceId face_id) const {
     return error_result<std::vector<Point2>>(
         StatusCode::DegenerateGeometry,
         detail::error_diag(
-            *state_, "面外环 UV 折线查询失败", diag_codes::kGeoDegenerateGeometry,
-            "面外环 UV 折线查询失败：有效顶点不足 3 个",
-            std::vector<std::uint64_t>{face_id.value}));
+            *state_, "面环 UV 折线查询失败", diag_codes::kGeoDegenerateGeometry,
+            "面环 UV 折线查询失败：有效顶点不足 3 个",
+            std::vector<std::uint64_t>{face_id.value, loop_id.value}));
   }
-  return ok_result(std::move(out), state_->create_diagnostic("已串联面外环 UV 折线"));
+  return ok_result(std::move(out), state_->create_diagnostic("已串联面环 UV 折线"));
+}
+
+Result<std::vector<Point2>>
+TopologyQueryService::face_outer_loop_uv_polyline(FaceId face_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
+  if (!detail::has_face(*state_, face_id)) {
+    return detail::invalid_input_result<std::vector<Point2>>(
+        *state_, diag_codes::kCoreInvalidHandle,
+        "面外环 UV 折线查询失败：目标面不存在", "面外环 UV 折线查询失败");
+  }
+  const auto &face = state_->faces.at(face_id.value);
+  return face_loop_uv_polyline(face_id, face.outer_loop);
 }
 
 Result<std::uint64_t>

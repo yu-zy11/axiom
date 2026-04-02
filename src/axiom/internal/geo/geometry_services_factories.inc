@@ -200,10 +200,65 @@ Result<CurveId> CurveFactory::make_bezier(std::span<const Point3> poles) {
 }
 
 Result<CurveId> CurveFactory::make_bspline(const BSplineCurveDesc &desc) {
-  if (desc.poles.empty()) {
+  if (desc.poles.size() < 2) {
     return detail::invalid_input_result<CurveId>(
         *state_, diag_codes::kGeoCurveCreationInvalid,
-        "BSpline 曲线创建失败：控制点不能为空", "BSpline 曲线创建失败");
+        "BSpline 曲线创建失败：至少需要两个控制点", "BSpline 曲线创建失败");
+  }
+  for (const auto &p : desc.poles) {
+    if (!finite_point(p)) {
+      return detail::invalid_input_result<CurveId>(
+          *state_, diag_codes::kGeoCurveCreationInvalid,
+          "BSpline 曲线创建失败：控制点包含非法数值", "BSpline 曲线创建失败");
+    }
+  }
+  const std::size_t n = desc.poles.size();
+  std::vector<Scalar> knots;
+  if (!desc.knots.empty()) {
+    int p = -1;
+    if (desc.degree >= 0) {
+      p = desc.degree;
+      if (desc.knots.size() != n + static_cast<std::size_t>(p) + 1) {
+        return detail::invalid_input_result<CurveId>(
+            *state_, diag_codes::kGeoCurveCreationInvalid,
+            "BSpline 曲线创建失败：结点数量与阶数、控制点数不一致", "BSpline 曲线创建失败");
+      }
+    } else {
+      p = static_cast<int>(desc.knots.size()) - static_cast<int>(n) - 1;
+      if (p < 1 || static_cast<std::size_t>(n) + static_cast<std::size_t>(p) + 1 != desc.knots.size()) {
+        return detail::invalid_input_result<CurveId>(
+            *state_, diag_codes::kGeoCurveCreationInvalid,
+            "BSpline 曲线创建失败：无法从结点向量推断有效阶数", "BSpline 曲线创建失败");
+      }
+    }
+    if (p < 1 || p >= static_cast<int>(n)) {
+      return detail::invalid_input_result<CurveId>(
+          *state_, diag_codes::kGeoCurveCreationInvalid,
+          "BSpline 曲线创建失败：阶数须满足 1 <= degree < 控制点数量", "BSpline 曲线创建失败");
+    }
+    knots = desc.knots;
+    for (const auto x : knots) {
+      if (!std::isfinite(x)) {
+        return detail::invalid_input_result<CurveId>(
+            *state_, diag_codes::kGeoCurveCreationInvalid,
+            "BSpline 曲线创建失败：结点包含非法数值", "BSpline 曲线创建失败");
+      }
+    }
+    for (std::size_t i = 1; i < knots.size(); ++i) {
+      if (knots[i] < knots[i - 1] - static_cast<Scalar>(1e-14)) {
+        return detail::invalid_input_result<CurveId>(
+            *state_, diag_codes::kGeoCurveCreationInvalid,
+            "BSpline 曲线创建失败：结点须为非减序列", "BSpline 曲线创建失败");
+      }
+    }
+  } else {
+    const int p_default = bspline_degree_for_control_count(n);
+    int p_use = desc.degree >= 0 ? desc.degree : p_default;
+    const int max_deg = std::max(1, static_cast<int>(n) - 1);
+    p_use = std::clamp(p_use, 1, max_deg);
+    knots = bspline_open_uniform_knots(n, p_use);
+    const Scalar target_end = std::max<Scalar>(1.0, static_cast<Scalar>(n - 1));
+    bspline_affine_scale_knots_to_span(knots, p_use, n, target_end);
   }
   const auto id = CurveId{state_->allocate_id()};
   state_->curves.emplace(
@@ -211,15 +266,15 @@ Result<CurveId> CurveFactory::make_bspline(const BSplineCurveDesc &desc) {
       make_curve_record(detail::CurveKind::BSpline, desc.poles.front(),
                         {1.0, 0.0, 0.0}, 0.0, {0.0, 0.0, 1.0},
                         {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, desc.poles, {},
-                        uniform_knot_vector(desc.poles.size())));
+                        std::move(knots)));
   return ok_result(id, state_->create_diagnostic("已创建BSpline曲线"));
 }
 
 Result<CurveId> CurveFactory::make_nurbs(const NURBSCurveDesc &desc) {
-  if (desc.poles.empty()) {
+  if (desc.poles.size() < 2) {
     return detail::invalid_input_result<CurveId>(
         *state_, diag_codes::kGeoCurveCreationInvalid,
-        "NURBS 曲线创建失败：控制点不能为空", "NURBS 曲线创建失败");
+        "NURBS 曲线创建失败：至少需要两个控制点", "NURBS 曲线创建失败");
   }
   if (!desc.weights.empty() && desc.weights.size() != desc.poles.size()) {
     return detail::invalid_input_result<CurveId>(
@@ -236,14 +291,55 @@ Result<CurveId> CurveFactory::make_nurbs(const NURBSCurveDesc &desc) {
         "NURBS 曲线创建失败：权重必须为有限正数且总和大于 0",
         "NURBS 曲线创建失败");
   }
+  const std::size_t n = desc.poles.size();
+  std::vector<Scalar> knots;
+  if (!desc.knots.empty()) {
+    int p = -1;
+    if (desc.degree >= 0) {
+      p = desc.degree;
+      if (desc.knots.size() != n + static_cast<std::size_t>(p) + 1) {
+        return detail::invalid_input_result<CurveId>(
+            *state_, diag_codes::kGeoCurveCreationInvalid,
+            "NURBS 曲线创建失败：结点数量与阶数、控制点数不一致", "NURBS 曲线创建失败");
+      }
+    } else {
+      p = static_cast<int>(desc.knots.size()) - static_cast<int>(n) - 1;
+      if (p < 1 || static_cast<std::size_t>(n) + static_cast<std::size_t>(p) + 1 != desc.knots.size()) {
+        return detail::invalid_input_result<CurveId>(
+            *state_, diag_codes::kGeoCurveCreationInvalid,
+            "NURBS 曲线创建失败：无法从结点向量推断有效阶数", "NURBS 曲线创建失败");
+      }
+    }
+    if (p < 1 || p >= static_cast<int>(n)) {
+      return detail::invalid_input_result<CurveId>(
+          *state_, diag_codes::kGeoCurveCreationInvalid,
+          "NURBS 曲线创建失败：阶数须满足 1 <= degree < 控制点数量", "NURBS 曲线创建失败");
+    }
+    knots = desc.knots;
+    for (const auto x : knots) {
+      if (!std::isfinite(x)) {
+        return detail::invalid_input_result<CurveId>(
+            *state_, diag_codes::kGeoCurveCreationInvalid,
+            "NURBS 曲线创建失败：结点包含非法数值", "NURBS 曲线创建失败");
+      }
+    }
+    for (std::size_t i = 1; i < knots.size(); ++i) {
+      if (knots[i] < knots[i - 1] - static_cast<Scalar>(1e-14)) {
+        return detail::invalid_input_result<CurveId>(
+            *state_, diag_codes::kGeoCurveCreationInvalid,
+            "NURBS 曲线创建失败：结点须为非减序列", "NURBS 曲线创建失败");
+      }
+    }
+  } else {
+    knots = nurbs_clamped_bezier_knots(n);
+  }
   const auto id = CurveId{state_->allocate_id()};
   state_->curves.emplace(
       id.value,
       make_curve_record(detail::CurveKind::Nurbs, desc.poles.front(),
                         {1.0, 0.0, 0.0}, 0.0, {0.0, 0.0, 1.0},
                         {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, desc.poles,
-                        std::move(normalized_weights),
-                        uniform_knot_vector(desc.poles.size())));
+                        std::move(normalized_weights), std::move(knots)));
   return ok_result(id, state_->create_diagnostic("已创建NURBS曲线"));
 }
 
@@ -487,7 +583,7 @@ Result<SurfaceId> SurfaceFactory::make_bspline(const BSplineSurfaceDesc &desc) {
       make_surface_record(detail::SurfaceKind::BSpline, desc.poles.front(),
                           {0.0, 0.0, 1.0}, {0.0, 0.0, 1.0}, 0.0, 0.0, 0.0, desc.poles, {},
                           std::move(knots_u), std::move(knots_v), SurfaceId{}, CurveId{}, 0.0,
-                          0.0, 0.0, 1.0, 0.0, 1.0, {}, 0.0, pu, pv));
+                          0.0, 0.0, 1.0, 0.0, 1.0, {}, {}, 0.0, pu, pv));
   return ok_result(id, state_->create_diagnostic("已创建BSpline曲面"));
 }
 
@@ -541,7 +637,7 @@ Result<SurfaceId> SurfaceFactory::make_nurbs(const NURBSSurfaceDesc &desc) {
                           {0.0, 0.0, 1.0}, {0.0, 0.0, 1.0}, 0.0, 0.0, 0.0, desc.poles,
                           std::move(normalized_weights), std::move(knots_u),
                           std::move(knots_v), SurfaceId{}, CurveId{}, 0.0, 0.0, 0.0, 1.0,
-                          0.0, 1.0, {}, 0.0, pu, pv));
+                          0.0, 1.0, {}, {}, 0.0, pu, pv));
   return ok_result(id, state_->create_diagnostic("已创建NURBS曲面"));
 }
 
@@ -660,6 +756,66 @@ Result<SurfaceId> SurfaceFactory::make_trimmed_polygon(SurfaceId base_surface, S
   return ok_result(id, state_->create_diagnostic("已创建修剪面"));
 }
 
+Result<SurfaceId> SurfaceFactory::make_trimmed_polygon_with_holes(
+    SurfaceId base_surface, Scalar u_min, Scalar u_max, Scalar v_min, Scalar v_max,
+    std::span<const Point2> uv_outer_loop,
+    const std::vector<std::vector<Point2>> &uv_holes) {
+  if (!detail::has_surface(*state_, base_surface) || !finite_scalar(u_min) ||
+      !finite_scalar(u_max) || !finite_scalar(v_min) || !finite_scalar(v_max)) {
+    return detail::invalid_input_result<SurfaceId>(
+        *state_, diag_codes::kGeoSurfaceCreationInvalid,
+        "修剪面创建失败：基曲面不存在或参数包含非法数值", "修剪面创建失败");
+  }
+  if (!(u_min < u_max) || !(v_min < v_max)) {
+    return detail::invalid_input_result<SurfaceId>(
+        *state_, diag_codes::kGeoSurfaceCreationInvalid,
+        "修剪面创建失败：修剪参数范围必须满足 min < max", "修剪面创建失败");
+  }
+  if (uv_outer_loop.size() < 3) {
+    return detail::invalid_input_result<SurfaceId>(
+        *state_, diag_codes::kGeoSurfaceCreationInvalid,
+        "修剪面创建失败：外环 UV 折线至少需要 3 个顶点", "修剪面创建失败");
+  }
+  std::vector<Point2> outer(uv_outer_loop.begin(), uv_outer_loop.end());
+  for (const auto &q : outer) {
+    if (!finite_scalar(q.x) || !finite_scalar(q.y)) {
+      return detail::invalid_input_result<SurfaceId>(
+          *state_, diag_codes::kGeoSurfaceCreationInvalid,
+          "修剪面创建失败：外环 UV 边界包含非法数值", "修剪面创建失败");
+    }
+  }
+  std::vector<std::vector<Point2>> holes;
+  holes.reserve(uv_holes.size());
+  for (const auto &hole : uv_holes) {
+    if (hole.size() < 3) {
+      return detail::invalid_input_result<SurfaceId>(
+          *state_, diag_codes::kGeoSurfaceCreationInvalid,
+          "修剪面创建失败：内环 UV 折线至少需要 3 个顶点", "修剪面创建失败");
+    }
+    std::vector<Point2> hcopy;
+    hcopy.reserve(hole.size());
+    for (const auto &q : hole) {
+      if (!finite_scalar(q.x) || !finite_scalar(q.y)) {
+        return detail::invalid_input_result<SurfaceId>(
+            *state_, diag_codes::kGeoSurfaceCreationInvalid,
+            "修剪面创建失败：内环 UV 边界包含非法数值", "修剪面创建失败");
+      }
+      hcopy.push_back(q);
+    }
+    holes.push_back(std::move(hcopy));
+  }
+  const auto &base = state_->surfaces.at(base_surface.value);
+  const auto id = SurfaceId{state_->allocate_id()};
+  state_->surfaces.emplace(
+      id.value,
+      make_surface_record(detail::SurfaceKind::Trimmed, base.origin, base.axis,
+                          base.normal, base.radius_a, base.radius_b,
+                          base.semi_angle, {}, {}, {}, {}, base_surface, {},
+                          0.0, 0.0, u_min, u_max, v_min, v_max, std::move(outer),
+                          std::move(holes)));
+  return ok_result(id, state_->create_diagnostic("已创建修剪面(含孔)"));
+}
+
 Result<SurfaceId> SurfaceFactory::make_offset(SurfaceId base_surface,
                                               Scalar offset_distance) {
   if (!detail::has_surface(*state_, base_surface) ||
@@ -669,12 +825,28 @@ Result<SurfaceId> SurfaceFactory::make_offset(SurfaceId base_surface,
         "偏置面创建失败：基曲面不存在或偏置距离非法", "偏置面创建失败");
   }
   const auto &base = state_->surfaces.at(base_surface.value);
+  if (base.kind == detail::SurfaceKind::Sphere) {
+    const Scalar re = base.radius_a + offset_distance;
+    if (re <= kEpsilon) {
+      return detail::invalid_input_result<SurfaceId>(
+          *state_, diag_codes::kGeoOffsetSelfIntersection,
+          "偏置面创建失败：球面有效半径非正（偏置自交/退化）", "偏置面创建失败");
+    }
+  }
+  if (base.kind == detail::SurfaceKind::Cylinder) {
+    const Scalar re = base.radius_a + offset_distance;
+    if (re <= kEpsilon) {
+      return detail::invalid_input_result<SurfaceId>(
+          *state_, diag_codes::kGeoOffsetSelfIntersection,
+          "偏置面创建失败：圆柱有效半径非正（偏置自交/退化）", "偏置面创建失败");
+    }
+  }
   const auto id = SurfaceId{state_->allocate_id()};
   state_->surfaces.emplace(
       id.value,
       make_surface_record(detail::SurfaceKind::Offset, base.origin, base.axis,
                           base.normal, base.radius_a, base.radius_b,
                           base.semi_angle, {}, {}, {}, {}, base_surface, {},
-                          0.0, 0.0, 0.0, 1.0, 0.0, 1.0, {}, offset_distance));
+                          0.0, 0.0, 0.0, 1.0, 0.0, 1.0, {}, {}, offset_distance));
   return ok_result(id, state_->create_diagnostic("已创建偏置面"));
 }

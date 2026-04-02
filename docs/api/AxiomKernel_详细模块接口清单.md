@@ -138,8 +138,11 @@ struct ImportOptions {
 struct ExportOptions {
   bool compatibility_mode;
   bool embed_metadata;
+  bool write_mesh_validation_report;
 };
 ```
+
+策略组合与网格导出门禁口径见 `docs/quality/AxiomKernel_IO_导出策略矩阵.md`。
 
 ## 4. `MathCore` 接口清单
 
@@ -160,6 +163,7 @@ public:
   Vec3 cross(const Vec3&, const Vec3&) const;
   Scalar norm(const Vec3&) const;
   Vec3 normalize(const Vec3&) const;
+  Scalar distance_point_to_segment(const Point3&, const Point3& seg_a, const Point3& seg_b) const;
   Point3 transform(const Point3&, const Transform3&) const;
   Vec3 transform(const Vec3&, const Transform3&) const;
 };
@@ -187,6 +191,13 @@ class PredicateService {
 public:
   Sign orient2d(const Point2&, const Point2&, const Point2&) const;
   Sign orient3d(const Point3&, const Point3&, const Point3&, const Point3&) const;
+  Sign orient2d_effective(const Point2&, const Point2&, const Point2&, Scalar tolerance_requested) const;
+  Sign orient3d_effective(const Point3&, const Point3&, const Point3&, const Point3&, Scalar tolerance_requested) const;
+  bool point_equal_effective(const Point3&, const Point3&, Scalar tolerance_requested) const;
+  bool point_on_segment_tol(const Point3&, const Point3&, const Point3&, Scalar tolerance) const;
+  bool point_on_segment_effective(const Point3&, const Point3&, const Point3&, Scalar tolerance_requested) const;
+  bool vec_parallel_effective(const Vec3&, const Vec3&, Scalar angular_requested) const;
+  bool vec_orthogonal_effective(const Vec3&, const Vec3&, Scalar angular_requested) const;
   Result<bool> point_on_curve(const Point3&, CurveId, Scalar tol) const;
   Result<bool> point_on_surface(const Point3&, SurfaceId, Scalar tol) const;
   Result<bool> point_in_body(const Point3&, BodyId, Scalar tol) const;
@@ -223,6 +234,10 @@ public:
   TolerancePolicy global_policy() const;
   TolerancePolicy policy_for_body(BodyId) const;
   TolerancePolicy override_policy(const TolerancePolicy&, Scalar linear) const;
+  bool nearly_equal_linear(Scalar lhs, Scalar rhs, Scalar abs_requested, Scalar rel_requested) const;
+  int compare_linear_rel_abs(Scalar lhs, Scalar rhs, Scalar abs_requested, Scalar rel_requested) const;
+  bool nearly_equal_angular(Scalar lhs, Scalar rhs, Scalar abs_requested, Scalar rel_requested) const;
+  int compare_angular_rel_abs(Scalar lhs, Scalar rhs, Scalar abs_requested, Scalar rel_requested) const;
 };
 ```
 
@@ -405,13 +420,62 @@ struct TessellationOptions {
   Scalar chordal_error;
   Scalar angular_error;
   bool compute_normals;
+  bool generate_texcoords;
+  /// 默认 `180`：仅按位置/UV 焊接；小于 `180` 时在法向夹角过大处保留折边顶点。
+  Scalar weld_shading_split_angle_deg;
+};
+
+/// 体级/面级三角化缓存观测；`clear_mesh_store` / `reset_runtime_stores` 时清零。
+struct TessellationCacheStats {
+  std::uint64_t body_cache_hits;
+  std::uint64_t body_cache_misses;
+  std::uint64_t body_cache_stale_evictions;
+  std::uint64_t face_cache_hits;
+  std::uint64_t face_cache_misses;
+  std::uint64_t face_cache_stale_evictions;
+};
+
+struct MeshInspectionReport {
+  std::uint64_t vertex_count;
+  std::uint64_t triangle_count;
+  std::uint64_t connected_components;
+  std::string mesh_label;
+  std::string tessellation_strategy;
+  std::string tessellation_budget_digest;
+  // ... 索引/退化/连通性等布尔字段见头文件
+};
+
+struct ConversionErrorBudget {
+  Scalar bbox_abs_tol;
+  Scalar max_point_abs_tol;
+  Scalar normal_angle_deg_tol;
+  Scalar chordal_error_basis;
+  Scalar angular_error_basis_deg;
+};
+
+struct RoundTripReport {
+  bool passed;
+  ConversionErrorBudget budget;
+  Scalar bbox_max_abs_delta;
+  Scalar max_point_abs_delta;
+  Scalar max_normal_angle_deg_delta;
+  bool normal_deviation_measured;
+  std::string tessellation_strategy;
+  std::string tessellation_budget_digest;
+  // ... 三角形计数等见头文件
 };
 
 class RepresentationConversionService {
 public:
   Result<MeshId> brep_to_mesh(BodyId, const TessellationOptions&);
+  /// 成功后将 `MeshRecord::source_body` 设为新建 `MeshRep` 体，便于 `brep_to_mesh` 嵌入返回同一网格。
   Result<BodyId> mesh_to_brep(MeshId);
   Result<MeshId> implicit_to_mesh(ImplicitFieldId, const TessellationOptions&);
+  Result<TessellationCacheStats> tessellation_cache_stats() const;
+  Result<void> export_tessellation_cache_stats_json(std::string_view path) const;
+  Result<void> export_round_trip_report_json(const RoundTripReport& report, std::string_view path) const;
+  Result<ConversionErrorBudget> conversion_error_budget_for_tessellation(const TessellationOptions&) const;
+  Result<void> export_conversion_error_budget_json(const TessellationOptions&, std::string_view path) const;
 };
 ```
 
@@ -570,6 +634,9 @@ enum class NodeKind {
   Analysis
 };
 
+/// 可观测性计数（节选）；含单次 `recompute` 传递闭包规模峰值 `recompute_single_root_max_finish_nodes` 与依赖 DFS 深度峰值 `recompute_single_root_max_stack_depth`。
+struct EvalGraphTelemetry { /* 见 axiom/core/types.h */ };
+
 class EvalGraphService {
 public:
   Result<NodeId> register_node(NodeKind, std::string_view label);
@@ -577,6 +644,7 @@ public:
   Result<void> invalidate(NodeId);
   Result<void> invalidate_body(BodyId);
   Result<void> recompute(NodeId);
+  Result<EvalGraphTelemetry> telemetry() const;
 };
 ```
 
@@ -773,6 +841,15 @@ public:
   DiagnosticService& diagnostics();
   EvalGraphService& eval_graph();
   PluginRegistry& plugins();
+  Result<TessellationCacheStats> tessellation_cache_stats() const;
+  Result<void> export_tessellation_cache_stats_json(std::string_view path) const;
+  Result<void> export_round_trip_report_json(const RoundTripReport& report, std::string_view path) const;
+  Result<ConversionErrorBudget> conversion_error_budget_for_tessellation(const TessellationOptions&) const;
+  Result<void> export_conversion_error_budget_json(const TessellationOptions&, std::string_view path) const;
+  /// `KernelEvalGraphMetrics`：含 `max_per_node_recompute_count`、`nodes_with_recompute_nonzero`、`mean_recompute_events_per_node`、`mean_recompute_events_per_touched_node` 等与重算门禁相关的派生字段。
+  Result<KernelEvalGraphMetrics> eval_graph_metrics() const;
+  /// 合并拓扑审计、Eval 指标、运行时 store 与 **`rep_stage_snapshot`**（默认 `TessellationOptions` 的 digest + `ConversionErrorBudget`，`derivation=tessellation_options_v1`）。
+  Result<void> export_runtime_observability_json(std::string_view path) const;
   // 另见 §14.4：配置/能力报告/插件发现与 register_plugin_* 等
 };
 ```

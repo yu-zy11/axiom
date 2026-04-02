@@ -235,6 +235,46 @@ struct DiagnosticStats {
   std::uint64_t fatal{};
 };
 
+/// 求值图可观测性计数（与节点重算计数独立；用于 CI/性能门禁与失效传播分析）。
+struct EvalGraphTelemetry {
+  std::uint64_t invalidate_node_calls{};
+  std::uint64_t invalidate_body_calls{};
+  std::uint64_t invalidate_many_batches{};
+  std::uint64_t invalidate_many_node_total{};
+  /// `recompute_many` 调用批次数（与 `invalidate_many_batches` 对称，供 CI/成本分析）。
+  std::uint64_t recompute_many_batches{};
+  /// 各批 `recompute_many` 传入的根节点总数（单次批大小之和）。
+  std::uint64_t recompute_many_root_total{};
+  /// 重算过程中因依赖 DAG 去重而跳过的「已完成重算」节点次数。
+  std::uint64_t recompute_transitive_dedup_skips{};
+  /// 单次 `recompute` 递归中实际执行「清除失效并递增 per-node 重算计数」的节点次数。
+  std::uint64_t recompute_finish_events{};
+  /// `invalidate(NodeId)` 调用时根节点在失效前**已经**处于失效状态的次数（仍可能向下游传播）。
+  std::uint64_t invalidate_node_redundant_calls{};
+  /// `recompute(NodeId)` 入口时根节点**已非失效**仍触发重算流程的次数（依赖链或幂等重算成本分析）。
+  std::uint64_t recompute_root_already_valid_calls{};
+  /// `exists` / `is_invalid` / `recompute_count` 等**轻量状态读 API**调用次数（与失效/重算写路径互补，供治理与成本门禁）。
+  std::uint64_t eval_graph_state_read_calls{};
+  /// 单次 `recompute(NodeId)` 调用中，实际完成「清除失效并递增 per-node 计数」的**不同节点数**的历史峰值（传递闭包规模门禁）。
+  std::uint64_t recompute_single_root_max_finish_nodes{};
+  /// 单次 `recompute` 中依赖 DFS 的**最大递归深度**（根深度记为 1；与 `recompute_single_root_max_finish_nodes` 互补）。
+  std::uint64_t recompute_single_root_max_stack_depth{};
+};
+
+/// 内核内部「体/面 → Eval 失效传播」引擎入口计数（含 Heal 等绕过 `EvalGraphService` 的调用）；与 `EvalGraphTelemetry` 的 API 级计数互补。
+struct EvalInvalidationBridgeMetrics {
+  /// `invalidate_eval_for_body` 调用次数（含由面/多体入口间接产生）。
+  std::uint64_t for_body_entries{};
+  /// `invalidate_eval_for_faces` 顶层调用次数。
+  std::uint64_t for_faces_entries{};
+  /// `invalidate_eval_for_bodies` 批次数。
+  std::uint64_t for_bodies_batches{};
+  /// 各次 `invalidate_eval_for_bodies` 传入列表长度之和（未去重；与 `initializer_list::size()` 一致）。
+  std::uint64_t for_bodies_list_size_total{};
+  /// `invalidate_eval_downstream` 每次入口（含递归）；与 `EvalGraphService::invalidate` / `invalidate_many` 及 `invalidate_eval_for_*` 共用，用于传播成本门禁。
+  std::uint64_t downstream_invalidation_steps{};
+};
+
 struct TolerancePolicy {
   Scalar linear{1e-6};
   Scalar angular{1e-6};
@@ -298,11 +338,19 @@ struct ExportOptions {
 
 struct BSplineCurveDesc {
   std::vector<Point3> poles;
+  /// 曲线阶数（次数 = degree）；\<0 表示按控制点数量使用内核默认策略（开放均匀 B 样条）。
+  int degree{-1};
+  /// 非空时作为结点向量，长度须为 `poles.size() + degree + 1`（若指定 `degree`），或由长度隐含阶数 `knots.size() - poles.size() - 1`。
+  std::vector<Scalar> knots;
 };
 
 struct NURBSCurveDesc {
   std::vector<Point3> poles;
   std::vector<Scalar> weights;
+  /// \<0 表示默认：单段 clamped NURBS，阶数为 `poles.size()-1`（与有理 Bézier 段一致）。
+  int degree{-1};
+  /// 非空时作为结点向量；校验规则同 `BSplineCurveDesc::knots`（须与非负权重数量一致）。
+  std::vector<Scalar> knots;
 };
 
 struct BSplineSurfaceDesc {
@@ -343,8 +391,14 @@ struct TessellationOptions {
   bool compute_normals{true};
   /// If true, attempt to generate per-vertex UVs for display/export.
   bool generate_texcoords{false};
-  /// Optional sharp-angle-based weld split for shading normals (degrees, validated in [0, 180]).
-  Scalar weld_shading_split_angle_deg{60.0};
+  /// 焊接时若法向夹角大于该值则保留折边顶点（不合并索引）；`180` 表示仅按位置/UV 合并（与历史行为一致）。
+  Scalar weld_shading_split_angle_deg{180.0};
+  /// 对张量积/派生参数域 patch：用 `SurfaceService`/张量主曲率估计加强细分（与 `chordal_error`/`angular_error` 叠合）。
+  bool use_principal_curvature_refinement{true};
+  /// 对 Bezier/BSpline/NURBS/Revolved/Swept/Offset 的 patch：用双线性单元中点与真实曲面的偏差迭代加密（0 关闭）；上限受实现 cap。
+  int refine_patch_chordal_max_passes{3};
+  /// 与 `generate_texcoords` 联用：输出曲面参数 `(u,v)` 而非归一化 patch `[0,1]`，便于多面拼接时在纹理空间保留 **UV seam**（焊接键含 UV 时不误合并）。
+  bool uv_parametric_seam{false};
 };
 
 struct CurveEvalResult {
@@ -370,6 +424,10 @@ struct SurfaceEvalResult {
   Vec3 normal{};
   Scalar k1{};
   Scalar k2{};
+  /// `SurfaceService::eval(..., deriv_order >= 2)` 且张量 NURBS/BSpline 路径成功时填充。
+  Vec3 duu{};
+  Vec3 dvv{};
+  Vec3 duv{};
 };
 
 struct MassProperties {
@@ -379,6 +437,39 @@ struct MassProperties {
   std::array<Scalar, 9> inertia{};
 };
 
+/// 三角化缓存可观测性（体级 `tessellation_cache` + 面级 `face_tessellation_cache`）；`clear_mesh_store` / `reset_runtime_stores` 会清零。
+struct TessellationCacheStats {
+  std::uint64_t body_cache_hits{};
+  std::uint64_t body_cache_misses{};
+  std::uint64_t body_cache_stale_evictions{};
+  std::uint64_t face_cache_hits{};
+  std::uint64_t face_cache_misses{};
+  std::uint64_t face_cache_stale_evictions{};
+};
+
+/// 与 `TopologyTransaction` 在单次成功 `commit()` 时可观测的写操作分项一致（用于 `Kernel::topology_commit_audit`）。
+struct TopologyCommitWriteBreakdown {
+  std::uint64_t created_vertices{};
+  std::uint64_t created_edges{};
+  std::uint64_t created_coedges{};
+  std::uint64_t created_loops{};
+  std::uint64_t created_faces{};
+  std::uint64_t created_shells{};
+  std::uint64_t created_bodies{};
+  std::uint64_t deleted_faces{};
+  std::uint64_t deleted_shells{};
+  std::uint64_t deleted_bodies{};
+  std::uint64_t replaced_surfaces{};
+  std::uint64_t coedge_pcurve_binds{};
+  std::uint64_t coedge_pcurve_clears{};
+};
+
+/// 各次成功拓扑提交中「新建实体」分项之和（与能力报告 `Core.Topology.Audit.Cumulative.CreatedEntities` 一致）。
+inline std::uint64_t topology_commit_breakdown_created_entities_total(const TopologyCommitWriteBreakdown& b) {
+  return b.created_vertices + b.created_edges + b.created_coedges + b.created_loops + b.created_faces +
+         b.created_shells + b.created_bodies;
+}
+
 struct MeshInspectionReport {
   std::uint64_t vertex_count{};
   std::uint64_t index_count{};
@@ -387,6 +478,8 @@ struct MeshInspectionReport {
   bool is_indexed{false};
   bool has_out_of_range_indices{false};
   bool has_degenerate_triangles{false};
+  /// `MeshRecord::label`（如 `mesh_from_brep_bbox_proxy`），便于与 `tessellation_strategy` 对照。
+  std::string mesh_label;
   /// Pipeline id for rep closure (budget → strategy → QA); empty if unavailable.
   std::string tessellation_strategy;
   /// Serialized tessellation inputs (chordal/angular/normals) for regression exports.
@@ -399,6 +492,10 @@ struct ConversionErrorBudget {
   Scalar max_point_abs_tol{0.0};
   // Angular budgets in degrees.
   Scalar normal_angle_deg_tol{0.0};
+  /// 派生上述线性预算时使用的 `TessellationOptions::chordal_error` 快照（审计/回归对齐）。
+  Scalar chordal_error_basis{0.0};
+  /// 派生角度预算时使用的 `TessellationOptions::angular_error` 快照（度）。
+  Scalar angular_error_basis_deg{0.0};
 };
 
 struct RoundTripReport {
@@ -406,10 +503,16 @@ struct RoundTripReport {
   ConversionErrorBudget budget{};
   Scalar bbox_max_abs_delta{0.0};
   Scalar max_point_abs_delta{0.0};
+  /// 与解析曲面法向的最大夹角（度）；未做该项测量时为 0（如盒体或未算法向）。
+  Scalar max_normal_angle_deg_delta{0.0};
+  /// 为真时表示已执行法向偏差测量并应用 `budget.normal_angle_deg_tol` 参与 `passed`。
+  bool normal_deviation_measured{false};
   std::uint64_t source_triangles{0};
   std::uint64_t roundtrip_triangles{0};
   /// BRep→Mesh path tag used for the source mesh (same semantics as MeshInspectionReport).
   std::string tessellation_strategy;
+  /// 与本次验证所用 `TessellationOptions` 对齐的预算摘要（JSON 片段，与 `MeshRecord::tessellation_budget_digest` 同形）。
+  std::string tessellation_budget_digest;
 };
 
 struct TopologySummary {

@@ -190,6 +190,17 @@ bool validate_loop_record(const detail::KernelState &state,
   }
 
   {
+    std::unordered_set<std::uint64_t> used_coedge;
+    used_coedge.reserve(loop.coedges.size());
+    for (const auto coedge_id : loop.coedges) {
+      if (!used_coedge.insert(coedge_id.value).second) {
+        reason = "环包含重复定向边引用";
+        return false;
+      }
+    }
+  }
+
+  {
     std::unordered_set<std::uint64_t> used_edges;
     used_edges.reserve(loop.coedges.size());
     for (const auto coedge_id : loop.coedges) {

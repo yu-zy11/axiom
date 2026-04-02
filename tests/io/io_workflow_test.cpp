@@ -3,6 +3,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <vector>
 
 #include "axiom/diag/error_codes.h"
 #include "axiom/sdk/kernel.h"
@@ -299,6 +300,24 @@ int main() {
         std::filesystem::remove(dirty_path);
         return 1;
     }
+    const auto missing_validate = tmp / ("axiom_io_missing_validate_" + uniq + ".step");
+    auto validate_missing = kernel.io().validate_import_path(missing_validate.string());
+    if (validate_missing.status != axiom::StatusCode::InvalidInput) {
+        std::cerr << "expected InvalidInput for validate_import_path on missing file\n";
+        std::filesystem::remove(out_path);
+        std::filesystem::remove(out_json_path);
+        std::filesystem::remove(dirty_path);
+        return 1;
+    }
+    auto validate_missing_diag = kernel.diagnostics().get(validate_missing.diagnostic_id);
+    if (validate_missing_diag.status != axiom::StatusCode::Ok || !validate_missing_diag.value.has_value() ||
+        !has_issue_code(*validate_missing_diag.value, axiom::diag_codes::kIoFileNotFound)) {
+        std::cerr << "validate_import_path missing file should report kIoFileNotFound\n";
+        std::filesystem::remove(out_path);
+        std::filesystem::remove(out_json_path);
+        std::filesystem::remove(dirty_path);
+        return 1;
+    }
 
     auto temp_txt = kernel.io().temp_path_for("axiom_io_snapshot", ".txt");
     if (temp_txt.status != axiom::StatusCode::Ok || !temp_txt.value.has_value()) {
@@ -542,6 +561,60 @@ int main() {
         std::cerr << "extended io batch read/summary behavior is unexpected\n";
         return 1;
     }
+    {
+        const auto missing_read = tmp / ("axiom_missing_read_" + uniq + ".txt");
+        const std::vector<std::string> bad_read {*tmp_batch_a.value, missing_read.string()};
+        auto read_fail = kernel.io().read_all_text_many(bad_read);
+        if (read_fail.status == axiom::StatusCode::Ok) {
+            std::cerr << "expected read_all_text_many failure when a file is missing\n";
+            return 1;
+        }
+        auto read_diag = kernel.diagnostics().get(read_fail.diagnostic_id);
+        const auto* read_ctx = read_diag.status == axiom::StatusCode::Ok && read_diag.value.has_value()
+                                  ? find_issue(*read_diag.value, axiom::diag_codes::kIoBatchReadItemContext)
+                                  : nullptr;
+        if (read_ctx == nullptr || read_ctx->stage != "io.batch_read" ||
+            !has_issue_code(*read_diag.value, axiom::diag_codes::kIoImportFailure)) {
+            std::cerr << "read_all_text_many batch failure missing batch context or merged read root cause\n";
+            return 1;
+        }
+    }
+    {
+        const auto missing_cmp = tmp / ("axiom_missing_cmp_" + uniq + ".txt");
+        const std::vector<std::string> lhs_cmp {*tmp_batch_a.value, *tmp_batch_b.value};
+        const std::vector<std::string> rhs_cmp {*tmp_batch_a.value, missing_cmp.string()};
+        auto cmp_fail = kernel.io().compare_file_text_many_equal(lhs_cmp, rhs_cmp);
+        if (cmp_fail.status == axiom::StatusCode::Ok) {
+            std::cerr << "expected compare_file_text_many_equal failure when rhs file is missing\n";
+            return 1;
+        }
+        auto cmp_diag = kernel.diagnostics().get(cmp_fail.diagnostic_id);
+        const auto* cmp_ctx = cmp_diag.status == axiom::StatusCode::Ok && cmp_diag.value.has_value()
+                                  ? find_issue(*cmp_diag.value, axiom::diag_codes::kIoBatchCompareItemContext)
+                                  : nullptr;
+        if (cmp_ctx == nullptr || cmp_ctx->stage != "io.batch_compare" ||
+            !has_issue_code(*cmp_diag.value, axiom::diag_codes::kIoImportFailure)) {
+            std::cerr << "compare_file_text_many_equal batch failure missing batch compare context or root cause\n";
+            return 1;
+        }
+    }
+    {
+        const std::vector<std::string> bad_append {*tmp_batch_a.value, std::string{}};
+        auto append_fail = kernel.io().append_text_many(bad_append, "z\n");
+        if (append_fail.status == axiom::StatusCode::Ok) {
+            std::cerr << "expected append_text_many failure when a path is empty\n";
+            return 1;
+        }
+        auto append_diag = kernel.diagnostics().get(append_fail.diagnostic_id);
+        const auto* append_ctx = append_diag.status == axiom::StatusCode::Ok && append_diag.value.has_value()
+                                     ? find_issue(*append_diag.value, axiom::diag_codes::kIoBatchPathOpItemContext)
+                                     : nullptr;
+        if (append_ctx == nullptr || append_ctx->stage != "io.batch_path_op" ||
+            !has_issue_code(*append_diag.value, axiom::diag_codes::kIoExportFailure)) {
+            std::cerr << "append_text_many batch failure missing batch path_op context or merged export root cause\n";
+            return 1;
+        }
+    }
 
     auto import_existing = kernel.io().import_existing_auto(io_paths, import_options);
     auto import_existing_count = kernel.io().import_existing_auto_count(io_paths, import_options);
@@ -560,6 +633,23 @@ int main() {
         export_body_summaries_many.status != axiom::StatusCode::Ok) {
         std::cerr << "extended io import/export directory behavior is unexpected\n";
         return 1;
+    }
+    {
+        std::array<std::string, 2> bad_summary_paths {*body_summary_many_a.value, export_dir.string()};
+        auto summary_fail = kernel.io().export_body_summaries_many(batch_bodies, bad_summary_paths);
+        if (summary_fail.status == axiom::StatusCode::Ok) {
+            std::cerr << "expected export_body_summaries_many failure when output path is a directory\n";
+            return 1;
+        }
+        auto summary_diag = kernel.diagnostics().get(summary_fail.diagnostic_id);
+        const auto* summary_ctx = summary_diag.status == axiom::StatusCode::Ok && summary_diag.value.has_value()
+                                      ? find_issue(*summary_diag.value, axiom::diag_codes::kIoBatchExportItemContext)
+                                      : nullptr;
+        if (summary_ctx == nullptr || summary_ctx->stage != "io.batch_export" ||
+            !has_issue_code(*summary_diag.value, axiom::diag_codes::kIoExportFailure)) {
+            std::cerr << "export_body_summaries_many failure missing batch export context or root cause\n";
+            return 1;
+        }
     }
     if (kernel.io().remove_files(batch_text_paths).status != axiom::StatusCode::Ok) {
         std::cerr << "extended io batch remove behavior is unexpected\n";
@@ -785,6 +875,237 @@ int main() {
         return 1;
     }
     std::filesystem::remove(bad_ext_path);
+
+    const auto bad_batch_item = tmp / ("axiom_io_batch_item_bad_" + uniq + ".unsupported_io_ext");
+    {
+        std::ofstream bf(bad_batch_item);
+        bf << "batch item placeholder\n";
+    }
+    const std::vector<std::string> batch_import_mixed {out_path.string(), bad_batch_item.string()};
+    auto batch_import_fail = kernel.io().import_many_auto(batch_import_mixed, import_options);
+    if (batch_import_fail.status == axiom::StatusCode::Ok) {
+        std::cerr << "expected batch import failure when second path has unknown extension\n";
+        std::filesystem::remove(bad_batch_item);
+        return 1;
+    }
+    auto batch_import_diag = kernel.diagnostics().get(batch_import_fail.diagnostic_id);
+    const auto* batch_import_ctx = batch_import_diag.status == axiom::StatusCode::Ok && batch_import_diag.value.has_value()
+                                      ? find_issue(*batch_import_diag.value, axiom::diag_codes::kIoBatchImportItemContext)
+                                      : nullptr;
+    if (batch_import_ctx == nullptr || batch_import_ctx->stage != "io.batch_import" ||
+        !has_issue_code(*batch_import_diag.value, axiom::diag_codes::kIoImportFailure)) {
+        std::cerr << "batch import failure diagnostic missing batch context or merged root cause\n";
+        std::filesystem::remove(bad_batch_item);
+        return 1;
+    }
+
+    const auto bad_batch_export_path = tmp / ("axiom_io_batch_export_bad_" + uniq + ".unsupported_io_ext");
+    const std::array<axiom::BodyId, 2> batch_export_bodies {*body.value, *body.value};
+    const std::array<std::string, 2> batch_export_paths {out_path.string(), bad_batch_export_path.string()};
+    auto batch_export_fail = kernel.io().export_many_auto(batch_export_bodies, batch_export_paths, export_options);
+    if (batch_export_fail.status == axiom::StatusCode::Ok) {
+        std::cerr << "expected batch export failure when second path has unknown extension\n";
+        std::filesystem::remove(bad_batch_item);
+        return 1;
+    }
+    auto batch_export_diag = kernel.diagnostics().get(batch_export_fail.diagnostic_id);
+    const auto* batch_export_ctx = batch_export_diag.status == axiom::StatusCode::Ok && batch_export_diag.value.has_value()
+                                       ? find_issue(*batch_export_diag.value, axiom::diag_codes::kIoBatchExportItemContext)
+                                       : nullptr;
+    if (batch_export_ctx == nullptr || batch_export_ctx->stage != "io.batch_export" ||
+        batch_export_ctx->related_entities.empty() || batch_export_ctx->related_entities[0] != body.value->value ||
+        !has_issue_code(*batch_export_diag.value, axiom::diag_codes::kIoExportFailure)) {
+        std::cerr << "batch export failure diagnostic missing batch context, body relation, or merged root cause\n";
+        std::filesystem::remove(bad_batch_item);
+        return 1;
+    }
+    std::filesystem::remove(bad_batch_item);
+
+    {
+        const std::vector<std::string> detect_mixed {out_path.string(), std::string{}};
+        auto detect_fail = kernel.io().detect_formats_with_paths(detect_mixed);
+        if (detect_fail.status == axiom::StatusCode::Ok) {
+            std::cerr << "expected detect_formats_with_paths failure when an item path is empty\n";
+            return 1;
+        }
+        auto detect_diag = kernel.diagnostics().get(detect_fail.diagnostic_id);
+        const auto* detect_ctx = detect_diag.status == axiom::StatusCode::Ok && detect_diag.value.has_value()
+                                    ? find_issue(*detect_diag.value, axiom::diag_codes::kIoBatchDetectFormatItemContext)
+                                    : nullptr;
+        if (detect_ctx == nullptr || detect_ctx->stage != "io.batch_detect_format" ||
+            !has_issue_code(*detect_diag.value, axiom::diag_codes::kIoImportFailure)) {
+            std::cerr << "detect_formats_with_paths batch failure missing batch context or merged root cause\n";
+            return 1;
+        }
+    }
+
+    {
+        const std::vector<std::string> two_items {out_path.string(), std::string{}};
+        auto vfail = kernel.io().validate_import_paths(two_items);
+        if (vfail.status == axiom::StatusCode::Ok) {
+            std::cerr << "expected validate_import_paths failure when an item path is empty\n";
+            return 1;
+        }
+        auto vdiag = kernel.diagnostics().get(vfail.diagnostic_id);
+        const auto* vctx = vdiag.status == axiom::StatusCode::Ok && vdiag.value.has_value()
+                               ? find_issue(*vdiag.value, axiom::diag_codes::kIoBatchPathTransformItemContext)
+                               : nullptr;
+        if (vctx == nullptr || vctx->stage != "io.batch_validate_import" ||
+            !has_issue_code(*vdiag.value, axiom::diag_codes::kIoImportFailure)) {
+            std::cerr << "validate_import_paths batch failure missing D-0015 context or merged root cause\n";
+            return 1;
+        }
+    }
+
+    {
+        const std::vector<std::string> two_export {out_path.string(), std::string{}};
+        auto vexp_fail = kernel.io().validate_export_paths(two_export);
+        if (vexp_fail.status == axiom::StatusCode::Ok) {
+            std::cerr << "expected validate_export_paths failure when an item path is empty\n";
+            return 1;
+        }
+        auto vexp_diag = kernel.diagnostics().get(vexp_fail.diagnostic_id);
+        const auto* vexp_ctx = vexp_diag.status == axiom::StatusCode::Ok && vexp_diag.value.has_value()
+                                  ? find_issue(*vexp_diag.value, axiom::diag_codes::kIoBatchPathTransformItemContext)
+                                  : nullptr;
+        if (vexp_ctx == nullptr || vexp_ctx->stage != "io.batch_validate_export" ||
+            !has_issue_code(*vexp_diag.value, axiom::diag_codes::kIoExportFailure)) {
+            std::cerr << "validate_export_paths batch failure missing D-0015 context or merged root cause\n";
+            return 1;
+        }
+    }
+
+    {
+        const std::vector<std::string> two_items {out_path.string(), std::string{}};
+        auto nfail = kernel.io().normalize_paths(two_items);
+        if (nfail.status == axiom::StatusCode::Ok) {
+            std::cerr << "expected normalize_paths failure when an item path is empty\n";
+            return 1;
+        }
+        auto ndiag = kernel.diagnostics().get(nfail.diagnostic_id);
+        const auto* nctx = ndiag.status == axiom::StatusCode::Ok && ndiag.value.has_value()
+                               ? find_issue(*ndiag.value, axiom::diag_codes::kIoBatchPathTransformItemContext)
+                               : nullptr;
+        if (nctx == nullptr || nctx->stage != "io.batch_path_transform" ||
+            !has_issue_code(*ndiag.value, axiom::diag_codes::kIoImportFailure)) {
+            std::cerr << "normalize_paths batch failure missing D-0015 context or merged root cause\n";
+            return 1;
+        }
+    }
+    {
+        const std::vector<std::string> two_items {out_path.string(), std::string{}};
+        auto cfail = kernel.io().change_extensions(two_items, "bak");
+        if (cfail.status == axiom::StatusCode::Ok) {
+            std::cerr << "expected change_extensions failure when an item path is empty\n";
+            return 1;
+        }
+        auto cdiag = kernel.diagnostics().get(cfail.diagnostic_id);
+        const auto* cctx = cdiag.status == axiom::StatusCode::Ok && cdiag.value.has_value()
+                               ? find_issue(*cdiag.value, axiom::diag_codes::kIoBatchPathTransformItemContext)
+                               : nullptr;
+        if (cctx == nullptr || cctx->stage != "io.batch_path_transform" ||
+            !has_issue_code(*cdiag.value, axiom::diag_codes::kIoExportFailure)) {
+            std::cerr << "change_extensions batch failure missing D-0015 context or merged root cause\n";
+            return 1;
+        }
+    }
+    {
+        const std::array<std::string, 2> bad_names {"n1", ""};
+        auto pfail = kernel.io().compose_paths(std::filesystem::temp_directory_path().string(), bad_names, "txt");
+        if (pfail.status == axiom::StatusCode::Ok) {
+            std::cerr << "expected compose_paths failure when a name is empty\n";
+            return 1;
+        }
+        auto pdiag = kernel.diagnostics().get(pfail.diagnostic_id);
+        const auto* pctx = pdiag.status == axiom::StatusCode::Ok && pdiag.value.has_value()
+                               ? find_issue(*pdiag.value, axiom::diag_codes::kIoBatchPathTransformItemContext)
+                               : nullptr;
+        if (pctx == nullptr || pctx->stage != "io.batch_path_transform" ||
+            !has_issue_code(*pdiag.value, axiom::diag_codes::kIoExportFailure)) {
+            std::cerr << "compose_paths batch failure missing D-0015 context or merged root cause\n";
+            return 1;
+        }
+    }
+    {
+        const std::vector<std::string> two_items {out_path.string(), std::string{}};
+        auto count_fail = kernel.io().count_by_format(two_items);
+        if (count_fail.status == axiom::StatusCode::Ok) {
+            std::cerr << "expected count_by_format failure when an item path is empty\n";
+            return 1;
+        }
+        auto count_diag = kernel.diagnostics().get(count_fail.diagnostic_id);
+        const auto* count_ctx = count_diag.status == axiom::StatusCode::Ok && count_diag.value.has_value()
+                                    ? find_issue(*count_diag.value, axiom::diag_codes::kIoBatchDetectFormatItemContext)
+                                    : nullptr;
+        if (count_ctx == nullptr || count_ctx->stage != "io.batch_detect_format" ||
+            !has_issue_code(*count_diag.value, axiom::diag_codes::kIoImportFailure)) {
+            std::cerr << "count_by_format batch failure missing D-0011 context or merged root cause\n";
+            return 1;
+        }
+    }
+    {
+        const std::vector<std::string> two_items {out_path.string(), std::string{}};
+        auto pof_fail = kernel.io().paths_of_format(two_items, "step");
+        if (pof_fail.status == axiom::StatusCode::Ok) {
+            std::cerr << "expected paths_of_format failure when an item path is empty\n";
+            return 1;
+        }
+        auto pof_diag = kernel.diagnostics().get(pof_fail.diagnostic_id);
+        const auto* pof_ctx = pof_diag.status == axiom::StatusCode::Ok && pof_diag.value.has_value()
+                                  ? find_issue(*pof_diag.value, axiom::diag_codes::kIoBatchDetectFormatItemContext)
+                                  : nullptr;
+        if (pof_ctx == nullptr || pof_ctx->stage != "io.batch_detect_format" ||
+            !has_issue_code(*pof_diag.value, axiom::diag_codes::kIoImportFailure)) {
+            std::cerr << "paths_of_format batch failure missing D-0011 context or merged root cause\n";
+            return 1;
+        }
+    }
+
+    const auto export_dir_bad = tmp / ("axiom_io_export_dir_bad_" + uniq);
+    std::filesystem::create_directories(export_dir_bad);
+    auto export_dir_bad_ext =
+        kernel.io().export_auto_to_directory(batch_bodies, export_dir_bad.string(), "not_a_real_ext", export_options);
+    if (export_dir_bad_ext.status != axiom::StatusCode::InvalidInput) {
+        std::cerr << "expected InvalidInput for export_auto_to_directory with unknown extension\n";
+        std::filesystem::remove_all(export_dir_bad);
+        return 1;
+    }
+    auto export_dir_bad_diag = kernel.diagnostics().get(export_dir_bad_ext.diagnostic_id);
+    if (export_dir_bad_diag.status != axiom::StatusCode::Ok || !export_dir_bad_diag.value.has_value() ||
+        !has_issue_code(*export_dir_bad_diag.value, axiom::diag_codes::kIoUnknownFormat)) {
+        std::cerr << "export_auto_to_directory unknown ext should report kIoUnknownFormat\n";
+        std::filesystem::remove_all(export_dir_bad);
+        return 1;
+    }
+    std::filesystem::remove_all(export_dir_bad);
+
+    const auto ro_root = tmp / ("axiom_io_readonly_" + uniq);
+    std::filesystem::create_directories(ro_root);
+    try {
+        std::filesystem::permissions(ro_root,
+                                       std::filesystem::perms::owner_read | std::filesystem::perms::owner_exec);
+    } catch (...) {
+    }
+    const auto ro_step_path = ro_root / "denied.step";
+    auto export_ro = kernel.io().export_step(*body.value, ro_step_path.string(), export_options);
+    if (export_ro.status != axiom::StatusCode::Ok) {
+        auto ro_diag = kernel.diagnostics().get(export_ro.diagnostic_id);
+        if (ro_diag.status != axiom::StatusCode::Ok || !ro_diag.value.has_value() ||
+            !has_issue_code(*ro_diag.value, axiom::diag_codes::kIoExportPathNotWritable)) {
+            std::cerr << "export to read-only directory should surface kIoExportPathNotWritable when write is denied\n";
+            try {
+                std::filesystem::permissions(ro_root, std::filesystem::perms::owner_all);
+            } catch (...) {
+            }
+            std::filesystem::remove_all(ro_root);
+            return 1;
+        }
+    }
+    try {
+        std::filesystem::permissions(ro_root, std::filesystem::perms::owner_all);
+    } catch (...) {
+    }
+    std::filesystem::remove_all(ro_root);
 
     auto imp_empty = kernel.io().import_auto("", import_options);
     if (imp_empty.status != axiom::StatusCode::InvalidInput) {

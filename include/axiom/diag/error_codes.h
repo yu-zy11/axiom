@@ -15,6 +15,8 @@ inline constexpr std::string_view kGeoParameterOutOfDomain = "AXM-GEO-E-0004";
 inline constexpr std::string_view kGeoClosestPointFailure = "AXM-GEO-E-0005";
 inline constexpr std::string_view kGeoParameterSolveFailure = "AXM-GEO-E-0006";
 inline constexpr std::string_view kGeoIntersectionFailure = "AXM-GEO-E-0007";
+/// 偏置距离导致有效曲率半径非正（球/柱等解析情形下的自交/退化壳）
+inline constexpr std::string_view kGeoOffsetSelfIntersection = "AXM-GEO-E-0010";
 
 inline constexpr std::string_view kTopoLoopNotClosed = "AXM-TOPO-E-0002";
 inline constexpr std::string_view kTopoFaceOuterLoopInvalid = "AXM-TOPO-E-0003";
@@ -141,8 +143,32 @@ inline constexpr std::string_view kIoPostImportValidation = "AXM-IO-D-0004";
 inline constexpr std::string_view kIoPostImportRepairMode = "AXM-IO-D-0005";
 /// 严格网格导出：`inspect_mesh` 未通过（越界索引/退化三角形等）。
 inline constexpr std::string_view kIoExportMeshStrictQaFailed = "AXM-IO-E-0006";
+/// 导出目标父目录不可写（探测写失败）；`Issue.stage` 常为 `io.export.path`。
+inline constexpr std::string_view kIoExportPathNotWritable = "AXM-IO-E-0009";
+/// 检测到 ISO-10303-21 **DATA** 段含 EXPRESS 实例（`#123=ENTITY(` 形态），非 Axiom 元数据子集；完整 AP 交换需外部 STEP 内核（如 STEPcode/OCCT）集成。
+inline constexpr std::string_view kIoStepStandardEntitiesUnsupported = "AXM-IO-E-0010";
+/// 检测到典型 **IGES 卡片/DE** 形态，非 Axiom 元数据子集；完整实体交换需外部 IGES 内核集成。
+inline constexpr std::string_view kIgesStandardEntitiesUnsupported = "AXM-IO-E-0011";
 /// 网格验证 JSON 侧车已写出（`stem.mesh_report.json`）。
 inline constexpr std::string_view kIoExportMeshReportSidecar = "AXM-IO-D-0008";
+/// 批量导入在某一输入项失败：`Issue.stage=io.batch_import`，消息含序号与路径，后续 issues 合并该项根因。
+inline constexpr std::string_view kIoBatchImportItemContext = "AXM-IO-D-0009";
+/// 批量导出在某一输出项失败：`Issue.stage=io.batch_export`，`related_entities` 含 `BodyId` 与批次下标。
+inline constexpr std::string_view kIoBatchExportItemContext = "AXM-IO-D-0010";
+/// 批量格式识别在某一输入项失败：`Issue.stage=io.batch_detect_format`，消息含序号与路径，后续 issues 合并该项根因。
+inline constexpr std::string_view kIoBatchDetectFormatItemContext = "AXM-IO-D-0011";
+/// 批量读取/统计/预览在某一输入项失败：`Issue.stage=io.batch_read`，消息含序号与路径，后续 issues 合并该项根因。
+inline constexpr std::string_view kIoBatchReadItemContext = "AXM-IO-D-0012";
+/// 批量文本比较在某一输入对失败：`Issue.stage=io.batch_compare`，消息含序号与左右路径，后续 issues 合并该项根因。
+inline constexpr std::string_view kIoBatchCompareItemContext = "AXM-IO-D-0013";
+/// 批量路径写操作在某一输入项失败：`Issue.stage=io.batch_path_op`；用于追加/touch/删除/创建父目录等，消息含操作名与路径。
+inline constexpr std::string_view kIoBatchPathOpItemContext = "AXM-IO-D-0014";
+/// 批量路径变换/校验在某一输入项失败：`Issue.stage` 常为 `io.batch_path_transform`、`io.batch_validate_import` 或 `io.batch_validate_export`；用于规范化、改扩展名、拼装路径、批量导入/导出路径校验等。
+inline constexpr std::string_view kIoBatchPathTransformItemContext = "AXM-IO-D-0015";
+/// 标准 STEP 文件：物理层实例类型扫描摘要（**非**几何物化）；`Issue.severity=Info`，`Issue.stage=io.import.step`。
+inline constexpr std::string_view kIoStepStandardFileScanSummary = "AXM-IO-D-0016";
+/// 标准 IGES 文件：Directory Entry 实体类型号扫描摘要（**非**几何物化）；`Issue.severity=Info`，`Issue.stage=io.import.iges`。
+inline constexpr std::string_view kIgesStandardFileScanSummary = "AXM-IO-D-0017";
 
 inline constexpr std::string_view kTesFailure = "AXM-TES-E-0001";
 

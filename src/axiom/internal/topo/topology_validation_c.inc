@@ -97,7 +97,22 @@ Result<void> TopologyValidationService::validate_indices_consistency() const {
   }
 
   for (const auto &[face_value, face_rec] : state_->faces) {
-    (void)face_rec;
+    if (has_duplicate_ids(std::span<const LoopId>(face_rec.inner_loops))) {
+      return detail::failed_void(
+          *state_, StatusCode::InvalidTopology,
+          diag_codes::kTopoFaceOuterLoopInvalid,
+          "索引验证失败：面内环列表存在重复引用", "拓扑索引验证失败",
+          {face_value});
+    }
+    for (const auto inner_loop_id : face_rec.inner_loops) {
+      if (inner_loop_id.value == face_rec.outer_loop.value) {
+        return detail::failed_void(
+            *state_, StatusCode::InvalidTopology,
+            diag_codes::kTopoFaceInnerLoopInvalid,
+            "索引验证失败：内环列表包含外环", "拓扑索引验证失败",
+            {face_value, face_rec.outer_loop.value});
+      }
+    }
     const auto fts = state_->face_to_shells.find(face_value);
     if (fts == state_->face_to_shells.end() || fts->second.empty()) {
       return detail::failed_void(

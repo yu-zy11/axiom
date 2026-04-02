@@ -110,6 +110,23 @@ int main() {
                   << "\n";
         return 1;
     }
+    // `weld_shading_split_angle_deg` < 180：在盒体棱边处按法向折边保留更多顶点；默认 180 与历史「按位置合并」一致。
+    {
+        axiom::TessellationOptions weld_merge {0.05, 5.0, true, false, 180.0};
+        axiom::TessellationOptions weld_crease {0.05, 5.0, true, false, 35.0};
+        auto m_m = kernel.convert().brep_to_mesh(*box.value, weld_merge);
+        auto m_c = kernel.convert().brep_to_mesh(*box.value, weld_crease);
+        auto v_m = kernel.convert().mesh_vertex_count(*m_m.value);
+        auto v_c = kernel.convert().mesh_vertex_count(*m_c.value);
+        if (m_m.status != axiom::StatusCode::Ok || m_c.status != axiom::StatusCode::Ok ||
+            !m_m.value.has_value() || !m_c.value.has_value() ||
+            v_m.status != axiom::StatusCode::Ok || v_c.status != axiom::StatusCode::Ok ||
+            !v_m.value.has_value() || !v_c.value.has_value() ||
+            *v_c.value <= *v_m.value) {
+            std::cerr << "expected crease-preserving weld to retain more vertices than merge-all on box\n";
+            return 1;
+        }
+    }
     const auto mesh_report_path = std::filesystem::temp_directory_path() / "axiom_mesh_report.json";
     auto export_mesh_report = kernel.convert().export_mesh_report_json(*fine_mesh.value, mesh_report_path.string());
     if (export_mesh_report.status != axiom::StatusCode::Ok) {
@@ -121,6 +138,7 @@ int main() {
                                  std::istreambuf_iterator<char>());
     if (mesh_report_text.find("\"triangle_count\":" + std::to_string(*fine_triangles.value)) == std::string::npos ||
         mesh_report_text.find("\"has_out_of_range_indices\":false") == std::string::npos ||
+        mesh_report_text.find("\"mesh_label\":\"mesh_from_box\"") == std::string::npos ||
         mesh_report_text.find("\"tessellation_strategy\":\"primitive_box\"") == std::string::npos ||
         mesh_report_text.find("\"tessellation_budget_digest\"") == std::string::npos ||
         mesh_report_text.find("\"has_texcoords\":false") == std::string::npos) {
@@ -152,6 +170,35 @@ int main() {
         std::filesystem::remove(mesh_report_path);
         std::filesystem::remove(uv_report_path);
         return 1;
+    }
+    {
+        axiom::TessellationOptions seam_opts {0.05, 5.0, true, true};
+        seam_opts.uv_parametric_seam = true;
+        auto seam_mesh = kernel.convert().brep_to_mesh(*box.value, seam_opts);
+        if (seam_mesh.status != axiom::StatusCode::Ok || !seam_mesh.value.has_value()) {
+            std::cerr << "brep_to_mesh with uv_parametric_seam failed\n";
+            std::filesystem::remove(mesh_report_path);
+            std::filesystem::remove(uv_report_path);
+            return 1;
+        }
+        const auto seam_report_path = std::filesystem::temp_directory_path() / "axiom_mesh_report_seam.json";
+        auto exp_seam = kernel.convert().export_mesh_report_json(*seam_mesh.value, seam_report_path.string());
+        if (exp_seam.status != axiom::StatusCode::Ok) {
+            std::cerr << "export seam mesh report failed\n";
+            std::filesystem::remove(mesh_report_path);
+            std::filesystem::remove(uv_report_path);
+            return 1;
+        }
+        std::ifstream seam_in {seam_report_path};
+        std::string seam_text((std::istreambuf_iterator<char>(seam_in)), std::istreambuf_iterator<char>());
+        if (seam_text.find("\"uv_parametric_seam\":true") == std::string::npos) {
+            std::cerr << "mesh report digest should record uv_parametric_seam\n";
+            std::filesystem::remove(mesh_report_path);
+            std::filesystem::remove(uv_report_path);
+            std::filesystem::remove(seam_report_path);
+            return 1;
+        }
+        std::filesystem::remove(seam_report_path);
     }
     std::filesystem::remove(uv_report_path);
 
@@ -239,6 +286,397 @@ int main() {
         }
     }
 
+    // BSpline 拓扑面：参数域网格三角化（误差敏感分段）应优于平面扇三角的三角形数量。
+    {
+        auto bsurf = kernel.surfaces().make_bspline(
+            {{{0.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {1.0, 0.0, 0.0}, {1.0, 1.0, 0.0}}});
+        auto l0 = kernel.curves().make_line({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
+        auto l1 = kernel.curves().make_line({1.0, 0.0, 0.0}, {0.0, 1.0, 0.0});
+        auto l2 = kernel.curves().make_line({1.0, 1.0, 0.0}, {-1.0, 0.0, 0.0});
+        auto l3 = kernel.curves().make_line({0.0, 1.0, 0.0}, {0.0, -1.0, 0.0});
+        if (bsurf.status != axiom::StatusCode::Ok || !bsurf.value.has_value() ||
+            l0.status != axiom::StatusCode::Ok || !l0.value.has_value() ||
+            l1.status != axiom::StatusCode::Ok || !l1.value.has_value() ||
+            l2.status != axiom::StatusCode::Ok || !l2.value.has_value() ||
+            l3.status != axiom::StatusCode::Ok || !l3.value.has_value()) {
+            std::cerr << "bspline-surface tessellation: geometry init failed\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        auto btx = kernel.topology().begin_transaction();
+        auto bv0 = btx.create_vertex({0.0, 0.0, 0.0});
+        auto bv1 = btx.create_vertex({1.0, 0.0, 0.0});
+        auto bv2 = btx.create_vertex({1.0, 1.0, 0.0});
+        auto bv3 = btx.create_vertex({0.0, 1.0, 0.0});
+        auto be0 = btx.create_edge(*l0.value, *bv0.value, *bv1.value);
+        auto be1 = btx.create_edge(*l1.value, *bv1.value, *bv2.value);
+        auto be2 = btx.create_edge(*l2.value, *bv2.value, *bv3.value);
+        auto be3 = btx.create_edge(*l3.value, *bv3.value, *bv0.value);
+        auto bc0 = btx.create_coedge(*be0.value, false);
+        auto bc1 = btx.create_coedge(*be1.value, false);
+        auto bc2 = btx.create_coedge(*be2.value, false);
+        auto bc3 = btx.create_coedge(*be3.value, false);
+        if (bv0.status != axiom::StatusCode::Ok || !bv0.value.has_value() ||
+            bv1.status != axiom::StatusCode::Ok || !bv1.value.has_value() ||
+            bv2.status != axiom::StatusCode::Ok || !bv2.value.has_value() ||
+            bv3.status != axiom::StatusCode::Ok || !bv3.value.has_value() ||
+            be0.status != axiom::StatusCode::Ok || !be0.value.has_value() ||
+            be1.status != axiom::StatusCode::Ok || !be1.value.has_value() ||
+            be2.status != axiom::StatusCode::Ok || !be2.value.has_value() ||
+            be3.status != axiom::StatusCode::Ok || !be3.value.has_value() ||
+            bc0.status != axiom::StatusCode::Ok || !bc0.value.has_value() ||
+            bc1.status != axiom::StatusCode::Ok || !bc1.value.has_value() ||
+            bc2.status != axiom::StatusCode::Ok || !bc2.value.has_value() ||
+            bc3.status != axiom::StatusCode::Ok || !bc3.value.has_value()) {
+            std::cerr << "bspline-surface tessellation: topology txn failed\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        const std::array<axiom::CoedgeId, 4> bcoedges {*bc0.value, *bc1.value, *bc2.value, *bc3.value};
+        auto bloop = btx.create_loop(bcoedges);
+        auto bface = btx.create_face(*bsurf.value, *bloop.value, {});
+        const std::array<axiom::FaceId, 1> bfaces {*bface.value};
+        auto bshell = btx.create_shell(bfaces);
+        const std::array<axiom::ShellId, 1> bshells {*bshell.value};
+        auto bbody = btx.create_body(bshells);
+        if (bloop.status != axiom::StatusCode::Ok || bface.status != axiom::StatusCode::Ok ||
+            bshell.status != axiom::StatusCode::Ok || bbody.status != axiom::StatusCode::Ok ||
+            !bloop.value.has_value() || !bface.value.has_value() || !bshell.value.has_value() ||
+            !bbody.value.has_value()) {
+            std::cerr << "bspline-surface tessellation: body creation failed\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        auto bcommit = btx.commit();
+        if (bcommit.status != axiom::StatusCode::Ok) {
+            std::cerr << "bspline-surface tessellation: commit failed\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        axiom::TessellationOptions bs_tes {0.12, 18.0, true};
+        auto bs_mesh = kernel.convert().brep_to_mesh(*bbody.value, bs_tes);
+        if (bs_mesh.status != axiom::StatusCode::Ok || !bs_mesh.value.has_value()) {
+            std::cerr << "bspline-surface brep_to_mesh failed\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        auto bs_tris = kernel.convert().mesh_triangle_count(*bs_mesh.value);
+        auto bs_insp = kernel.convert().inspect_mesh(*bs_mesh.value);
+        if (bs_tris.status != axiom::StatusCode::Ok || !bs_tris.value.has_value() ||
+            bs_insp.status != axiom::StatusCode::Ok || !bs_insp.value.has_value() ||
+            *bs_tris.value < 8 || bs_insp.value->tessellation_strategy != "owned_topo_welded") {
+            std::cerr << "bspline face should tessellate with parametric grid (more than fan)\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        // 张量积 patch：`angular_error` 收紧应使网格更密（与 `segments_for_tensor_direction` 一致）。
+        auto bs_ang_coarse = kernel.convert().brep_to_mesh(*bbody.value, {0.12, 48.0, true});
+        auto bs_ang_fine = kernel.convert().brep_to_mesh(*bbody.value, {0.12, 4.0, true});
+        if (bs_ang_coarse.status != axiom::StatusCode::Ok || !bs_ang_coarse.value.has_value() ||
+            bs_ang_fine.status != axiom::StatusCode::Ok || !bs_ang_fine.value.has_value()) {
+            std::cerr << "bspline angular tessellation probe failed\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        auto bs_tc = kernel.convert().mesh_triangle_count(*bs_ang_coarse.value);
+        auto bs_tf = kernel.convert().mesh_triangle_count(*bs_ang_fine.value);
+        if (bs_tc.status != axiom::StatusCode::Ok || !bs_tc.value.has_value() ||
+            bs_tf.status != axiom::StatusCode::Ok || !bs_tf.value.has_value() ||
+            *bs_tf.value <= *bs_tc.value) {
+            std::cerr << "bspline tessellation should refine when angular_error tightens (same chordal)\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        // Patch 弦高/曲率选项写入网格 digest（与缓存键一致）；盒体路径三角形数可能相同，不断言增量。
+        axiom::TessellationOptions dig0 {0.08, 12.0, true};
+        dig0.refine_patch_chordal_max_passes = 0;
+        dig0.use_principal_curvature_refinement = false;
+        axiom::TessellationOptions dig1 = dig0;
+        dig1.refine_patch_chordal_max_passes = 5;
+        dig1.use_principal_curvature_refinement = true;
+        auto dig_mesh0 = kernel.convert().brep_to_mesh(*box.value, dig0);
+        auto dig_mesh1 = kernel.convert().brep_to_mesh(*box.value, dig1);
+        if (dig_mesh0.status != axiom::StatusCode::Ok || dig_mesh1.status != axiom::StatusCode::Ok ||
+            !dig_mesh0.value.has_value() || !dig_mesh1.value.has_value()) {
+            std::cerr << "brep_to_mesh with patch refine digest options failed\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        const auto dig_path0 = std::filesystem::temp_directory_path() / "axiom_mesh_digest0.json";
+        const auto dig_path1 = std::filesystem::temp_directory_path() / "axiom_mesh_digest1.json";
+        if (kernel.convert().export_mesh_report_json(*dig_mesh0.value, dig_path0.string()).status !=
+                axiom::StatusCode::Ok ||
+            kernel.convert().export_mesh_report_json(*dig_mesh1.value, dig_path1.string()).status !=
+                axiom::StatusCode::Ok) {
+            std::cerr << "export mesh report for digest options failed\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        std::ifstream din0 {dig_path0};
+        std::ifstream din1 {dig_path1};
+        std::string dtext0((std::istreambuf_iterator<char>(din0)), std::istreambuf_iterator<char>());
+        std::string dtext1((std::istreambuf_iterator<char>(din1)), std::istreambuf_iterator<char>());
+        if (dtext0.find("\"refine_patch_chordal_max_passes\":0") == std::string::npos ||
+            dtext0.find("\"use_principal_curvature_refinement\":false") == std::string::npos ||
+            dtext1.find("\"refine_patch_chordal_max_passes\":5") == std::string::npos ||
+            dtext1.find("\"use_principal_curvature_refinement\":true") == std::string::npos) {
+            std::cerr << "mesh report should embed patch chordal/curvature flags in tessellation_budget_digest\n";
+            std::filesystem::remove(mesh_report_path);
+            std::filesystem::remove(dig_path0);
+            std::filesystem::remove(dig_path1);
+            return 1;
+        }
+        std::filesystem::remove(dig_path0);
+        std::filesystem::remove(dig_path1);
+    }
+
+    // 线性扫掠曲面：派生面参数域网格（mesh_from_face_derived_patch）应优于平面扇。
+    {
+        auto prof = kernel.curves().make_line_segment({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
+        auto sw_surf = kernel.surfaces().make_swept_linear(*prof.value, {0.0, 0.0, 1.0}, 2.0);
+        auto e0 = kernel.curves().make_line({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
+        auto e1 = kernel.curves().make_line({1.0, 0.0, 0.0}, {0.0, 0.0, 1.0});
+        auto e2 = kernel.curves().make_line({1.0, 0.0, 2.0}, {-1.0, 0.0, 0.0});
+        auto e3 = kernel.curves().make_line({0.0, 0.0, 2.0}, {0.0, 0.0, -1.0});
+        if (prof.status != axiom::StatusCode::Ok || !prof.value.has_value() ||
+            sw_surf.status != axiom::StatusCode::Ok || !sw_surf.value.has_value() ||
+            e0.status != axiom::StatusCode::Ok || !e0.value.has_value() ||
+            e1.status != axiom::StatusCode::Ok || !e1.value.has_value() ||
+            e2.status != axiom::StatusCode::Ok || !e2.value.has_value() ||
+            e3.status != axiom::StatusCode::Ok || !e3.value.has_value()) {
+            std::cerr << "swept-surface tessellation: geometry init failed\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        auto sw_tx = kernel.topology().begin_transaction();
+        auto sv0 = sw_tx.create_vertex({0.0, 0.0, 0.0});
+        auto sv1 = sw_tx.create_vertex({1.0, 0.0, 0.0});
+        auto sv2 = sw_tx.create_vertex({1.0, 0.0, 2.0});
+        auto sv3 = sw_tx.create_vertex({0.0, 0.0, 2.0});
+        auto se0 = sw_tx.create_edge(*e0.value, *sv0.value, *sv1.value);
+        auto se1 = sw_tx.create_edge(*e1.value, *sv1.value, *sv2.value);
+        auto se2 = sw_tx.create_edge(*e2.value, *sv2.value, *sv3.value);
+        auto se3 = sw_tx.create_edge(*e3.value, *sv3.value, *sv0.value);
+        auto sc0 = sw_tx.create_coedge(*se0.value, false);
+        auto sc1 = sw_tx.create_coedge(*se1.value, false);
+        auto sc2 = sw_tx.create_coedge(*se2.value, false);
+        auto sc3 = sw_tx.create_coedge(*se3.value, false);
+        if (sv0.status != axiom::StatusCode::Ok || !sv0.value.has_value() ||
+            sv1.status != axiom::StatusCode::Ok || !sv1.value.has_value() ||
+            sv2.status != axiom::StatusCode::Ok || !sv2.value.has_value() ||
+            sv3.status != axiom::StatusCode::Ok || !sv3.value.has_value() ||
+            se0.status != axiom::StatusCode::Ok || !se0.value.has_value() ||
+            se1.status != axiom::StatusCode::Ok || !se1.value.has_value() ||
+            se2.status != axiom::StatusCode::Ok || !se2.value.has_value() ||
+            se3.status != axiom::StatusCode::Ok || !se3.value.has_value() ||
+            sc0.status != axiom::StatusCode::Ok || !sc0.value.has_value() ||
+            sc1.status != axiom::StatusCode::Ok || !sc1.value.has_value() ||
+            sc2.status != axiom::StatusCode::Ok || !sc2.value.has_value() ||
+            sc3.status != axiom::StatusCode::Ok || !sc3.value.has_value()) {
+            std::cerr << "swept-surface tessellation: topology txn failed\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        const std::array<axiom::CoedgeId, 4> sw_coedges {*sc0.value, *sc1.value, *sc2.value, *sc3.value};
+        auto sw_loop = sw_tx.create_loop(sw_coedges);
+        auto sw_face = sw_tx.create_face(*sw_surf.value, *sw_loop.value, {});
+        const std::array<axiom::FaceId, 1> sw_faces {*sw_face.value};
+        auto sw_shell = sw_tx.create_shell(sw_faces);
+        const std::array<axiom::ShellId, 1> sw_shells {*sw_shell.value};
+        auto sw_body = sw_tx.create_body(sw_shells);
+        if (sw_loop.status != axiom::StatusCode::Ok || sw_face.status != axiom::StatusCode::Ok ||
+            sw_shell.status != axiom::StatusCode::Ok || sw_body.status != axiom::StatusCode::Ok ||
+            !sw_loop.value.has_value() || !sw_face.value.has_value() || !sw_shell.value.has_value() ||
+            !sw_body.value.has_value()) {
+            std::cerr << "swept-surface tessellation: body creation failed\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        auto sw_commit = sw_tx.commit();
+        if (sw_commit.status != axiom::StatusCode::Ok) {
+            std::cerr << "swept-surface tessellation: commit failed\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        axiom::TessellationOptions sw_tes {0.12, 18.0, true};
+        auto sw_mesh = kernel.convert().brep_to_mesh(*sw_body.value, sw_tes);
+        if (sw_mesh.status != axiom::StatusCode::Ok || !sw_mesh.value.has_value()) {
+            std::cerr << "swept-surface brep_to_mesh failed\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        auto sw_tris = kernel.convert().mesh_triangle_count(*sw_mesh.value);
+        auto sw_insp = kernel.convert().inspect_mesh(*sw_mesh.value);
+        if (sw_tris.status != axiom::StatusCode::Ok || !sw_tris.value.has_value() ||
+            sw_insp.status != axiom::StatusCode::Ok || !sw_insp.value.has_value() ||
+            *sw_tris.value < 8 || sw_insp.value->tessellation_strategy != "owned_topo_welded") {
+            std::cerr << "swept linear surface should use derived parametric patch tessellation\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+    }
+
+    // 解析 Revolved 曲面 + 四边形环：`sweeps().revolve` 物化体多为平面三角片，此处覆盖 `mesh_from_face_derived_patch`。
+    {
+        const double pi = 3.14159265358979323846;
+        axiom::Axis3 axis_z {{0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}};
+        auto gen = kernel.curves().make_line_segment({1.0, 0.0, 0.0}, {2.0, 0.0, 0.0});
+        auto rev_surf = kernel.surfaces().make_revolved(*gen.value, axis_z, pi);
+        if (gen.status != axiom::StatusCode::Ok || !gen.value.has_value() ||
+            rev_surf.status != axiom::StatusCode::Ok || !rev_surf.value.has_value()) {
+            std::cerr << "revolved-surface tessellation: geometry init failed\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        const auto corner_uvs = std::array<std::pair<double, double>, 4> {{
+            {pi * 0.15, 0.0},
+            {pi * 0.65, 0.0},
+            {pi * 0.65, 1.0},
+            {pi * 0.15, 1.0},
+        }};
+        std::array<axiom::Point3, 4> corners {};
+        for (std::size_t i = 0; i < 4; ++i) {
+            auto ev = kernel.surface_service().eval(*rev_surf.value, corner_uvs[i].first, corner_uvs[i].second, 0);
+            if (ev.status != axiom::StatusCode::Ok || !ev.value.has_value()) {
+                std::cerr << "revolved-surface tessellation: surface eval failed\n";
+                std::filesystem::remove(mesh_report_path);
+                return 1;
+            }
+            corners[i] = ev.value->point;
+        }
+        auto le0 = kernel.curves().make_line_segment(corners[0], corners[1]);
+        auto le1 = kernel.curves().make_line_segment(corners[1], corners[2]);
+        auto le2 = kernel.curves().make_line_segment(corners[2], corners[3]);
+        auto le3 = kernel.curves().make_line_segment(corners[3], corners[0]);
+        if (le0.status != axiom::StatusCode::Ok || !le0.value.has_value() ||
+            le1.status != axiom::StatusCode::Ok || !le1.value.has_value() ||
+            le2.status != axiom::StatusCode::Ok || !le2.value.has_value() ||
+            le3.status != axiom::StatusCode::Ok || !le3.value.has_value()) {
+            std::cerr << "revolved-surface tessellation: boundary curves failed\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        auto rv_tx = kernel.topology().begin_transaction();
+        auto rv0 = rv_tx.create_vertex(corners[0]);
+        auto rv1 = rv_tx.create_vertex(corners[1]);
+        auto rv2 = rv_tx.create_vertex(corners[2]);
+        auto rv3 = rv_tx.create_vertex(corners[3]);
+        auto re0 = rv_tx.create_edge(*le0.value, *rv0.value, *rv1.value);
+        auto re1 = rv_tx.create_edge(*le1.value, *rv1.value, *rv2.value);
+        auto re2 = rv_tx.create_edge(*le2.value, *rv2.value, *rv3.value);
+        auto re3 = rv_tx.create_edge(*le3.value, *rv3.value, *rv0.value);
+        auto rc0 = rv_tx.create_coedge(*re0.value, false);
+        auto rc1 = rv_tx.create_coedge(*re1.value, false);
+        auto rc2 = rv_tx.create_coedge(*re2.value, false);
+        auto rc3 = rv_tx.create_coedge(*re3.value, false);
+        if (rv0.status != axiom::StatusCode::Ok || !rv0.value.has_value() ||
+            rv1.status != axiom::StatusCode::Ok || !rv1.value.has_value() ||
+            rv2.status != axiom::StatusCode::Ok || !rv2.value.has_value() ||
+            rv3.status != axiom::StatusCode::Ok || !rv3.value.has_value() ||
+            re0.status != axiom::StatusCode::Ok || !re0.value.has_value() ||
+            re1.status != axiom::StatusCode::Ok || !re1.value.has_value() ||
+            re2.status != axiom::StatusCode::Ok || !re2.value.has_value() ||
+            re3.status != axiom::StatusCode::Ok || !re3.value.has_value() ||
+            rc0.status != axiom::StatusCode::Ok || !rc0.value.has_value() ||
+            rc1.status != axiom::StatusCode::Ok || !rc1.value.has_value() ||
+            rc2.status != axiom::StatusCode::Ok || !rc2.value.has_value() ||
+            rc3.status != axiom::StatusCode::Ok || !rc3.value.has_value()) {
+            std::cerr << "revolved-surface tessellation: topology txn failed\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        const std::array<axiom::CoedgeId, 4> rv_coedges {*rc0.value, *rc1.value, *rc2.value, *rc3.value};
+        auto rv_loop = rv_tx.create_loop(rv_coedges);
+        auto rv_face = rv_tx.create_face(*rev_surf.value, *rv_loop.value, {});
+        const std::array<axiom::FaceId, 1> rv_faces {*rv_face.value};
+        auto rv_shell = rv_tx.create_shell(rv_faces);
+        const std::array<axiom::ShellId, 1> rv_shells {*rv_shell.value};
+        auto rv_body = rv_tx.create_body(rv_shells);
+        if (rv_loop.status != axiom::StatusCode::Ok || rv_face.status != axiom::StatusCode::Ok ||
+            rv_shell.status != axiom::StatusCode::Ok || rv_body.status != axiom::StatusCode::Ok ||
+            !rv_loop.value.has_value() || !rv_face.value.has_value() || !rv_shell.value.has_value() ||
+            !rv_body.value.has_value()) {
+            std::cerr << "revolved-surface tessellation: body creation failed\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        auto rv_commit = rv_tx.commit();
+        if (rv_commit.status != axiom::StatusCode::Ok) {
+            std::cerr << "revolved-surface tessellation: commit failed\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        axiom::TessellationOptions rev_tes {0.12, 18.0, true};
+        auto rev_mesh = kernel.convert().brep_to_mesh(*rv_body.value, rev_tes);
+        if (rev_mesh.status != axiom::StatusCode::Ok || !rev_mesh.value.has_value()) {
+            std::cerr << "revolved-surface brep_to_mesh failed\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        auto rev_tris = kernel.convert().mesh_triangle_count(*rev_mesh.value);
+        auto rev_insp = kernel.convert().inspect_mesh(*rev_mesh.value);
+        if (rev_tris.status != axiom::StatusCode::Ok || !rev_tris.value.has_value() ||
+            rev_insp.status != axiom::StatusCode::Ok || !rev_insp.value.has_value() ||
+            *rev_tris.value < 8 || rev_insp.value->tessellation_strategy != "owned_topo_welded" ||
+            rev_insp.value->has_degenerate_triangles) {
+            std::cerr << "revolved analytic surface should use derived parametric patch tessellation\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+    }
+
+    // 体级三角化缓存：相同体与相同 options 第二次调用应命中。
+    {
+        const axiom::TessellationOptions cache_opts {0.251, 31.0, true};
+        auto s0 = kernel.tessellation_cache_stats();
+        if (s0.status != axiom::StatusCode::Ok || !s0.value.has_value()) {
+            std::cerr << "tessellation_cache_stats query failed\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        const auto h0 = s0.value->body_cache_hits;
+        const auto m0 = s0.value->body_cache_misses;
+        auto c1 = kernel.convert().brep_to_mesh(*box.value, cache_opts);
+        if (c1.status != axiom::StatusCode::Ok || !c1.value.has_value()) {
+            std::cerr << "cache probe brep_to_mesh (1) failed\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        auto s1 = kernel.tessellation_cache_stats();
+        auto c2 = kernel.convert().brep_to_mesh(*box.value, cache_opts);
+        auto s2 = kernel.tessellation_cache_stats();
+        if (s1.status != axiom::StatusCode::Ok || !s1.value.has_value() ||
+            s2.status != axiom::StatusCode::Ok || !s2.value.has_value() ||
+            c2.status != axiom::StatusCode::Ok || !c2.value.has_value()) {
+            std::cerr << "tessellation_cache_stats or cache probe (2) failed\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        if (s1.value->body_cache_misses != m0 + 1 || s2.value->body_cache_hits != h0 + 1 ||
+            s2.value->body_cache_misses != m0 + 1) {
+            std::cerr << "body tessellation cache hit/miss counters unexpected\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        const auto tcs_path = std::filesystem::temp_directory_path() / "axiom_tess_cache_stats.json";
+        auto exp_tcs = kernel.export_tessellation_cache_stats_json(tcs_path.string());
+        if (exp_tcs.status != axiom::StatusCode::Ok) {
+            std::cerr << "export_tessellation_cache_stats_json failed\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        std::ifstream tcs_in {tcs_path};
+        std::string tcs_text((std::istreambuf_iterator<char>(tcs_in)), std::istreambuf_iterator<char>());
+        if (tcs_text.find("\"body_cache_hits\":") == std::string::npos ||
+            tcs_text.find("\"face_cache_misses\":") == std::string::npos) {
+            std::cerr << "tessellation cache stats json missing expected fields\n";
+            std::filesystem::remove(mesh_report_path);
+            std::filesystem::remove(tcs_path);
+            return 1;
+        }
+        std::filesystem::remove(tcs_path);
+    }
+
     const std::vector<axiom::BodyId> batch_body_ids {*box.value};
     auto batch_mesh = kernel.convert().brep_to_mesh_batch(batch_body_ids, {0.1, 10.0, true});
     if (batch_mesh.status != axiom::StatusCode::Ok || !batch_mesh.value.has_value() || batch_mesh.value->size() != 1) {
@@ -254,6 +692,14 @@ int main() {
     if (bad_mesh_diag.status != axiom::StatusCode::Ok || !bad_mesh_diag.value.has_value() ||
         !has_issue_code(*bad_mesh_diag.value, axiom::diag_codes::kCoreParameterOutOfRange)) {
         std::cerr << "invalid tessellation options should carry parameter diagnostic\n";
+        return 1;
+    }
+    axiom::TessellationOptions bad_refine {0.1, 10.0, true};
+    bad_refine.refine_patch_chordal_max_passes = 99;
+    auto bad_refine_mesh = kernel.convert().brep_to_mesh(*box.value, bad_refine);
+    if (bad_refine_mesh.status != axiom::StatusCode::InvalidInput) {
+        std::cerr << "expected invalid refine_patch_chordal_max_passes to fail\n";
+        std::filesystem::remove(mesh_report_path);
         return 1;
     }
     auto invalid_mesh_triangles = kernel.convert().mesh_triangle_count(axiom::MeshId {999999});
@@ -275,9 +721,96 @@ int main() {
     }
 
     auto rt_brep_mesh = kernel.convert().verify_brep_mesh_round_trip(*box.value, {0.1, 10.0, true});
-    if (rt_brep_mesh.status != axiom::StatusCode::Ok || !rt_brep_mesh.value.has_value() || !rt_brep_mesh.value->passed) {
-        std::cerr << "brep-mesh round-trip report should pass\n";
+    if (rt_brep_mesh.status != axiom::StatusCode::Ok || !rt_brep_mesh.value.has_value() || !rt_brep_mesh.value->passed ||
+        rt_brep_mesh.value->tessellation_strategy != "primitive_box" ||
+        rt_brep_mesh.value->tessellation_budget_digest.find("chordal_error") == std::string::npos ||
+        rt_brep_mesh.value->tessellation_budget_digest.find("angular_error_deg") == std::string::npos) {
+        std::cerr << "brep-mesh round-trip report should pass with strategy and budget digest\n";
         return 1;
+    }
+    const auto rt_json_path = std::filesystem::temp_directory_path() / "axiom_round_trip_report.json";
+    auto exp_rt = kernel.export_round_trip_report_json(*rt_brep_mesh.value, rt_json_path.string());
+    if (exp_rt.status != axiom::StatusCode::Ok) {
+        std::cerr << "export_round_trip_report_json failed\n";
+        std::filesystem::remove(mesh_report_path);
+        return 1;
+    }
+    std::ifstream rt_json_in {rt_json_path};
+    std::string rt_json_text((std::istreambuf_iterator<char>(rt_json_in)), std::istreambuf_iterator<char>());
+    if (rt_json_text.find("\"passed\":true") == std::string::npos ||
+        rt_json_text.find("\"budget\":") == std::string::npos ||
+        rt_json_text.find("\"normal_angle_deg_tol\":") == std::string::npos ||
+        rt_json_text.find("\"chordal_error_basis\":") == std::string::npos ||
+        rt_json_text.find("\"angular_error_basis_deg\":") == std::string::npos ||
+        rt_json_text.find("\"tessellation_strategy\":\"primitive_box\"") == std::string::npos ||
+        rt_json_text.find("\"tessellation_budget_digest\":") == std::string::npos ||
+        rt_json_text.find("\"normal_deviation_measured\":false") == std::string::npos ||
+        rt_json_text.find("\"max_normal_angle_deg_delta\":") == std::string::npos) {
+        std::cerr << "round-trip report json export content unexpected\n";
+        std::filesystem::remove(mesh_report_path);
+        std::filesystem::remove(rt_json_path);
+        return 1;
+    }
+    if (kernel.export_round_trip_report_json(*rt_brep_mesh.value, "").status != axiom::StatusCode::InvalidInput) {
+        std::cerr << "export_round_trip_report_json should reject empty path\n";
+        std::filesystem::remove(mesh_report_path);
+        std::filesystem::remove(rt_json_path);
+        return 1;
+    }
+    std::filesystem::remove(rt_json_path);
+
+    // 圆柱：round-trip 点/包围盒门禁；法向预算待按「侧面径向 vs 端盖轴向」分类后再启用（当前统一径向对比会在端盖上得到 ~90° 伪差）。
+    {
+        auto cyl = kernel.primitives().cylinder({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, 2.0, 5.0);
+        if (cyl.status != axiom::StatusCode::Ok || !cyl.value.has_value()) {
+            std::cerr << "failed to create cylinder for round-trip budget\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        // mesh_to_brep 重建圆柱的径向近似在粗网格下可至 O(1) 量级；弦高预算需覆盖该点误差门禁。
+        axiom::TessellationOptions cyl_tes {2.5, 12.0, false};
+        auto rt_cyl = kernel.convert().verify_brep_mesh_round_trip(*cyl.value, cyl_tes);
+        if (rt_cyl.status != axiom::StatusCode::Ok || !rt_cyl.value.has_value() || !rt_cyl.value->passed ||
+            rt_cyl.value->normal_deviation_measured || rt_cyl.value->tessellation_strategy != "primitive_cylinder") {
+            std::cerr << "cylinder brep-mesh round-trip failed\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+    }
+
+    {
+        axiom::TessellationOptions tes_budget {0.05, 6.0, true};
+        auto cb = kernel.conversion_error_budget_for_tessellation(tes_budget);
+        if (cb.status != axiom::StatusCode::Ok || !cb.value.has_value() ||
+            !approx(cb.value->chordal_error_basis, 0.05) || !approx(cb.value->angular_error_basis_deg, 6.0) ||
+            !approx(cb.value->max_point_abs_tol, 0.05) || !approx(cb.value->bbox_abs_tol, 0.1) ||
+            !approx(cb.value->normal_angle_deg_tol, 6.0)) {
+            std::cerr << "conversion_error_budget_for_tessellation mapping unexpected\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        const auto cb_json_path = std::filesystem::temp_directory_path() / "axiom_conversion_budget.json";
+        if (kernel.export_conversion_error_budget_json(tes_budget, cb_json_path.string()).status != axiom::StatusCode::Ok) {
+            std::cerr << "export_conversion_error_budget_json failed\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
+        std::ifstream cb_in {cb_json_path};
+        std::string cb_text((std::istreambuf_iterator<char>(cb_in)), std::istreambuf_iterator<char>());
+        if (cb_text.find("\"derivation\":\"tessellation_options_v1\"") == std::string::npos ||
+            cb_text.find("\"bbox_abs_tol\":") == std::string::npos) {
+            std::cerr << "conversion error budget json export unexpected\n";
+            std::filesystem::remove(mesh_report_path);
+            std::filesystem::remove(cb_json_path);
+            return 1;
+        }
+        std::filesystem::remove(cb_json_path);
+        auto cb_bad = kernel.conversion_error_budget_for_tessellation({0.0, 5.0, true});
+        if (cb_bad.status != axiom::StatusCode::InvalidInput) {
+            std::cerr << "conversion_error_budget_for_tessellation should reject invalid options\n";
+            std::filesystem::remove(mesh_report_path);
+            return 1;
+        }
     }
 
     auto brep_bbox = kernel.representation().bbox_of_body(*brep.value);
@@ -315,13 +848,28 @@ int main() {
         return 1;
     }
     auto rt_mesh_brep = kernel.convert().verify_mesh_brep_round_trip(*implicit_mesh.value, {0.2, 15.0, true});
-    if (rt_mesh_brep.status != axiom::StatusCode::Ok || !rt_mesh_brep.value.has_value() || !rt_mesh_brep.value->passed) {
+    if (rt_mesh_brep.status != axiom::StatusCode::Ok || !rt_mesh_brep.value.has_value() ||
+        !rt_mesh_brep.value->passed) {
         std::cerr << "mesh-brep round-trip report should pass\n";
+        return 1;
+    }
+    // `verify_mesh_brep_round_trip` 内部会 `mesh_to_brep` 并再 `brep_to_mesh`：绑定后应返回同一嵌入网格（策略为原网格记录上的 implicit_bbox_proxy）。
+    const auto& rt_mb = *rt_mesh_brep.value;
+    const bool rt_strat_ok =
+        rt_mb.tessellation_strategy == "bbox_proxy" || rt_mb.tessellation_strategy == "implicit_bbox_proxy";
+    if (!rt_strat_ok || rt_mb.tessellation_budget_digest.find("chordal_error") == std::string::npos) {
+        std::cerr << "mesh-brep round-trip report should carry strategy and budget digest\n";
         return 1;
     }
     auto implicit_brep = kernel.convert().mesh_to_brep(*implicit_mesh.value);
     if (implicit_brep.status != axiom::StatusCode::Ok || !implicit_brep.value.has_value()) {
         std::cerr << "failed to convert implicit mesh back to brep\n";
+        return 1;
+    }
+    auto embed_roundtrip = kernel.convert().brep_to_mesh(*implicit_brep.value, {0.2, 15.0, true});
+    if (embed_roundtrip.status != axiom::StatusCode::Ok || !embed_roundtrip.value.has_value() ||
+        !implicit_mesh.value.has_value() || *embed_roundtrip.value != *implicit_mesh.value) {
+        std::cerr << "MeshRep should return embedded mesh id after mesh_to_brep linkage\n";
         return 1;
     }
     auto implicit_bbox = kernel.representation().bbox_of_body(*implicit_brep.value);

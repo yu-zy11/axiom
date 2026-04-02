@@ -369,9 +369,68 @@ int main() {
             std::cerr << "expected Strict validate_tolerance to fail when min_local > max_local\n";
             return 1;
         }
+        auto strict_tol_diag = k_bad_tol.diagnostics().get(strict_tol.diagnostic_id);
+        if (strict_tol_diag.status != axiom::StatusCode::Ok || !strict_tol_diag.value.has_value()) {
+            std::cerr << "missing diagnostic for strict validate_tolerance failure\n";
+            return 1;
+        }
+        bool saw_tol_stage = false;
+        for (const auto& iss : strict_tol_diag.value->issues) {
+            if (iss.stage == "heal.validation.tolerance") {
+                saw_tol_stage = true;
+                break;
+            }
+        }
+        if (!saw_tol_stage) {
+            std::cerr << "expected heal.validation.tolerance stage on tolerance validation failure\n";
+            return 1;
+        }
+        auto tol_prefix_total = k_bad_tol.diagnostics().total_issues_with_stage_prefix("heal.validation.tolerance");
+        if (tol_prefix_total.status != axiom::StatusCode::Ok || !tol_prefix_total.value.has_value() ||
+            *tol_prefix_total.value < 1) {
+            std::cerr << "expected total_issues_with_stage_prefix to count tolerance validation issues\n";
+            return 1;
+        }
+        auto heal_val_total = k_bad_tol.diagnostics().total_issues_with_stage_prefix("heal.validation.");
+        if (heal_val_total.status != axiom::StatusCode::Ok || !heal_val_total.value.has_value() ||
+            *heal_val_total.value < *tol_prefix_total.value) {
+            std::cerr << "expected heal.validation. prefix total to cover tolerance issues\n";
+            return 1;
+        }
         auto std_tol = k_bad_tol.validate().validate_tolerance(*box_tol.value, axiom::ValidationMode::Standard);
         if (std_tol.status != axiom::StatusCode::Ok) {
             std::cerr << "Standard validate_tolerance should not apply min_local/max_local ordering gate\n";
+            return 1;
+        }
+    }
+
+    {
+        axiom::Kernel k_manifold;
+        auto bad_manifold = k_manifold.validate().validate_manifold(axiom::BodyId {888888888},
+                                                                    axiom::ValidationMode::Standard);
+        if (bad_manifold.status != axiom::StatusCode::InvalidTopology || bad_manifold.diagnostic_id.value == 0) {
+            std::cerr << "expected validate_manifold on missing body to fail topology\n";
+            return 1;
+        }
+        auto manifold_diag = k_manifold.diagnostics().get(bad_manifold.diagnostic_id);
+        if (manifold_diag.status != axiom::StatusCode::Ok || !manifold_diag.value.has_value()) {
+            std::cerr << "missing diagnostic for validate_manifold failure\n";
+            return 1;
+        }
+        bool saw_manifold_stage = false;
+        for (const auto& iss : manifold_diag.value->issues) {
+            if (iss.stage == "heal.validation.manifold") {
+                saw_manifold_stage = true;
+                break;
+            }
+        }
+        if (!saw_manifold_stage) {
+            std::cerr << "expected heal.validation.manifold stage on manifold validation failure\n";
+            return 1;
+        }
+        auto mf_total = k_manifold.diagnostics().total_issues_with_stage_prefix("heal.validation.manifold");
+        if (mf_total.status != axiom::StatusCode::Ok || !mf_total.value.has_value() || *mf_total.value < 1) {
+            std::cerr << "expected total_issues_with_stage_prefix to count manifold validation issues\n";
             return 1;
         }
     }

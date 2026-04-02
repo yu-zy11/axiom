@@ -51,6 +51,21 @@ Result<OpReport> boolean_op_fail_staged(std::shared_ptr<detail::KernelState> sta
     return error_result<OpReport>(st, diag);
 }
 
+Result<OpReport> op_report_error_with_stage(detail::KernelState& st, StatusCode code_status,
+                                            std::string_view err_code, std::string message, std::string summary,
+                                            std::string_view stage, std::span<const std::uint64_t> related) {
+    Issue issue;
+    if (related.empty()) {
+        issue = detail::make_error_issue(err_code, std::move(message));
+    } else {
+        issue = detail::make_error_issue(err_code, std::move(message),
+                                         std::vector<std::uint64_t>(related.begin(), related.end()));
+    }
+    issue.stage = std::string(stage);
+    const DiagnosticId diag = st.create_diagnostic(std::move(summary), {std::move(issue)});
+    return error_result<OpReport>(code_status, diag);
+}
+
 }  // namespace
 
 PrimitiveService::PrimitiveService(std::shared_ptr<detail::KernelState> state) : state_(std::move(state)) {}
@@ -257,6 +272,7 @@ Result<BodyId> SweepService::extrude(const ProfileRef& profile, const Vec3& dire
                 record.extrude_mass_centroid = detail::add_point_vec(c_base, detail::scale(D, 0.5));
             }
         }
+        record.extrude_profile_xyz = profile.polygon_xyz;
     } else {
         const auto p0 = Point3{0.0, 0.0, 0.0};
         const auto p1 = detail::add_point_vec(p0, detail::scale(dir, distance));
@@ -606,7 +622,7 @@ Result<OpReport> BooleanService::run(BooleanOp op, BodyId lhs, BodyId rhs, const
     append_boolean_prep_candidate_issue(*state_, diag, lhs, rhs, prep);
     append_boolean_run_stage_issue(*state_, diag, op, relation, prep, lhs, rhs, output);
     append_boolean_stage_issue(*state_, diag, diag_codes::kBoolStageOutputMaterialized,
-                               "布尔输出占位物化完成：最小 owned topology / 回退链路已执行",
+                               "布尔输出物化完成：owned topology 已建立（来源面/壳重建、单壳 bbox 回退及后续 imprint 等路径的组合）",
                                {lhs.value, rhs.value, output.value});
 
     if (diag.value != 0) {
@@ -634,6 +650,21 @@ Result<OpReport> BooleanService::run(BooleanOp op, BodyId lhs, BodyId rhs, const
                 return -1;
             }
             if (std::abs(rr - r2) <= eps || std::abs(t - half) <= eps || std::abs(t + half) <= eps) {
+                return 0;
+            }
+            return 1;
+        };
+
+        auto point_in_sphere = [&](const detail::BodyRecord& sph, const Point3& p, Scalar eps) -> int {
+            const auto C = sph.origin;
+            const auto r = sph.a;
+            const Vec3 d {p.x - C.x, p.y - C.y, p.z - C.z};
+            const auto rr = detail::dot(d, d);
+            const auto r2 = r * r;
+            if (rr > r2 + eps) {
+                return -1;
+            }
+            if (std::abs(rr - r2) <= eps) {
                 return 0;
             }
             return 1;
@@ -690,8 +721,12 @@ Result<OpReport> BooleanService::run(BooleanOp op, BodyId lhs, BodyId rhs, const
             const Scalar eps = detail::resolve_linear_tolerance(0.0, state_->config.tolerance);
             const bool use_cylinder = rhs_body.kind == detail::BodyKind::Cylinder && rhs_body.rep_kind == RepKind::ExactBRep &&
                                       rhs_body.a > 0.0 && rhs_body.b > 0.0;
+            const bool use_sphere =
+                rhs_body.kind == detail::BodyKind::Sphere && rhs_body.rep_kind == RepKind::ExactBRep && rhs_body.a > 0.0;
             if (use_cylinder) {
                 method = "cylinder_point_classification";
+            } else if (use_sphere) {
+                method = "sphere_point_classification";
             }
             for (const auto shell_id : out_body.shells) {
                 const auto shell_it = state_->shells.find(shell_id.value);
@@ -710,6 +745,8 @@ Result<OpReport> BooleanService::run(BooleanOp op, BodyId lhs, BodyId rhs, const
                     int cls = -2;
                     if (use_cylinder) {
                         cls = point_in_cylinder(rhs_body, p, eps);
+                    } else if (use_sphere) {
+                        cls = point_in_sphere(rhs_body, p, eps);
                     } else {
                         // Fallback: bbox-based point inclusion.
                         if (!rhs_bbox.is_valid) {
@@ -874,16 +911,16 @@ ModifyService::ModifyService(std::shared_ptr<detail::KernelState> state) : state
 
 Result<OpReport> ModifyService::offset_body(BodyId body_id, Scalar distance, const TolerancePolicy&) {
     if (!detail::has_body(*state_, body_id) || distance == 0.0) {
-        return detail::invalid_input_result<OpReport>(
-            *state_, diag_codes::kModOffsetInvalid,
-            "偏置失败：目标实体不存在或偏置距离不能为 0", "偏置失败");
+        return op_report_error_with_stage(*state_, StatusCode::InvalidInput, diag_codes::kModOffsetInvalid,
+                                          "偏置失败：目标实体不存在或偏置距离不能为 0", "偏置失败",
+                                          "modify.offset.input_gate", std::span<const std::uint64_t> {});
     }
     auto record = state_->bodies[body_id.value];
     detach_owned_topology(*state_, record);
     if (distance < 0.0 && std::abs(distance) * 2.0 >= bbox_min_extent(record.bbox)) {
-        return detail::failed_result<OpReport>(
-            *state_, StatusCode::OperationFailed, diag_codes::kModOffsetSelfIntersection,
-            "偏置失败：负偏置过大，结果会产生自交或完全塌缩", "偏置失败");
+        return op_report_error_with_stage(*state_, StatusCode::OperationFailed, diag_codes::kModOffsetSelfIntersection,
+                                          "偏置失败：负偏置过大，结果会产生自交或完全塌缩", "偏置失败",
+                                          "modify.offset.self_intersection", std::span<const std::uint64_t> {});
     }
     record.kind = detail::BodyKind::Modified;
     record.label = "offset";
@@ -897,28 +934,28 @@ Result<OpReport> ModifyService::offset_body(BodyId body_id, Scalar distance, con
 
 Result<OpReport> ModifyService::shell_body(BodyId body_id, std::span<const FaceId> removed_faces, Scalar thickness) {
     if (!detail::has_body(*state_, body_id) || thickness <= 0.0) {
-        return detail::invalid_input_result<OpReport>(
-            *state_, diag_codes::kModShellFailure,
-            "抽壳失败：目标实体不存在或壁厚必须大于 0", "抽壳失败");
+        return op_report_error_with_stage(*state_, StatusCode::InvalidInput, diag_codes::kModShellFailure,
+                                          "抽壳失败：目标实体不存在或壁厚必须大于 0", "抽壳失败",
+                                          "modify.shell.input_gate", std::span<const std::uint64_t> {});
     }
     if (!removed_faces.empty() && !valid_face_ids(*state_, removed_faces)) {
-        return detail::invalid_input_result<OpReport>(
-            *state_, diag_codes::kModShellFailure,
-            "抽壳失败：待移除面集合包含无效面", "抽壳失败");
+        return op_report_error_with_stage(*state_, StatusCode::InvalidInput, diag_codes::kModShellFailure,
+                                          "抽壳失败：待移除面集合包含无效面", "抽壳失败",
+                                          "modify.shell.invalid_faces", std::span<const std::uint64_t> {});
     }
     auto record = state_->bodies[body_id.value];
     detach_owned_topology(*state_, record);
     const auto min_extent = bbox_min_extent(record.bbox);
     if (thickness * 2.0 >= min_extent) {
-        return detail::failed_result<OpReport>(
-            *state_, StatusCode::OperationFailed, diag_codes::kModShellFailure,
-            "抽壳失败：壁厚过大，内部空腔将塌缩", "抽壳失败");
+        return op_report_error_with_stage(*state_, StatusCode::OperationFailed, diag_codes::kModShellFailure,
+                                          "抽壳失败：壁厚过大，内部空腔将塌缩", "抽壳失败",
+                                          "modify.shell.thickness", std::span<const std::uint64_t> {});
     }
     const auto cavity_margin = min_extent - thickness * 2.0;
     if (cavity_margin <= detail::resolve_linear_tolerance(0.0, state_->config.tolerance)) {
-        return detail::failed_result<OpReport>(
-            *state_, StatusCode::OperationFailed, diag_codes::kModShellFailure,
-            "抽壳失败：壁厚逼近容差阈值，内部空腔不稳定", "抽壳失败");
+        return op_report_error_with_stage(*state_, StatusCode::OperationFailed, diag_codes::kModShellFailure,
+                                          "抽壳失败：壁厚逼近容差阈值，内部空腔不稳定", "抽壳失败",
+                                          "modify.shell.cavity_tolerance", std::span<const std::uint64_t> {});
     }
     record.kind = detail::BodyKind::Modified;
     record.label = "shell";
@@ -935,9 +972,10 @@ Result<OpReport> ModifyService::shell_body(BodyId body_id, std::span<const FaceI
         // Roll back just-created result body to keep modify failure side-effect free.
         state_->bodies.erase(output.value);
         detail::rebuild_topology_links(*state_);
-        return detail::failed_result<OpReport>(
+        return op_report_error_with_stage(
             *state_, StatusCode::OperationFailed, diag_codes::kModShellValidateFailed,
-            "抽壳失败：结果校验未通过，已执行回滚", "抽壳失败");
+            "抽壳失败：结果校验未通过，已执行回滚", "抽壳失败", "modify.shell.validate",
+            std::span<const std::uint64_t> {&body_id.value, 1});
     }
     detail::invalidate_eval_for_bodies(*state_, {body_id});
     const auto diag = state_->create_diagnostic("抽壳操作完成");
@@ -946,9 +984,10 @@ Result<OpReport> ModifyService::shell_body(BodyId body_id, std::span<const FaceI
 
 Result<OpReport> ModifyService::draft_faces(BodyId body_id, std::span<const FaceId> faces, const Vec3& pull_dir, Scalar angle) {
     if (!detail::has_body(*state_, body_id) || angle == 0.0 || !valid_axis(pull_dir) || !valid_face_ids(*state_, faces)) {
-        return detail::invalid_input_result<OpReport>(
-            *state_, diag_codes::kCoreParameterOutOfRange,
-            "拔模失败：目标实体不存在、面集合无效、拉拔方向无效或角度不能为 0", "拔模失败");
+        return op_report_error_with_stage(
+            *state_, StatusCode::InvalidInput, diag_codes::kCoreParameterOutOfRange,
+            "拔模失败：目标实体不存在、面集合无效、拉拔方向无效或角度不能为 0", "拔模失败",
+            "modify.draft.input_gate", std::span<const std::uint64_t> {});
     }
     auto record = state_->bodies[body_id.value];
     detach_owned_topology(*state_, record);
@@ -968,9 +1007,10 @@ Result<OpReport> ModifyService::draft_faces(BodyId body_id, std::span<const Face
 
 Result<OpReport> ModifyService::replace_face(BodyId body_id, FaceId target, SurfaceId replacement) {
     if (!detail::has_body(*state_, body_id) || state_->faces.find(target.value) == state_->faces.end() || !detail::has_surface(*state_, replacement)) {
-        return detail::invalid_input_result<OpReport>(
-            *state_, diag_codes::kModReplaceFaceIncompatible,
-            "替换面失败：目标实体、目标面或替换曲面无效", "替换面失败");
+        return op_report_error_with_stage(
+            *state_, StatusCode::InvalidInput, diag_codes::kModReplaceFaceIncompatible,
+            "替换面失败：目标实体、目标面或替换曲面无效", "替换面失败", "modify.replace_face.input_gate",
+            std::span<const std::uint64_t> {});
     }
     auto record = state_->bodies[body_id.value];
     detach_owned_topology(*state_, record);
@@ -987,9 +1027,10 @@ Result<OpReport> ModifyService::replace_face(BodyId body_id, FaceId target, Surf
 
 Result<OpReport> ModifyService::delete_face_and_heal(BodyId body_id, FaceId target) {
     if (!detail::has_body(*state_, body_id) || state_->faces.find(target.value) == state_->faces.end()) {
-        return detail::invalid_input_result<OpReport>(
-            *state_, diag_codes::kModDeleteFaceHealFailure,
-            "删除面补面失败：目标实体或目标面无效", "删除面补面失败");
+        return op_report_error_with_stage(
+            *state_, StatusCode::InvalidInput, diag_codes::kModDeleteFaceHealFailure,
+            "删除面补面失败：目标实体或目标面无效", "删除面补面失败", "modify.delete_face.input_gate",
+            std::span<const std::uint64_t> {});
     }
     auto record = state_->bodies[body_id.value];
     detach_owned_topology(*state_, record);
@@ -1003,25 +1044,32 @@ Result<OpReport> ModifyService::delete_face_and_heal(BodyId body_id, FaceId targ
     const auto diag = state_->create_diagnostic("删除面补面操作完成");
     auto report = make_report(StatusCode::Ok, output, diag,
                               {detail::make_warning(diag_codes::kHealFeatureRemovedWarning, "局部面删除后已执行简化补面")});
-    state_->append_diagnostic_issue(diag,
-                                    detail::make_warning_issue(diag_codes::kHealFeatureRemovedWarning, "局部面删除后执行了补面简化"));
+    {
+        auto heal_warn = detail::make_warning_issue(diag_codes::kHealFeatureRemovedWarning, "局部面删除后执行了补面简化");
+        heal_warn.related_entities = {body_id.value, output.value, target.value};
+        heal_warn.stage = "modify.delete_face.heal";
+        state_->append_diagnostic_issue(diag, std::move(heal_warn));
+    }
     return ok_result(report, diag);
 }
 
 BlendService::BlendService(std::shared_ptr<detail::KernelState> state) : state_(std::move(state)) {}
 
+// 圆角/倒角：当前为拓扑占位 + 参数门禁 + 阶段化诊断；工业级滚球/角区/变半径/变距几何仍为长期 Ops 课题（见进度文档 OpsCore）。
 Result<OpReport> BlendService::fillet_edges(BodyId body_id, std::span<const EdgeId> edges, Scalar radius) {
     if (!detail::has_body(*state_, body_id) || edges.empty() || radius <= 0.0 || !valid_edge_ids(*state_, edges)) {
-        return detail::invalid_input_result<OpReport>(
-            *state_, diag_codes::kBlendParameterTooLarge,
-            "圆角失败：目标实体无效、边集合为空、边句柄无效或半径非法", "圆角失败");
+        return op_report_error_with_stage(
+            *state_, StatusCode::InvalidInput, diag_codes::kBlendParameterTooLarge,
+            "圆角失败：目标实体无效、边集合为空、边句柄无效或半径非法", "圆角失败", "blend.fillet.input_gate",
+            std::span<const std::uint64_t> {});
     }
     auto record = state_->bodies[body_id.value];
     detach_owned_topology(*state_, record);
     if (radius * 2.0 >= bbox_min_extent(record.bbox)) {
-        return detail::failed_result<OpReport>(
+        return op_report_error_with_stage(
             *state_, StatusCode::OperationFailed, diag_codes::kBlendParameterTooLarge,
-            "圆角失败：圆角半径过大，超过局部可容纳特征尺寸", "圆角失败");
+            "圆角失败：圆角半径过大，超过局部可容纳特征尺寸", "圆角失败", "blend.fillet.radius_gate",
+            std::span<const std::uint64_t> {&body_id.value, 1});
     }
     record.kind = detail::BodyKind::BlendResult;
     record.label = "fillet";
@@ -1039,11 +1087,20 @@ Result<OpReport> BlendService::fillet_edges(BodyId body_id, std::span<const Edge
     blend_warnings.push_back(detail::make_warning(
         diag_codes::kBlendApproximatePlaceholder,
         "圆角：当前为拓扑占位与参数门禁，工业级滚球/角区/变半径未实现"));
+    {
+        auto ph = detail::make_warning_issue(
+            diag_codes::kBlendApproximatePlaceholder,
+            "圆角：当前为拓扑占位与参数门禁，工业级滚球/角区/变半径未实现");
+        ph.related_entities = {body_id.value, output.value};
+        ph.stage = "blend.fillet.placeholder";
+        state_->append_diagnostic_issue(diag, std::move(ph));
+    }
     if (edges.size() > 1) {
         auto corner_issue = detail::make_warning_issue(
             diag_codes::kBlendMultiEdgeCornerPlaceholder,
             "圆角：一次处理多条边时角区/连续滚球/变半径未实现，仍为拓扑占位");
         corner_issue.related_entities = {body_id.value, output.value};
+        corner_issue.stage = "blend.fillet.multi_edge";
         state_->append_diagnostic_issue(diag, std::move(corner_issue));
         blend_warnings.push_back(detail::make_warning(
             diag_codes::kBlendMultiEdgeCornerPlaceholder,
@@ -1054,16 +1111,18 @@ Result<OpReport> BlendService::fillet_edges(BodyId body_id, std::span<const Edge
 
 Result<OpReport> BlendService::chamfer_edges(BodyId body_id, std::span<const EdgeId> edges, Scalar distance) {
     if (!detail::has_body(*state_, body_id) || edges.empty() || distance <= 0.0 || !valid_edge_ids(*state_, edges)) {
-        return detail::invalid_input_result<OpReport>(
-            *state_, diag_codes::kBlendInvalidTarget,
-            "倒角失败：目标实体无效、边集合为空、边句柄无效或距离非法", "倒角失败");
+        return op_report_error_with_stage(
+            *state_, StatusCode::InvalidInput, diag_codes::kBlendInvalidTarget,
+            "倒角失败：目标实体无效、边集合为空、边句柄无效或距离非法", "倒角失败", "blend.chamfer.input_gate",
+            std::span<const std::uint64_t> {});
     }
     auto record = state_->bodies[body_id.value];
     detach_owned_topology(*state_, record);
     if (distance >= bbox_min_extent(record.bbox)) {
-        return detail::failed_result<OpReport>(
+        return op_report_error_with_stage(
             *state_, StatusCode::OperationFailed, diag_codes::kBlendParameterTooLarge,
-            "倒角失败：倒角距离过大，超过局部可容纳特征尺寸", "倒角失败");
+            "倒角失败：倒角距离过大，超过局部可容纳特征尺寸", "倒角失败", "blend.chamfer.distance_gate",
+            std::span<const std::uint64_t> {&body_id.value, 1});
     }
     record.kind = detail::BodyKind::BlendResult;
     record.label = "chamfer";
@@ -1081,11 +1140,20 @@ Result<OpReport> BlendService::chamfer_edges(BodyId body_id, std::span<const Edg
     blend_warnings.push_back(detail::make_warning(
         diag_codes::kBlendApproximatePlaceholder,
         "倒角：当前为拓扑占位与参数门禁，工业级角区/变距几何未实现"));
+    {
+        auto ph = detail::make_warning_issue(
+            diag_codes::kBlendApproximatePlaceholder,
+            "倒角：当前为拓扑占位与参数门禁，工业级角区/变距几何未实现");
+        ph.related_entities = {body_id.value, output.value};
+        ph.stage = "blend.chamfer.placeholder";
+        state_->append_diagnostic_issue(diag, std::move(ph));
+    }
     if (edges.size() > 1) {
         auto corner_issue = detail::make_warning_issue(
             diag_codes::kBlendMultiEdgeCornerPlaceholder,
             "倒角：一次处理多条边时角区/连续倒角/变距未实现，仍为拓扑占位");
         corner_issue.related_entities = {body_id.value, output.value};
+        corner_issue.stage = "blend.chamfer.multi_edge";
         state_->append_diagnostic_issue(diag, std::move(corner_issue));
         blend_warnings.push_back(detail::make_warning(
             diag_codes::kBlendMultiEdgeCornerPlaceholder,

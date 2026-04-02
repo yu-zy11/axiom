@@ -445,6 +445,69 @@ int main() {
         }
     }
 
+    // ---- TopoCore (7.2): validate_face checks loop_to_faces ↔ face (happy path + indices) ----
+    {
+        axiom::Kernel k_ltf;
+        auto plane = k_ltf.surfaces().make_plane({0.0, 0.0, -2.0}, {0.0, 0.0, 1.0});
+        auto la0 = k_ltf.curves().make_line({0.0, -2.0, 0.0}, {1.0, 0.0, 0.0});
+        auto la1 = k_ltf.curves().make_line({1.0, -2.0, 0.0}, {0.0, 1.0, 0.0});
+        auto la2 = k_ltf.curves().make_line({1.0, -1.0, 0.0}, {-1.0, 0.0, 0.0});
+        auto la3 = k_ltf.curves().make_line({0.0, -1.0, 0.0}, {0.0, -2.0, 0.0});
+        if (plane.status != axiom::StatusCode::Ok || !plane.value.has_value() ||
+            la0.status != axiom::StatusCode::Ok || !la0.value.has_value() ||
+            la1.status != axiom::StatusCode::Ok || !la1.value.has_value() ||
+            la2.status != axiom::StatusCode::Ok || !la2.value.has_value() ||
+            la3.status != axiom::StatusCode::Ok || !la3.value.has_value()) {
+            std::cerr << "failed to init geometry for loop_to_faces face validate test\n";
+            return 1;
+        }
+        auto txn = k_ltf.topology().begin_transaction();
+        auto va0 = txn.create_vertex({0.0, -2.0, 0.0});
+        auto va1 = txn.create_vertex({1.0, -2.0, 0.0});
+        auto va2 = txn.create_vertex({1.0, -1.0, 0.0});
+        auto va3 = txn.create_vertex({0.0, -1.0, 0.0});
+        auto ea0 = txn.create_edge(*la0.value, *va0.value, *va1.value);
+        auto ea1 = txn.create_edge(*la1.value, *va1.value, *va2.value);
+        auto ea2 = txn.create_edge(*la2.value, *va2.value, *va3.value);
+        auto ea3 = txn.create_edge(*la3.value, *va3.value, *va0.value);
+        auto ca0 = txn.create_coedge(*ea0.value, false);
+        auto ca1 = txn.create_coedge(*ea1.value, false);
+        auto ca2 = txn.create_coedge(*ea2.value, false);
+        auto ca3 = txn.create_coedge(*ea3.value, false);
+        const std::array<axiom::CoedgeId, 4> coa {
+            *ca0.value, *ca1.value, *ca2.value, *ca3.value};
+        auto loop_f = txn.create_loop(coa);
+        auto face_f = txn.create_face(*plane.value, *loop_f.value, {});
+        auto shell_f = txn.create_shell(std::array<axiom::FaceId, 1>{*face_f.value});
+        auto body_f = txn.create_body(std::array<axiom::ShellId, 1>{*shell_f.value});
+        if (loop_f.status != axiom::StatusCode::Ok || face_f.status != axiom::StatusCode::Ok ||
+            shell_f.status != axiom::StatusCode::Ok || body_f.status != axiom::StatusCode::Ok ||
+            !face_f.value.has_value()) {
+            std::cerr << "failed to build face for loop_to_faces validate test\n";
+            return 1;
+        }
+        auto vf = k_ltf.topology().validate().validate_face(*face_f.value);
+        if (vf.status != axiom::StatusCode::Ok) {
+            std::cerr << "expected validate_face ok when loop_to_faces matches face\n";
+            return 1;
+        }
+        auto vl = k_ltf.topology().validate().validate_loop(*loop_f.value);
+        if (vl.status != axiom::StatusCode::Ok) {
+            std::cerr << "expected validate_loop ok when loop_to_faces matches face (scoped index check)\n";
+            return 1;
+        }
+        auto idx = k_ltf.topology().validate().validate_indices_consistency();
+        if (idx.status != axiom::StatusCode::Ok) {
+            std::cerr << "expected validate_indices_consistency ok in loop_to_faces face test\n";
+            return 1;
+        }
+        auto rb = txn.rollback();
+        if (rb.status != axiom::StatusCode::Ok) {
+            std::cerr << "rollback failed for loop_to_faces face validate test\n";
+            return 1;
+        }
+    }
+
     // ---- TopoCore (7.2): delete_face leaves orphan loop; indices fail; txn rollback restores ----
     {
         auto plane = kernel.surfaces().make_plane({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0});
@@ -708,6 +771,12 @@ int main() {
             return 1;
         }
 
+        auto bad_lp = kernel.topology().query().face_loop_uv_polyline(*face.value, axiom::LoopId{999999});
+        if (bad_lp.status == axiom::StatusCode::Ok) {
+            std::cerr << "expected face_loop_uv_polyline to reject loop not on face\n";
+            return 1;
+        }
+
         // Break closure by binding wrong pcurve on one coedge.
         txn.set_coedge_pcurve(*c3.value, *pc23.value);
         auto broken = kernel.topology().validate().validate_loop_pcurve_closedness(*loop.value);
@@ -732,6 +801,471 @@ int main() {
         auto rb = txn.rollback();
         if (rb.status != axiom::StatusCode::Ok) {
             std::cerr << "rollback failed for uv loop test\n";
+            return 1;
+        }
+    }
+
+    // ---- Stage 2: full trim outer-only — UV signed area must not be degenerate vs linear tol ----
+    {
+        const double s = 3e-7;  // s^2 = 9e-14 < default linear_tol^2 * 10 (1e-11 @ 1e-6)
+        auto plane = kernel.surfaces().make_plane({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0});
+        auto seg01 = kernel.curves().make_line_segment({0.0, 0.0, 0.0}, {s, 0.0, 0.0});
+        auto seg12 = kernel.curves().make_line_segment({s, 0.0, 0.0}, {s, s, 0.0});
+        auto seg23 = kernel.curves().make_line_segment({s, s, 0.0}, {0.0, s, 0.0});
+        auto seg30 = kernel.curves().make_line_segment({0.0, s, 0.0}, {0.0, 0.0, 0.0});
+        if (plane.status != axiom::StatusCode::Ok || seg01.status != axiom::StatusCode::Ok ||
+            seg12.status != axiom::StatusCode::Ok || seg23.status != axiom::StatusCode::Ok ||
+            seg30.status != axiom::StatusCode::Ok || !plane.value.has_value() ||
+            !seg01.value.has_value() || !seg12.value.has_value() || !seg23.value.has_value() ||
+            !seg30.value.has_value()) {
+            std::cerr << "failed to create geometry for micro-uv trim area test\n";
+            return 1;
+        }
+        auto txn = kernel.topology().begin_transaction();
+        auto v0 = txn.create_vertex({0.0, 0.0, 0.0});
+        auto v1 = txn.create_vertex({s, 0.0, 0.0});
+        auto v2 = txn.create_vertex({s, s, 0.0});
+        auto v3 = txn.create_vertex({0.0, s, 0.0});
+        auto e01 = txn.create_edge(*seg01.value, *v0.value, *v1.value);
+        auto e12 = txn.create_edge(*seg12.value, *v1.value, *v2.value);
+        auto e23 = txn.create_edge(*seg23.value, *v2.value, *v3.value);
+        auto e30 = txn.create_edge(*seg30.value, *v3.value, *v0.value);
+        auto c01 = txn.create_coedge(*e01.value, false);
+        auto c12 = txn.create_coedge(*e12.value, false);
+        auto c23 = txn.create_coedge(*e23.value, false);
+        auto c30 = txn.create_coedge(*e30.value, false);
+        if (v0.status != axiom::StatusCode::Ok || !v0.value.has_value() ||
+            v1.status != axiom::StatusCode::Ok || !v1.value.has_value() ||
+            v2.status != axiom::StatusCode::Ok || !v2.value.has_value() ||
+            v3.status != axiom::StatusCode::Ok || !v3.value.has_value() ||
+            e01.status != axiom::StatusCode::Ok || e12.status != axiom::StatusCode::Ok ||
+            e23.status != axiom::StatusCode::Ok || e30.status != axiom::StatusCode::Ok ||
+            c01.status != axiom::StatusCode::Ok || c12.status != axiom::StatusCode::Ok ||
+            c23.status != axiom::StatusCode::Ok || c30.status != axiom::StatusCode::Ok ||
+            !e01.value.has_value() || !e12.value.has_value() || !e23.value.has_value() ||
+            !e30.value.has_value() || !c01.value.has_value() || !c12.value.has_value() ||
+            !c23.value.has_value() || !c30.value.has_value()) {
+            std::cerr << "failed to build micro-uv trim topology\n";
+            return 1;
+        }
+        const std::array<axiom::Point2, 2> uv01{{{0.0, 0.0}, {s, 0.0}}};
+        const std::array<axiom::Point2, 2> uv12{{{s, 0.0}, {s, s}}};
+        const std::array<axiom::Point2, 2> uv23{{{s, s}, {0.0, s}}};
+        const std::array<axiom::Point2, 2> uv30{{{0.0, s}, {0.0, 0.0}}};
+        auto pc01 = kernel.pcurves().make_polyline(uv01);
+        auto pc12 = kernel.pcurves().make_polyline(uv12);
+        auto pc23 = kernel.pcurves().make_polyline(uv23);
+        auto pc30 = kernel.pcurves().make_polyline(uv30);
+        if (pc01.status != axiom::StatusCode::Ok || pc12.status != axiom::StatusCode::Ok ||
+            pc23.status != axiom::StatusCode::Ok || pc30.status != axiom::StatusCode::Ok ||
+            !pc01.value.has_value() || !pc12.value.has_value() || !pc23.value.has_value() ||
+            !pc30.value.has_value()) {
+            std::cerr << "failed to create pcurves for micro-uv trim test\n";
+            return 1;
+        }
+        txn.set_coedge_pcurve(*c01.value, *pc01.value);
+        txn.set_coedge_pcurve(*c12.value, *pc12.value);
+        txn.set_coedge_pcurve(*c23.value, *pc23.value);
+        txn.set_coedge_pcurve(*c30.value, *pc30.value);
+        const std::array<axiom::CoedgeId, 4> coedges{{*c01.value, *c12.value, *c23.value, *c30.value}};
+        auto loop = txn.create_loop(coedges);
+        auto face = txn.create_face(*plane.value, *loop.value, {});
+        if (loop.status != axiom::StatusCode::Ok || face.status != axiom::StatusCode::Ok ||
+            !loop.value.has_value() || !face.value.has_value()) {
+            std::cerr << "failed to create face for micro-uv trim test\n";
+            return 1;
+        }
+        auto tiny_uv = kernel.topology().validate().validate_face_trim_consistency(*face.value);
+        if (tiny_uv.status == axiom::StatusCode::Ok) {
+            std::cerr << "expected validate_face_trim_consistency to reject degenerate UV signed area\n";
+            return 1;
+        }
+        auto tiny_rep = kernel.diagnostics().get(tiny_uv.diagnostic_id);
+        if (tiny_rep.status != axiom::StatusCode::Ok || !tiny_rep.value.has_value() ||
+            !has_issue_code(*tiny_rep.value, axiom::diag_codes::kTopoFaceOuterLoopInvalid)) {
+            std::cerr << "expected kTopoFaceOuterLoopInvalid for micro UV trim area\n";
+            return 1;
+        }
+        if (txn.rollback().status != axiom::StatusCode::Ok) {
+            std::cerr << "rollback failed for micro-uv trim test\n";
+            return 1;
+        }
+    }
+
+    // ---- Stage 2+: full trim on plane — 3D 外环顺时针时须与平面法向冲突（kTopoLoopOrientationMismatch）----
+    {
+        auto plane = kernel.surfaces().make_plane({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0});
+        auto s03 = kernel.curves().make_line_segment({0.0, 0.0, 0.0}, {0.0, 1.0, 0.0});
+        auto s32 = kernel.curves().make_line_segment({0.0, 1.0, 0.0}, {1.0, 1.0, 0.0});
+        auto s21 = kernel.curves().make_line_segment({1.0, 1.0, 0.0}, {1.0, 0.0, 0.0});
+        auto s10 = kernel.curves().make_line_segment({1.0, 0.0, 0.0}, {0.0, 0.0, 0.0});
+        if (plane.status != axiom::StatusCode::Ok || s03.status != axiom::StatusCode::Ok ||
+            s32.status != axiom::StatusCode::Ok || s21.status != axiom::StatusCode::Ok ||
+            s10.status != axiom::StatusCode::Ok || !plane.value.has_value() ||
+            !s03.value.has_value() || !s32.value.has_value() || !s21.value.has_value() ||
+            !s10.value.has_value()) {
+            std::cerr << "failed to create geometry for cw trim orientation test\n";
+            return 1;
+        }
+        auto txn = kernel.topology().begin_transaction();
+        auto v0 = txn.create_vertex({0.0, 0.0, 0.0});
+        auto v3 = txn.create_vertex({0.0, 1.0, 0.0});
+        auto v2 = txn.create_vertex({1.0, 1.0, 0.0});
+        auto v1 = txn.create_vertex({1.0, 0.0, 0.0});
+        auto e03 = txn.create_edge(*s03.value, *v0.value, *v3.value);
+        auto e32 = txn.create_edge(*s32.value, *v3.value, *v2.value);
+        auto e21 = txn.create_edge(*s21.value, *v2.value, *v1.value);
+        auto e10 = txn.create_edge(*s10.value, *v1.value, *v0.value);
+        auto c03 = txn.create_coedge(*e03.value, false);
+        auto c32 = txn.create_coedge(*e32.value, false);
+        auto c21 = txn.create_coedge(*e21.value, false);
+        auto c10 = txn.create_coedge(*e10.value, false);
+        if (v0.status != axiom::StatusCode::Ok || !v0.value.has_value() ||
+            v3.status != axiom::StatusCode::Ok || !v3.value.has_value() ||
+            v2.status != axiom::StatusCode::Ok || !v2.value.has_value() ||
+            v1.status != axiom::StatusCode::Ok || !v1.value.has_value() ||
+            e03.status != axiom::StatusCode::Ok || e32.status != axiom::StatusCode::Ok ||
+            e21.status != axiom::StatusCode::Ok || e10.status != axiom::StatusCode::Ok ||
+            c03.status != axiom::StatusCode::Ok || c32.status != axiom::StatusCode::Ok ||
+            c21.status != axiom::StatusCode::Ok || c10.status != axiom::StatusCode::Ok ||
+            !e03.value.has_value() || !e32.value.has_value() || !e21.value.has_value() ||
+            !e10.value.has_value() || !c03.value.has_value() || !c32.value.has_value() ||
+            !c21.value.has_value() || !c10.value.has_value()) {
+            std::cerr << "failed to build cw trim topology\n";
+            return 1;
+        }
+        const std::array<axiom::Point2, 2> uv03{{{0.0, 0.0}, {0.0, 1.0}}};
+        const std::array<axiom::Point2, 2> uv32{{{0.0, 1.0}, {1.0, 1.0}}};
+        const std::array<axiom::Point2, 2> uv21{{{1.0, 1.0}, {1.0, 0.0}}};
+        const std::array<axiom::Point2, 2> uv10{{{1.0, 0.0}, {0.0, 0.0}}};
+        auto pc03 = kernel.pcurves().make_polyline(uv03);
+        auto pc32 = kernel.pcurves().make_polyline(uv32);
+        auto pc21 = kernel.pcurves().make_polyline(uv21);
+        auto pc10 = kernel.pcurves().make_polyline(uv10);
+        if (pc03.status != axiom::StatusCode::Ok || pc32.status != axiom::StatusCode::Ok ||
+            pc21.status != axiom::StatusCode::Ok || pc10.status != axiom::StatusCode::Ok ||
+            !pc03.value.has_value() || !pc32.value.has_value() || !pc21.value.has_value() ||
+            !pc10.value.has_value()) {
+            std::cerr << "failed to create pcurves for cw trim test\n";
+            return 1;
+        }
+        txn.set_coedge_pcurve(*c03.value, *pc03.value);
+        txn.set_coedge_pcurve(*c32.value, *pc32.value);
+        txn.set_coedge_pcurve(*c21.value, *pc21.value);
+        txn.set_coedge_pcurve(*c10.value, *pc10.value);
+        const std::array<axiom::CoedgeId, 4> cw_ring{{*c03.value, *c32.value, *c21.value, *c10.value}};
+        auto loop = txn.create_loop(cw_ring);
+        auto face = txn.create_face(*plane.value, *loop.value, {});
+        if (loop.status != axiom::StatusCode::Ok || face.status != axiom::StatusCode::Ok ||
+            !loop.value.has_value() || !face.value.has_value()) {
+            std::cerr << "failed to create face for cw trim test\n";
+            return 1;
+        }
+        auto bad_trim = kernel.topology().validate().validate_face_trim_consistency(*face.value);
+        if (bad_trim.status == axiom::StatusCode::Ok) {
+            std::cerr << "expected validate_face_trim_consistency to fail for CW 3D outer with +Z plane\n";
+            return 1;
+        }
+        auto bad_rep = kernel.diagnostics().get(bad_trim.diagnostic_id);
+        if (bad_rep.status != axiom::StatusCode::Ok || !bad_rep.value.has_value() ||
+            !has_issue_code(*bad_rep.value, axiom::diag_codes::kTopoLoopOrientationMismatch)) {
+            std::cerr << "expected kTopoLoopOrientationMismatch for CW full trim on plane\n";
+            return 1;
+        }
+        if (txn.rollback().status != axiom::StatusCode::Ok) {
+            std::cerr << "rollback failed for cw trim orientation test\n";
+            return 1;
+        }
+    }
+
+    // ---- Stage 2: trim bridge — 外环+内环 PCurve -> Kernel 物化 `trim_uv_loop` + `trim_uv_holes` ----
+    {
+        auto plane = kernel.surfaces().make_plane({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0});
+        auto o0 = kernel.curves().make_line_segment({0.0, 0.0, 0.0}, {5.0, 0.0, 0.0});
+        auto o1 = kernel.curves().make_line_segment({5.0, 0.0, 0.0}, {5.0, 5.0, 0.0});
+        auto o2 = kernel.curves().make_line_segment({5.0, 5.0, 0.0}, {0.0, 5.0, 0.0});
+        auto o3 = kernel.curves().make_line_segment({0.0, 5.0, 0.0}, {0.0, 0.0, 0.0});
+        // 内环走向与外环相反（Strict trim：有符号 UV 面积异号）
+        auto i0 = kernel.curves().make_line_segment({2.0, 2.0, 0.0}, {2.0, 3.0, 0.0});
+        auto i1 = kernel.curves().make_line_segment({2.0, 3.0, 0.0}, {3.0, 3.0, 0.0});
+        auto i2 = kernel.curves().make_line_segment({3.0, 3.0, 0.0}, {3.0, 2.0, 0.0});
+        auto i3 = kernel.curves().make_line_segment({3.0, 2.0, 0.0}, {2.0, 2.0, 0.0});
+        if (plane.status != axiom::StatusCode::Ok || !plane.value.has_value() ||
+            o0.status != axiom::StatusCode::Ok || !o0.value.has_value() ||
+            o1.status != axiom::StatusCode::Ok || !o1.value.has_value() ||
+            o2.status != axiom::StatusCode::Ok || !o2.value.has_value() ||
+            o3.status != axiom::StatusCode::Ok || !o3.value.has_value() ||
+            i0.status != axiom::StatusCode::Ok || !i0.value.has_value() ||
+            i1.status != axiom::StatusCode::Ok || !i1.value.has_value() ||
+            i2.status != axiom::StatusCode::Ok || !i2.value.has_value() ||
+            i3.status != axiom::StatusCode::Ok || !i3.value.has_value()) {
+            std::cerr << "failed geometry for trim bridge polygon+holes test\n";
+            return 1;
+        }
+        const std::array<axiom::Point2, 2> ouv0{{{0.0, 0.0}, {5.0, 0.0}}};
+        const std::array<axiom::Point2, 2> ouv1{{{5.0, 0.0}, {5.0, 5.0}}};
+        const std::array<axiom::Point2, 2> ouv2{{{5.0, 5.0}, {0.0, 5.0}}};
+        const std::array<axiom::Point2, 2> ouv3{{{0.0, 5.0}, {0.0, 0.0}}};
+        const std::array<axiom::Point2, 2> iuv0{{{2.0, 2.0}, {2.0, 3.0}}};
+        const std::array<axiom::Point2, 2> iuv1{{{2.0, 3.0}, {3.0, 3.0}}};
+        const std::array<axiom::Point2, 2> iuv2{{{3.0, 3.0}, {3.0, 2.0}}};
+        const std::array<axiom::Point2, 2> iuv3{{{3.0, 2.0}, {2.0, 2.0}}};
+        auto po0 = kernel.pcurves().make_polyline(ouv0);
+        auto po1 = kernel.pcurves().make_polyline(ouv1);
+        auto po2 = kernel.pcurves().make_polyline(ouv2);
+        auto po3 = kernel.pcurves().make_polyline(ouv3);
+        auto pi0 = kernel.pcurves().make_polyline(iuv0);
+        auto pi1 = kernel.pcurves().make_polyline(iuv1);
+        auto pi2 = kernel.pcurves().make_polyline(iuv2);
+        auto pi3 = kernel.pcurves().make_polyline(iuv3);
+        if (po0.status != axiom::StatusCode::Ok || !po0.value.has_value() ||
+            po1.status != axiom::StatusCode::Ok || !po1.value.has_value() ||
+            po2.status != axiom::StatusCode::Ok || !po2.value.has_value() ||
+            po3.status != axiom::StatusCode::Ok || !po3.value.has_value() ||
+            pi0.status != axiom::StatusCode::Ok || !pi0.value.has_value() ||
+            pi1.status != axiom::StatusCode::Ok || !pi1.value.has_value() ||
+            pi2.status != axiom::StatusCode::Ok || !pi2.value.has_value() ||
+            pi3.status != axiom::StatusCode::Ok || !pi3.value.has_value()) {
+            std::cerr << "failed pcurves for trim bridge polygon+holes test\n";
+            return 1;
+        }
+        auto txn = kernel.topology().begin_transaction();
+        auto v00 = txn.create_vertex({0.0, 0.0, 0.0});
+        auto v50 = txn.create_vertex({5.0, 0.0, 0.0});
+        auto v55 = txn.create_vertex({5.0, 5.0, 0.0});
+        auto v05 = txn.create_vertex({0.0, 5.0, 0.0});
+        auto v22 = txn.create_vertex({2.0, 2.0, 0.0});
+        auto v32 = txn.create_vertex({3.0, 2.0, 0.0});
+        auto v33 = txn.create_vertex({3.0, 3.0, 0.0});
+        auto v23 = txn.create_vertex({2.0, 3.0, 0.0});
+        auto e_o0 = txn.create_edge(*o0.value, *v00.value, *v50.value);
+        auto e_o1 = txn.create_edge(*o1.value, *v50.value, *v55.value);
+        auto e_o2 = txn.create_edge(*o2.value, *v55.value, *v05.value);
+        auto e_o3 = txn.create_edge(*o3.value, *v05.value, *v00.value);
+        auto e_i0 = txn.create_edge(*i0.value, *v22.value, *v23.value);
+        auto e_i1 = txn.create_edge(*i1.value, *v23.value, *v33.value);
+        auto e_i2 = txn.create_edge(*i2.value, *v33.value, *v32.value);
+        auto e_i3 = txn.create_edge(*i3.value, *v32.value, *v22.value);
+        auto c_o0 = txn.create_coedge(*e_o0.value, false);
+        auto c_o1 = txn.create_coedge(*e_o1.value, false);
+        auto c_o2 = txn.create_coedge(*e_o2.value, false);
+        auto c_o3 = txn.create_coedge(*e_o3.value, false);
+        auto c_i0 = txn.create_coedge(*e_i0.value, false);
+        auto c_i1 = txn.create_coedge(*e_i1.value, false);
+        auto c_i2 = txn.create_coedge(*e_i2.value, false);
+        auto c_i3 = txn.create_coedge(*e_i3.value, false);
+        if (v00.status != axiom::StatusCode::Ok || !v00.value.has_value() ||
+            v50.status != axiom::StatusCode::Ok || !v50.value.has_value() ||
+            v55.status != axiom::StatusCode::Ok || !v55.value.has_value() ||
+            v05.status != axiom::StatusCode::Ok || !v05.value.has_value() ||
+            v22.status != axiom::StatusCode::Ok || !v22.value.has_value() ||
+            v32.status != axiom::StatusCode::Ok || !v32.value.has_value() ||
+            v33.status != axiom::StatusCode::Ok || !v33.value.has_value() ||
+            v23.status != axiom::StatusCode::Ok || !v23.value.has_value() ||
+            e_o0.status != axiom::StatusCode::Ok || !e_o0.value.has_value() ||
+            e_o1.status != axiom::StatusCode::Ok || !e_o1.value.has_value() ||
+            e_o2.status != axiom::StatusCode::Ok || !e_o2.value.has_value() ||
+            e_o3.status != axiom::StatusCode::Ok || !e_o3.value.has_value() ||
+            e_i0.status != axiom::StatusCode::Ok || !e_i0.value.has_value() ||
+            e_i1.status != axiom::StatusCode::Ok || !e_i1.value.has_value() ||
+            e_i2.status != axiom::StatusCode::Ok || !e_i2.value.has_value() ||
+            e_i3.status != axiom::StatusCode::Ok || !e_i3.value.has_value() ||
+            c_o0.status != axiom::StatusCode::Ok || !c_o0.value.has_value() ||
+            c_o1.status != axiom::StatusCode::Ok || !c_o1.value.has_value() ||
+            c_o2.status != axiom::StatusCode::Ok || !c_o2.value.has_value() ||
+            c_o3.status != axiom::StatusCode::Ok || !c_o3.value.has_value() ||
+            c_i0.status != axiom::StatusCode::Ok || !c_i0.value.has_value() ||
+            c_i1.status != axiom::StatusCode::Ok || !c_i1.value.has_value() ||
+            c_i2.status != axiom::StatusCode::Ok || !c_i2.value.has_value() ||
+            c_i3.status != axiom::StatusCode::Ok || !c_i3.value.has_value()) {
+            std::cerr << "failed topology txn for trim bridge polygon+holes test\n";
+            return 1;
+        }
+        txn.set_coedge_pcurve(*c_o0.value, *po0.value);
+        txn.set_coedge_pcurve(*c_o1.value, *po1.value);
+        txn.set_coedge_pcurve(*c_o2.value, *po2.value);
+        txn.set_coedge_pcurve(*c_o3.value, *po3.value);
+        txn.set_coedge_pcurve(*c_i0.value, *pi0.value);
+        txn.set_coedge_pcurve(*c_i1.value, *pi1.value);
+        txn.set_coedge_pcurve(*c_i2.value, *pi2.value);
+        txn.set_coedge_pcurve(*c_i3.value, *pi3.value);
+        const std::array<axiom::CoedgeId, 4> co_outer{{*c_o0.value, *c_o1.value, *c_o2.value, *c_o3.value}};
+        const std::array<axiom::CoedgeId, 4> co_inner{{*c_i0.value, *c_i1.value, *c_i2.value, *c_i3.value}};
+        auto outer_loop = txn.create_loop(co_outer);
+        auto inner_loop = txn.create_loop(co_inner);
+        if (outer_loop.status != axiom::StatusCode::Ok || !outer_loop.value.has_value() ||
+            inner_loop.status != axiom::StatusCode::Ok || !inner_loop.value.has_value()) {
+            std::cerr << "failed create loops for trim bridge polygon+holes test\n";
+            return 1;
+        }
+        auto face_h = txn.create_face(*plane.value, *outer_loop.value,
+                                      std::array<axiom::LoopId, 1>{*inner_loop.value});
+        if (face_h.status != axiom::StatusCode::Ok || !face_h.value.has_value()) {
+            std::cerr << "failed create face with hole for trim bridge test\n";
+            return 1;
+        }
+        auto trim_ok_h = kernel.topology().validate().validate_face_trim_consistency(*face_h.value);
+        if (trim_ok_h.status != axiom::StatusCode::Ok) {
+            std::cerr << "expected face with outer+inner PCurve loops to pass trim consistency\n";
+            return 1;
+        }
+        auto ts_h = kernel.create_trimmed_surface_from_face_outer_loop_pcurves(*face_h.value);
+        if (ts_h.status != axiom::StatusCode::Ok || !ts_h.value.has_value()) {
+            std::cerr << "create_trimmed_surface_from_face_outer_loop_pcurves (with holes) failed\n";
+            return 1;
+        }
+        auto ev_mid = kernel.surface_service().eval(*ts_h.value, 2.5, 2.5, 0);
+        if (ev_mid.status != axiom::StatusCode::Ok || !ev_mid.value.has_value()) {
+            std::cerr << "eval on trim-with-holes from topo failed\n";
+            return 1;
+        }
+        if (std::abs(ev_mid.value->point.x - 2.5) < 0.08 && std::abs(ev_mid.value->point.y - 2.5) < 0.08) {
+            std::cerr << "expected UV in hole to project off hole interior (trim bridge)\n";
+            return 1;
+        }
+        // 单面带孔非闭合壳，此处只验证 trim bridge + Geo 物化；Strict 全体验证见 `validate_face_trim_consistency` 与其它闭合体回归。
+        if (txn.rollback().status != axiom::StatusCode::Ok) {
+            std::cerr << "rollback failed for trim bridge polygon+holes test\n";
+            return 1;
+        }
+    }
+
+    // ---- Trim bridge：内环 UV 整体落在外环 UV 域外时须在 PCurve↔3D 之前判为 kTopoFaceInnerLoopInvalid ----
+    {
+        auto plane = kernel.surfaces().make_plane({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0});
+        auto o0 = kernel.curves().make_line_segment({0.0, 0.0, 0.0}, {5.0, 0.0, 0.0});
+        auto o1 = kernel.curves().make_line_segment({5.0, 0.0, 0.0}, {5.0, 5.0, 0.0});
+        auto o2 = kernel.curves().make_line_segment({5.0, 5.0, 0.0}, {0.0, 5.0, 0.0});
+        auto o3 = kernel.curves().make_line_segment({0.0, 5.0, 0.0}, {0.0, 0.0, 0.0});
+        auto i0 = kernel.curves().make_line_segment({2.0, 2.0, 0.0}, {2.0, 3.0, 0.0});
+        auto i1 = kernel.curves().make_line_segment({2.0, 3.0, 0.0}, {3.0, 3.0, 0.0});
+        auto i2 = kernel.curves().make_line_segment({3.0, 3.0, 0.0}, {3.0, 2.0, 0.0});
+        auto i3 = kernel.curves().make_line_segment({3.0, 2.0, 0.0}, {2.0, 2.0, 0.0});
+        if (plane.status != axiom::StatusCode::Ok || !plane.value.has_value() ||
+            o0.status != axiom::StatusCode::Ok || !o0.value.has_value() ||
+            o1.status != axiom::StatusCode::Ok || !o1.value.has_value() ||
+            o2.status != axiom::StatusCode::Ok || !o2.value.has_value() ||
+            o3.status != axiom::StatusCode::Ok || !o3.value.has_value() ||
+            i0.status != axiom::StatusCode::Ok || !i0.value.has_value() ||
+            i1.status != axiom::StatusCode::Ok || !i1.value.has_value() ||
+            i2.status != axiom::StatusCode::Ok || !i2.value.has_value() ||
+            i3.status != axiom::StatusCode::Ok || !i3.value.has_value()) {
+            std::cerr << "failed geometry for inner UV outside outer trim test\n";
+            return 1;
+        }
+        const std::array<axiom::Point2, 2> ouv0{{{0.0, 0.0}, {5.0, 0.0}}};
+        const std::array<axiom::Point2, 2> ouv1{{{5.0, 0.0}, {5.0, 5.0}}};
+        const std::array<axiom::Point2, 2> ouv2{{{5.0, 5.0}, {0.0, 5.0}}};
+        const std::array<axiom::Point2, 2> ouv3{{{0.0, 5.0}, {0.0, 0.0}}};
+        // 与合法孔相同的绕向，但整体平移 (+4,+4) 使质心落在外环 [0,5]² 之外
+        const std::array<axiom::Point2, 2> iuv0{{{6.0, 6.0}, {6.0, 7.0}}};
+        const std::array<axiom::Point2, 2> iuv1{{{6.0, 7.0}, {7.0, 7.0}}};
+        const std::array<axiom::Point2, 2> iuv2{{{7.0, 7.0}, {7.0, 6.0}}};
+        const std::array<axiom::Point2, 2> iuv3{{{7.0, 6.0}, {6.0, 6.0}}};
+        auto po0 = kernel.pcurves().make_polyline(ouv0);
+        auto po1 = kernel.pcurves().make_polyline(ouv1);
+        auto po2 = kernel.pcurves().make_polyline(ouv2);
+        auto po3 = kernel.pcurves().make_polyline(ouv3);
+        auto pi0 = kernel.pcurves().make_polyline(iuv0);
+        auto pi1 = kernel.pcurves().make_polyline(iuv1);
+        auto pi2 = kernel.pcurves().make_polyline(iuv2);
+        auto pi3 = kernel.pcurves().make_polyline(iuv3);
+        if (po0.status != axiom::StatusCode::Ok || !po0.value.has_value() ||
+            po1.status != axiom::StatusCode::Ok || !po1.value.has_value() ||
+            po2.status != axiom::StatusCode::Ok || !po2.value.has_value() ||
+            po3.status != axiom::StatusCode::Ok || !po3.value.has_value() ||
+            pi0.status != axiom::StatusCode::Ok || !pi0.value.has_value() ||
+            pi1.status != axiom::StatusCode::Ok || !pi1.value.has_value() ||
+            pi2.status != axiom::StatusCode::Ok || !pi2.value.has_value() ||
+            pi3.status != axiom::StatusCode::Ok || !pi3.value.has_value()) {
+            std::cerr << "failed pcurves for inner UV outside outer test\n";
+            return 1;
+        }
+        auto txn = kernel.topology().begin_transaction();
+        auto v00 = txn.create_vertex({0.0, 0.0, 0.0});
+        auto v50 = txn.create_vertex({5.0, 0.0, 0.0});
+        auto v55 = txn.create_vertex({5.0, 5.0, 0.0});
+        auto v05 = txn.create_vertex({0.0, 5.0, 0.0});
+        auto v22 = txn.create_vertex({2.0, 2.0, 0.0});
+        auto v32 = txn.create_vertex({3.0, 2.0, 0.0});
+        auto v33 = txn.create_vertex({3.0, 3.0, 0.0});
+        auto v23 = txn.create_vertex({2.0, 3.0, 0.0});
+        auto e_o0 = txn.create_edge(*o0.value, *v00.value, *v50.value);
+        auto e_o1 = txn.create_edge(*o1.value, *v50.value, *v55.value);
+        auto e_o2 = txn.create_edge(*o2.value, *v55.value, *v05.value);
+        auto e_o3 = txn.create_edge(*o3.value, *v05.value, *v00.value);
+        auto e_i0 = txn.create_edge(*i0.value, *v22.value, *v23.value);
+        auto e_i1 = txn.create_edge(*i1.value, *v23.value, *v33.value);
+        auto e_i2 = txn.create_edge(*i2.value, *v33.value, *v32.value);
+        auto e_i3 = txn.create_edge(*i3.value, *v32.value, *v22.value);
+        auto c_o0 = txn.create_coedge(*e_o0.value, false);
+        auto c_o1 = txn.create_coedge(*e_o1.value, false);
+        auto c_o2 = txn.create_coedge(*e_o2.value, false);
+        auto c_o3 = txn.create_coedge(*e_o3.value, false);
+        auto c_i0 = txn.create_coedge(*e_i0.value, false);
+        auto c_i1 = txn.create_coedge(*e_i1.value, false);
+        auto c_i2 = txn.create_coedge(*e_i2.value, false);
+        auto c_i3 = txn.create_coedge(*e_i3.value, false);
+        if (v00.status != axiom::StatusCode::Ok || !v00.value.has_value() ||
+            v50.status != axiom::StatusCode::Ok || !v50.value.has_value() ||
+            v55.status != axiom::StatusCode::Ok || !v55.value.has_value() ||
+            v05.status != axiom::StatusCode::Ok || !v05.value.has_value() ||
+            v22.status != axiom::StatusCode::Ok || !v22.value.has_value() ||
+            v32.status != axiom::StatusCode::Ok || !v32.value.has_value() ||
+            v33.status != axiom::StatusCode::Ok || !v33.value.has_value() ||
+            v23.status != axiom::StatusCode::Ok || !v23.value.has_value() ||
+            e_o0.status != axiom::StatusCode::Ok || !e_o0.value.has_value() ||
+            e_o1.status != axiom::StatusCode::Ok || !e_o1.value.has_value() ||
+            e_o2.status != axiom::StatusCode::Ok || !e_o2.value.has_value() ||
+            e_o3.status != axiom::StatusCode::Ok || !e_o3.value.has_value() ||
+            e_i0.status != axiom::StatusCode::Ok || !e_i0.value.has_value() ||
+            e_i1.status != axiom::StatusCode::Ok || !e_i1.value.has_value() ||
+            e_i2.status != axiom::StatusCode::Ok || !e_i2.value.has_value() ||
+            e_i3.status != axiom::StatusCode::Ok || !e_i3.value.has_value() ||
+            c_o0.status != axiom::StatusCode::Ok || !c_o0.value.has_value() ||
+            c_o1.status != axiom::StatusCode::Ok || !c_o1.value.has_value() ||
+            c_o2.status != axiom::StatusCode::Ok || !c_o2.value.has_value() ||
+            c_o3.status != axiom::StatusCode::Ok || !c_o3.value.has_value() ||
+            c_i0.status != axiom::StatusCode::Ok || !c_i0.value.has_value() ||
+            c_i1.status != axiom::StatusCode::Ok || !c_i1.value.has_value() ||
+            c_i2.status != axiom::StatusCode::Ok || !c_i2.value.has_value() ||
+            c_i3.status != axiom::StatusCode::Ok || !c_i3.value.has_value()) {
+            std::cerr << "failed topology txn for inner UV outside outer test\n";
+            return 1;
+        }
+        txn.set_coedge_pcurve(*c_o0.value, *po0.value);
+        txn.set_coedge_pcurve(*c_o1.value, *po1.value);
+        txn.set_coedge_pcurve(*c_o2.value, *po2.value);
+        txn.set_coedge_pcurve(*c_o3.value, *po3.value);
+        txn.set_coedge_pcurve(*c_i0.value, *pi0.value);
+        txn.set_coedge_pcurve(*c_i1.value, *pi1.value);
+        txn.set_coedge_pcurve(*c_i2.value, *pi2.value);
+        txn.set_coedge_pcurve(*c_i3.value, *pi3.value);
+        const std::array<axiom::CoedgeId, 4> co_outer{{*c_o0.value, *c_o1.value, *c_o2.value, *c_o3.value}};
+        const std::array<axiom::CoedgeId, 4> co_inner{{*c_i0.value, *c_i1.value, *c_i2.value, *c_i3.value}};
+        auto outer_loop = txn.create_loop(co_outer);
+        auto inner_loop = txn.create_loop(co_inner);
+        auto face_bad = txn.create_face(*plane.value, *outer_loop.value,
+                                        std::array<axiom::LoopId, 1>{*inner_loop.value});
+        if (outer_loop.status != axiom::StatusCode::Ok || !outer_loop.value.has_value() ||
+            inner_loop.status != axiom::StatusCode::Ok || !inner_loop.value.has_value() ||
+            face_bad.status != axiom::StatusCode::Ok || !face_bad.value.has_value()) {
+            std::cerr << "failed create face for inner UV outside outer test\n";
+            return 1;
+        }
+        auto trim_bad_uv = kernel.topology().validate().validate_face_trim_consistency(*face_bad.value);
+        if (trim_bad_uv.status == axiom::StatusCode::Ok) {
+            std::cerr << "expected validate_face_trim_consistency to reject inner UV outside outer\n";
+            return 1;
+        }
+        auto trim_bad_rep = kernel.diagnostics().get(trim_bad_uv.diagnostic_id);
+        if (trim_bad_rep.status != axiom::StatusCode::Ok || !trim_bad_rep.value.has_value() ||
+            !has_issue_code(*trim_bad_rep.value, axiom::diag_codes::kTopoFaceInnerLoopInvalid)) {
+            std::cerr << "expected kTopoFaceInnerLoopInvalid for inner UV outside outer\n";
+            return 1;
+        }
+        if (txn.rollback().status != axiom::StatusCode::Ok) {
+            std::cerr << "rollback failed for inner UV outside outer test\n";
             return 1;
         }
     }
@@ -1090,6 +1624,42 @@ int main() {
         }
     }
 
+    // ---- Stage 2: duplicate coedge id in loop sequence (kTopoLoopDuplicateEdge) ----
+    {
+        auto line01 = kernel.curves().make_line({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
+        if (line01.status != axiom::StatusCode::Ok || !line01.value.has_value()) {
+            std::cerr << "failed to create curve for duplicate-coedge loop test\n";
+            return 1;
+        }
+        auto txn = kernel.topology().begin_transaction();
+        auto va = txn.create_vertex({0.0, 0.0, 0.0});
+        auto vb = txn.create_vertex({1.0, 0.0, 0.0});
+        auto e01 = txn.create_edge(*line01.value, *va.value, *vb.value);
+        auto c0 = txn.create_coedge(*e01.value, false);
+        if (va.status != axiom::StatusCode::Ok || vb.status != axiom::StatusCode::Ok ||
+            e01.status != axiom::StatusCode::Ok || c0.status != axiom::StatusCode::Ok ||
+            !c0.value.has_value()) {
+            std::cerr << "failed to build topology for duplicate-coedge loop test\n";
+            return 1;
+        }
+        const std::array<axiom::CoedgeId, 2> dup_co {{ *c0.value, *c0.value }};
+        auto bad = txn.create_loop(dup_co);
+        if (bad.status == axiom::StatusCode::Ok) {
+            std::cerr << "expected invalid topology for duplicate coedge in loop\n";
+            return 1;
+        }
+        auto dup_co_diag = kernel.diagnostics().get(bad.diagnostic_id);
+        if (dup_co_diag.status != axiom::StatusCode::Ok || !dup_co_diag.value.has_value() ||
+            !has_issue_code(*dup_co_diag.value, axiom::diag_codes::kTopoLoopDuplicateEdge)) {
+            std::cerr << "expected kTopoLoopDuplicateEdge for duplicate coedge in create_loop\n";
+            return 1;
+        }
+        if (txn.rollback().status != axiom::StatusCode::Ok) {
+            std::cerr << "rollback failed for duplicate-coedge loop test\n";
+            return 1;
+        }
+    }
+
     // ---- Stage 2: outer/inner loop UV orientation (hole must oppose outer) ----
     {
         auto plane = kernel.surfaces().make_plane({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0});
@@ -1377,6 +1947,257 @@ int main() {
         }
     }
 
+    // ---- Stage 2+: cylinder outer loop orientation (no PCurve), non-planar quad on wall ----
+    {
+        axiom::Kernel k_cyl;
+        auto cyl = k_cyl.surfaces().make_cylinder({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, 1.0);
+        auto s01 = k_cyl.curves().make_line_segment({1.0, 0.0, 0.0}, {0.0, 1.0, 0.5});
+        auto s12 = k_cyl.curves().make_line_segment({0.0, 1.0, 0.5}, {-1.0, 0.0, 1.0});
+        auto s23 = k_cyl.curves().make_line_segment({-1.0, 0.0, 1.0}, {0.0, -1.0, 0.5});
+        auto s30 = k_cyl.curves().make_line_segment({0.0, -1.0, 0.5}, {1.0, 0.0, 0.0});
+        if (cyl.status != axiom::StatusCode::Ok || !cyl.value.has_value() ||
+            s01.status != axiom::StatusCode::Ok || !s01.value.has_value() ||
+            s12.status != axiom::StatusCode::Ok || !s12.value.has_value() ||
+            s23.status != axiom::StatusCode::Ok || !s23.value.has_value() ||
+            s30.status != axiom::StatusCode::Ok || !s30.value.has_value()) {
+            std::cerr << "failed to init geometry for cylinder loop orientation test\n";
+            return 1;
+        }
+        auto txn = k_cyl.topology().begin_transaction();
+        auto v0 = txn.create_vertex({1.0, 0.0, 0.0});
+        auto v1 = txn.create_vertex({0.0, 1.0, 0.5});
+        auto v2 = txn.create_vertex({-1.0, 0.0, 1.0});
+        auto v3 = txn.create_vertex({0.0, -1.0, 0.5});
+        auto e01 = txn.create_edge(*s01.value, *v0.value, *v1.value);
+        auto e12 = txn.create_edge(*s12.value, *v1.value, *v2.value);
+        auto e23 = txn.create_edge(*s23.value, *v2.value, *v3.value);
+        auto e30 = txn.create_edge(*s30.value, *v3.value, *v0.value);
+        auto c01 = txn.create_coedge(*e01.value, false);
+        auto c12 = txn.create_coedge(*e12.value, false);
+        auto c23 = txn.create_coedge(*e23.value, false);
+        auto c30 = txn.create_coedge(*e30.value, false);
+        // Opposite winding: same edges, reversed coedges so the loop is still closed (v0->v3->v2->v1->v0).
+        auto c30r = txn.create_coedge(*e30.value, true);
+        auto c23r = txn.create_coedge(*e23.value, true);
+        auto c12r = txn.create_coedge(*e12.value, true);
+        auto c01r = txn.create_coedge(*e01.value, true);
+        if (v0.status != axiom::StatusCode::Ok || !v0.value.has_value() ||
+            c01.status != axiom::StatusCode::Ok || !c01.value.has_value() ||
+            c30r.status != axiom::StatusCode::Ok || !c30r.value.has_value()) {
+            std::cerr << "failed to build topology for cylinder loop orientation test\n";
+            return 1;
+        }
+        const std::array<axiom::CoedgeId, 4> co_good{{*c01.value, *c12.value, *c23.value, *c30.value}};
+        auto loop_good = txn.create_loop(co_good);
+        auto face_good = txn.create_face(*cyl.value, *loop_good.value, {});
+        if (loop_good.status != axiom::StatusCode::Ok || face_good.status != axiom::StatusCode::Ok ||
+            !face_good.value.has_value()) {
+            std::cerr << "failed to create good cylinder face for orientation test\n";
+            return 1;
+        }
+        auto ok_val = k_cyl.topology().validate().validate_face(*face_good.value);
+        if (ok_val.status != axiom::StatusCode::Ok) {
+            std::cerr << "expected validate_face ok for good cylinder outer winding\n";
+            return 1;
+        }
+        const std::array<axiom::CoedgeId, 4> co_bad{{*c30r.value, *c23r.value, *c12r.value, *c01r.value}};
+        auto loop_bad = txn.create_loop(co_bad);
+        auto face_bad = txn.create_face(*cyl.value, *loop_bad.value, {});
+        if (loop_bad.status != axiom::StatusCode::Ok || face_bad.status != axiom::StatusCode::Ok ||
+            !face_bad.value.has_value()) {
+            std::cerr << "failed to create bad cylinder face for orientation test\n";
+            return 1;
+        }
+        auto bad_val = k_cyl.topology().validate().validate_face(*face_bad.value);
+        if (bad_val.status == axiom::StatusCode::Ok) {
+            std::cerr << "expected validate_face to fail for reversed cylinder outer winding\n";
+            return 1;
+        }
+        auto bad_diag = k_cyl.diagnostics().get(bad_val.diagnostic_id);
+        if (bad_diag.status != axiom::StatusCode::Ok || !bad_diag.value.has_value() ||
+            !has_issue_code(*bad_diag.value, axiom::diag_codes::kTopoLoopOrientationMismatch)) {
+            std::cerr << "expected kTopoLoopOrientationMismatch for cylinder outer winding\n";
+            return 1;
+        }
+        auto rb = txn.rollback();
+        if (rb.status != axiom::StatusCode::Ok) {
+            std::cerr << "rollback failed for cylinder loop orientation test\n";
+            return 1;
+        }
+    }
+
+    // ---- Stage 2+: cone outer loop orientation (no PCurve), same axis-radial rule as cylinder ----
+    {
+        const double pi = std::acos(-1.0);
+        axiom::Kernel k_cone;
+        auto cone = k_cone.surfaces().make_cone({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, pi * 0.25);
+        // 非共面四边形顶点在锥面上（r=z）：避免 Newell 与轴平行导致与径向点积退化。
+        auto s01 = k_cone.curves().make_line_segment({1.0, 0.0, 1.0}, {0.0, 2.0, 2.0});
+        auto s12 = k_cone.curves().make_line_segment({0.0, 2.0, 2.0}, {-2.0, 0.0, 2.0});
+        auto s23 = k_cone.curves().make_line_segment({-2.0, 0.0, 2.0}, {0.0, -1.0, 1.0});
+        auto s30 = k_cone.curves().make_line_segment({0.0, -1.0, 1.0}, {1.0, 0.0, 1.0});
+        if (cone.status != axiom::StatusCode::Ok || !cone.value.has_value() ||
+            s01.status != axiom::StatusCode::Ok || !s01.value.has_value() ||
+            s12.status != axiom::StatusCode::Ok || !s12.value.has_value() ||
+            s23.status != axiom::StatusCode::Ok || !s23.value.has_value() ||
+            s30.status != axiom::StatusCode::Ok || !s30.value.has_value()) {
+            std::cerr << "failed to init geometry for cone loop orientation test\n";
+            return 1;
+        }
+        auto txn = k_cone.topology().begin_transaction();
+        auto v0 = txn.create_vertex({1.0, 0.0, 1.0});
+        auto v1 = txn.create_vertex({0.0, 2.0, 2.0});
+        auto v2 = txn.create_vertex({-2.0, 0.0, 2.0});
+        auto v3 = txn.create_vertex({0.0, -1.0, 1.0});
+        auto e01 = txn.create_edge(*s01.value, *v0.value, *v1.value);
+        auto e12 = txn.create_edge(*s12.value, *v1.value, *v2.value);
+        auto e23 = txn.create_edge(*s23.value, *v2.value, *v3.value);
+        auto e30 = txn.create_edge(*s30.value, *v3.value, *v0.value);
+        auto c01 = txn.create_coedge(*e01.value, false);
+        auto c12 = txn.create_coedge(*e12.value, false);
+        auto c23 = txn.create_coedge(*e23.value, false);
+        auto c30 = txn.create_coedge(*e30.value, false);
+        auto c30r = txn.create_coedge(*e30.value, true);
+        auto c23r = txn.create_coedge(*e23.value, true);
+        auto c12r = txn.create_coedge(*e12.value, true);
+        auto c01r = txn.create_coedge(*e01.value, true);
+        if (c01.status != axiom::StatusCode::Ok || !c01.value.has_value() ||
+            c30r.status != axiom::StatusCode::Ok || !c30r.value.has_value()) {
+            std::cerr << "failed to build topology for cone loop orientation test\n";
+            return 1;
+        }
+        const std::array<axiom::CoedgeId, 4> co_good{{*c01.value, *c12.value, *c23.value, *c30.value}};
+        auto loop_good = txn.create_loop(co_good);
+        auto face_good = txn.create_face(*cone.value, *loop_good.value, {});
+        if (loop_good.status != axiom::StatusCode::Ok || face_good.status != axiom::StatusCode::Ok ||
+            !face_good.value.has_value()) {
+            std::cerr << "failed to create good cone face for orientation test\n";
+            return 1;
+        }
+        if (k_cone.topology().validate().validate_face(*face_good.value).status != axiom::StatusCode::Ok) {
+            std::cerr << "expected validate_face ok for good cone outer winding\n";
+            return 1;
+        }
+        const std::array<axiom::CoedgeId, 4> co_bad{{*c30r.value, *c23r.value, *c12r.value, *c01r.value}};
+        auto loop_bad = txn.create_loop(co_bad);
+        auto face_bad = txn.create_face(*cone.value, *loop_bad.value, {});
+        if (loop_bad.status != axiom::StatusCode::Ok || face_bad.status != axiom::StatusCode::Ok ||
+            !face_bad.value.has_value()) {
+            std::cerr << "failed to create bad cone face for orientation test\n";
+            return 1;
+        }
+        auto bad_val = k_cone.topology().validate().validate_face(*face_bad.value);
+        if (bad_val.status == axiom::StatusCode::Ok) {
+            std::cerr << "expected validate_face to fail for reversed cone outer winding\n";
+            return 1;
+        }
+        auto bad_diag = k_cone.diagnostics().get(bad_val.diagnostic_id);
+        if (bad_diag.status != axiom::StatusCode::Ok || !bad_diag.value.has_value() ||
+            !has_issue_code(*bad_diag.value, axiom::diag_codes::kTopoLoopOrientationMismatch)) {
+            std::cerr << "expected kTopoLoopOrientationMismatch for cone outer winding\n";
+            return 1;
+        }
+        auto rb = txn.rollback();
+        if (rb.status != axiom::StatusCode::Ok) {
+            std::cerr << "rollback failed for cone loop orientation test\n";
+            return 1;
+        }
+    }
+
+    // ---- Stage 2+: torus outer loop orientation (no PCurve), quad from surface eval ----
+    {
+        axiom::Kernel k_tor;
+        auto tor = k_tor.surfaces().make_torus({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, 3.0, 0.5);
+        if (tor.status != axiom::StatusCode::Ok || !tor.value.has_value()) {
+            std::cerr << "failed to create torus for orientation test\n";
+            return 1;
+        }
+        const axiom::SurfaceId sid = *tor.value;
+        const struct {
+            double u;
+            double v;
+        } uvs[4] = {{0.0, 0.12}, {0.9, 0.18}, {1.8, 0.14}, {2.7, 0.16}};
+        axiom::Point3 pts[4]{};
+        for (int i = 0; i < 4; ++i) {
+            auto ev = k_tor.surface_service().eval(sid, uvs[i].u, uvs[i].v, 0);
+            if (ev.status != axiom::StatusCode::Ok || !ev.value.has_value()) {
+                std::cerr << "failed eval torus point for orientation test\n";
+                return 1;
+            }
+            pts[i] = ev.value->point;
+        }
+        auto s01 = k_tor.curves().make_line_segment(pts[0], pts[1]);
+        auto s12 = k_tor.curves().make_line_segment(pts[1], pts[2]);
+        auto s23 = k_tor.curves().make_line_segment(pts[2], pts[3]);
+        auto s30 = k_tor.curves().make_line_segment(pts[3], pts[0]);
+        if (s01.status != axiom::StatusCode::Ok || !s01.value.has_value() ||
+            s12.status != axiom::StatusCode::Ok || !s12.value.has_value() ||
+            s23.status != axiom::StatusCode::Ok || !s23.value.has_value() ||
+            s30.status != axiom::StatusCode::Ok || !s30.value.has_value()) {
+            std::cerr << "failed to init curves for torus loop orientation test\n";
+            return 1;
+        }
+        auto txn = k_tor.topology().begin_transaction();
+        auto v0 = txn.create_vertex(pts[0]);
+        auto v1 = txn.create_vertex(pts[1]);
+        auto v2 = txn.create_vertex(pts[2]);
+        auto v3 = txn.create_vertex(pts[3]);
+        auto e01 = txn.create_edge(*s01.value, *v0.value, *v1.value);
+        auto e12 = txn.create_edge(*s12.value, *v1.value, *v2.value);
+        auto e23 = txn.create_edge(*s23.value, *v2.value, *v3.value);
+        auto e30 = txn.create_edge(*s30.value, *v3.value, *v0.value);
+        auto c01 = txn.create_coedge(*e01.value, false);
+        auto c12 = txn.create_coedge(*e12.value, false);
+        auto c23 = txn.create_coedge(*e23.value, false);
+        auto c30 = txn.create_coedge(*e30.value, false);
+        auto c30r = txn.create_coedge(*e30.value, true);
+        auto c23r = txn.create_coedge(*e23.value, true);
+        auto c12r = txn.create_coedge(*e12.value, true);
+        auto c01r = txn.create_coedge(*e01.value, true);
+        if (v0.status != axiom::StatusCode::Ok || !v0.value.has_value() ||
+            c01.status != axiom::StatusCode::Ok || !c01.value.has_value() ||
+            c30r.status != axiom::StatusCode::Ok || !c30r.value.has_value()) {
+            std::cerr << "failed to build topology for torus loop orientation test\n";
+            return 1;
+        }
+        const std::array<axiom::CoedgeId, 4> co_good{{*c01.value, *c12.value, *c23.value, *c30.value}};
+        auto loop_good = txn.create_loop(co_good);
+        auto face_good = txn.create_face(sid, *loop_good.value, {});
+        if (loop_good.status != axiom::StatusCode::Ok || face_good.status != axiom::StatusCode::Ok ||
+            !face_good.value.has_value()) {
+            std::cerr << "failed to create good torus face for orientation test\n";
+            return 1;
+        }
+        if (k_tor.topology().validate().validate_face(*face_good.value).status != axiom::StatusCode::Ok) {
+            std::cerr << "expected validate_face ok for good torus outer winding\n";
+            return 1;
+        }
+        const std::array<axiom::CoedgeId, 4> co_bad{{*c30r.value, *c23r.value, *c12r.value, *c01r.value}};
+        auto loop_bad = txn.create_loop(co_bad);
+        auto face_bad = txn.create_face(sid, *loop_bad.value, {});
+        if (loop_bad.status != axiom::StatusCode::Ok || face_bad.status != axiom::StatusCode::Ok ||
+            !face_bad.value.has_value()) {
+            std::cerr << "failed to create bad torus face for orientation test\n";
+            return 1;
+        }
+        auto bad_val = k_tor.topology().validate().validate_face(*face_bad.value);
+        if (bad_val.status == axiom::StatusCode::Ok) {
+            std::cerr << "expected validate_face to fail for reversed torus outer winding\n";
+            return 1;
+        }
+        auto bad_diag = k_tor.diagnostics().get(bad_val.diagnostic_id);
+        if (bad_diag.status != axiom::StatusCode::Ok || !bad_diag.value.has_value() ||
+            !has_issue_code(*bad_diag.value, axiom::diag_codes::kTopoLoopOrientationMismatch)) {
+            std::cerr << "expected kTopoLoopOrientationMismatch for torus outer winding\n";
+            return 1;
+        }
+        auto rb = txn.rollback();
+        if (rb.status != axiom::StatusCode::Ok) {
+            std::cerr << "rollback failed for torus loop orientation test\n";
+            return 1;
+        }
+    }
+
     // ---- Stage 2: dangling edge (no coedge) ----
     {
         auto line_d = kernel.curves().make_line({2.0, 0.0, 0.0}, {3.0, 0.0, 0.0});
@@ -1406,6 +2227,66 @@ int main() {
         auto rb = txn.rollback();
         if (rb.status != axiom::StatusCode::Ok) {
             std::cerr << "rollback failed for dangling-edge test\n";
+            return 1;
+        }
+    }
+
+    // ---- TopoCore (7.2): face-bound loop must have at least three coedges (kTopoLoopNotClosed) ----
+    {
+        auto la = kernel.curves().make_line({5.0, 0.0, 0.0}, {6.0, 0.0, 0.0});
+        auto lb = kernel.curves().make_line({6.0, 0.0, 0.0}, {5.0, 0.0, 0.0});
+        auto plane = kernel.surfaces().make_plane({5.5, 0.0, 0.0}, {0.0, 0.0, 1.0});
+        if (la.status != axiom::StatusCode::Ok || !la.value || lb.status != axiom::StatusCode::Ok || !lb.value ||
+            plane.status != axiom::StatusCode::Ok || !plane.value) {
+            std::cerr << "failed to create geometry for two-edge face loop test\n";
+            return 1;
+        }
+        auto txn = kernel.topology().begin_transaction();
+        auto v0 = txn.create_vertex({5.0, 0.0, 0.0});
+        auto v1 = txn.create_vertex({6.0, 0.0, 0.0});
+        auto e0 = txn.create_edge(*la.value, *v0.value, *v1.value);
+        auto e1 = txn.create_edge(*lb.value, *v1.value, *v0.value);
+        auto c0 = txn.create_coedge(*e0.value, false);
+        auto c1 = txn.create_coedge(*e1.value, false);
+        if (v0.status != axiom::StatusCode::Ok || !v0.value || v1.status != axiom::StatusCode::Ok || !v1.value ||
+            e0.status != axiom::StatusCode::Ok || !e0.value || e1.status != axiom::StatusCode::Ok || !e1.value ||
+            c0.status != axiom::StatusCode::Ok || !c0.value || c1.status != axiom::StatusCode::Ok || !c1.value) {
+            std::cerr << "failed to build two-coedge loop topology\n";
+            return 1;
+        }
+        const std::array<axiom::CoedgeId, 2> two {{ *c0.value, *c1.value }};
+        auto lp = txn.create_loop(two);
+        auto face = txn.create_face(*plane.value, *lp.value, {});
+        if (lp.status != axiom::StatusCode::Ok || !lp.value || face.status != axiom::StatusCode::Ok || !face.value) {
+            std::cerr << "failed to create two-edge loop face\n";
+            return 1;
+        }
+        auto lv = kernel.topology().validate().validate_loop(*lp.value);
+        if (lv.status == axiom::StatusCode::Ok) {
+            std::cerr << "expected validate_loop to fail for two-coedge face-bound loop\n";
+            return 1;
+        }
+        auto ld = kernel.diagnostics().get(lv.diagnostic_id);
+        if (ld.status != axiom::StatusCode::Ok || !ld.value ||
+            !has_issue_code(*ld.value, axiom::diag_codes::kTopoLoopNotClosed)) {
+            std::cerr << "expected kTopoLoopNotClosed on validate_loop for two-line digon\n";
+            return 1;
+        }
+        auto fv = kernel.topology().validate().validate_face(*face.value);
+        if (fv.status == axiom::StatusCode::Ok) {
+            std::cerr << "expected validate_face to fail for two-coedge outer loop on a face\n";
+            return 1;
+        }
+        auto fd = kernel.diagnostics().get(fv.diagnostic_id);
+        // validate_face maps outer validate_loop failures to kTopoFaceOuterLoopInvalid.
+        if (fd.status != axiom::StatusCode::Ok || !fd.value ||
+            !has_issue_code(*fd.value, axiom::diag_codes::kTopoFaceOuterLoopInvalid)) {
+            std::cerr << "expected kTopoFaceOuterLoopInvalid for face with only two boundary coedges\n";
+            return 1;
+        }
+        auto rb = txn.rollback();
+        if (rb.status != axiom::StatusCode::Ok) {
+            std::cerr << "rollback failed for two-edge face loop test\n";
             return 1;
         }
     }
@@ -1793,6 +2674,7 @@ int main() {
     auto faces_of_edge = kernel.topology().query().faces_of_edge(*e0.value);
     auto shells_of_edge = kernel.topology().query().shells_of_edge(*e0.value);
     auto edges = kernel.topology().query().edges_of_loop(*loop.value);
+    auto loop_vertices = kernel.topology().query().vertices_of_loop(*loop.value);
     auto loops = kernel.topology().query().loops_of_face(*face.value);
     auto surface = kernel.topology().query().surface_of_face(*face.value);
     auto shells_of_face = kernel.topology().query().shells_of_face(*face.value);
@@ -1859,6 +2741,12 @@ int main() {
         shells_of_edge.status != axiom::StatusCode::Ok || !shells_of_edge.value.has_value() || shells_of_edge.value->size() != 1 ||
         shells_of_edge.value->front().value != shell.value->value ||
         edges.status != axiom::StatusCode::Ok || !edges.value.has_value() || edges.value->size() != 4 ||
+        loop_vertices.status != axiom::StatusCode::Ok || !loop_vertices.value.has_value() ||
+        loop_vertices.value->size() != 4 ||
+        loop_vertices.value->at(0).value != v0.value->value ||
+        loop_vertices.value->at(1).value != v1.value->value ||
+        loop_vertices.value->at(2).value != v2.value->value ||
+        loop_vertices.value->at(3).value != v3.value->value ||
         loops.status != axiom::StatusCode::Ok || !loops.value.has_value() || loops.value->size() != 1 ||
         surface.status != axiom::StatusCode::Ok || !surface.value.has_value() || surface.value->value != plane0.value->value ||
         shells_of_face.status != axiom::StatusCode::Ok || !shells_of_face.value.has_value() || shells_of_face.value->size() != 1 ||
@@ -2367,6 +3255,30 @@ int main() {
             std::cerr << "expected TopoCore shell closedness validation to fail for open shells\n";
             return 1;
         }
+        auto open_topo_shell = kernel.topology().validate().validate_shell(*open_shell.value);
+        if (open_topo_shell.status != axiom::StatusCode::Ok) {
+            std::cerr << "expected validate_shell Ok with warnings for open shell\n";
+            return 1;
+        }
+        auto loops_open = kernel.topology().query().loops_of_face(*face.value);
+        if (loops_open.status != axiom::StatusCode::Ok || !loops_open.value.has_value() ||
+            loops_open.value->empty()) {
+            std::cerr << "failed to query loops for open-shell related_entities test\n";
+            return 1;
+        }
+        auto edges_open = kernel.topology().query().edges_of_loop(loops_open.value->front());
+        if (edges_open.status != axiom::StatusCode::Ok || !edges_open.value.has_value() ||
+            edges_open.value->empty()) {
+            std::cerr << "failed to query edges for open-shell related_entities test\n";
+            return 1;
+        }
+        auto open_topo_shell_diag = kernel.diagnostics().get(open_topo_shell.diagnostic_id);
+        if (open_topo_shell_diag.status != axiom::StatusCode::Ok || !open_topo_shell_diag.value.has_value() ||
+            !issue_links_entities(*open_topo_shell_diag.value, axiom::diag_codes::kTopoOpenBoundary,
+                                  {open_shell.value->value, edges_open.value->front().value})) {
+            std::cerr << "expected validate_shell open-boundary warning with shell+edge related_entities\n";
+            return 1;
+        }
         auto open_diag = kernel.diagnostics().get(open_strict.diagnostic_id);
         if (open_diag.status != axiom::StatusCode::Ok || !open_diag.value.has_value() ||
             !has_issue_code(*open_diag.value, axiom::diag_codes::kTopoOpenBoundary)) {
@@ -2444,6 +3356,18 @@ int main() {
         if (nm_shell.status != axiom::StatusCode::Ok || nm_body.status != axiom::StatusCode::Ok ||
             !nm_shell.value.has_value() || !nm_body.value.has_value()) {
             std::cerr << "failed to create non-manifold shell body for strict validation\n";
+            return 1;
+        }
+        auto nm_topo_shell = kernel.topology().validate().validate_shell(*nm_shell.value);
+        if (nm_topo_shell.status != axiom::StatusCode::Ok) {
+            std::cerr << "expected validate_shell Ok with warnings for non-manifold shell\n";
+            return 1;
+        }
+        auto nm_topo_shell_diag = kernel.diagnostics().get(nm_topo_shell.diagnostic_id);
+        if (nm_topo_shell_diag.status != axiom::StatusCode::Ok || !nm_topo_shell_diag.value.has_value() ||
+            !issue_links_entities(*nm_topo_shell_diag.value, axiom::diag_codes::kTopoNonManifoldEdge,
+                                  {nm_shell.value->value, E[0].value})) {
+            std::cerr << "expected validate_shell non-manifold warning with shell+edge related_entities\n";
             return 1;
         }
         auto nm_strict = kernel.validate().validate_topology(*nm_body.value, axiom::ValidationMode::Strict);

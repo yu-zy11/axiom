@@ -1358,6 +1358,160 @@ inline void polyhedral_mass_properties_from_triangles(const std::vector<Point3>&
     out_inertia = {ixx, ixy, ixz, ixy, iyy, iyz, ixz, iyz, izz};
 }
 
+/// 平面闭合多边形沿 `record.axis`（单位）拉伸 `record.b`：棱柱三角剖分 + 闭合流形 BRep（**凸**多边形扇形三角化；非平面/退化/拉伸方向平行于面则返回 false）。
+inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRecord& record) {
+    if (record.kind != BodyKind::Sweep || record.rep_kind != RepKind::ExactBRep || !record.bbox.is_valid ||
+        !record.shells.empty()) {
+        return false;
+    }
+    if (record.label.size() < 8 || record.label.compare(0, 8, "extrude:") != 0) {
+        return false;
+    }
+    const auto& poly_in = record.extrude_profile_xyz;
+    const int n = static_cast<int>(poly_in.size());
+    if (n < 3) {
+        return false;
+    }
+    const Scalar h = record.b;
+    if (!(h > 0.0)) {
+        return false;
+    }
+    const Vec3 D = normalize(record.axis);
+    if (norm(D) <= 1e-14) {
+        return false;
+    }
+    const auto n_raw = newell_normal_unnormalized_poly(std::span<const Point3>(poly_in.data(), poly_in.size()));
+    const auto n_len = norm(n_raw);
+    if (n_len <= 1e-14) {
+        return false;
+    }
+    const auto n_unit = scale(n_raw, 1.0 / n_len);
+    const Scalar plane_tol = std::max(Scalar(1e-7), state.config.tolerance.linear * Scalar(100.0));
+    const Point3& p0r = poly_in[0];
+    const Scalar d0 = n_unit.x * p0r.x + n_unit.y * p0r.y + n_unit.z * p0r.z;
+    for (const auto& pt : poly_in) {
+        const Scalar dd = std::abs(n_unit.x * pt.x + n_unit.y * pt.y + n_unit.z * pt.z - d0);
+        if (dd > plane_tol) {
+            return false;
+        }
+    }
+    const Scalar align = std::abs(dot(D, n_unit));
+    if (align < Scalar(1e-6)) {
+        return false;
+    }
+
+    std::vector<Point3> pos(static_cast<std::size_t>(2 * n));
+    for (int i = 0; i < n; ++i) {
+        pos[static_cast<std::size_t>(i)] = poly_in[static_cast<std::size_t>(i)];
+        pos[static_cast<std::size_t>(n + i)] =
+            add_point_vec(poly_in[static_cast<std::size_t>(i)], scale(D, h));
+    }
+
+    std::vector<std::array<int, 3>> tris;
+    tris.reserve(static_cast<std::size_t>((n - 2) * 2 + n * 2));
+    for (int k = 1; k < n - 1; ++k) {
+        tris.push_back({0, k + 1, k});
+    }
+    for (int k = 1; k < n - 1; ++k) {
+        tris.push_back({n, n + k, n + k + 1});
+    }
+    for (int i = 0; i < n; ++i) {
+        const int j = (i + 1) % n;
+        tris.push_back({i, j, n + j});
+        tris.push_back({i, n + j, n + i});
+    }
+
+    Scalar vol_chk = 0.0;
+    Point3 cm_tmp {};
+    std::array<Scalar, 9> in_tmp {};
+    Scalar area_tmp = 0.0;
+    polyhedral_mass_properties_from_triangles(pos, tris, vol_chk, cm_tmp, in_tmp, area_tmp);
+    if (vol_chk < 0.0) {
+        for (auto& t : tris) {
+            std::swap(t[1], t[2]);
+        }
+        polyhedral_mass_properties_from_triangles(pos, tris, vol_chk, cm_tmp, in_tmp, area_tmp);
+    }
+    if (!(vol_chk > 1e-18)) {
+        return false;
+    }
+
+    std::vector<VertexId> vid(static_cast<std::size_t>(2 * n));
+    for (int i = 0; i < 2 * n; ++i) {
+        vid[static_cast<std::size_t>(i)] = VertexId {state.allocate_id()};
+        state.vertices.emplace(vid[static_cast<std::size_t>(i)].value,
+                               VertexRecord {pos[static_cast<std::size_t>(i)]});
+    }
+
+    std::vector<EdgeId> edges;
+    std::map<std::pair<int, int>, int> edge_to_index;
+    auto edge_index_for_pair = [&](int a, int b) -> int {
+        const int lo = std::min(a, b);
+        const int hi = std::max(a, b);
+        const auto key = std::make_pair(lo, hi);
+        const auto it = edge_to_index.find(key);
+        if (it != edge_to_index.end()) {
+            return it->second;
+        }
+        const auto curve_id =
+            create_materialized_line(state, pos[static_cast<std::size_t>(lo)], pos[static_cast<std::size_t>(hi)]);
+        const auto eid = EdgeId {state.allocate_id()};
+        state.edges.emplace(eid.value,
+                            EdgeRecord {curve_id, vid[static_cast<std::size_t>(lo)], vid[static_cast<std::size_t>(hi)]});
+        const int idx = static_cast<int>(edges.size());
+        edges.push_back(eid);
+        edge_to_index.emplace(key, idx);
+        return idx;
+    };
+    auto coedge_ref = [&](int a, int b) -> std::pair<int, bool> {
+        const int lo = std::min(a, b);
+        const int hi = std::max(a, b);
+        const int ei = edge_index_for_pair(lo, hi);
+        const bool rev = (a == hi);
+        return {ei, rev};
+    };
+    auto tri_normal = [&](int a, int b, int c) -> Vec3 {
+        const auto pa = pos[static_cast<std::size_t>(a)];
+        const auto pb = pos[static_cast<std::size_t>(b)];
+        const auto pc = pos[static_cast<std::size_t>(c)];
+        const auto e1 = subtract(pb, pa);
+        const auto e2 = subtract(pc, pa);
+        return safe_unit_normal(cross(e1, e2));
+    };
+
+    const auto source_faces = std::span<const FaceId>(record.source_faces);
+    std::vector<FaceId> faces;
+    faces.reserve(tris.size());
+
+    for (const auto& t : tris) {
+        const auto [e0, r0] = coedge_ref(t[0], t[1]);
+        const auto [e1, r1] = coedge_ref(t[1], t[2]);
+        const auto [e2, r2] = coedge_ref(t[2], t[0]);
+        const std::array<std::pair<int, bool>, 3> refs {{{e0, r0}, {e1, r1}, {e2, r2}}};
+        faces.push_back(create_materialized_polygon_face(state, edges, std::span<const std::pair<int, bool>>(refs),
+                                                         tri_normal(t[0], t[1], t[2]), source_faces));
+    }
+
+    const auto shell_id = ShellId {state.allocate_id()};
+    ShellRecord shell;
+    shell.faces = std::move(faces);
+    shell.source_shells = record.source_shells;
+    if (record.source_faces.empty()) {
+        shell.source_faces = shell.faces;
+    } else {
+        shell.source_faces = record.source_faces;
+    }
+    state.shells.emplace(shell_id.value, std::move(shell));
+    record.shells.push_back(shell_id);
+
+    record.sweep_polyhedral_mass_valid = true;
+    record.sweep_polyhedral_volume = vol_chk;
+    record.sweep_cached_surface_area = area_tmp;
+    record.sweep_polyhedral_centroid = cm_tmp;
+    record.sweep_inertia_about_centroid = in_tmp;
+    return true;
+}
+
 /// 子午面闭合多边形绕其平面内轴旋转 `< 2π`：侧壁为直纹面的两三角形剖分 + 两侧平面封盖，闭合流形 BRep。
 inline bool try_materialize_sweep_revolve_meridian_body(KernelState& state, BodyRecord& record) {
     if (record.kind != BodyKind::Sweep || record.rep_kind != RepKind::ExactBRep || !record.bbox.is_valid ||
@@ -1511,6 +1665,9 @@ inline void materialize_body_bbox_topology(KernelState& state, BodyRecord& recor
     inherit_source_topology_from_owned_shells(state, record);
     infer_source_shells_from_source_faces(state, record);
     sanitize_source_references(state, record);
+    if (try_materialize_sweep_extrude_prism_body(state, record)) {
+        return;
+    }
     if (try_materialize_sweep_revolve_meridian_body(state, record)) {
         return;
     }

@@ -202,9 +202,10 @@ Result<void> ValidationService::validate_topology(BodyId body_id, ValidationMode
 }
 
 Result<void> ValidationService::validate_manifold(BodyId body_id, ValidationMode mode) const {
+    static constexpr const char* k_manifold_stage = "heal.validation.manifold";
     if (!detail::has_body(*state_, body_id)) {
         return detail::failed_void(*state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
-                                   "流形验证失败：目标实体不存在", "流形验证失败");
+                                   "流形验证失败：目标实体不存在", "流形验证失败", k_manifold_stage);
     }
     const auto& body = state_->bodies.at(body_id.value);
     if (body.rep_kind != RepKind::ExactBRep || body.shells.empty()) {
@@ -219,7 +220,7 @@ Result<void> ValidationService::validate_manifold(BodyId body_id, ValidationMode
         const auto shell_it = state_->shells.find(shell_id.value);
         if (shell_it == state_->shells.end()) {
             return detail::failed_void(*state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
-                                       "流形验证失败：体引用了不存在的壳", "流形验证失败");
+                                       "流形验证失败：体引用了不存在的壳", "流形验证失败", k_manifold_stage);
         }
         std::string reason;
         std::string_view issue_code = diag_codes::kTopoShellNotClosed;
@@ -235,8 +236,8 @@ Result<void> ValidationService::validate_manifold(BodyId body_id, ValidationMode
             }
             related.insert(related.end(), edge_related_extra.begin(), edge_related_extra.end());
             return detail::failed_void(*state_, StatusCode::InvalidTopology, issue_code,
-                                       "流形验证失败：" + reason, "流形验证失败",
-                                       std::move(related));
+                                       "流形验证失败：" + reason, "流形验证失败", std::move(related),
+                                       k_manifold_stage);
         }
         if (mode == ValidationMode::Strict) {
             std::string_view rel_code = diag_codes::kTopoShellNotClosed;
@@ -246,7 +247,7 @@ Result<void> ValidationService::validate_manifold(BodyId body_id, ValidationMode
                 rel_entities.insert(rel_entities.begin(), body_id.value);
                 return detail::failed_void(*state_, StatusCode::InvalidTopology, rel_code,
                                            "流形验证失败：" + rel_reason, "流形验证失败",
-                                           std::move(rel_entities));
+                                           std::move(rel_entities), k_manifold_stage);
             }
         }
     }
@@ -270,7 +271,8 @@ Result<void> ValidationService::validate_manifold(BodyId body_id, ValidationMode
                                                    ", shell_a=" + std::to_string(it->second) +
                                                    ", shell_b=" + std::to_string(shell_id.value) + ")",
                                                "流形验证失败",
-                                               {body_id.value, face_id.value, it->second, shell_id.value});
+                                               {body_id.value, face_id.value, it->second, shell_id.value},
+                                               k_manifold_stage);
                 }
             }
         }
@@ -378,35 +380,36 @@ Result<void> ValidationService::validate_self_intersection_all_shells(BodyId bod
 }
 
 Result<void> ValidationService::validate_tolerance(BodyId body_id, ValidationMode mode) const {
+    static constexpr const char* k_tol_stage = "heal.validation.tolerance";
     if (!detail::has_body(*state_, body_id)) {
         return detail::failed_void(*state_, StatusCode::ToleranceConflict, diag_codes::kValToleranceConflict,
-                                   "容差验证失败：目标实体不存在", "容差验证失败");
+                                   "容差验证失败：目标实体不存在", "容差验证失败", k_tol_stage);
     }
     const auto& tol = state_->config.tolerance;
     if (!std::isfinite(tol.linear) || tol.linear <= 0.0) {
         return detail::failed_void(*state_, StatusCode::ToleranceConflict, diag_codes::kValToleranceConflict,
-                                   "容差验证失败：工作线性容差须为有限正数", "容差验证失败");
+                                   "容差验证失败：工作线性容差须为有限正数", "容差验证失败", k_tol_stage);
     }
     if (!std::isfinite(tol.angular) || tol.angular <= 0.0) {
         return detail::failed_void(*state_, StatusCode::ToleranceConflict, diag_codes::kValToleranceConflict,
-                                   "容差验证失败：角度容差须为有限正数", "容差验证失败");
+                                   "容差验证失败：角度容差须为有限正数", "容差验证失败", k_tol_stage);
     }
     const auto& body = state_->bodies.at(body_id.value);
     if (!has_valid_bbox(body)) {
         return detail::failed_void(*state_, StatusCode::ToleranceConflict, diag_codes::kValToleranceConflict,
-                                   "容差验证失败：目标实体无有效尺寸范围", "容差验证失败");
+                                   "容差验证失败：目标实体无有效尺寸范围", "容差验证失败", k_tol_stage);
     }
     if (mode == ValidationMode::Strict) {
         if (std::isfinite(tol.min_local) && std::isfinite(tol.max_local) && tol.max_local > 0.0 &&
             tol.min_local > tol.max_local) {
             return detail::failed_void(*state_, StatusCode::ToleranceConflict, diag_codes::kValToleranceConflict,
                                        "容差验证失败：线性容差策略 min_local 大于 max_local", "容差验证失败",
-                                       {body_id.value});
+                                       {body_id.value}, k_tol_stage);
         }
         if (std::isfinite(tol.max_local) && tol.max_local > 0.0 && tol.linear > tol.max_local) {
             return detail::failed_void(*state_, StatusCode::ToleranceConflict, diag_codes::kValToleranceConflict,
                                        "容差验证失败：线性容差超过策略上限 max_local", "容差验证失败",
-                                       {body_id.value});
+                                       {body_id.value}, k_tol_stage);
         }
         const auto ext = min_extent(body.bbox);
         const bool skip_linear_vs_min_extent =
@@ -415,12 +418,12 @@ Result<void> ValidationService::validate_tolerance(BodyId body_id, ValidationMod
         if (!skip_linear_vs_min_extent && std::isfinite(ext) && ext > 0.0 && tol.linear > 0.25 * ext) {
             return detail::failed_void(*state_, StatusCode::ToleranceConflict, diag_codes::kValToleranceConflict,
                                        "容差验证失败：线性容差相对模型尺度过大", "容差验证失败",
-                                       {body_id.value});
+                                       {body_id.value}, k_tol_stage);
         }
         constexpr Scalar k_pi = 3.14159265358979323846;
         if (tol.angular > k_pi) {
             return detail::failed_void(*state_, StatusCode::ToleranceConflict, diag_codes::kValToleranceConflict,
-                                       "容差验证失败：角度容差超过 π", "容差验证失败", {body_id.value});
+                                       "容差验证失败：角度容差超过 π", "容差验证失败", {body_id.value}, k_tol_stage);
         }
         // 导入体：高纵横比包围盒 + 最小厚度落在相对线性容差的工程薄片带内（与 revolve/sweep 等本地建模体解耦，避免误报）。
         if (body.kind == detail::BodyKind::Imported) {
@@ -433,7 +436,7 @@ Result<void> ValidationService::validate_tolerance(BodyId body_id, ValidationMod
                 return detail::failed_void(*state_, StatusCode::ToleranceConflict,
                                            diag_codes::kValModelFinerThanTolerance,
                                            "容差验证失败：导入包围盒呈高纵横比薄片且最小厚度相对线性容差过薄",
-                                           "容差验证失败", {body_id.value});
+                                           "容差验证失败", {body_id.value}, k_tol_stage);
             }
         }
     }

@@ -10,11 +10,29 @@ Result<BodyId> IOService::import_step(std::string_view path, const ImportOptions
             "STEP 导入失败：输入文件不存在", "STEP 导入失败");
     }
 
-    std::ifstream in {std::string(path)};
-    if (!in) {
+    constexpr std::size_t kStepIgesProbeMaxBytes = static_cast<std::size_t>(64) * 1024 * 1024;
+    const auto file_text = read_regular_file_bytes_limited(path, kStepIgesProbeMaxBytes);
+    if (!file_text.has_value()) {
         return detail::failed_result<BodyId>(
             *state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
             "STEP 导入失败：无法打开输入文件", "STEP 导入失败");
+    }
+    if (step_file_requires_full_standard_importer(std::string_view(*file_text))) {
+        std::vector<Issue> issues;
+        auto issue = detail::make_error_issue(
+            diag_codes::kIoStepStandardEntitiesUnsupported,
+            "STEP 导入：检测到 ISO-10303-21 DATA 段含 EXPRESS 实体实例；当前内核仅支持 Axiom 元数据子集。完整 AP 交换需集成 STEP 内核（如 STEPcode/Open CASCADE）。");
+        issue.stage = "io.import.step";
+        issues.push_back(std::move(issue));
+        std::string scan_msg;
+        std::size_t scan_count = 0;
+        if (summarize_step_standard_file_entities(std::string_view(*file_text), scan_msg, scan_count)) {
+            auto info = detail::make_info_issue(diag_codes::kIoStepStandardFileScanSummary, std::move(scan_msg));
+            info.stage = "io.import.step";
+            issues.push_back(std::move(info));
+        }
+        return error_result<BodyId>(StatusCode::NotImplemented,
+                                    state_->create_diagnostic("STEP 标准实体交换未实现", std::move(issues)));
     }
 
     const auto body_id = BodyId {state_->allocate_id()};
@@ -24,6 +42,7 @@ Result<BodyId> IOService::import_step(std::string_view path, const ImportOptions
     record.label = std::string(path);
     record.bbox = detail::make_bbox({0.0, 0.0, 0.0}, {1.0, 1.0, 1.0});
 
+    std::istringstream in(*file_text);
     parse_axiom_interchange_metadata_lines(in, record);
 
     state_->bodies.emplace(body_id.value, record);
@@ -112,6 +131,10 @@ Result<void> IOService::export_step(BodyId body_id, std::string_view path, const
             *state_, diag_codes::kIoExportFailure,
             "STEP 导出失败：目标实体不存在或输出路径为空", "STEP 导出失败");
     }
+    const auto wx = reject_if_export_directory_not_writable(*state_, path);
+    if (wx.status != StatusCode::Ok) {
+        return wx;
+    }
 
     std::ofstream out {std::string(path)};
     if (!out) {
@@ -128,6 +151,14 @@ Result<void> IOService::export_step(BodyId body_id, std::string_view path, const
     out << "FILE_DESCRIPTION(('AxiomKernel export'),'2;1');\n";
     if (options.embed_metadata) {
         out << "/* metadata embedded */\n";
+        const std::string step_schema =
+            body.io_step_file_schema.empty() ? "CONFIG_CONTROL_DESIGN" : body.io_step_file_schema;
+        const std::string step_entity =
+            body.io_step_entity_name.empty() ? "MANIFOLD_SOLID_BREP" : body.io_step_entity_name;
+        out << "/* FILE_NAME('AxiomKernel','','',''); */\n";
+        out << "/* FILE_SCHEMA((('" << step_schema << "')) */\n";
+        out << "AXIOM_STEP_SCHEMA " << step_schema << "\n";
+        out << "AXIOM_STEP_ENTITY " << step_entity << "\n";
         out << "AXIOM_LABEL " << body.label << "\n";
         out << "AXIOM_BODY_KIND " << body_kind_name(body.kind) << "\n";
         out << "AXIOM_ORIGIN " << body.origin.x << " " << body.origin.y << " " << body.origin.z << "\n";
@@ -370,17 +401,37 @@ Result<BodyId> IOService::import_iges(std::string_view path, const ImportOptions
         return detail::failed_result<BodyId>(*state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
                                              "IGES 导入失败：输入文件不存在", "IGES 导入失败");
     }
-    std::ifstream in {std::string(path)};
-    if (!in) {
+    constexpr std::size_t kStepIgesProbeMaxBytes = static_cast<std::size_t>(64) * 1024 * 1024;
+    const auto file_text = read_regular_file_bytes_limited(path, kStepIgesProbeMaxBytes);
+    if (!file_text.has_value()) {
         return detail::failed_result<BodyId>(*state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
                                              "IGES 导入失败：无法打开输入文件", "IGES 导入失败");
     }
+    if (iges_file_requires_full_standard_importer(std::string_view(*file_text))) {
+        std::vector<Issue> issues;
+        auto issue = detail::make_error_issue(
+            diag_codes::kIgesStandardEntitiesUnsupported,
+            "IGES 导入：检测到典型 IGES 卡片/DE 形态；当前内核仅支持 Axiom 元数据子集。完整实体交换需集成 IGES 内核。");
+        issue.stage = "io.import.iges";
+        issues.push_back(std::move(issue));
+        std::string scan_msg;
+        std::size_t de_lines = 0;
+        if (summarize_iges_standard_file_entities(std::string_view(*file_text), scan_msg, de_lines)) {
+            auto info = detail::make_info_issue(diag_codes::kIgesStandardFileScanSummary, std::move(scan_msg));
+            info.stage = "io.import.iges";
+            issues.push_back(std::move(info));
+        }
+        return error_result<BodyId>(StatusCode::NotImplemented,
+                                    state_->create_diagnostic("IGES 标准实体交换未实现", std::move(issues)));
+    }
+
     const auto body_id = BodyId {state_->allocate_id()};
     detail::BodyRecord record;
     record.kind = detail::BodyKind::Imported;
     record.rep_kind = RepKind::ExactBRep;
     record.label = std::string(path);
     record.bbox = detail::make_bbox({0.0, 0.0, 0.0}, {1.0, 1.0, 1.0});
+    std::istringstream in(*file_text);
     parse_axiom_interchange_metadata_lines(in, record);
     state_->bodies.emplace(body_id.value, record);
 
@@ -538,6 +589,10 @@ Result<void> IOService::export_axmjson(BodyId body_id, std::string_view path, co
             *state_, diag_codes::kIoExportFailure,
             "AXMJSON 导出失败：目标实体不存在或输出路径为空", "AXMJSON 导出失败");
     }
+    const auto wx = reject_if_export_directory_not_writable(*state_, path);
+    if (wx.status != StatusCode::Ok) {
+        return wx;
+    }
     std::ofstream out {std::string(path)};
     if (!out) {
         return detail::failed_void(
@@ -558,6 +613,8 @@ Result<void> IOService::export_iges(BodyId body_id, std::string_view path, const
     }
     const auto ensured = ensure_parent_directory(path);
     if (ensured.status != StatusCode::Ok) return ensured;
+    const auto wx_iges = reject_if_export_directory_not_writable(*state_, path);
+    if (wx_iges.status != StatusCode::Ok) return wx_iges;
     std::ofstream out {std::string(path)};
     if (!out) {
         return detail::failed_void(
@@ -569,6 +626,9 @@ Result<void> IOService::export_iges(BodyId body_id, std::string_view path, const
     out << "START\n";
     out << "1H,,1HAXIOM,AxiomKernel IGES metadata interchange (subset)\n";
     if (options.embed_metadata) {
+        const std::string iges_ent =
+            body.io_iges_entity_hint.empty() ? "186_SUBSET" : body.io_iges_entity_hint;
+        out << "AXIOM_IGES_ENTITY " << iges_ent << "\n";
         out << "AXIOM_LABEL " << body.label << "\n";
         out << "AXIOM_BODY_KIND " << body_kind_name(body.kind) << "\n";
         out << "AXIOM_ORIGIN " << body.origin.x << " " << body.origin.y << " " << body.origin.z << "\n";
@@ -591,6 +651,8 @@ Result<void> IOService::export_brep(BodyId body_id, std::string_view path, const
     }
     const auto ensured = ensure_parent_directory(path);
     if (ensured.status != StatusCode::Ok) return ensured;
+    const auto wx_brep = reject_if_export_directory_not_writable(*state_, path);
+    if (wx_brep.status != StatusCode::Ok) return wx_brep;
     std::ofstream out {std::string(path)};
     if (!out) {
         return detail::failed_void(
@@ -612,6 +674,8 @@ Result<void> IOService::export_obj(BodyId body_id, std::string_view path, const 
     }
     const auto ensured = ensure_parent_directory(path);
     if (ensured.status != StatusCode::Ok) return ensured;
+    const auto wx_obj = reject_if_export_directory_not_writable(*state_, path);
+    if (wx_obj.status != StatusCode::Ok) return wx_obj;
 
     RepresentationConversionService convert {state_};
     const auto mesh_id = convert.brep_to_mesh(body_id, TessellationOptions{});
@@ -663,6 +727,8 @@ Result<void> IOService::export_3mf(BodyId body_id, std::string_view path, const 
     }
     const auto ensured = ensure_parent_directory(path);
     if (ensured.status != StatusCode::Ok) return ensured;
+    const auto wx_3mf = reject_if_export_directory_not_writable(*state_, path);
+    if (wx_3mf.status != StatusCode::Ok) return wx_3mf;
 
     RepresentationConversionService convert {state_};
     const auto mesh_id = convert.brep_to_mesh(body_id, TessellationOptions{});
@@ -728,6 +794,8 @@ Result<void> IOService::export_gltf(BodyId body_id, std::string_view path, const
     }
     const auto ensured = ensure_parent_directory(path);
     if (ensured.status != StatusCode::Ok) return ensured;
+    const auto wx_gltf = reject_if_export_directory_not_writable(*state_, path);
+    if (wx_gltf.status != StatusCode::Ok) return wx_gltf;
 
     RepresentationConversionService convert {state_};
     const auto mesh_id = convert.brep_to_mesh(body_id, TessellationOptions{});
@@ -828,6 +896,8 @@ Result<void> IOService::export_stl(BodyId body_id, std::string_view path, const 
     }
     const auto ensured = ensure_parent_directory(path);
     if (ensured.status != StatusCode::Ok) return ensured;
+    const auto wx_stl = reject_if_export_directory_not_writable(*state_, path);
+    if (wx_stl.status != StatusCode::Ok) return wx_stl;
 
     RepresentationConversionService convert {state_};
     const auto mesh_id = convert.brep_to_mesh(body_id, TessellationOptions{});
