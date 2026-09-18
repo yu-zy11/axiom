@@ -1,0 +1,22 @@
+{
+  "agent_command": ["codex", "exec", "--full-auto", "-"],
+  "build_dir": "build-agent",
+  "full_test_interval": 5,
+  "max_consecutive_failures": 3,
+  "agent_timeout_seconds": 3600,
+  "protected_branches": ["main", "master"],
+  "module_tests": {
+    "Core": ["axiom_kernel_runtime_invariant_test", "axiom_smoke_test"],
+    "Math": ["axiom_math_services_test"],
+    "Geo": ["axiom_geometry_test"],
+    "Topo": ["axiom_topology_test"],
+    "Rep": ["axiom_representation_io_test"],
+    "Ops": ["axiom_ops_heal_test", "axiom_boolean_prep_test", "axiom_boolean_workflow_test"],
+    "Heal": ["axiom_heal_test", "axiom_ops_heal_test"],
+    "Eval": ["axiom_query_eval_test"],
+    "IO": ["axiom_io_workflow_test", "axiom_io_dataset_test"],
+    "Plugin": ["axiom_plugin_sdk_test"],
+    "SDK": ["axiom_smoke_test", "axiom_plugin_sdk_test"],
+    "Diagnostics": ["axiom_diagnostics_test"]
+  }
+}

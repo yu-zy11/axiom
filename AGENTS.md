@@ -37,7 +37,7 @@ ctest --test-dir build
   - `AXM_ENABLE_DIAGNOSTICS`
   - `AXM_ENABLE_STRICT_WARNINGS`
 
-> 说明：以当前仓库 `CMakeLists.txt` 为准，上述选项中 **实际已定义并生效** 的包括  
+> 说明：以当前仓库 `CMakeLists.txt` 为准，上述选项中 **实际已定义并生效** 的包括
 > `AXM_ENABLE_TESTS/AXM_ENABLE_EXAMPLES/AXM_ENABLE_BENCHMARKS/AXM_ENABLE_DIAGNOSTICS/AXM_ENABLE_STRICT_WARNINGS`。
 
 ---
@@ -277,7 +277,7 @@ AXM_PERF_MAX_MS=2000 AXM_PERF_ITERATIONS=80 ctest --test-dir build -R axiom_perf
 
 ### 修复闭环（必须完成）
 
-复现 → 分级 → 修复 → 验证 → **回归沉淀** → 关闭  
+复现 → 分级 → 修复 → 验证 → **回归沉淀** → 关闭
 尤其：`S0/S1` 与布尔/修复/导入导出相关的 `S2` 必须沉淀回归案例（含输入数据、期望输出、错误码预期、最小复现路径）。
 
 ---
@@ -320,6 +320,14 @@ AXM_PERF_MAX_MS=2000 AXM_PERF_ITERATIONS=80 ctest --test-dir build -R axiom_perf
 
 ## 详细文档索引（按主题查阅）
 
+- **统一导航与日常开发**：
+  - `docs/README.md`（按角色和任务组织的文档总入口）
+  - `docs/guides/AxiomKernel_开发者工作流.md`
+  - `docs/guides/AxiomKernel_Agent自动开发指南.md`（连续 Agent 交付、门禁与停机规则）
+  - `docs/requirements/AxiomKernel_需求追踪矩阵.md`（需求 → 模块 → 测试证据）
+  - `docs/decisions/README.md`（架构决策记录索引）
+  - `docs/operations/AxiomKernel_发布与回滚手册.md`
+
 - **架构与边界**：
   - `docs/architecture/AxiomKernel_几何引擎技术架构文档.md`
   - `docs/architecture/AxiomKernel_模块依赖图与时序图.md`
@@ -347,6 +355,5 @@ AXM_PERF_MAX_MS=2000 AXM_PERF_ITERATIONS=80 ctest --test-dir build -R axiom_perf
   - `docs/plan/AxiomKernel_当前开发进度.md`（**阶段与模块完成度的事实入口**，宜与代码/ctest 同步更新）
   - `docs/plan/AxiomKernel_主开发计划与阶段路线图.md`（总阶段、里程碑与退出标准）
   - `docs/plan/AxiomKernel_MVP实施蓝图.md`（MVP 交付拆解；阶段口径以主路线图 `§1` 为准）
-  - `docs/plan/AxiomKernel_几何引擎功能需求文档.md`
+  - `docs/requirements/AxiomKernel_几何引擎功能需求文档.md`（产品目标，不表示当前已交付）
   - `docs/plan/AxiomKernel_术语表与命名约定.md`
-
