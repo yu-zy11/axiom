@@ -66,11 +66,20 @@ ctest --test-dir build
 
 ## 文档索引
 
-建议阅读顺序：
+所有角色与文档的完整导航见 [`docs/README.md`](docs/README.md)。建议开发者阅读顺序：
 
 1. `docs/README.md`
-2. `docs/plan/AxiomKernel_当前开发进度.md`
-3. `docs/architecture/AxiomKernel_项目结构与文档治理建议.md`
-4. `docs/plan/AxiomKernel_主开发计划与阶段路线图.md`
-5. `AGENTS.md`
+2. `docs/guides/AxiomKernel_开发者工作流.md`
+3. `docs/requirements/AxiomKernel_需求追踪矩阵.md`
+4. `docs/plan/AxiomKernel_当前开发进度.md`
+5. `docs/architecture/AxiomKernel_项目结构与文档治理建议.md`
+6. `AGENTS.md`
 
+提交前可运行文档完整性检查：
+
+```bash
+python3 scripts/check_docs.py
+```
+
+需要让外部 Agent 按需求矩阵连续交付经过验证的小切片时，请先阅读
+`docs/guides/AxiomKernel_Agent自动开发指南.md`，再使用 `scripts/agent_autodev.py`。

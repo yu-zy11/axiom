@@ -17,6 +17,9 @@ Testing/
 a.out
 
 ## Tooling
+__pycache__/
+*.py[cod]
 *.swp
 *.swo
 *~
+.axiom-agent/
