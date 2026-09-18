@@ -1,5 +1,6 @@
 #include "axiom/rep/representation_conversion_service.h"
 
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <iomanip>
