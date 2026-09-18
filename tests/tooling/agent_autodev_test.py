@@ -53,11 +53,43 @@ class AgentAutodevTest(unittest.TestCase):
             agent_autodev.relevant_tests("Unknown", {"module_tests": {}})
 
     def test_prompt_contains_safety_and_report_contract(self) -> None:
-        prompt = agent_autodev.build_prompt(3)
+        prompt = agent_autodev.build_prompt(
+            3, agent_autodev.Requirement("FR-GEO-001", "进行中")
+        )
         self.assertIn("第 3 个交付切片", prompt)
         self.assertIn("不执行 git commit", prompt)
         self.assertIn(".axiom-agent/result.json", prompt)
         self.assertIn("FR-GEO-001", prompt)
+        self.assertIn("唯一目标", prompt)
+
+    def test_select_target_rotates_within_the_active_tier(self) -> None:
+        requirements = [
+            agent_autodev.Requirement("FR-GEO-001", "进行中"),
+            agent_autodev.Requirement("FR-TOPO-001", "受限可用"),
+            agent_autodev.Requirement("FR-OPS-001", "未开始"),
+        ]
+        config = {
+            "requirement_tiers": [
+                ["FR-GEO-001", "FR-TOPO-001"],
+                ["FR-OPS-001"],
+            ]
+        }
+        state = {"requirement_cycles": {"FR-GEO-001": 1}}
+        self.assertEqual(
+            agent_autodev.select_target(requirements, state, config),
+            agent_autodev.Requirement("FR-TOPO-001", "受限可用"),
+        )
+
+    def test_select_target_advances_to_next_completed_tier(self) -> None:
+        requirements = [
+            agent_autodev.Requirement("FR-GEO-001", "已满足"),
+            agent_autodev.Requirement("FR-OPS-001", "进行中"),
+        ]
+        config = {"requirement_tiers": [["FR-GEO-001"], ["FR-OPS-001"]]}
+        self.assertEqual(
+            agent_autodev.select_target(requirements, {}, config),
+            agent_autodev.Requirement("FR-OPS-001", "进行中"),
+        )
 
     def test_automation_files_are_protected(self) -> None:
         self.assertIn(".gitignore", agent_autodev.PROTECTED_AUTOMATION_FILES)

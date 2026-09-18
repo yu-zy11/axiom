@@ -17,6 +17,7 @@ import shlex
 import subprocess
 import sys
 import time
+from datetime import UTC, datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -29,6 +30,7 @@ REPORT_PATH = RUNTIME_DIR / "result.json"
 STATE_PATH = RUNTIME_DIR / "state.json"
 LOG_DIR = RUNTIME_DIR / "logs"
 TRACEABILITY = ROOT / "docs" / "requirements" / "AxiomKernel_需求追踪矩阵.md"
+PROGRESS_LEDGER = ROOT / "docs" / "plan" / "AxiomKernel_Agent自动开发进度.md"
 REQUIREMENT_ROW = re.compile(
     r"^\|\s*((?:FR|NFR)-[A-Z]+-\d+)\s*\|.*?\|\s*"
     r"(未开始|进行中|受限可用|已满足|阻塞)\s*\|"
@@ -93,6 +95,7 @@ def load_config(path: Path) -> dict[str, Any]:
         "max_consecutive_failures",
         "agent_timeout_seconds",
         "protected_branches",
+        "requirement_tiers",
         "module_tests",
     }
     missing = required - config.keys()
@@ -100,6 +103,21 @@ def load_config(path: Path) -> dict[str, Any]:
         raise RunnerError(f"config missing keys: {', '.join(sorted(missing))}")
     if not isinstance(config["agent_command"], list) or not config["agent_command"]:
         raise RunnerError("agent_command must be a non-empty JSON array")
+    configured_ids = [
+        requirement_id
+        for tier in config["requirement_tiers"]
+        for requirement_id in tier
+    ]
+    known_ids = {item.requirement_id for item in read_requirements()}
+    if len(configured_ids) != len(set(configured_ids)):
+        raise RunnerError("requirement_tiers contains duplicate requirement IDs")
+    if set(configured_ids) != known_ids:
+        missing_ids = sorted(known_ids - set(configured_ids))
+        unknown_ids = sorted(set(configured_ids) - known_ids)
+        raise RunnerError(
+            "requirement_tiers must cover the traceability matrix exactly; "
+            f"missing={missing_ids}, unknown={unknown_ids}"
+        )
     return config
 
 
@@ -116,6 +134,23 @@ def read_requirements(path: Path = TRACEABILITY) -> list[Requirement]:
 
 def unfinished_requirements(requirements: Sequence[Requirement]) -> list[Requirement]:
     return [item for item in requirements if item.status != "已满足"]
+
+
+def select_target(
+    requirements: Sequence[Requirement], state: dict[str, Any], config: dict[str, Any]
+) -> Requirement | None:
+    """Select the least-served unfinished requirement from the earliest active tier."""
+    by_id = {item.requirement_id: item for item in requirements}
+    counts: dict[str, int] = state.get("requirement_cycles", {})
+    for tier in config["requirement_tiers"]:
+        candidates = [by_id[item] for item in tier if by_id[item].status != "已满足"]
+        if candidates:
+            order = {requirement_id: index for index, requirement_id in enumerate(tier)}
+            return min(
+                candidates,
+                key=lambda item: (counts.get(item.requirement_id, 0), order[item.requirement_id]),
+            )
+    return None
 
 
 def git_status() -> str:
@@ -155,8 +190,15 @@ def ensure_safe_start(config: dict[str, Any], allow_dirty: bool) -> None:
 
 def load_state() -> dict[str, Any]:
     if not STATE_PATH.exists():
-        return {"successful_cycles": 0, "consecutive_failures": 0, "history": []}
-    return json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        return {
+            "successful_cycles": 0,
+            "consecutive_failures": 0,
+            "requirement_cycles": {},
+            "history": [],
+        }
+    state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    state.setdefault("requirement_cycles", {})
+    return state
 
 
 def save_state(state: dict[str, Any]) -> None:
@@ -164,7 +206,9 @@ def save_state(state: dict[str, Any]) -> None:
     STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def build_prompt(cycle: int, previous_failure: str | None = None) -> str:
+def build_prompt(
+    cycle: int, target: Requirement, previous_failure: str | None = None
+) -> str:
     requirements = unfinished_requirements(read_requirements())
     requirement_summary = "\n".join(
         f"- {item.requirement_id}: {item.status}" for item in requirements
@@ -181,8 +225,10 @@ def build_prompt(cycle: int, previous_failure: str | None = None) -> str:
 当前进度和近期 Backlog。当前未完全满足的需求如下：
 {requirement_summary}
 {repair}
+本轮由调度器分配的唯一目标是 **{target.requirement_id}（{target.status}）**。
+
 工作规则：
-1. 先检查代码和测试事实，从最高优先级、依赖已具备的需求中只选择一个可评审的小切片。
+1. 先检查代码和测试事实，只为本轮目标选择一个依赖已具备、可评审的小切片。
 2. 优先完成近期 Backlog；禁止把占位实现、bbox/mesh 近似或仅有接口声明标记为精确能力。
 3. 实现真实代码，补齐成功、失败、退化和失败不污染的回归测试；遵守模块依赖。
 4. 运行最小相关测试。若修改公共 API、错误码、阶段状态或完成度，同步对应文档。
@@ -221,6 +267,21 @@ def load_report() -> dict[str, Any]:
     if not isinstance(report["tests"], list):
         raise RunnerError("report tests must be a JSON array")
     return report
+
+
+def record_progress(
+    cycle: int, report: dict[str, Any], full_gate: bool
+) -> None:
+    """Append an accepted slice to the repository-visible progress ledger."""
+    timestamp = datetime.now(UTC).replace(microsecond=0).isoformat()
+    summary = str(report["summary"]).replace("|", "\\|").replace("\n", " ")
+    remaining = str(report["remaining"]).replace("|", "\\|").replace("\n", " ")
+    gate = "完整测试" if full_gate else "模块测试"
+    with PROGRESS_LEDGER.open("a", encoding="utf-8") as stream:
+        stream.write(
+            f"| {cycle} | {timestamp} | {report['requirement_id']} | "
+            f"{report['module']} | {summary} | {gate}通过 | {remaining} |\n"
+        )
 
 
 def relevant_tests(module: str, config: dict[str, Any]) -> list[str]:
@@ -322,15 +383,24 @@ def main() -> int:
     state = load_state()
     cycle = int(state["successful_cycles"]) + 1
     target_cycle = None if args.max_cycles == 0 else cycle + args.max_cycles - 1
+    target = select_target(read_requirements(), state, config)
+    if target is None:
+        print("all traceability-matrix requirements are already satisfied")
+        return 0
     if args.dry_run:
-        print(build_prompt(cycle))
+        print(build_prompt(cycle, target))
         return 0
 
     while target_cycle is None or cycle <= target_cycle:
         previous_failure: str | None = None
+        ledger_before = PROGRESS_LEDGER.read_text(encoding="utf-8")
         while True:
             REPORT_PATH.unlink(missing_ok=True)
-            prompt = build_prompt(cycle, previous_failure)
+            target = select_target(read_requirements(), state, config)
+            if target is None:
+                print("all traceability-matrix requirements are already satisfied")
+                return 0
+            prompt = build_prompt(cycle, target, previous_failure)
             try:
                 result = run(
                     config["agent_command"],
@@ -340,19 +410,28 @@ def main() -> int:
                 if result.returncode != 0:
                     raise RunnerError(f"agent exited with status {result.returncode}")
                 report = load_report()
+                if report["requirement_id"] != target.requirement_id:
+                    raise RunnerError(
+                        "agent report does not match assigned requirement: "
+                        f"expected {target.requirement_id}, got {report['requirement_id']}"
+                    )
+                if PROGRESS_LEDGER.read_text(encoding="utf-8") != ledger_before:
+                    raise RunnerError("agent modified the runner-owned progress ledger")
                 if report["status"] == "blocked":
                     raise RunnerError(f"agent blocked: {report['remaining']}")
                 if report["status"] == "project_complete" and unfinished_requirements(
                     read_requirements()
                 ):
                     raise RunnerError("project_complete rejected: traceability matrix is unfinished")
+                full_gate = report["status"] == "project_complete" or (
+                    cycle % int(config["full_test_interval"]) == 0
+                )
                 verify_slice(
                     cycle,
                     report,
                     config,
                     force_full=report["status"] == "project_complete",
                 )
-                commit = commit_slice(report, args.no_commit)
                 break
             except (RunnerError, json.JSONDecodeError) as exc:
                 state["consecutive_failures"] = int(state["consecutive_failures"]) + 1
@@ -367,8 +446,25 @@ def main() -> int:
                     return 1
                 print("asking the agent to repair the retained worktree", file=sys.stderr)
 
+        try:
+            record_progress(cycle, report, full_gate)
+            execute_gate(
+                [sys.executable, "scripts/check_docs.py"],
+                LOG_DIR / f"cycle-{cycle:04d}-gates.log",
+            )
+            commit = commit_slice(report, args.no_commit)
+        except RunnerError as exc:
+            state["last_error"] = str(exc)
+            save_state(state)
+            print(f"cycle {cycle} could not be recorded: {exc}", file=sys.stderr)
+            return 1
+
         state["successful_cycles"] = int(state["successful_cycles"]) + 1
         state["consecutive_failures"] = 0
+        requirement_cycles = state.setdefault("requirement_cycles", {})
+        requirement_cycles[report["requirement_id"]] = (
+            int(requirement_cycles.get(report["requirement_id"], 0)) + 1
+        )
         state["history"].append(
             {
                 "cycle": cycle,
