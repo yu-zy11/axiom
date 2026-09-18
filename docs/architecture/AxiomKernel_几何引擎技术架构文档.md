@@ -22,6 +22,11 @@
 - 第一阶段不追求覆盖所有高阶曲面构造。
 - 第一阶段不追求一次性超越所有商业内核的边角圆角能力。
 
+### 依赖、许可证与数据真源（工程约束）
+
+- **默认交付**：不将第三方几何内核（如 Open CASCADE）作为运行时 BRep 真源链入 `axiom_kernel`；几何/拓扑/布尔以本仓库自有服务为准。  
+- **数据交换**：`STEP`/`IGES` 等为序列化介质；导入后权威表示为 Axiom 内部 `Body`/拓扑/几何句柄。可选外部解析库仅能通过桥接层接入，且须符合许可证与模块边界（详见 **[AxiomKernel_依赖边界许可证与真源策略.md](AxiomKernel_依赖边界许可证与真源策略.md)**、**ADR-0005**）。
+
 ## 一、总体架构
 
 采用 `8 层架构 + 1 条统一诊断链路`。
@@ -248,13 +253,13 @@ public:
 
 建议用 `incidence tables` 而不是纯 OO 树。
 
-例如：
+例如（逻辑关联，非具体 C++ 布局）：
 
-- `Edge -> [start_vertex, end_vertex]`
-- `Coedge -> [edge_id, face_id, loop_id, orientation]`
-- `Face -> [surface_id, outer_loop_id, inner_loop_ids...]`
-- `Shell -> [face_ids...]`
-- `Body -> [shell_ids...]`
+- `Edge` → 有序顶点对 `(start_vertex_id, end_vertex_id)` 及可选几何曲线句柄
+- `Coedge` → `(edge_id, face_id, loop_id, orientation)`，表达半边在面上的走向
+- `Face` → `surface_id`、唯一 `outer_loop_id`、零个或多个 `inner_loop_id`（孔）
+- `Shell` → 有序 `face_id` 列表及定向，闭壳或开壳由验证规则判定
+- `Body` → 一个或多个 `shell_id`（实体、片体或多壳零件）
 
 ### 为什么用表驱动
 
