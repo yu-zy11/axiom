@@ -164,6 +164,28 @@ TopologyTransaction::create_loop(std::span<const CoedgeId> coedges) {
         *state_, StatusCode::InvalidTopology, diag_codes::kTopoLoopDuplicateEdge,
         "创建环失败：定向边序列包含重复引用", "创建环失败");
   }
+  {
+    std::unordered_map<std::uint64_t, CoedgeId> first_coedge_by_vertex;
+    first_coedge_by_vertex.reserve(coedges.size());
+    for (const auto coedge_id : coedges) {
+      const auto oriented = oriented_vertices(*state_, coedge_id);
+      if (!oriented.has_value()) {
+        continue;
+      }
+      const auto [it, inserted] = first_coedge_by_vertex.emplace(
+          (*oriented)[0].value, coedge_id);
+      if (!inserted) {
+        return error_result<LoopId>(
+            StatusCode::InvalidTopology,
+            detail::error_diag(
+                *state_, "创建环失败", diag_codes::kTopoLoopRepeatedVertex,
+                "创建环失败：环在闭合终点之外重复经过同一顶点",
+                std::vector<std::uint64_t>{(*oriented)[0].value,
+                                           it->second.value,
+                                           coedge_id.value}));
+      }
+    }
+  }
   detail::LoopRecord loop{
       std::vector<CoedgeId>(coedges.begin(), coedges.end())};
   std::string reason;
@@ -171,6 +193,8 @@ TopologyTransaction::create_loop(std::span<const CoedgeId> coedges) {
     std::string_view fail_code = diag_codes::kTopoLoopNotClosed;
     if (reason == "环包含重复边引用" || reason == "环包含重复定向边引用") {
       fail_code = diag_codes::kTopoLoopDuplicateEdge;
+    } else if (reason == "环在闭合终点之外重复经过同一顶点") {
+      fail_code = diag_codes::kTopoLoopRepeatedVertex;
     }
     return detail::failed_result<LoopId>(*state_, StatusCode::InvalidTopology, fail_code,
                                          "创建环失败：" + reason, "创建环失败");

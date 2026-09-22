@@ -171,6 +171,8 @@ Result<void> TopologyValidationService::validate_loop(LoopId loop_id) const {
     std::string_view code = diag_codes::kTopoLoopNotClosed;
     if (reason == "环包含重复边引用" || reason == "环包含重复定向边引用") {
       code = diag_codes::kTopoLoopDuplicateEdge;
+    } else if (reason == "环在闭合终点之外重复经过同一顶点") {
+      code = diag_codes::kTopoLoopRepeatedVertex;
     }
     return detail::failed_void(*state_, StatusCode::InvalidTopology, code,
                                "环验证失败：" + reason, "环验证失败");

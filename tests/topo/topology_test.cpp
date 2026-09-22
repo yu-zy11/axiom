@@ -289,6 +289,91 @@ int main() {
         }
     }
 
+    // FR-TOPO-001: a loop may close at its start vertex only; an intermediate
+    // revisit is a self-touching, non-simple topological boundary.
+    {
+        axiom::Kernel repeated_vertex_kernel;
+        const auto ab = repeated_vertex_kernel.curves().make_line({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
+        const auto bc = repeated_vertex_kernel.curves().make_line({1.0, 0.0, 0.0}, {0.0, 1.0, 0.0});
+        const auto ca = repeated_vertex_kernel.curves().make_line({1.0, 1.0, 0.0}, {-1.0, -1.0, 0.0});
+        const auto ad = repeated_vertex_kernel.curves().make_line({0.0, 0.0, 0.0}, {-1.0, 1.0, 0.0});
+        const auto da = repeated_vertex_kernel.curves().make_line({-1.0, 1.0, 0.0}, {1.0, -1.0, 0.0});
+        if (!ab.value || !bc.value || !ca.value || !ad.value || !da.value) return 1;
+
+        auto txn = repeated_vertex_kernel.topology().begin_transaction();
+        const auto a = txn.create_vertex({0.0, 0.0, 0.0});
+        const auto b = txn.create_vertex({1.0, 0.0, 0.0});
+        const auto c = txn.create_vertex({1.0, 1.0, 0.0});
+        const auto d = txn.create_vertex({-1.0, 1.0, 0.0});
+        if (!a.value || !b.value || !c.value || !d.value) return 1;
+        const std::array<axiom::Result<axiom::EdgeId>, 5> edges {{
+            txn.create_edge(*ab.value, *a.value, *b.value),
+            txn.create_edge(*bc.value, *b.value, *c.value),
+            txn.create_edge(*ca.value, *c.value, *a.value),
+            txn.create_edge(*ad.value, *a.value, *d.value),
+            txn.create_edge(*da.value, *d.value, *a.value)}};
+        std::array<axiom::CoedgeId, 5> coedges;
+        for (std::size_t i = 0; i < edges.size(); ++i) {
+            if (!edges[i].value) return 1;
+            const auto coedge = txn.create_coedge(*edges[i].value, false);
+            if (!coedge.value) return 1;
+            coedges[i] = *coedge.value;
+        }
+
+        const auto count_before = repeated_vertex_kernel.topology_count().value;
+        const auto writes_before = txn.write_operation_count().value;
+        const auto version_before = txn.preview_commit_version().value;
+        const auto rejected = txn.create_loop(coedges);
+        const auto report = repeated_vertex_kernel.diagnostics().get(rejected.diagnostic_id);
+        if (rejected.status != axiom::StatusCode::InvalidTopology || rejected.value ||
+            !report.value ||
+            !issue_links_entities(*report.value,
+                                  axiom::diag_codes::kTopoLoopRepeatedVertex,
+                                  {a.value->value, coedges[0].value, coedges[3].value}) ||
+            repeated_vertex_kernel.topology_count().value != count_before ||
+            txn.write_operation_count().value != writes_before ||
+            txn.preview_commit_version().value != version_before ||
+            txn.created_loop_count().value != std::optional<std::uint64_t>{0}) {
+            std::cerr << "self-touching loop was accepted or rejection polluted state\n";
+            return 1;
+        }
+        for (const auto edge : edges) {
+            if (repeated_vertex_kernel.topology().query().loops_of_edge(*edge.value).value !=
+                std::optional<std::vector<axiom::LoopId>>{std::vector<axiom::LoopId>{}}) {
+                std::cerr << "rejected repeated-vertex loop polluted reverse indices\n";
+                return 1;
+            }
+        }
+        const auto path = std::filesystem::temp_directory_path() /
+                          "axiom_topo_loop_repeated_vertex.json";
+        if (repeated_vertex_kernel.diagnostics()
+                .export_report_json(rejected.diagnostic_id, path.string()).status !=
+            axiom::StatusCode::Ok) return 1;
+        std::ifstream input(path);
+        const std::string json((std::istreambuf_iterator<char>(input)),
+                               std::istreambuf_iterator<char>());
+        input.close();
+        std::filesystem::remove(path);
+        if (json.find(axiom::diag_codes::kTopoLoopRepeatedVertex) == std::string::npos ||
+            json.find("related_entities") == std::string::npos) {
+            std::cerr << "repeated-vertex loop diagnostic export lost evidence\n";
+            return 1;
+        }
+
+        const std::array<axiom::CoedgeId, 3> triangle {{coedges[0], coedges[1], coedges[2]}};
+        const auto valid = txn.create_loop(triangle);
+        if (!valid.value ||
+            repeated_vertex_kernel.topology().validate().validate_loop(*valid.value).status !=
+                axiom::StatusCode::Ok ||
+            txn.rollback().status != axiom::StatusCode::Ok ||
+            repeated_vertex_kernel.topology_count().value != std::optional<std::uint64_t>{0} ||
+            repeated_vertex_kernel.topology().query().has_loop(*valid.value).value !=
+                std::optional<bool>{false}) {
+            std::cerr << "valid loop retry or rollback failed after repeated-vertex rejection\n";
+            return 1;
+        }
+    }
+
     // NFR-REL-001: existing coedge bindings must survive rejected writes and rollback.
     {
         axiom::Kernel binding_kernel;

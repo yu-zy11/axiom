@@ -373,7 +373,7 @@ public:
   Result<EdgeId> create_edge(CurveId, VertexId, VertexId);
   // validate_edge 要求两个拓扑端点在引用的 3D Curve 上（采用内核线性容差）；不一致返回 InvalidTopology / AXM-TOPO-E-0008。
   Result<CoedgeId> create_coedge(EdgeId, bool reversed);
-  // 按定向端点 ID 首尾闭合，单共边不豁免；未闭合返回 InvalidTopology / AXM-TOPO-E-0002，失败不写入环或事务计数。
+  // 按定向端点 ID 首尾闭合，单共边不豁免；未闭合返回 AXM-TOPO-E-0002，闭合前重复经过顶点返回 AXM-TOPO-E-0023，失败不写入环或事务计数。
   Result<LoopId> create_loop(std::span<const CoedgeId>);
   // 外环/内环及内环之间不得复用 EdgeId；返回 InvalidTopology / AXM-TOPO-E-0014，失败不分配面或改变索引、事务写计数。
   Result<FaceId> create_face(SurfaceId, LoopId outer_loop, std::span<const LoopId> inner_loops);

@@ -223,6 +223,8 @@ bool validate_loop_record(const detail::KernelState &state,
 
   std::optional<VertexId> first_start;
   std::optional<VertexId> previous_end;
+  std::unordered_set<std::uint64_t> visited_vertices;
+  visited_vertices.reserve(loop.coedges.size());
   for (const auto coedge_id : loop.coedges) {
     const auto oriented = oriented_vertices(state, coedge_id);
     if (!oriented.has_value()) {
@@ -231,6 +233,10 @@ bool validate_loop_record(const detail::KernelState &state,
     }
     if (!first_start.has_value()) {
       first_start = (*oriented)[0];
+    }
+    if (!visited_vertices.insert((*oriented)[0].value).second) {
+      reason = "环在闭合终点之外重复经过同一顶点";
+      return false;
     }
     if (previous_end.has_value() &&
         previous_end->value != (*oriented)[0].value) {

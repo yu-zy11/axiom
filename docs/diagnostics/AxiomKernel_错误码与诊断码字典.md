@@ -248,6 +248,7 @@
 | `AXM-TOPO-E-0020` | Error | 顶点未作为任何边的端点（悬挂顶点；`validate_vertex` 与 `validate_indices_consistency`） |
 | `AXM-TOPO-E-0021` | Error | 环未被任何面引用（孤立环，例如删除面后残留） |
 | `AXM-TOPO-E-0022` | Error | 面未被任何壳引用（孤立面；`face_to_shells` 无条目或为空；`validate_indices_consistency`） |
+| `AXM-TOPO-E-0023` | Error | 环在闭合终点之外重复经过同一顶点，形成自接触的非简单边界；`create_loop` 在写入前拒绝并关联重复顶点与两条冲突定向边 |
 
 ## 7.5 `BOOL` 布尔模块错误码
 
