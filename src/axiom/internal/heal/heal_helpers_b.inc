@@ -200,13 +200,13 @@ bool validate_strict_owned_plane_face_loop_normals(const std::shared_ptr<detail:
 
 Result<void> strict_owned_brep_mesh_self_intersection_with_builder(
     const std::shared_ptr<detail::KernelState>& state,
-    BodyId body_id,
     const detail::BodyRecord& body,
     const std::function<Result<MeshId>(const TessellationOptions&)>& build_mesh,
     std::vector<std::uint64_t> related_entities,
     std::string_view fail_title,
     std::string_view ok_summary,
-    std::string_view extra_hit_suffix) {
+    std::string_view extra_hit_suffix,
+    std::string_view failure_stage) {
     constexpr std::size_t k_self_intersection_max_tris = 25000;
     const auto ext = std::max(0.0, min_extent(body.bbox));
     TessellationOptions tess_opts;
@@ -233,12 +233,12 @@ Result<void> strict_owned_brep_mesh_self_intersection_with_builder(
     if (si_first.first == detail::MeshSelfIntersectionStatus::InvalidMesh) {
         return detail::failed_void(*state, StatusCode::DegenerateGeometry, diag_codes::kTesFailure,
                                    std::string(fail_title) + "：分析网格无效或索引越界", std::string(fail_title),
-                                   std::move(related_entities));
+                                   std::move(related_entities), failure_stage);
     }
     if (si_first.first == detail::MeshSelfIntersectionStatus::TooManyTriangles) {
         return detail::failed_void(*state, StatusCode::OperationFailed, diag_codes::kValSelfIntersectionMeshBudget,
                                    std::string(fail_title) + "：三角化三角形数量超过检测预算", std::string(fail_title),
-                                   std::move(related_entities));
+                                   std::move(related_entities), failure_stage);
     }
     if (si_first.first == detail::MeshSelfIntersectionStatus::Hit) {
         TessellationOptions coarse = tess_opts;
@@ -260,13 +260,14 @@ Result<void> strict_owned_brep_mesh_self_intersection_with_builder(
                 msg.append(extra_hit_suffix.data(), extra_hit_suffix.size());
             }
             return detail::failed_void(*state, StatusCode::OperationFailed, diag_codes::kValSelfIntersection,
-                                       std::move(msg), std::string(fail_title), std::move(related_entities));
+                                       std::move(msg), std::string(fail_title), std::move(related_entities),
+                                       failure_stage);
         }
         if (si_second.first == detail::MeshSelfIntersectionStatus::InvalidMesh ||
             si_second.first == detail::MeshSelfIntersectionStatus::TooManyTriangles) {
             return detail::failed_void(*state, StatusCode::OperationFailed, diag_codes::kValSelfIntersection,
                                        std::string(fail_title) + "：粗化重试后仍无法完成自交分析", std::string(fail_title),
-                                       std::move(related_entities));
+                                       std::move(related_entities), failure_stage);
         }
     }
     return ok_void(state->create_diagnostic(std::string(ok_summary)));

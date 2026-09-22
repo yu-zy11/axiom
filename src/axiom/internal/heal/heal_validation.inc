@@ -294,13 +294,14 @@ Result<void> ValidationService::validate_manifold(BodyId body_id, ValidationMode
 Result<void> ValidationService::validate_self_intersection(BodyId body_id, ValidationMode mode) const {
     if (!detail::has_body(*state_, body_id)) {
         return detail::failed_void(*state_, StatusCode::InvalidInput, diag_codes::kValSelfIntersection,
-                                   "自交检查失败：目标实体不存在", "自交检查失败");
+                                   "自交检查失败：目标实体不存在", "自交检查失败", {body_id.value},
+                                   "heal.validate_self_intersection.input");
     }
     const auto& body = state_->bodies.at(body_id.value);
     if (body.label == "offset" && min_extent(body.bbox) <= 0.0) {
         return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kValSelfIntersection,
                                    "自交检查失败：偏置结果已退化，疑似发生自交", "自交检查失败",
-                                   {body_id.value});
+                                   {body_id.value}, "heal.validate_self_intersection.degenerate");
     }
     // 子午面旋转体：分片线性侧壁 + 平面封盖；Strict 网格 SAT 对窄二面角/共顶点接触易数值误报，与 Sweep 占位棱柱同类。
     if (body.kind == detail::BodyKind::Sweep && body.sweep_polyhedral_mass_valid) {
@@ -312,9 +313,10 @@ Result<void> ValidationService::validate_self_intersection(BodyId body_id, Valid
     if (mode == ValidationMode::Strict && body.rep_kind == RepKind::ExactBRep) {
         RepresentationConversionService rep {state_};
         return strict_owned_brep_mesh_self_intersection_with_builder(
-            state_, body_id, body,
+            state_, body,
             [&](const TessellationOptions& opts) { return rep.brep_to_mesh(body_id, opts); },
-            {body_id.value}, "自交检查失败", "自交检查通过", "");
+            {body_id.value}, "自交检查失败", "自交检查通过", "",
+            "heal.validate_self_intersection.mesh");
     }
 
     return ok_void(state_->create_diagnostic("自交检查通过"));
@@ -324,24 +326,28 @@ Result<void> ValidationService::validate_self_intersection_shell(BodyId body_id,
                                                                ValidationMode mode) const {
     if (!detail::has_body(*state_, body_id)) {
         return detail::failed_void(*state_, StatusCode::InvalidInput, diag_codes::kValSelfIntersection,
-                                   "壳级自交检查失败：目标实体不存在", "壳级自交检查失败");
+                                   "壳级自交检查失败：目标实体不存在", "壳级自交检查失败",
+                                   {body_id.value, shell_id.value}, "heal.validate_self_intersection.shell_input");
     }
     if (!detail::has_shell(*state_, shell_id)) {
-        return detail::invalid_input_void(*state_, diag_codes::kValSelfIntersection,
-                                          "壳级自交检查失败：目标壳不存在", "壳级自交检查失败");
+        return detail::failed_void(*state_, StatusCode::InvalidInput, diag_codes::kValSelfIntersection,
+                                   "壳级自交检查失败：目标壳不存在", "壳级自交检查失败",
+                                   {body_id.value, shell_id.value}, "heal.validate_self_intersection.shell_input");
     }
     const auto& body = state_->bodies.at(body_id.value);
     const bool shell_owned =
         std::any_of(body.shells.begin(), body.shells.end(),
                     [shell_id](ShellId sid) { return sid.value == shell_id.value; });
     if (!shell_owned) {
-        return detail::invalid_input_void(*state_, diag_codes::kValSelfIntersection,
-                                          "壳级自交检查失败：壳不属于该体的 owned 壳集合", "壳级自交检查失败");
+        return detail::failed_void(*state_, StatusCode::InvalidInput, diag_codes::kValSelfIntersection,
+                                   "壳级自交检查失败：壳不属于该体的 owned 壳集合", "壳级自交检查失败",
+                                   {body_id.value, shell_id.value}, "heal.validate_self_intersection.shell_input");
     }
     if (body.label == "offset" && min_extent(body.bbox) <= 0.0) {
         return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kValSelfIntersection,
                                    "壳级自交检查失败：偏置结果已退化，疑似发生自交", "壳级自交检查失败",
-                                   {body_id.value, shell_id.value});
+                                   {body_id.value, shell_id.value},
+                                   "heal.validate_self_intersection.shell_degenerate");
     }
     if (body.kind == detail::BodyKind::Sweep && body.sweep_polyhedral_mass_valid) {
         return ok_void(state_->create_diagnostic("壳级自交检查通过（跳过分片旋转体网格 SAT）"));
@@ -351,9 +357,10 @@ Result<void> ValidationService::validate_self_intersection_shell(BodyId body_id,
     }
     RepresentationConversionService rep {state_};
     return strict_owned_brep_mesh_self_intersection_with_builder(
-        state_, body_id, body,
+        state_, body,
         [&](const TessellationOptions& opts) { return rep.brep_to_mesh_shell(body_id, shell_id, opts); },
-        {body_id.value, shell_id.value}, "壳级自交检查失败", "壳级自交检查通过", "（壳级三角化近似）");
+        {body_id.value, shell_id.value}, "壳级自交检查失败", "壳级自交检查通过", "（壳级三角化近似）",
+        "heal.validate_self_intersection.shell_mesh");
 }
 
 Result<void> ValidationService::validate_self_intersection_shell_many(BodyId body_id,
@@ -361,11 +368,13 @@ Result<void> ValidationService::validate_self_intersection_shell_many(BodyId bod
                                                                     ValidationMode mode) const {
     if (!detail::has_body(*state_, body_id)) {
         return detail::failed_void(*state_, StatusCode::InvalidInput, diag_codes::kValSelfIntersection,
-                                   "壳级批量自交检查失败：目标实体不存在", "壳级批量自交检查失败");
+                                   "壳级批量自交检查失败：目标实体不存在", "壳级批量自交检查失败",
+                                   {body_id.value}, "heal.validate_self_intersection.shell_input");
     }
     if (shell_ids.empty()) {
-        return detail::invalid_input_void(*state_, diag_codes::kValSelfIntersection,
-                                          "壳级批量自交检查失败：壳列表为空", "壳级批量自交检查失败");
+        return detail::failed_void(*state_, StatusCode::InvalidInput, diag_codes::kValSelfIntersection,
+                                   "壳级批量自交检查失败：壳列表为空", "壳级批量自交检查失败",
+                                   {body_id.value}, "heal.validate_self_intersection.shell_input");
     }
     for (const auto shell_id : shell_ids) {
         const auto r = validate_self_intersection_shell(body_id, shell_id, mode);
@@ -380,7 +389,8 @@ Result<void> ValidationService::validate_self_intersection_all_shells(BodyId bod
                                                                     ValidationMode mode) const {
     if (!detail::has_body(*state_, body_id)) {
         return detail::failed_void(*state_, StatusCode::InvalidInput, diag_codes::kValSelfIntersection,
-                                   "壳级自交检查失败：目标实体不存在", "壳级自交检查失败");
+                                   "壳级自交检查失败：目标实体不存在", "壳级自交检查失败", {body_id.value},
+                                   "heal.validate_self_intersection.shell_input");
     }
     const auto& body = state_->bodies.at(body_id.value);
     if (body.rep_kind != RepKind::ExactBRep || body.shells.empty()) {

@@ -2,6 +2,8 @@
 
 本文档用于记录 `AxiomKernel` 当前阶段的实际开发状态、已完成内容、当前风险和下一阶段执行重点。
 
+> **第 25 切片（NFR-DIA-001）**：体级、壳级及批量壳级自交验证的现有失败出口现在携带 `heal.validate_self_intersection.*` 细分阶段，并关联目标 Body/Shell；`axiom_heal_test` 覆盖正常 Strict、非法/异属句柄、空批量、阶段检索、JSON 与失败不污染。需求保持受限可用，网格 SAT 仍为近似验证能力。
+
 > **第 19 切片（FR-DIAG-001）**：严格网格导出 QA 失败 `AXM-IO-E-0006` 现在携带 `io.export.mesh_strict_qa` 阶段和输入 Body；`axiom_io_workflow_test` 覆盖合法网格、越界索引、退化三角形、阶段检索、JSON 导出及失败不污染。需求保持受限可用。
 
 **相关文档（计划层）**：[主开发计划与阶段路线图](AxiomKernel_主开发计划与阶段路线图.md)（总阶段与退出标准）、[MVP 实施蓝图](AxiomKernel_MVP实施蓝图.md)（交付拆解）、[几何引擎功能需求文档](../requirements/AxiomKernel_几何引擎功能需求文档.md)（需求对照见本文 §3.3）、[近期迭代与 Backlog](AxiomKernel_近期迭代与Backlog.md)（近期执行项）、[变更纪要](AxiomKernel_变更纪要.md)（批次历史摘要）；工程约定见仓库根目录 `AGENTS.md`；文档导航见 [`docs/README.md`](../README.md)；结构与文档治理问题见 [`docs/architecture/AxiomKernel_项目结构与文档治理建议.md`](../architecture/AxiomKernel_项目结构与文档治理建议.md)。
@@ -370,6 +372,8 @@
 - **未开始/缺失**：**进程外/OS 级隔离**、动态库加载与供应链安全（签名/沙箱）；**完整 SemVer 与多 ABI 并存**（`SameMajor`/`SameMinor` 已支持剥离 `-` 预发布与 `+` 构建元数据后再做核心版本比较；`Exact` 仍为整串相等；多 ABI 并存与完整 SemVer 语义仍不足）；**已闭合（宿主绑定）**：`Kernel` 构造时对 `PluginRegistry::bind_host_kernel_for_plugin_invocation` 绑定 `weak_ptr<KernelState>` 后，**`invoke_registered_importer/exporter/repair/curve`** 在对应策略开关开启时会自动套用与 **`plugin_import_file` / `plugin_export_file` / `plugin_run_repair` / `plugin_create_curve`** 一致的宿主校验语义（未绑定宿主时行为与历史一致：仅调用插件）；**Body** 侧仍可显式 **`validate_after_plugin_mutation`**，**曲线**侧 **`verify_after_plugin_curve`** 与 `plugin_curve_host_consistency_check` 共用实现
 
 ### 需求 7.13 诊断与日志（Diagnostics）
+
+- **NFR-DIA-001 第 25 切片**：`validate_self_intersection`、壳级及批量壳级变体的非法 Body/Shell、异属 Shell、空批量、退化偏置和 Strict 网格分析失败统一绑定 `heal.validate_self_intersection.*` 细分阶段，并保留目标 Body/Shell。`axiom_heal_test` 覆盖正常 Strict、非法/异属句柄、空批量、阶段检索、JSON 及模型计数不污染。复用既有错误码，无公开签名变化；网格 SAT 仍为三角化近似，需求保持受限可用。
 
 - **FR-DIAG-001 第 24 切片**：`export_grouped_by_stage_txt/json` 显式关闭并检查输出流，设备写入/关闭失败不再误报成功；空路径在打开文件前返回 `InvalidInput`，打开或写入失败返回 `OperationFailed`，均复用 `AXM-IO-E-0005`。`axiom_diagnostics_test` 覆盖正常阶段、空阶段 `(unset)`、空路径、目录、Linux `/dev/full`、参数失败不截断既有文件、源报告不变及失败后重试。无公开签名或错误码变化；设备写入失败不保证恢复目标文件，需求仍为受限可用。
 

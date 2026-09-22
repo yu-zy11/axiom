@@ -465,6 +465,13 @@
 | `AXM-VAL-D-0004` | 检测到薄壁区域 |
 | `AXM-VAL-D-0005` | 全量验证通过 |
 
+自交验证失败使用可聚合阶段标签：体级非法输入为 `heal.validate_self_intersection.input`，退化偏置为
+`heal.validate_self_intersection.degenerate`，Strict 三角化/SAT 分析失败为
+`heal.validate_self_intersection.mesh`；壳级及批量壳级对应
+`heal.validate_self_intersection.shell_input`、`heal.validate_self_intersection.shell_degenerate` 和
+`heal.validate_self_intersection.shell_mesh`。失败 Issue 关联目标 Body，并在适用时同时关联目标 Shell。
+这些阶段描述当前网格近似自交验证流程，不表示精确曲面自交能力。
+
 ## 9.4 `IO` 诊断码
 
 | 诊断码 | 含义 |
