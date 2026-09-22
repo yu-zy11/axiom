@@ -626,6 +626,27 @@ std::vector<Scalar> nurbs_clamped_bezier_knots(std::size_t n) {
   return U;
 }
 
+int bspline_find_nonempty_endpoint_span(std::size_t n, int p,
+                                        const std::vector<Scalar> &U,
+                                        bool upper) {
+  const int ni = static_cast<int>(n);
+  if (!upper) {
+    const Scalar endpoint = U[static_cast<std::size_t>(p)];
+    int k = p;
+    while (k < ni - 1 && U[static_cast<std::size_t>(k + 1)] <= endpoint) {
+      ++k;
+    }
+    return k;
+  }
+
+  const Scalar endpoint = U[n];
+  int k = ni - 1;
+  while (k > p && U[static_cast<std::size_t>(k)] >= endpoint) {
+    --k;
+  }
+  return k;
+}
+
 int bspline_find_span(std::size_t n, int p, Scalar u, const std::vector<Scalar> &U) {
   const int ni = static_cast<int>(n);
   if (ni <= 0 || static_cast<int>(U.size()) < ni + p + 1) {
@@ -636,18 +657,13 @@ int bspline_find_span(std::size_t n, int p, Scalar u, const std::vector<Scalar> 
   if (u <= ulo) {
     // Non-clamped vectors (and derivative knot vectors) can have empty
     // spans at the active endpoints. Use the first nonempty right span.
-    int k = p;
-    while (k < ni - 1 && U[static_cast<std::size_t>(k + 1)] <= ulo) {
-      ++k;
-    }
-    return k;
+    return bspline_find_nonempty_endpoint_span(n, p, U, false);
   }
   if (u >= uhi) {
-    int k = ni - 1;
-    while (k > p && U[static_cast<std::size_t>(k)] >= uhi) {
-      --k;
-    }
-    return k;
+    // The upper endpoint uses the last nonempty left span. Keeping this
+    // policy in the common span finder also makes first/second derivative
+    // knot vectors select the same one-sided surface patch as position.
+    return bspline_find_nonempty_endpoint_span(n, p, U, true);
   }
   int low = p;
   int high = ni;

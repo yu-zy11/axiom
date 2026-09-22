@@ -657,6 +657,85 @@ int main() {
             std::cerr << "full-multiplicity surface knots must remain evaluable\n";
             return 1;
         }
+
+        // At a full-multiplicity break both axes select the right patch;
+        // the upper endpoint (including clamped out-of-domain input) selects
+        // the left patch. Derivative knot vectors must follow the same side.
+        for (const bool rational : {false, true}) {
+            std::vector<axiom::Point3> patch_poles;
+            std::vector<double> patch_weights;
+            const std::array<double, 4> xs{0.0, 2.0, 10.0, 12.0};
+            const std::array<double, 4> ys{0.0, 3.0, 20.0, 23.0};
+            for (int iu = 0; iu < 4; ++iu) {
+                for (int iv = 0; iv < 4; ++iv) {
+                    patch_poles.push_back({xs[static_cast<std::size_t>(iu)],
+                                           ys[static_cast<std::size_t>(iv)], 4.0});
+                    // Each individual patch has constant weight, while the
+                    // complete NURBS net remains genuinely non-unit-weighted.
+                    patch_weights.push_back(iu < 2 ? 2.0 : 5.0);
+                }
+            }
+            axiom::Result<axiom::SurfaceId> made;
+            if (rational) {
+                axiom::NURBSSurfaceDesc desc;
+                desc.poles = patch_poles;
+                desc.weights = patch_weights;
+                desc.degree_u = desc.degree_v = 1;
+                desc.knots_u = desc.knots_v = valid.knots_u;
+                made = kernel.surfaces().make_nurbs(desc);
+            } else {
+                axiom::BSplineSurfaceDesc desc;
+                desc.poles = patch_poles;
+                desc.degree_u = desc.degree_v = 1;
+                desc.knots_u = desc.knots_v = valid.knots_u;
+                made = kernel.surfaces().make_bspline(desc);
+            }
+            for (const double parameter : {1.5, 3.0, 4.0}) {
+                const auto one_sided = made.value
+                    ? kernel.surface_service().eval(*made.value, parameter, parameter, 2)
+                    : axiom::Result<axiom::SurfaceEvalResult>{};
+                if (!one_sided.value || !approx(one_sided.value->point.x, parameter == 1.5 ? 10.0 : 12.0) ||
+                    !approx(one_sided.value->point.y, parameter == 1.5 ? 20.0 : 23.0) ||
+                    !approx(one_sided.value->point.z, 4.0) ||
+                    !approx(one_sided.value->du.x, 4.0 / 3.0) ||
+                    !approx(one_sided.value->dv.y, 2.0) ||
+                    !approx(one_sided.value->duu.x, 0.0) ||
+                    !approx(one_sided.value->dvv.y, 0.0) ||
+                    !approx(one_sided.value->duv.z, 0.0) ||
+                    !approx(one_sided.value->k1, 0.0) || !approx(one_sided.value->k2, 0.0)) {
+                    std::cerr << "surface break derivatives must use a consistent one-sided patch\n";
+                    return 1;
+                }
+            }
+
+            if (rational) {
+                axiom::NURBSSurfaceDesc constant;
+                constant.poles.assign(16, {7.0, 8.0, 9.0});
+                constant.weights = patch_weights;
+                constant.degree_u = constant.degree_v = 1;
+                constant.knots_u = constant.knots_v = valid.knots_u;
+                const auto constant_surface = kernel.surfaces().make_nurbs(constant);
+                const auto degenerate = constant_surface.value
+                    ? kernel.surface_service().eval(*constant_surface.value, 1.5, 1.5, 2)
+                    : axiom::Result<axiom::SurfaceEvalResult>{};
+                if (!degenerate.value || !approx(degenerate.value->point.x, 7.0) ||
+                    !approx(degenerate.value->point.y, 8.0) || !approx(degenerate.value->point.z, 9.0) ||
+                    !approx(degenerate.value->du.x, 0.0) || !approx(degenerate.value->dv.y, 0.0) ||
+                    !approx(degenerate.value->duu.z, 0.0) || !approx(degenerate.value->dvv.z, 0.0) ||
+                    !approx(degenerate.value->duv.z, 0.0) || !approx(degenerate.value->k1, 0.0) ||
+                    !approx(degenerate.value->k2, 0.0)) {
+                    std::cerr << "constant full-multiplicity surface patch must remain evaluable\n";
+                    return 1;
+                }
+            }
+        }
+
+        const auto after_rejections = kernel.surface_service().eval(*surface.value, 1.5, 1.5, 2);
+        if (!after_rejections.value || !std::isfinite(after_rejections.value->du.x) ||
+            !std::isfinite(after_rejections.value->dv.y)) {
+            std::cerr << "rejected surface creation changed an existing full-multiplicity surface\n";
+            return 1;
+        }
     }
     // Surface closest-point seeding must visit every non-empty knot patch. A
     // fixed whole-domain grid misses this isolated 0.001 x 0.001 branch.
