@@ -3,12 +3,12 @@
 > 状态：已接受
 > 责任域：Project
 > 维护者：项目负责人
-> 最后核验：2026-09-18
+> 最后核验：2026-09-22
 > 核验依据：`scripts/agent_autodev.py`、`automation/agent_autodev.json`
 
 ## 1. 目标与边界
 
-`scripts/agent_autodev.py` 将长期开发拆成连续、可验证、可提交的小切片。它不是“无限生成代码”的脚本：需求追踪矩阵、模块边界和自动化门禁共同决定什么可以被接纳。任何一轮失败、阻塞、越过受保护分支或连续失败达到上限时都会停机，避免错误持续扩散。
+`scripts/agent_autodev.py` 将长期开发拆成连续、可验证、可提交的小切片。它不是“无限生成代码”的脚本：需求追踪矩阵、模块边界和自动化门禁共同决定什么可以被接纳。默认在 Agent 报错、blocked 或门禁失败后保留同一任务，分析根因、修复并重新验证，成功后继续开发。受保护分支和工作树检查仍生效；失败不能绕过验收。
 
 每轮执行以下闭环：
 
@@ -21,12 +21,12 @@
 
 ## 2. 前置条件
 
-- 在非 `main`/`master` 的专用开发分支运行，初始工作树必须干净。
+- 在非 `main`/`master` 的专用开发分支运行，初始工作树必须干净；恢复已记录的失败切片使用 `--resume-failed`，会核对 HEAD 与文件指纹。
 - 安装能从标准输入读取提示词、并能在当前目录修改文件的 Agent CLI。
 - 已安装项目构建工具链；首次运行会创建独立的 `build-agent/`。
 - 长时间无人值守前，先执行一轮人工监督的试运行。
 
-默认配置使用 `codex exec --full-auto -`。如果本机命令不同，通过 `--agent-command` 覆盖，不要把个人凭证写入仓库配置。
+默认配置使用 `codex exec --sandbox workspace-write -`。如果本机命令不同，通过 `--agent-command` 覆盖，不要把个人凭证写入仓库配置。
 
 ## 3. 推荐启动方式
 
@@ -40,7 +40,7 @@ python3 scripts/agent_autodev.py --dry-run
 
 ```bash
 python3 scripts/agent_autodev.py \
-  --agent-command 'codex exec --full-auto -' \
+  --agent-command 'codex exec --sandbox workspace-write -' \
   --max-cycles 1
 ```
 
@@ -48,11 +48,11 @@ python3 scripts/agent_autodev.py \
 
 ```bash
 python3 scripts/agent_autodev.py \
-  --agent-command 'codex exec --full-auto -' \
+  --agent-command 'codex exec --sandbox workspace-write -' \
   --max-cycles 0
 ```
 
-`--max-cycles 0` 表示连续模式，不表示绕过验收。进程仍会在 Agent 阻塞、验证失败、工作树异常或完成条件满足时退出。
+`--max-cycles 0` 表示连续模式，不表示绕过验收。默认失败会转入修复循环，重试等待从 10 秒递增到最多 60 秒。显式设置非零失败上限、启动检查失败、外部定时停止或项目完成仍会结束运行。
 
 ## 4. 配置
 
@@ -63,7 +63,8 @@ python3 scripts/agent_autodev.py \
 | `agent_command` | Agent 命令参数数组；提示词由标准输入传入 |
 | `build_dir` | 自动开发专用构建目录 |
 | `full_test_interval` | 每成功多少轮执行一次完整 `ctest` |
-| `max_consecutive_failures` | 失败上限；达到后要求人工检查 |
+| `max_consecutive_failures` | 默认 `0`：不限失败次数，持续诊断修复；正整数表示显式停机上限 |
+| `retry_delay_seconds` | 每次失败的等待增量，默认 10 秒，上限 60 秒，避免快速空转 |
 | `agent_timeout_seconds` | 单轮 Agent 最长执行时间 |
 | `protected_branches` | 禁止直接自动提交的分支 |
 | `requirement_tiers` | 需求阶段梯队；先完成前一梯队，并在梯队内按已验收轮次数轮转 |
@@ -83,19 +84,22 @@ python3 scripts/agent_autodev.py \
 - 责任模块测试通过；到达周期或项目完成时完整测试通过；
 - 工作树确实产生了可审查的变更。
 
-下列情况必须人工介入：
+失败后的处理规则：
 
-- Agent 无法把需求拆成可验证切片，或需要产品/架构决策；
-- 默认性能基线在固定基准环境持续失败；
-- Public API、ABI、持久格式、外部依赖或模块边界需要 ADR；
-- S0/S1、静默数据损坏、事务污染或测试不稳定；
-- Agent 反复修改完成度文档但没有相应实现和测试证据。
+- 固定本轮需求，将错误和门禁日志交给下一次 Agent；先复现和分析，再做最小修复。
+- `blocked` 也是修复输入，不再仅因三次失败退出。重复失败要求调整诊断方法。
+- 性能失败先排查构建类型、机器负载、基准条件和算法热点，不得提高阈值、减少迭代或跳过测试。
+- 修复可以涉及造成门禁失败的其他模块；修复后的切片必须通过完整测试，之后再轮转需求。
+- 提交失败会撤回调度器本次追加的台账行，再进入修复，避免重复记录。
+- 需要凭证、外部服务恢复或产品/架构决定的情况，Agent 只能记录阻塞证据并在运行时限内继续调查，不能虚构授权或擅自放宽门禁。
 
 ## 6. 运行监控与恢复
 
 - 查看 `.axiom-agent/state.json` 获取成功轮次、最近提交和最后错误。
 - 查看 `.axiom-agent/logs/cycle-NNNN-gates.log` 获取调度器实际执行的门禁输出。
-- 门禁失败时保留工作树，便于人工诊断；修复并提交或还原后再启动，不要盲目使用 `--allow-dirty`。
+- 门禁失败自动保存错误历史、当前需求、HEAD 和改动文件指纹。恢复命令：`python3 scripts/agent_autodev.py --resume-failed --max-cycles 0`。若文件或 HEAD 已被其他操作改变，恢复会拒绝启动，需先核对现场。
+- Agent 输出保存在 `.axiom-agent/logs/cycle-NNNN-attempt-NNNN-agent.log`；失败信息和对应门禁日志会用于下一轮修复。
+- 强制终止期间的未完成改动可能晚于最近检查点，需核对后才能恢复；不要用 `--allow-dirty` 混入其他修改。
 - `--no-commit` 仅用于调试单轮，脚本会在该轮后停止。
 - `--allow-dirty` 必须与 `--no-commit` 同时使用，只适用于人工监督调试，防止把既有改动混入自动提交。
 - Agent 不得修改调度脚本及其配置；调度器会在门禁前拒绝这类变更，防止运行中的质量规则被自行放宽。
@@ -103,3 +107,7 @@ python3 scripts/agent_autodev.py \
 ## 7. 完成定义
 
 “项目完成”不是 Agent 的主观声明。必须同时满足：需求追踪矩阵全部 FR/NFR 为“已满足”；每项有实现、自动化证据和限制说明；完整测试及发布门禁通过；当前进度、支持矩阵和发布说明与代码一致。在此之前，脚本只会持续交付小切片，不会接受 `project_complete`。
+
+## 8. 调度器回归验证
+
+运行 `python3 tests/tooling/agent_autodev_test.py`。覆盖超过三次门禁失败后修复成功并继续下一需求、blocked 转入修复、完整测试复验、提交失败不重复台账、显式失败上限、恢复错误上下文及拒绝混入其他文件修改。

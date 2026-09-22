@@ -1,10 +1,20 @@
 {
-  "agent_command": ["codex", "exec", "--full-auto", "-"],
+  "agent_command": ["codex", "exec", "--sandbox", "workspace-write", "-"],
   "build_dir": "build-agent",
   "full_test_interval": 5,
-  "max_consecutive_failures": 3,
+  "max_consecutive_failures": 0,
+  "retry_delay_seconds": 10,
   "agent_timeout_seconds": 3600,
   "protected_branches": ["main", "master"],
+  "requirement_tiers": [
+    ["FR-GEO-001", "FR-TOPO-001", "NFR-REL-001", "FR-DIAG-001", "NFR-DIA-001"],
+    ["FR-OPS-001", "FR-QUERY-001"],
+    ["FR-BOOL-001"],
+    ["FR-HEAL-001", "FR-IO-001", "FR-REP-001"],
+    ["FR-MOD-001", "FR-BLEND-001"],
+    ["FR-EVAL-001"],
+    ["FR-PLUGIN-001", "FR-HYBRID-001", "NFR-PERF-001", "NFR-COMP-001", "NFR-OBS-001", "NFR-SEC-001"]
+  ],
   "module_tests": {
     "Core": ["axiom_kernel_runtime_invariant_test", "axiom_smoke_test"],
     "Math": ["axiom_math_services_test"],
