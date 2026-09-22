@@ -867,8 +867,10 @@ Result<OpReport> BooleanService::run(BooleanOp op, BodyId lhs, BodyId rhs, const
     }
     if (diag.value != 0) {
         for (const auto& warning : warnings) {
-            state_->diagnostics[diag.value].issues.push_back(
-                detail::make_warning_issue(warning.code, warning.message));
+            auto issue = detail::make_warning_issue(warning.code, warning.message);
+            issue.related_entities = {lhs.value, rhs.value, output.value};
+            set_boolean_diagnostic_stage(issue, warning.code);
+            state_->append_diagnostic_issue(diag, std::move(issue));
         }
     }
 

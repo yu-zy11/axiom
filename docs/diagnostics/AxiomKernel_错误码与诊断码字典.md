@@ -399,7 +399,8 @@
 | `AXM-CORE-W-0001` | 当前操作采用默认容差 |
 | `AXM-MATH-W-0001` | 谓词进入高精度回退 |
 | `AXM-GEO-W-0001` | 几何求值结果接近退化区域 |
-| `AXM-BOOL-W-0001` | 布尔操作遇到近共面情形 |
+| `AXM-BOOL-W-0001` | 布尔预处理近退化/仅接触或受限 bbox 语义告警（包括分离输入与 Split 占位）；`Issue.stage=bool.prep` |
+| `AXM-BOOL-W-0002` | 壳/区域级无局部候选，交集回退全局 bbox 或减运算保留左体；`Issue.stage=bool.prep` |
 | `AXM-BOOL-W-0003` | 布尔结果在重建后 Strict 验证仍残留问题（可审计告警） |
 | `AXM-BLEND-W-0002` | 圆角/倒角一次处理多条边时角区仍为占位实现 |
 | `AXM-HEAL-W-0001` | 修复时删除了局部小特征 |
@@ -433,7 +434,7 @@
 | `AXM-BOOL-D-0017` | 布尔验证阶段开始（Strict/Standard validation 入口，`kBoolStageValidate`） |
 | `AXM-BOOL-D-0018` | 布尔修复阶段开始（auto_repair/heal 入口，`kBoolStageRepair`） |
 
-与 **`AXM-BOOL-E-*` 错误码**绑定的布尔早期失败路径会在 `Issue.stage` 中写入可聚合阶段标签（与 `export_report_json` 一致）：`bool.input`（输入体无效，`AXM-BOOL-E-0001`）、`bool.abort.intersect`（交集在包围盒层面不相交，`AXM-BOOL-E-0003`）、`bool.abort.classify`（如减运算右包左无法表达空结果，`AXM-BOOL-E-0005`）。Strict 残留告警见 `bool.validate.residual`（`AXM-BOOL-W-0003`）。
+与 **`AXM-BOOL-E-*` 错误码**绑定的布尔早期失败路径会在 `Issue.stage` 中写入可聚合阶段标签（与 `export_report_json` 一致）：`bool.input`（输入体无效，`AXM-BOOL-E-0001`）、`bool.abort.intersect`（交集在包围盒层面不相交，`AXM-BOOL-E-0003`）、`bool.abort.classify`（如减运算右包左无法表达空结果，`AXM-BOOL-E-0005`）。启用布尔诊断时，返回的预处理告警 `AXM-BOOL-W-0001/W-0002` 同步写入报告，保留原文案和 Warning 级别，并绑定 `bool.prep` 与 `[lhs, rhs, output]` 实体 ID，可按阶段检索及导出 JSON；这些告警不表示精确布尔能力。Strict 残留告警见 `bool.validate.residual`（`AXM-BOOL-W-0003`）。
 
 ## 9.2 `HEAL` 诊断码
 
