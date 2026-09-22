@@ -212,7 +212,7 @@
 | 错误码 | 严重级别 | 含义 |
 |---|---|---|
 | `AXM-GEO-E-0001` | Error | 曲线创建参数非法（含显式 BSpline/NURBS 结点逆序、零长度有效参数域、结点重数超过 degree + 1） |
-| `AXM-GEO-E-0002` | Error | 曲面创建参数非法 |
+| `AXM-GEO-E-0002` | Error | 曲面创建参数非法（包括 BSpline/NURBS 任一轴结点非有限、逆序、零有效域或重数超过 `degree + 1`） |
 | `AXM-GEO-E-0003` | Error | 几何对象退化 |
 | `AXM-GEO-E-0004` | Error | 参数超出定义域 |
 | `AXM-GEO-E-0005` | Error | 最近点求解失败 |
@@ -233,17 +233,17 @@
 | `AXM-TOPO-E-0005` | Error | 壳未封闭（含：`validate_indices_consistency` 发现体记录中 `shells` 列表含重复壳 id） |
 | `AXM-TOPO-E-0006` | Error | 非法悬挂边（含：`validate_edge` 与 `validate_indices_consistency` 反向索引发现边无共边引用） |
 | `AXM-TOPO-E-0007` | Error | 拓扑关系不一致（含：`edge_to_coedges` 重复定向边、`face_to_shells`/`shell_to_bodies` 反向列表重复条目、`loop_to_faces` 重复面或同一环对应多面等索引自洽性失败） |
-| `AXM-TOPO-E-0008` | Error | 参数曲线与空间曲线不一致（含 `validate_face_trim_consistency`：PCurve 绑定不完整、PCurve 控制点不足、边/曲线/顶点缺失时带 `face/loop/coedge/edge/pcurve` 等；**全量 trim 数据**下 `SurfaceService::closest_uv` 失败亦归此类；**全量 trim** 下 PCurve 定义域非法导致无法完成内点采样一致性校验；端点/曲面与 3D 边不一致时常含 `face/loop/coedge/edge/pcurve`；`validate_indices_consistency` 发现边记录引用不存在顶点时 `related_entities` 含 `edge` 与端点 id） |
+| `AXM-TOPO-E-0008` | Error | 参数曲线与空间曲线不一致（含 `validate_edge` 检测拓扑端点不在引用 3D Curve 上，关联 `edge/curve/vertex`；`validate_face_trim_consistency`：PCurve 绑定不完整、PCurve 控制点不足、边/曲线/顶点缺失时带 `face/loop/coedge/edge/pcurve` 等；**全量 trim 数据**下 `SurfaceService::closest_uv` 失败亦归此类；**全量 trim** 下 PCurve 定义域非法导致无法完成内点采样一致性校验；端点/曲面与 3D 边不一致时常含 `face/loop/coedge/edge/pcurve`；`validate_indices_consistency` 发现边记录引用不存在顶点时 `related_entities` 含 `edge` 与端点 id） |
 | `AXM-TOPO-E-0009` | Fatal | 拓扑不变量被破坏 |
 | `AXM-TOPO-E-0010` | Error | 壳内存在开放边界（边引用次数不足） |
 | `AXM-TOPO-E-0011` | Error | 壳内存在非流形边（边被过多拓扑面共享） |
 | `AXM-TOPO-E-0012` | Error | 派生/传播来源引用无效或丢失 |
 | `AXM-TOPO-E-0013` | Error | 面/壳/体的来源集合不一致 |
 | `AXM-TOPO-E-0014` | Error | 同一环内重复引用同一条拓扑边，或同一面跨环复用拓扑边；`create_face` 在写入前拒绝，关联两个冲突环与边 ID，`validate_face` 保留验证门禁 |
-| `AXM-TOPO-E-0015` | Error | 面环方向与外向规则不一致（含：内外环在 UV 空间绕向不符合孔洞规则；**全量 PCurve** 且基曲面为**平面**时，外环 UV 映射到 3D 的 Newell 与基平面法向不一致；无 PCurve 时平面/球/柱/锥/环面外环与解析外向一致性等） |
+| `AXM-TOPO-E-0015` | Error | 面环方向与外向规则不一致（含：内外环在 UV 空间绕向不符合孔洞规则；**全量 PCurve** 且基曲面为**平面**时，外环 UV 映射到 3D 的 Newell 与基平面法向不一致；无 PCurve 时平面/球/柱/锥/环面外环与解析外向一致性；`validate_shell_closedness` 发现共享边两侧 coedge 方向相同） |
 | `AXM-TOPO-E-0016` | Error | 定向边已归属其他环（共边跨环复用） |
 | `AXM-TOPO-E-0017` | Warning / Error | 壳内重复面：`validate_shell` 对同曲面同边界环签名给 **Warning**；`create_shell` / `validate_indices_consistency` 对壳 `faces` 列表中重复 `FaceId` 给 **Error** |
-| `AXM-TOPO-E-0018` | Warning | 壳不连通（面集合存在多个连通分量） |
+| `AXM-TOPO-E-0018` | Warning / Error | 壳不连通（`validate_shell` 作为结构告警；`validate_shell_closedness` 将多个面连通分量作为 Strict 闭合性错误） |
 | `AXM-TOPO-E-0019` | Error | 定向边未被任何环引用（悬挂定向边） |
 | `AXM-TOPO-E-0020` | Error | 顶点未作为任何边的端点（悬挂顶点；`validate_vertex` 与 `validate_indices_consistency`） |
 | `AXM-TOPO-E-0021` | Error | 环未被任何面引用（孤立环，例如删除面后残留） |
@@ -323,9 +323,13 @@
 | `AXM-VAL-E-0001` | Error | 检测到自交 |
 | `AXM-VAL-E-0002` | Error | 检测到非法非流形 |
 | `AXM-VAL-E-0003` | Error | 检测到容差冲突 |
-| `AXM-VAL-E-0004` | Error | 检测到退化几何 |
+| `AXM-VAL-E-0004` | Error | 检测到退化几何；`validate_geometry` 按根因绑定 `heal.validate_geometry.*` 阶段并关联目标 Body/问题子实体 |
 | `AXM-VAL-E-0005` | Warning | 检测到薄壁高风险区域 |
 | `AXM-VAL-E-0006` | Warning | 检测到高曲率不稳定区域 |
+
+`validate_geometry` 的失败阶段包括 `input`、`bbox`、`references`、`surface_domain`、`curve_domain`、
+`vertices_finite`、`near_duplicate_vertices`、`edges`、`face_area` 与 `face_normal`，统一使用
+`heal.validate_geometry.` 前缀，便于按阶段聚合。
 
 ## 7.11 `IO` 数据交换模块错误码
 
@@ -334,9 +338,9 @@
 | `AXM-IO-E-0001` | Error | 文件不存在（如 `IOService::validate_import_path` 校验时目标路径不存在） |
 | `AXM-IO-E-0002` | Error | 文件格式无法识别 |
 | `AXM-IO-E-0003` | Error | 文件内容损坏 |
-| `AXM-IO-E-0004` | Error | 导入解析失败 |
+| `AXM-IO-E-0004` | Error | 导入解析失败；STEP 早期失败按根因绑定 `io.import.step.input/path/open` |
 | `AXM-IO-E-0005` | Error | 导出失败 |
-| `AXM-IO-E-0006` | Warning | 导入后发生几何近似 |
+| `AXM-IO-E-0006` | Error | 严格网格导出 QA 失败（越界索引、退化三角形或检查不可用；`Issue.stage=io.export.mesh_strict_qa`，关联输入 Body） |
 | `AXM-IO-E-0007` | Warning | 导入后存在未映射属性 |
 | `AXM-IO-E-0008` | Warning | 导出采用兼容模式降级 |
 | `AXM-IO-E-0009` | Error | 导出目标目录不可写（`kIoExportPathNotWritable`，`Issue.stage=io.export.path`） |
@@ -437,6 +441,10 @@
 
 `BooleanService::export_boolean_prep_stats` 失败均携带 `[lhs, rhs]`（保留无效 ID）：参数失败为 `InvalidInput` / `AXM-BOOL-E-0001` / `bool.prep.export.input`；文件打开失败为 `OperationFailed` / `AXM-IO-E-0005` / `bool.prep.export.open`（修正此前误用的 BOOL 输入码）；写入或关闭失败为 `OperationFailed` / `AXM-IO-E-0005` / `bool.prep.export.write`。参数校验先于文件打开，失败不创建或截断目标；所有失败不修改模型，底层写入失败不保证目标文件恢复。回归入口：`axiom_boolean_prep_test`，Linux 使用 `/dev/full` 覆盖缓冲写入失败。
 
+`DiagnosticService::export_grouped_by_stage_txt/json` 的空路径、文件打开及最终写入/关闭失败复用 `AXM-IO-E-0005`；空路径在打开文件前拒绝，失败不修改参与聚合的源报告，底层设备写入失败不保证恢复目标文件。回归入口：`axiom_diagnostics_test`。
+
+`IOService::export_step` 的失败继续复用 `AXM-IO-E-0005`，并关联输入 Body：无效 Body/空路径为 `io.export.step.input`，父目录不存在或不可写为 `io.export.step.path`，打开失败为 `io.export.step.open`，最终写入或关闭失败为 `io.export.step.write`。输入/路径失败不创建目标文件，所有失败不修改模型；底层设备写入失败不保证恢复目标文件。回归入口：`axiom_io_workflow_test`。
+
 与 **`AXM-BOOL-E-*` 错误码**绑定的布尔早期失败路径会在 `Issue.stage` 中写入可聚合阶段标签（与 `export_report_json` 一致）：`bool.input`（输入体或布尔运算类型无效，`AXM-BOOL-E-0001`）、`bool.abort.intersect`（交集在包围盒层面不相交，`AXM-BOOL-E-0003`）、`bool.abort.classify`（如减运算右包左无法表达空结果，`AXM-BOOL-E-0005`）。上述早期失败即使设置 `BooleanOptions::diagnostics=false`，也保留单条 Error Issue、阶段标签与 `[lhs, rhs]`（包括无效输入值），只省略候选阶段/统计信息；成功时关闭诊断的行为不变。启用布尔诊断时，返回的预处理告警 `AXM-BOOL-W-0001/W-0002` 同步写入报告，保留原文案和 Warning 级别，并绑定 `bool.prep` 与 `[lhs, rhs, output]` 实体 ID，可按阶段检索及导出 JSON；这些告警不表示精确布尔能力。Strict 残留告警见 `bool.validate.residual`（`AXM-BOOL-W-0003`）。
 
 ## 9.2 `HEAL` 诊断码
@@ -458,6 +466,13 @@
 | `AXM-VAL-D-0003` | 自交检查开始 |
 | `AXM-VAL-D-0004` | 检测到薄壁区域 |
 | `AXM-VAL-D-0005` | 全量验证通过 |
+
+自交验证失败使用可聚合阶段标签：体级非法输入为 `heal.validate_self_intersection.input`，退化偏置为
+`heal.validate_self_intersection.degenerate`，Strict 三角化/SAT 分析失败为
+`heal.validate_self_intersection.mesh`；壳级及批量壳级对应
+`heal.validate_self_intersection.shell_input`、`heal.validate_self_intersection.shell_degenerate` 和
+`heal.validate_self_intersection.shell_mesh`。失败 Issue 关联目标 Body，并在适用时同时关联目标 Shell。
+这些阶段描述当前网格近似自交验证流程，不表示精确曲面自交能力。
 
 ## 9.4 `IO` 诊断码
 

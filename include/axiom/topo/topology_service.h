@@ -108,11 +108,14 @@ private:
 class TopologyTransaction {
 public:
     explicit TopologyTransaction(std::shared_ptr<detail::KernelState> state);
-    TopologyTransaction(TopologyTransaction&&) noexcept = default;
-    TopologyTransaction& operator=(TopologyTransaction&&) noexcept = default;
+    /// 事务为唯一所有权对象：可移动构造，但不可复制或移动赋值。
+    /// 移动后源对象保持可析构、可查询的关闭状态，不能再提交或回滚。
+    TopologyTransaction(TopologyTransaction&& other);
+    TopologyTransaction& operator=(TopologyTransaction&&) = delete;
     TopologyTransaction(const TopologyTransaction&) = delete;
     TopologyTransaction& operator=(const TopologyTransaction&) = delete;
-    ~TopologyTransaction() = default;
+    /// 活动事务离开作用域时自动回滚；已提交、已回滚或移动后的源对象不改变模型。
+    ~TopologyTransaction() noexcept;
 
     /// 坐标必须为有限值；否则返回 InvalidInput / AXM-CORE-E-0002，且不修改拓扑或事务写计数。
     Result<VertexId> create_vertex(const Point3& point);
@@ -223,6 +226,8 @@ public:
     // Strict closedness validation:
     // - kTopoOpenBoundary when any edge is used < 2 times within the shell
     // - kTopoNonManifoldEdge when any edge is used > 2 times within the shell
+    // - kTopoLoopOrientationMismatch when the two coedges of a shared edge have the same direction
+    // - kTopoShellDisconnected when paired faces form more than one connected component
     Result<void> validate_shell_closedness(ShellId shell_id) const;
     Result<void> validate_shell_sources(ShellId shell_id) const;
     Result<void> validate_body(BodyId body_id) const;

@@ -7,6 +7,8 @@
 
 #include "axiom/diag/error_codes.h"
 #include "axiom/sdk/kernel.h"
+#include "axiom/internal/core/kernel_state.h"
+#include "axiom/internal/io/io_service_internal.h"
 
 namespace {
 
@@ -31,6 +33,64 @@ const axiom::Issue* find_issue(const axiom::DiagnosticReport& report, std::strin
 }  // namespace
 
 int main() {
+    {
+        auto state = std::make_shared<axiom::detail::KernelState>(axiom::KernelConfig {});
+        axiom::RepresentationConversionService convert {state};
+        axiom::DiagnosticService diagnostics {state};
+        constexpr axiom::BodyId body_id {7101};
+        const axiom::MeshId valid_id {7102};
+        const axiom::MeshId out_of_range_id {7103};
+        const axiom::MeshId degenerate_id {7104};
+
+        axiom::detail::MeshRecord valid;
+        valid.vertices = {{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}};
+        valid.indices = {0, 1, 2};
+        state->meshes.emplace(valid_id.value, valid);
+        auto out_of_range = valid;
+        out_of_range.indices = {0, 1, 3};
+        state->meshes.emplace(out_of_range_id.value, std::move(out_of_range));
+        auto degenerate = valid;
+        degenerate.indices = {0, 0, 2};
+        state->meshes.emplace(degenerate_id.value, std::move(degenerate));
+
+        axiom::ExportOptions strict;
+        strict.compatibility_mode = false;
+        const auto mesh_count_before = state->meshes.size();
+        const auto passed = axiom::io_internal::mesh_export_strict_gate(*state, convert, valid_id, strict, body_id);
+        const auto bad_index = axiom::io_internal::mesh_export_strict_gate(
+            *state, convert, out_of_range_id, strict, body_id);
+        const auto bad_triangle = axiom::io_internal::mesh_export_strict_gate(
+            *state, convert, degenerate_id, strict, body_id);
+        if (passed.status != axiom::StatusCode::Ok || bad_index.status != axiom::StatusCode::OperationFailed ||
+            bad_triangle.status != axiom::StatusCode::OperationFailed || state->meshes.size() != mesh_count_before) {
+            std::cerr << "strict mesh QA success/failure contract or failure isolation is unexpected\n";
+            return 1;
+        }
+        for (const auto result : {bad_index, bad_triangle}) {
+            const auto report = diagnostics.get(result.diagnostic_id);
+            const auto* issue = report.value ? find_issue(*report.value, axiom::diag_codes::kIoExportMeshStrictQaFailed)
+                                             : nullptr;
+            if (issue == nullptr || issue->severity != axiom::IssueSeverity::Error ||
+                issue->stage != "io.export.mesh_strict_qa" || issue->related_entities.size() != 1 ||
+                issue->related_entities.front() != body_id.value) {
+                std::cerr << "strict mesh QA failure is missing stage or body evidence\n";
+                return 1;
+            }
+        }
+        const auto staged = diagnostics.find_by_issue_stage("io.export.mesh_strict_qa", 10);
+        const auto json_path = std::filesystem::temp_directory_path() / "axiom_io_strict_mesh_qa_diag.json";
+        const auto exported = diagnostics.export_report_json(bad_index.diagnostic_id, json_path.string());
+        std::ifstream json_in {json_path, std::ios::binary};
+        const std::string json {(std::istreambuf_iterator<char>(json_in)), std::istreambuf_iterator<char>()};
+        std::filesystem::remove(json_path);
+        if (!staged.value || staged.value->size() != 2 || exported.status != axiom::StatusCode::Ok ||
+            json.find("\"stage\":\"io.export.mesh_strict_qa\"") == std::string::npos ||
+            json.find("7101") == std::string::npos) {
+            std::cerr << "strict mesh QA diagnostic lookup or JSON evidence is unexpected\n";
+            return 1;
+        }
+    }
+
     axiom::Kernel kernel;
 
     auto body = kernel.primitives().box({0.0, 0.0, 0.0}, 10.0, 20.0, 30.0);
@@ -48,6 +108,102 @@ int main() {
     const auto out_stl_path = tmp / ("axiom_io_workflow_test_" + uniq + ".stl");
 
     axiom::ExportOptions export_options;
+
+    const auto body_count_before_step_import_failures = kernel.body_count();
+    const auto missing_import_path = tmp / ("axiom_io_missing_import_" + uniq + ".step");
+    const auto check_step_import_failure = [&](const axiom::Result<axiom::BodyId>& result,
+                                               axiom::StatusCode expected_status,
+                                               std::string_view expected_stage) {
+        const auto report = kernel.diagnostics().get(result.diagnostic_id);
+        const auto* issue = report.value ? find_issue(*report.value, axiom::diag_codes::kIoImportFailure) : nullptr;
+        return result.status == expected_status && !result.value.has_value() && issue != nullptr &&
+               issue->severity == axiom::IssueSeverity::Error && issue->stage == expected_stage &&
+               issue->related_entities.empty();
+    };
+    const auto empty_step_import = kernel.io().import_step("", axiom::ImportOptions {});
+    const auto missing_step_import = kernel.io().import_step(missing_import_path.string(), axiom::ImportOptions {});
+    const auto directory_step_import = kernel.io().import_step(tmp.string(), axiom::ImportOptions {});
+    if (!check_step_import_failure(empty_step_import, axiom::StatusCode::InvalidInput, "io.import.step.input") ||
+        !check_step_import_failure(missing_step_import, axiom::StatusCode::OperationFailed, "io.import.step.path") ||
+        !check_step_import_failure(directory_step_import, axiom::StatusCode::OperationFailed, "io.import.step.open")) {
+        std::cerr << "STEP import failure is missing stable stage evidence\n";
+        return 1;
+    }
+    const auto import_failure_json = tmp / ("axiom_io_step_import_failure_" + uniq + ".json");
+    const auto exported_import_failure = kernel.diagnostics().export_report_json(
+        directory_step_import.diagnostic_id, import_failure_json.string());
+    std::ifstream import_failure_json_in {import_failure_json, std::ios::binary};
+    const std::string import_failure_json_text {
+        (std::istreambuf_iterator<char>(import_failure_json_in)), std::istreambuf_iterator<char>()};
+    std::filesystem::remove(import_failure_json);
+    const auto staged_step_import_failures = kernel.diagnostics().find_by_issue_stage_prefix("io.import.step.", 10);
+    const auto body_count_after_step_import_failures = kernel.body_count();
+    if (exported_import_failure.status != axiom::StatusCode::Ok ||
+        import_failure_json_text.find("\"stage\":\"io.import.step.open\"") == std::string::npos ||
+        !staged_step_import_failures.value || staged_step_import_failures.value->size() != 3 ||
+        !body_count_before_step_import_failures.value || !body_count_after_step_import_failures.value ||
+        *body_count_before_step_import_failures.value != *body_count_after_step_import_failures.value ||
+        std::filesystem::exists(missing_import_path)) {
+        std::cerr << "STEP import failure lookup, JSON evidence, or model isolation is unexpected\n";
+        return 1;
+    }
+
+    const auto body_count_before_step_failures = kernel.body_count();
+    const auto check_step_failure = [&](const axiom::Result<void>& result, axiom::StatusCode expected_status,
+                                        std::string_view expected_stage) {
+        const auto report = kernel.diagnostics().get(result.diagnostic_id);
+        const auto* issue = report.value ? find_issue(*report.value, axiom::diag_codes::kIoExportFailure) : nullptr;
+        return result.status == expected_status && issue != nullptr && issue->stage == expected_stage &&
+               issue->related_entities == std::vector<std::uint64_t> {body.value->value};
+    };
+    const auto empty_step_path = kernel.io().export_step(*body.value, "", export_options);
+    const auto missing_step_body = kernel.io().export_step(axiom::BodyId {body.value->value + 1000000},
+                                                           out_path.string(), export_options);
+    if (!check_step_failure(empty_step_path, axiom::StatusCode::InvalidInput, "io.export.step.input") ||
+        missing_step_body.status != axiom::StatusCode::InvalidInput) {
+        std::cerr << "STEP input failure is missing stable stage or body evidence\n";
+        return 1;
+    }
+    const auto missing_report = kernel.diagnostics().get(missing_step_body.diagnostic_id);
+    const auto* missing_issue = missing_report.value
+        ? find_issue(*missing_report.value, axiom::diag_codes::kIoExportFailure) : nullptr;
+    if (missing_issue == nullptr || missing_issue->stage != "io.export.step.input" ||
+        missing_issue->related_entities != std::vector<std::uint64_t> {body.value->value + 1000000}) {
+        std::cerr << "STEP invalid Body failure is missing rejected entity evidence\n";
+        return 1;
+    }
+    const auto missing_parent_path = tmp / ("axiom_io_missing_parent_" + uniq) / "model.step";
+    const auto missing_parent = kernel.io().export_step(*body.value, missing_parent_path.string(), export_options);
+    const auto step_failure_json = tmp / ("axiom_io_step_failure_" + uniq + ".json");
+    const auto exported_step_failure = kernel.diagnostics().export_report_json(
+        missing_parent.diagnostic_id, step_failure_json.string());
+    std::ifstream step_failure_json_in {step_failure_json, std::ios::binary};
+    const std::string step_failure_json_text {(std::istreambuf_iterator<char>(step_failure_json_in)),
+                                              std::istreambuf_iterator<char>()};
+    std::filesystem::remove(step_failure_json);
+    if (!check_step_failure(missing_parent, axiom::StatusCode::InvalidInput, "io.export.step.path") ||
+        std::filesystem::exists(missing_parent_path) || exported_step_failure.status != axiom::StatusCode::Ok ||
+        step_failure_json_text.find("\"stage\":\"io.export.step.path\"") == std::string::npos ||
+        step_failure_json_text.find(std::to_string(body.value->value)) == std::string::npos) {
+        std::cerr << "STEP path failure diagnostics or output isolation is unexpected\n";
+        return 1;
+    }
+#if defined(__linux__)
+    const auto write_failure = kernel.io().export_step(*body.value, "/dev/full", export_options);
+    if (!check_step_failure(write_failure, axiom::StatusCode::OperationFailed, "io.export.step.write")) {
+        std::cerr << "STEP device write failure was reported as success or lacks evidence\n";
+        return 1;
+    }
+#endif
+    const auto staged_step_failures = kernel.diagnostics().find_by_issue_stage_prefix("io.export.step.", 10);
+    const auto body_count_after_step_failures = kernel.body_count();
+    if (!staged_step_failures.value || staged_step_failures.value->size() < 3 ||
+        !body_count_before_step_failures.value || !body_count_after_step_failures.value ||
+        *body_count_after_step_failures.value != *body_count_before_step_failures.value ||
+        kernel.io().export_step(*body.value, out_path.string(), export_options).status != axiom::StatusCode::Ok) {
+        std::cerr << "STEP failure lookup, model isolation, or retry regression\n";
+        return 1;
+    }
     auto exported = kernel.io().export_step(*body.value, out_path.string(), export_options);
     if (exported.status != axiom::StatusCode::Ok) {
         std::cerr << "export failed\n";

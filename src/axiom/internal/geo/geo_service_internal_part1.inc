@@ -626,6 +626,27 @@ std::vector<Scalar> nurbs_clamped_bezier_knots(std::size_t n) {
   return U;
 }
 
+int bspline_find_nonempty_endpoint_span(std::size_t n, int p,
+                                        const std::vector<Scalar> &U,
+                                        bool upper) {
+  const int ni = static_cast<int>(n);
+  if (!upper) {
+    const Scalar endpoint = U[static_cast<std::size_t>(p)];
+    int k = p;
+    while (k < ni - 1 && U[static_cast<std::size_t>(k + 1)] <= endpoint) {
+      ++k;
+    }
+    return k;
+  }
+
+  const Scalar endpoint = U[n];
+  int k = ni - 1;
+  while (k > p && U[static_cast<std::size_t>(k)] >= endpoint) {
+    --k;
+  }
+  return k;
+}
+
 int bspline_find_span(std::size_t n, int p, Scalar u, const std::vector<Scalar> &U) {
   const int ni = static_cast<int>(n);
   if (ni <= 0 || static_cast<int>(U.size()) < ni + p + 1) {
@@ -636,18 +657,13 @@ int bspline_find_span(std::size_t n, int p, Scalar u, const std::vector<Scalar> 
   if (u <= ulo) {
     // Non-clamped vectors (and derivative knot vectors) can have empty
     // spans at the active endpoints. Use the first nonempty right span.
-    int k = p;
-    while (k < ni - 1 && U[static_cast<std::size_t>(k + 1)] <= ulo) {
-      ++k;
-    }
-    return k;
+    return bspline_find_nonempty_endpoint_span(n, p, U, false);
   }
   if (u >= uhi) {
-    int k = ni - 1;
-    while (k > p && U[static_cast<std::size_t>(k)] >= uhi) {
-      --k;
-    }
-    return k;
+    // The upper endpoint uses the last nonempty left span. Keeping this
+    // policy in the common span finder also makes first/second derivative
+    // knot vectors select the same one-sided surface patch as position.
+    return bspline_find_nonempty_endpoint_span(n, p, U, true);
   }
   int low = p;
   int high = ni;
@@ -1152,14 +1168,40 @@ Scalar approximate_curve_parameter(const detail::CurveRecord &curve,
   const int samples = 64;
   Scalar best_t = domain.min;
   Scalar best_distance = std::numeric_limits<Scalar>::max();
+  const auto consider = [&](Scalar t, Scalar &candidate_t,
+                            Scalar &candidate_distance) {
+    const auto distance =
+        detail::norm(detail::subtract(point, evaluate_curve_point(curve, t)));
+    if (distance < candidate_distance) {
+      candidate_distance = distance;
+      candidate_t = t;
+    }
+  };
   for (int i = 0; i <= samples; ++i) {
     const auto alpha = static_cast<Scalar>(i) / static_cast<Scalar>(samples);
     const auto t = domain.min + (domain.max - domain.min) * alpha;
-    const auto sample = evaluate_curve_point(curve, t);
-    const auto distance = detail::norm(detail::subtract(point, sample));
-    if (distance < best_distance) {
-      best_distance = distance;
-      best_t = t;
+    consider(t, best_t, best_distance);
+  }
+  // A fixed grid over the full domain can completely miss a narrow, valid knot
+  // span. Seed every non-empty spline span so the subsequent local refinement
+  // starts on the correct branch even at a full-multiplicity discontinuity.
+  if ((curve.kind == detail::CurveKind::BSpline ||
+       curve.kind == detail::CurveKind::Nurbs) &&
+      !curve.knots_u.empty()) {
+    constexpr int kSamplesPerKnotSpan = 4;
+    for (std::size_t i = 0; i + 1 < curve.knots_u.size(); ++i) {
+      const auto span_min = std::max(curve.knots_u[i], domain.min);
+      const auto span_max = std::min(curve.knots_u[i + 1], domain.max);
+      if (!(span_max > span_min)) {
+        continue;
+      }
+      for (int sample_index = 0; sample_index <= kSamplesPerKnotSpan;
+           ++sample_index) {
+        const auto alpha = static_cast<Scalar>(sample_index) /
+                           static_cast<Scalar>(kSamplesPerKnotSpan);
+        consider(span_min + (span_max - span_min) * alpha, best_t,
+                 best_distance);
+      }
     }
   }
   const auto radius = (domain.max - domain.min) * 0.125;
@@ -1239,6 +1281,17 @@ bool resolve_bspline_surface_axis(int n_ctrl, int degree_hint,
     knots_out = knots_in;
     if (!bspline_knot_vector_non_decreasing(knots_out)) {
       return false;
+    }
+    if (!(knots_out[static_cast<std::size_t>(p_out)] <
+          knots_out[static_cast<std::size_t>(n)])) {
+      return false;
+    }
+    int multiplicity = 1;
+    for (std::size_t i = 1; i < knots_out.size(); ++i) {
+      multiplicity = knots_out[i] == knots_out[i - 1] ? multiplicity + 1 : 1;
+      if (multiplicity > p_out + 1) {
+        return false;
+      }
     }
     bspline_affine_scale_knots_to_span(knots_out, p_out, static_cast<std::size_t>(n),
                                        span_end);

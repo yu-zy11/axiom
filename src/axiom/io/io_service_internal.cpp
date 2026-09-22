@@ -41,6 +41,13 @@ Result<void> reject_if_export_directory_not_writable(detail::KernelState& state,
     if (!std::filesystem::is_directory(dir, ec)) {
         return detail::invalid_input_void(state, diag_codes::kIoExportFailure, "导出路径校验失败：输出路径父级不是目录", "导出路径校验失败");
     }
+    ec.clear();
+    if (std::filesystem::exists(file_path, ec) && !ec && !std::filesystem::is_directory(file_path, ec)) {
+        // Replacing an existing file only requires access to that file. The parent
+        // directory may legitimately reject creation (for example /dev/full in a
+        // restricted runtime), so let the exporter classify open/write failures.
+        return ok_void({});
+    }
     static std::atomic<std::uint64_t> wchk_seq {0};
     const auto probe = dir / (".axiom_export_wchk_" + std::to_string(wchk_seq.fetch_add(1, std::memory_order_relaxed)) + "_" +
                               std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -636,12 +643,14 @@ Result<void> mesh_export_strict_gate(detail::KernelState& state, RepresentationC
     }
     if (!insp.value.has_value()) {
         return detail::failed_void(state, StatusCode::OperationFailed, diag_codes::kIoExportMeshStrictQaFailed,
-                                   "严格导出失败：网格检查不可用", "严格导出失败", {body_id.value});
+                                   "严格导出失败：网格检查不可用", "严格导出失败", {body_id.value},
+                                   "io.export.mesh_strict_qa");
     }
     const auto& r = *insp.value;
     if (r.has_out_of_range_indices || r.has_degenerate_triangles) {
         return detail::failed_void(state, StatusCode::OperationFailed, diag_codes::kIoExportMeshStrictQaFailed,
-                                   "严格导出失败：网格存在越界索引或退化三角形", "严格导出失败", {body_id.value});
+                                   "严格导出失败：网格存在越界索引或退化三角形", "严格导出失败", {body_id.value},
+                                   "io.export.mesh_strict_qa");
     }
     return ok_void(state.create_diagnostic("网格导出严格检查通过"));
 }

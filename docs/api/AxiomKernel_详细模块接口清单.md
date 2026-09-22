@@ -261,6 +261,8 @@ public:
 
 `CurveFactory::make_bspline/make_nurbs` 的显式结点向量须有限、严格满足非减顺序（不使用几何容差吞掉逆序），且有效参数域 `knots[degree] < knots[poles.size()]`；每个结点的重数不得超过 `degree + 1`（精确数值比较），合法重复结点保留。内部重数为 `degree + 1` 的断点按右侧分段求值，上端点按左侧分段求值；返回的一、二阶导数是对应分段的单侧值，不表示断点处全局可微。非夹持结点向量在有效域端点出现重复结点时，跳过零长度分段，下端点使用第一个非空右侧分段、上端点使用最后一个非空左侧分段；点值、一二阶导数和曲率均遵循此约定，域外参数钳制后同样适用。常值分段允许求值，导数与曲率返回零。零长度有效域、结点逆序或重数超限返回 `InvalidInput` 和 `AXM-GEO-E-0001`，不创建几何对象、不改动已有求值缓存。省略结点时的默认生成规则不变。
 
+`SurfaceFactory::make_bspline/make_nurbs` 对 u/v 两轴的显式结点采用相同的有限、非减、非零有效域及 `degree + 1` 重数上限；任一轴不满足时返回 `InvalidInput` 和 `AXM-GEO-E-0002`，且不创建曲面或改动求值缓存。合法满重数断点保留：内部断点使用右侧非空曲面片，上端点使用左侧非空曲面片；点值、一二阶偏导和曲率采用同一侧语义，不表示断点处全局可微。域外参数钳制到端点后遵循相同规则；常值退化片返回零偏导和零曲率。
+
 #### `SurfaceFactory`
 
 ```cpp
@@ -297,6 +299,8 @@ public:
 };
 ```
 
+`CurveService::closest_parameter/closest_point` 对 BSpline/NURBS 会在全域粗采样之外逐个覆盖非空结点分段，再进行阻尼局部细化；因此合法的极窄分段（包括满重数断点隔开的分支与常值退化分段）不会仅因宽度小于全域采样步长而被跳过。返回值仍是数值搜索结果，不构成任意曲线全局最优或工业精度保证。非有限查询点返回 `InvalidInput` / `AXM-CORE-E-0002`，不修改几何或求值缓存。
+
 #### `SurfaceEvaluator`
 
 ```cpp
@@ -318,6 +322,8 @@ public:
   Result<BoundingBox> bbox(SurfaceId) const;
 };
 ```
+
+`closest_uv` 对 BSpline/NURBS 会覆盖每个非空结点片的初值采样，包含极窄片和满重数隔离片；随后仍采用局部迭代，因此不承诺任意曲面的全局最优或工业级精度。
 
 ### 5.3 几何变换接口
 
@@ -357,9 +363,15 @@ enum class TopologyIsolationLevel : std::uint8_t {
 
 class TopologyTransaction {
 public:
+  TopologyTransaction(TopologyTransaction&&);
+  TopologyTransaction& operator=(TopologyTransaction&&) = delete;
+  TopologyTransaction(const TopologyTransaction&) = delete;
+  TopologyTransaction& operator=(const TopologyTransaction&) = delete;
+  ~TopologyTransaction() noexcept;
   // 坐标必须为有限值；NaN/±Inf 返回 InvalidInput / AXM-CORE-E-0002，拓扑与事务写计数不变。
   Result<VertexId> create_vertex(const Point3&);
   Result<EdgeId> create_edge(CurveId, VertexId, VertexId);
+  // validate_edge 要求两个拓扑端点在引用的 3D Curve 上（采用内核线性容差）；不一致返回 InvalidTopology / AXM-TOPO-E-0008。
   Result<CoedgeId> create_coedge(EdgeId, bool reversed);
   // 按定向端点 ID 首尾闭合，单共边不豁免；未闭合返回 InvalidTopology / AXM-TOPO-E-0002，失败不写入环或事务计数。
   Result<LoopId> create_loop(std::span<const CoedgeId>);
@@ -379,7 +391,7 @@ public:
 };
 ```
 
-> 说明：`TopologyTransaction` 的完整签名见 `include/axiom/topo/topology_service.h`；另含 `set_coedge_pcurve`、删除壳/体、以及 trim 桥接审计读数 `coedge_pcurve_bind_count()` / `coedge_pcurve_clear_count()` 等。`write_operation_count()` 统计本事务内每次**成功**的写操作（创建/删除实体、`replace_surface`、每次 `set_coedge_pcurve` 含清除）；回滚或 `clear_tracking_records()` 归零。`clear_tracking_records()` 仅在提交或回滚后允许调用，可重复清理且不改变模型；活动事务（含空事务）返回 `OperationFailed` / `AXM-TX-E-0006`，保留创建记录、修改快照与计数。`effective_isolation_level()` 当前实现返回 `SnapshotSerializable`（单事务 + 快照回滚的工程占位，见头文件注释）。
+> 说明：`TopologyTransaction` 的完整签名见 `include/axiom/topo/topology_service.h`；事务具有唯一所有权，只能移动构造，不能复制或移动赋值。移动后的源对象处于可安全查询的关闭状态，写入、提交和回滚均被拒绝，事务权限仅由目标对象持有。活动事务若未显式提交或回滚便离开作用域，`noexcept` 析构会自动回滚成功写入；空事务析构是纯 no-op，已关闭事务与移动后的源对象析构不改变模型。另含 `set_coedge_pcurve`、删除壳/体、以及 trim 桥接审计读数 `coedge_pcurve_bind_count()` / `coedge_pcurve_clear_count()` 等。`write_operation_count()` 统计本事务内每次**成功**的写操作（创建/删除实体、`replace_surface`、每次 `set_coedge_pcurve` 含清除）；回滚或 `clear_tracking_records()` 归零。`clear_tracking_records()` 仅在提交或回滚后允许调用，可重复清理且不改变模型；活动事务（含空事务）返回 `OperationFailed` / `AXM-TX-E-0006`，保留创建记录、修改快照与计数。`effective_isolation_level()` 当前实现返回 `SnapshotSerializable`（单事务 + 快照回滚的工程占位，见头文件注释）。
 
 ### 6.3 拓扑验证接口
 
@@ -389,6 +401,9 @@ public:
   Result<void> validate_edge(EdgeId) const;
   Result<void> validate_face(FaceId) const;
   Result<void> validate_shell(ShellId) const;
+  // Strict 闭合性：每条边须由两个不同面反向配对，且全部面只能形成一个连通分量。
+  // 多个独立闭合分量返回 InvalidTopology / AXM-TOPO-E-0018。
+  Result<void> validate_shell_closedness(ShellId) const;
   Result<void> validate_body(BodyId) const;
 };
 ```
@@ -598,6 +613,7 @@ enum class ValidationMode {
 
 class ValidationService {
 public:
+  // 失败报告使用 heal.validate_geometry.* 阶段，并关联目标 Body 及可定位的问题子实体。
   Result<void> validate_geometry(BodyId, ValidationMode) const;
   Result<void> validate_topology(BodyId, ValidationMode) const;
   Result<void> validate_self_intersection(BodyId, ValidationMode) const;
@@ -718,6 +734,8 @@ public:
   Result<void> export_report_json(DiagnosticId, std::string_view path) const;
   Result<void> export_reports_txt(std::span<const DiagnosticId>, std::string_view path) const;
   Result<void> export_reports_json(std::span<const DiagnosticId>, std::string_view path) const;
+  Result<void> export_grouped_by_stage_txt(std::string_view path) const;
+  Result<void> export_grouped_by_stage_json(std::string_view path) const;
 };
 ```
 
@@ -726,6 +744,8 @@ public:
 `export_reports_txt` 按输入顺序拼接单报告文本，保留摘要、每个问题的严重级别、错误码、消息及非空阶段与关联实体；重复 ID 重复输出，空报告仍包含 ID 和摘要。文本中的特殊字节原样保留。
 
 上述两个指定 ID 批量导出接口：空 ID 列表或空路径返回 `InvalidInput` / `AXM-IO-E-0005`；任一 ID 不存在返回 `InvalidInput` / `AXM-CORE-E-0001`。上述参数失败均在打开文件前返回，不创建或截断目标，不修改源报告（仍生成失败诊断）。打开或写入失败返回 `OperationFailed` / `AXM-IO-E-0005`；写入期间的设备错误不保证恢复原文件。
+
+阶段聚合导出把空 `Issue.stage` 归入 `(unset)`。空路径在打开文件前返回 `InvalidInput` / `AXM-IO-E-0005`，文件打开、写入或关闭失败返回 `OperationFailed` / `AXM-IO-E-0005`；导出不修改参与聚合的源报告，设备写入失败不保证恢复目标文件。
 
 ## 13. `TopoCore` 门面补充接口
 

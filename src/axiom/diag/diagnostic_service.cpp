@@ -879,20 +879,25 @@ Result<std::unordered_map<std::string, std::uint64_t>> DiagnosticService::issue_
 
 Result<void> DiagnosticService::export_grouped_by_stage_txt(std::string_view path) const {
     if (path.empty()) return detail::invalid_input_void(*state_, diag_codes::kIoExportFailure, "分组导出失败：路径为空", "分组导出失败");
-    std::ofstream out{std::string(path)};
-    if (!out) return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure, "分组导出失败：无法打开文件", "分组导出失败");
     const auto hist = issue_stage_histogram();
     if (hist.status != StatusCode::Ok || !hist.value.has_value()) return error_result<void>(hist.status, hist.diagnostic_id);
+    std::ofstream out{std::string(path)};
+    if (!out) return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure, "分组导出失败：无法打开文件", "分组导出失败");
     for (const auto& [stage, count] : *hist.value) out << stage << ": " << count << "\n";
+    out.close();
+    if (!out) {
+        return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+                                   "分组导出失败：写入阶段文本失败", "分组导出失败");
+    }
     return ok_void(state_->create_diagnostic("已按工作流阶段导出文本分组"));
 }
 
 Result<void> DiagnosticService::export_grouped_by_stage_json(std::string_view path) const {
     if (path.empty()) return detail::invalid_input_void(*state_, diag_codes::kIoExportFailure, "分组导出失败：路径为空", "分组导出失败");
-    std::ofstream out{std::string(path)};
-    if (!out) return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure, "分组导出失败：无法打开文件", "分组导出失败");
     const auto hist = issue_stage_histogram();
     if (hist.status != StatusCode::Ok || !hist.value.has_value()) return error_result<void>(hist.status, hist.diagnostic_id);
+    std::ofstream out{std::string(path)};
+    if (!out) return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure, "分组导出失败：无法打开文件", "分组导出失败");
     out << "{\"stages\":{";
     bool first = true;
     for (const auto& [stage, count] : *hist.value) {
@@ -901,6 +906,11 @@ Result<void> DiagnosticService::export_grouped_by_stage_json(std::string_view pa
         out << "\"" << json_escape(stage) << "\":" << count;
     }
     out << "}}";
+    out.close();
+    if (!out) {
+        return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+                                   "分组导出失败：写入阶段 JSON 失败", "分组导出失败");
+    }
     return ok_void(state_->create_diagnostic("已按工作流阶段导出JSON分组"));
 }
 

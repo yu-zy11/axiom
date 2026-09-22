@@ -97,6 +97,7 @@ public:
     Result<void> export_grouped_by_entity_json(std::string_view path) const;
     Result<void> export_grouped_by_severity_json(std::string_view path) const;
     Result<std::unordered_map<std::string, std::uint64_t>> issue_stage_histogram() const;
+    /// 导出阶段直方图；空路径在打开文件前拒绝，打开或最终写入失败返回 `AXM-IO-E-0005`。
     Result<void> export_grouped_by_stage_txt(std::string_view path) const;
     Result<void> export_grouped_by_stage_json(std::string_view path) const;
     Result<std::vector<std::string>> summaries_by_ids(std::span<const DiagnosticId> ids) const;

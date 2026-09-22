@@ -1,21 +1,29 @@
 Result<BodyId> IOService::import_step(std::string_view path, const ImportOptions& options) {
+    const auto fail_before_import = [this](StatusCode status, std::string message,
+                                           std::string_view stage) {
+        auto issue = detail::make_error_issue(diag_codes::kIoImportFailure, std::move(message));
+        issue.stage = std::string(stage);
+        return error_result<BodyId>(
+            status, state_->create_diagnostic("STEP 导入失败", {std::move(issue)}));
+    };
     if (path.empty()) {
-        return detail::invalid_input_result<BodyId>(
-            *state_, diag_codes::kIoImportFailure,
-            "STEP 导入失败：输入路径为空", "STEP 导入失败");
+        return fail_before_import(StatusCode::InvalidInput,
+                                  "STEP 导入失败：输入路径为空", "io.import.step.input");
     }
     if (!std::filesystem::exists(path)) {
-        return detail::failed_result<BodyId>(
-            *state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
-            "STEP 导入失败：输入文件不存在", "STEP 导入失败");
+        return fail_before_import(StatusCode::OperationFailed,
+                                  "STEP 导入失败：输入文件不存在", "io.import.step.path");
     }
 
     constexpr std::size_t kStepIgesProbeMaxBytes = static_cast<std::size_t>(64) * 1024 * 1024;
-    const auto file_text = read_regular_file_bytes_limited(path, kStepIgesProbeMaxBytes);
+    std::error_code step_path_error;
+    const bool is_regular_step_file = std::filesystem::is_regular_file(path, step_path_error);
+    const auto file_text = is_regular_step_file
+                               ? read_regular_file_bytes_limited(path, kStepIgesProbeMaxBytes)
+                               : std::optional<std::string> {};
     if (!file_text.has_value()) {
-        return detail::failed_result<BodyId>(
-            *state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
-            "STEP 导入失败：无法打开输入文件", "STEP 导入失败");
+        return fail_before_import(StatusCode::OperationFailed,
+                                  "STEP 导入失败：无法打开输入文件", "io.import.step.open");
     }
     if (step_file_requires_full_standard_importer(std::string_view(*file_text))) {
         std::vector<Issue> issues;
@@ -127,12 +135,22 @@ Result<BodyId> IOService::import_step(std::string_view path, const ImportOptions
 
 Result<void> IOService::export_step(BodyId body_id, std::string_view path, const ExportOptions& options) {
     if (!detail::has_body(*state_, body_id) || path.empty()) {
-        return detail::invalid_input_void(
-            *state_, diag_codes::kIoExportFailure,
-            "STEP 导出失败：目标实体不存在或输出路径为空", "STEP 导出失败");
+        return detail::failed_void(
+            *state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
+            "STEP 导出失败：目标实体不存在或输出路径为空", "STEP 导出失败",
+            {body_id.value}, "io.export.step.input");
     }
     const auto wx = reject_if_export_directory_not_writable(*state_, path);
     if (wx.status != StatusCode::Ok) {
+        const auto diagnostic_it = state_->diagnostics.find(wx.diagnostic_id.value);
+        if (diagnostic_it != state_->diagnostics.end()) {
+            for (auto& issue : diagnostic_it->second.issues) {
+                issue.stage = "io.export.step.path";
+                if (issue.related_entities.empty()) {
+                    issue.related_entities.push_back(body_id.value);
+                }
+            }
+        }
         return wx;
     }
 
@@ -140,7 +158,8 @@ Result<void> IOService::export_step(BodyId body_id, std::string_view path, const
     if (!out) {
         return detail::failed_void(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
-            "STEP 导出失败：无法打开输出文件", "STEP 导出失败");
+            "STEP 导出失败：无法打开输出文件", "STEP 导出失败", {body_id.value},
+            "io.export.step.open");
     }
 
     const auto body_it = state_->bodies.find(body_id.value);
@@ -173,6 +192,14 @@ Result<void> IOService::export_step(BodyId body_id, std::string_view path, const
     out << "/* body " << body_id.value << " */\n";
     out << "ENDSEC;\n";
     out << "END-ISO-10303-21;\n";
+    out.flush();
+    out.close();
+    if (!out) {
+        return detail::failed_void(
+            *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+            "STEP 导出失败：写入输出文件失败", "STEP 导出失败", {body_id.value},
+            "io.export.step.write");
+    }
 
     return ok_void(state_->create_diagnostic("已导出STEP模型"));
 }

@@ -236,6 +236,34 @@ SurfaceService::closest_uv(SurfaceId surface_id, const Point3 &point) const {
       consider(uc, domain.v.min);
       consider(uc, domain.v.max);
     }
+    // A fixed whole-domain grid can entirely miss a narrow legal knot patch.
+    // Seed each non-empty tensor-product patch so discontinuous/full-multiplicity
+    // branches and strongly non-uniform parameterizations participate in the
+    // same local refinement as the broad patches.
+    if ((surface.kind == detail::SurfaceKind::BSpline ||
+         surface.kind == detail::SurfaceKind::Nurbs) &&
+        surface.knots_u.size() >= 2 && surface.knots_v.size() >= 2) {
+      constexpr std::array<Scalar, 3> patch_samples{0.0, 0.5, 1.0};
+      for (std::size_t iu = 0; iu + 1 < surface.knots_u.size(); ++iu) {
+        const Scalar u0 = std::max(surface.knots_u[iu], domain.u.min);
+        const Scalar u1 = std::min(surface.knots_u[iu + 1], domain.u.max);
+        if (!(u1 > u0)) {
+          continue;
+        }
+        for (std::size_t iv = 0; iv + 1 < surface.knots_v.size(); ++iv) {
+          const Scalar v0 = std::max(surface.knots_v[iv], domain.v.min);
+          const Scalar v1 = std::min(surface.knots_v[iv + 1], domain.v.max);
+          if (!(v1 > v0)) {
+            continue;
+          }
+          for (const Scalar au : patch_samples) {
+            for (const Scalar av : patch_samples) {
+              consider(u0 + (u1 - u0) * au, v0 + (v1 - v0) * av);
+            }
+          }
+        }
+      }
+    }
     uv.first = best_u;
     uv.second = best_v;
     // Damped Gauss-Newton (LM-style) refinement using local tangents (du/dv).

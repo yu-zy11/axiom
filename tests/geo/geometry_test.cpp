@@ -591,6 +591,217 @@ int main() {
             return 1;
         }
     }
+    // Explicit surface knots follow the same non-degenerate-domain and multiplicity contract as curves.
+    {
+        std::vector<axiom::Point3> poles;
+        for (int u = 0; u < 4; ++u) {
+            for (int v = 0; v < 4; ++v) {
+                poles.push_back({static_cast<double>(u), static_cast<double>(v),
+                                 static_cast<double>(u + v)});
+            }
+        }
+        const auto count_before = kernel.geometry_count();
+        const auto cache_before = kernel.cache_entry_count();
+        if (!count_before.value || !cache_before.value) {
+            std::cerr << "failed to read geometry state before surface-knot regression\n";
+            return 1;
+        }
+
+        const std::array<std::vector<double>, 2> invalid_knots{{
+            {0.0, 0.0, 0.0, 0.0, 1.0, 1.0}, // degree 1, excess multiplicity with positive active domain
+            {0.0, 0.0, 0.0, 0.0, 0.0, 0.0}  // zero-length active domain
+        }};
+        for (bool rational : {false, true}) {
+            for (bool invalid_u : {true, false}) {
+                for (const auto& knots : invalid_knots) {
+                    axiom::Result<axiom::SurfaceId> failed;
+                    if (rational) {
+                        axiom::NURBSSurfaceDesc desc;
+                        desc.poles = poles;
+                        desc.weights.assign(poles.size(), 2.0);
+                        (invalid_u ? desc.knots_u : desc.knots_v) = knots;
+                        failed = kernel.surfaces().make_nurbs(desc);
+                    } else {
+                        axiom::BSplineSurfaceDesc desc;
+                        desc.poles = poles;
+                        (invalid_u ? desc.knots_u : desc.knots_v) = knots;
+                        failed = kernel.surfaces().make_bspline(desc);
+                    }
+                    const auto code = kernel.diagnostics().has_issue_code(
+                        failed.diagnostic_id, "AXM-GEO-E-0002");
+                    if (failed.status != axiom::StatusCode::InvalidInput || failed.value ||
+                        !code.value || !*code.value ||
+                        kernel.geometry_count().value != count_before.value ||
+                        kernel.cache_entry_count().value != cache_before.value) {
+                        std::cerr << "invalid surface knots must fail without pollution\n";
+                        return 1;
+                    }
+                }
+            }
+        }
+
+        // Full multiplicity remains valid and selects a one-sided patch at the discontinuity.
+        axiom::BSplineSurfaceDesc valid;
+        valid.poles = poles;
+        valid.degree_u = 1;
+        valid.degree_v = 1;
+        valid.knots_u = {0.0, 0.0, 0.5, 0.5, 1.0, 1.0};
+        valid.knots_v = valid.knots_u;
+        const auto surface = kernel.surfaces().make_bspline(valid);
+        const auto eval = surface.value
+            ? kernel.surface_service().eval(*surface.value, 1.5, 1.5, 1)
+            : axiom::Result<axiom::SurfaceEvalResult>{};
+        if (!surface.value || !eval.value || !std::isfinite(eval.value->point.x) ||
+            !std::isfinite(eval.value->point.y) || !std::isfinite(eval.value->point.z) ||
+            !std::isfinite(eval.value->du.x) || !std::isfinite(eval.value->dv.y)) {
+            std::cerr << "full-multiplicity surface knots must remain evaluable\n";
+            return 1;
+        }
+
+        // At a full-multiplicity break both axes select the right patch;
+        // the upper endpoint (including clamped out-of-domain input) selects
+        // the left patch. Derivative knot vectors must follow the same side.
+        for (const bool rational : {false, true}) {
+            std::vector<axiom::Point3> patch_poles;
+            std::vector<double> patch_weights;
+            const std::array<double, 4> xs{0.0, 2.0, 10.0, 12.0};
+            const std::array<double, 4> ys{0.0, 3.0, 20.0, 23.0};
+            for (int iu = 0; iu < 4; ++iu) {
+                for (int iv = 0; iv < 4; ++iv) {
+                    patch_poles.push_back({xs[static_cast<std::size_t>(iu)],
+                                           ys[static_cast<std::size_t>(iv)], 4.0});
+                    // Each individual patch has constant weight, while the
+                    // complete NURBS net remains genuinely non-unit-weighted.
+                    patch_weights.push_back(iu < 2 ? 2.0 : 5.0);
+                }
+            }
+            axiom::Result<axiom::SurfaceId> made;
+            if (rational) {
+                axiom::NURBSSurfaceDesc desc;
+                desc.poles = patch_poles;
+                desc.weights = patch_weights;
+                desc.degree_u = desc.degree_v = 1;
+                desc.knots_u = desc.knots_v = valid.knots_u;
+                made = kernel.surfaces().make_nurbs(desc);
+            } else {
+                axiom::BSplineSurfaceDesc desc;
+                desc.poles = patch_poles;
+                desc.degree_u = desc.degree_v = 1;
+                desc.knots_u = desc.knots_v = valid.knots_u;
+                made = kernel.surfaces().make_bspline(desc);
+            }
+            for (const double parameter : {1.5, 3.0, 4.0}) {
+                const auto one_sided = made.value
+                    ? kernel.surface_service().eval(*made.value, parameter, parameter, 2)
+                    : axiom::Result<axiom::SurfaceEvalResult>{};
+                if (!one_sided.value || !approx(one_sided.value->point.x, parameter == 1.5 ? 10.0 : 12.0) ||
+                    !approx(one_sided.value->point.y, parameter == 1.5 ? 20.0 : 23.0) ||
+                    !approx(one_sided.value->point.z, 4.0) ||
+                    !approx(one_sided.value->du.x, 4.0 / 3.0) ||
+                    !approx(one_sided.value->dv.y, 2.0) ||
+                    !approx(one_sided.value->duu.x, 0.0) ||
+                    !approx(one_sided.value->dvv.y, 0.0) ||
+                    !approx(one_sided.value->duv.z, 0.0) ||
+                    !approx(one_sided.value->k1, 0.0) || !approx(one_sided.value->k2, 0.0)) {
+                    std::cerr << "surface break derivatives must use a consistent one-sided patch\n";
+                    return 1;
+                }
+            }
+
+            if (rational) {
+                axiom::NURBSSurfaceDesc constant;
+                constant.poles.assign(16, {7.0, 8.0, 9.0});
+                constant.weights = patch_weights;
+                constant.degree_u = constant.degree_v = 1;
+                constant.knots_u = constant.knots_v = valid.knots_u;
+                const auto constant_surface = kernel.surfaces().make_nurbs(constant);
+                const auto degenerate = constant_surface.value
+                    ? kernel.surface_service().eval(*constant_surface.value, 1.5, 1.5, 2)
+                    : axiom::Result<axiom::SurfaceEvalResult>{};
+                if (!degenerate.value || !approx(degenerate.value->point.x, 7.0) ||
+                    !approx(degenerate.value->point.y, 8.0) || !approx(degenerate.value->point.z, 9.0) ||
+                    !approx(degenerate.value->du.x, 0.0) || !approx(degenerate.value->dv.y, 0.0) ||
+                    !approx(degenerate.value->duu.z, 0.0) || !approx(degenerate.value->dvv.z, 0.0) ||
+                    !approx(degenerate.value->duv.z, 0.0) || !approx(degenerate.value->k1, 0.0) ||
+                    !approx(degenerate.value->k2, 0.0)) {
+                    std::cerr << "constant full-multiplicity surface patch must remain evaluable\n";
+                    return 1;
+                }
+            }
+        }
+
+        const auto after_rejections = kernel.surface_service().eval(*surface.value, 1.5, 1.5, 2);
+        if (!after_rejections.value || !std::isfinite(after_rejections.value->du.x) ||
+            !std::isfinite(after_rejections.value->dv.y)) {
+            std::cerr << "rejected surface creation changed an existing full-multiplicity surface\n";
+            return 1;
+        }
+    }
+    // Surface closest-point seeding must visit every non-empty knot patch. A
+    // fixed whole-domain grid misses this isolated 0.001 x 0.001 branch.
+    {
+        const std::vector<double> knots{0.0, 0.0, 0.503, 0.503, 0.504, 0.504, 1.0, 1.0};
+        for (bool rational : {false, true}) {
+            std::vector<axiom::Point3> poles;
+            std::vector<double> weights;
+            for (int iu = 0; iu < 6; ++iu) {
+                for (int iv = 0; iv < 6; ++iv) {
+                    if (iu >= 2 && iu <= 3 && iv >= 2 && iv <= 3) {
+                        poles.push_back({100.0 + (iu - 2), 200.0 + (iv - 2), 5.0});
+                    } else {
+                        poles.push_back({-100.0 - iu, -200.0 - iv, -5.0});
+                    }
+                    weights.push_back(1.0 + 0.1 * ((iu + iv) % 3));
+                }
+            }
+
+            axiom::Result<axiom::SurfaceId> made;
+            if (rational) {
+                axiom::NURBSSurfaceDesc desc;
+                desc.poles = poles;
+                desc.weights = weights;
+                desc.degree_u = 1;
+                desc.degree_v = 1;
+                desc.knots_u = knots;
+                desc.knots_v = knots;
+                made = kernel.surfaces().make_nurbs(desc);
+            } else {
+                axiom::BSplineSurfaceDesc desc;
+                desc.poles = poles;
+                desc.degree_u = 1;
+                desc.degree_v = 1;
+                desc.knots_u = knots;
+                desc.knots_v = knots;
+                made = kernel.surfaces().make_bspline(desc);
+            }
+            const auto uv = made.value
+                ? kernel.surface_service().closest_uv(*made.value, {100.5, 200.5, 5.2})
+                : axiom::Result<std::pair<double, double>>{};
+            const auto closest = made.value
+                ? kernel.surface_service().closest_point(*made.value, {100.5, 200.5, 5.2})
+                : axiom::Result<axiom::Point3>{};
+            if (!made.value || !uv.value || uv.value->first < 2.515 || uv.value->first > 2.520 ||
+                uv.value->second < 2.515 || uv.value->second > 2.520 || !closest.value ||
+                !approx(closest.value->x, 100.5, 2e-3) ||
+                !approx(closest.value->y, 200.5, 2e-3) || !approx(closest.value->z, 5.0)) {
+                std::cerr << "spline surface closest point missed narrow knot patch\n";
+                return 1;
+            }
+
+            const auto count_before_failure = kernel.geometry_count();
+            const auto cache_before_failure = kernel.cache_entry_count();
+            const auto failed = kernel.surface_service().closest_uv(
+                *made.value, {std::numeric_limits<double>::quiet_NaN(), 0.0, 0.0});
+            if (failed.status != axiom::StatusCode::InvalidInput || failed.value ||
+                !count_before_failure.value || !cache_before_failure.value ||
+                kernel.geometry_count().value != count_before_failure.value ||
+                kernel.cache_entry_count().value != cache_before_failure.value) {
+                std::cerr << "invalid surface closest-point query must not pollute state\n";
+                return 1;
+            }
+        }
+    }
+
     // closest_parameter for spline-like curves should stay within domain.
     auto bspline_single_t = kernel.curve_service().closest_parameter(*bspline.value, {100.0, 100.0, 0.0});
     if (bspline_single_t.status != axiom::StatusCode::Ok || !bspline_single_t.value.has_value() ||
@@ -1152,6 +1363,73 @@ int main() {
                         return 1;
                     }
                 }
+            }
+        }
+    }
+    // Closest-point seeding must inspect every non-empty knot span. A fixed
+    // whole-domain grid misses this narrow, discontinuous middle branch.
+    for (const bool rational : {false, true}) {
+        for (const int degree : {-1, 1}) {
+            axiom::BSplineCurveDesc desc;
+            desc.degree = degree;
+            desc.poles = {{0, 0, 0}, {0, 2, 0}, {100, 0, 0},
+                          {100, 2, 0}, {200, 0, 0}, {200, 2, 0}};
+            desc.knots = {0, 0, 0.501, 0.501, 0.502, 0.502, 1, 1};
+            const auto create = [&]() {
+                if (!rational) {
+                    return kernel.curves().make_bspline(desc);
+                }
+                axiom::NURBSCurveDesc nurbs;
+                nurbs.degree = desc.degree;
+                nurbs.poles = desc.poles;
+                nurbs.knots = desc.knots;
+                nurbs.weights = {1, 1, 2, 2, 1, 1};
+                return kernel.curves().make_nurbs(nurbs);
+            };
+            const auto curve = create();
+            if (!curve.value) {
+                std::cerr << "narrow-span closest-point setup failed\n";
+                return 1;
+            }
+            const auto closest_t = kernel.curve_service().closest_parameter(
+                *curve.value, {100, 1, 0});
+            const auto closest = kernel.curve_service().closest_point(
+                *curve.value, {100, 1, 0});
+            if (!closest_t.value || *closest_t.value < 0.501 || *closest_t.value > 0.502 ||
+                !closest.value || !approx(closest.value->x, 100) ||
+                !approx(closest.value->y, 1, 1e-5)) {
+                std::cerr << "spline closest point missed narrow knot span\n";
+                return 1;
+            }
+
+            // A zero-speed span remains a valid closest-point candidate.
+            desc.poles[2] = desc.poles[3] = {100, 1, 0};
+            const auto constant = create();
+            const auto constant_t = constant.value
+                ? kernel.curve_service().closest_parameter(*constant.value, {100, 1, 0})
+                : axiom::Result<double>{};
+            if (!constant.value || !constant_t.value || *constant_t.value < 0.501 ||
+                *constant_t.value > 0.502) {
+                std::cerr << "constant narrow knot span was not considered\n";
+                return 1;
+            }
+
+            const auto count_before = kernel.geometry_count();
+            const auto cache_before = kernel.cache_entry_count();
+            const auto failed = kernel.curve_service().closest_parameter(
+                *curve.value, {std::numeric_limits<double>::quiet_NaN(), 0, 0});
+            const auto code = kernel.diagnostics().has_issue_code(
+                failed.diagnostic_id, "AXM-CORE-E-0002");
+            if (failed.status != axiom::StatusCode::InvalidInput || failed.value ||
+                !code.value || !*code.value || kernel.geometry_count().value != count_before.value ||
+                kernel.cache_entry_count().value != cache_before.value) {
+                std::cerr << "invalid closest-point input must fail without pollution\n";
+                return 1;
+            }
+            const auto after = kernel.curve_service().closest_point(*curve.value, {100, 1, 0});
+            if (!after.value || !approx(after.value->x, 100) || !approx(after.value->y, 1, 1e-5)) {
+                std::cerr << "failed closest-point query changed existing spline\n";
+                return 1;
             }
         }
     }

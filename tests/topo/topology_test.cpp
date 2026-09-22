@@ -9,6 +9,7 @@
 #include <optional>
 #include <iostream>
 #include <string_view>
+#include <type_traits>
 #include <unordered_set>
 
 #include "axiom/diag/error_codes.h"
@@ -50,6 +51,11 @@ bool issue_links_entities(const axiom::DiagnosticReport& report, std::string_vie
 }  // namespace
 
 int main() {
+    static_assert(!std::is_copy_constructible_v<axiom::TopologyTransaction>);
+    static_assert(!std::is_copy_assignable_v<axiom::TopologyTransaction>);
+    static_assert(std::is_move_constructible_v<axiom::TopologyTransaction>);
+    static_assert(!std::is_move_assignable_v<axiom::TopologyTransaction>);
+    static_assert(std::is_nothrow_destructible_v<axiom::TopologyTransaction>);
     axiom::Kernel kernel;
 
     // Non-finite vertex coordinates must fail before mutating topology or transaction tracking.
@@ -134,6 +140,68 @@ int main() {
         if (closed.status != axiom::StatusCode::OperationFailed || !closed_report.value ||
             !has_issue_code(*closed_report.value, axiom::diag_codes::kTxCommitFailure)) {
             std::cerr << "closed transaction vertex creation contract changed\n";
+            return 1;
+        }
+    }
+
+    // FR-TOPO-001: an edge's topological endpoints must lie on its 3D curve.
+    {
+        axiom::Kernel edge_kernel;
+        const auto line = edge_kernel.curves().make_line(
+            {0.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
+        if (!line.value) return 1;
+        auto txn = edge_kernel.topology().begin_transaction();
+        const auto v0 = txn.create_vertex({0.0, 0.0, 0.0});
+        const auto v1 = txn.create_vertex({2.0, 0.0, 0.0});
+        const auto near = txn.create_vertex({3.0, 5.0e-8, 0.0});
+        const auto off = txn.create_vertex({1.0, 1.0, 0.0});
+        if (!v0.value || !v1.value || !near.value || !off.value) return 1;
+        const auto valid_edge = txn.create_edge(*line.value, *v0.value, *v1.value);
+        const auto tolerant_edge = txn.create_edge(*line.value, *v1.value, *near.value);
+        const auto invalid_edge = txn.create_edge(*line.value, *v0.value, *off.value);
+        if (!valid_edge.value || !tolerant_edge.value || !invalid_edge.value) return 1;
+        if (!txn.create_coedge(*valid_edge.value, false).value ||
+            !txn.create_coedge(*tolerant_edge.value, false).value ||
+            !txn.create_coedge(*invalid_edge.value, false).value) return 1;
+
+        if (edge_kernel.topology().validate().validate_edge(*valid_edge.value).status !=
+                axiom::StatusCode::Ok ||
+            edge_kernel.topology().validate().validate_edge(*tolerant_edge.value).status !=
+                axiom::StatusCode::Ok) {
+            std::cerr << "on-curve or tolerance-boundary edge endpoint was rejected\n";
+            return 1;
+        }
+        const auto topology_before = edge_kernel.topology_count().value;
+        const auto writes_before = txn.write_operation_count().value;
+        const auto invalid =
+            edge_kernel.topology().validate().validate_edge(*invalid_edge.value);
+        const auto report = edge_kernel.diagnostics().get(invalid.diagnostic_id);
+        if (invalid.status != axiom::StatusCode::InvalidTopology || !report.value ||
+            !issue_links_entities(*report.value,
+                                  axiom::diag_codes::kTopoCurveTopologyMismatch,
+                                  {invalid_edge.value->value, line.value->value,
+                                   off.value->value}) ||
+            edge_kernel.topology_count().value != topology_before ||
+            txn.write_operation_count().value != writes_before) {
+            std::cerr << "off-curve edge endpoint was accepted or validation polluted state\n";
+            return 1;
+        }
+        const auto path = std::filesystem::temp_directory_path() /
+                          "axiom_topo_edge_curve_mismatch.json";
+        if (edge_kernel.diagnostics()
+                .export_report_json(invalid.diagnostic_id, path.string()).status !=
+            axiom::StatusCode::Ok) return 1;
+        std::ifstream input(path);
+        const std::string json((std::istreambuf_iterator<char>(input)),
+                               std::istreambuf_iterator<char>());
+        input.close();
+        std::filesystem::remove(path);
+        if (json.find(axiom::diag_codes::kTopoCurveTopologyMismatch) ==
+                std::string::npos ||
+            json.find("related_entities") == std::string::npos ||
+            txn.rollback().status != axiom::StatusCode::Ok ||
+            edge_kernel.topology_count().value != std::optional<std::uint64_t>{0}) {
+            std::cerr << "edge mismatch diagnostic export or rollback failed\n";
             return 1;
         }
     }
@@ -3669,6 +3737,105 @@ int main() {
 
     // ---- Stage 2+: same-surface same-loop-id duplicate shell signature is blocked at create_face (7.2); Strict duplicate-signature path is covered by Heal strict_check when data is corrupted. ----
 
+    // ---- FR-TOPO-001: closed-shell shared coedges must have opposite directions ----
+    {
+        axiom::Kernel orientation_kernel;
+        const auto plane_up = orientation_kernel.surfaces().make_plane(
+            {0.0, 0.0, 0.0}, {0.0, 0.0, 1.0});
+        const auto plane_down = orientation_kernel.surfaces().make_plane(
+            {0.0, 0.0, 0.0}, {0.0, 0.0, -1.0});
+        const auto l01 = orientation_kernel.curves().make_line(
+            {0.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
+        const auto l12 = orientation_kernel.curves().make_line(
+            {1.0, 0.0, 0.0}, {-1.0, 1.0, 0.0});
+        const auto l20 = orientation_kernel.curves().make_line(
+            {0.0, 1.0, 0.0}, {0.0, -1.0, 0.0});
+        if (!plane_up.value || !plane_down.value || !l01.value ||
+            !l12.value || !l20.value) {
+            std::cerr << "failed to create geometry for shell orientation test\n";
+            return 1;
+        }
+        auto txn = orientation_kernel.topology().begin_transaction();
+        const auto v0 = txn.create_vertex({0.0, 0.0, 0.0});
+        const auto v1 = txn.create_vertex({1.0, 0.0, 0.0});
+        const auto v2 = txn.create_vertex({0.0, 1.0, 0.0});
+        if (!v0.value || !v1.value || !v2.value) return 1;
+        const auto e01 = txn.create_edge(*l01.value, *v0.value, *v1.value);
+        const auto e12 = txn.create_edge(*l12.value, *v1.value, *v2.value);
+        const auto e20 = txn.create_edge(*l20.value, *v2.value, *v0.value);
+        if (!e01.value || !e12.value || !e20.value) return 1;
+
+        const auto make_face = [&](bool opposite, axiom::SurfaceId surface)
+            -> std::optional<axiom::FaceId> {
+            std::array<axiom::CoedgeId, 3> coedges;
+            if (opposite) {
+                const auto c20 = txn.create_coedge(*e20.value, true);
+                const auto c12 = txn.create_coedge(*e12.value, true);
+                const auto c01 = txn.create_coedge(*e01.value, true);
+                if (!c20.value || !c12.value || !c01.value) return {};
+                coedges = {*c20.value, *c12.value, *c01.value};
+            } else {
+                const auto c01 = txn.create_coedge(*e01.value, false);
+                const auto c12 = txn.create_coedge(*e12.value, false);
+                const auto c20 = txn.create_coedge(*e20.value, false);
+                if (!c01.value || !c12.value || !c20.value) return {};
+                coedges = {*c01.value, *c12.value, *c20.value};
+            }
+            const auto loop = txn.create_loop(coedges);
+            if (!loop.value) return {};
+            return txn.create_face(surface, *loop.value, {}).value;
+        };
+
+        const auto face_up = make_face(false, *plane_up.value);
+        const auto face_same = make_face(false, *plane_up.value);
+        const auto face_opposite = make_face(true, *plane_down.value);
+        if (!face_up || !face_same || !face_opposite) return 1;
+        const auto invalid_shell = txn.create_shell(
+            std::array<axiom::FaceId, 2>{*face_up, *face_same});
+        const auto valid_degenerate_shell = txn.create_shell(
+            std::array<axiom::FaceId, 2>{*face_up, *face_opposite});
+        if (!invalid_shell.value || !valid_degenerate_shell.value) return 1;
+
+        const auto topology_before = orientation_kernel.topology_count().value;
+        const auto writes_before = txn.write_operation_count().value;
+        const auto invalid = orientation_kernel.topology().validate()
+                                 .validate_shell_closedness(*invalid_shell.value);
+        const auto report = orientation_kernel.diagnostics().get(invalid.diagnostic_id);
+        if (invalid.status != axiom::StatusCode::InvalidTopology || !report.value ||
+            !issue_links_entities(*report.value,
+                                  axiom::diag_codes::kTopoLoopOrientationMismatch,
+                                  {invalid_shell.value->value}) ||
+            orientation_kernel.topology_count().value != topology_before ||
+            txn.write_operation_count().value != writes_before) {
+            std::cerr << "same-direction shared coedges were accepted or polluted state\n";
+            return 1;
+        }
+        const auto path = std::filesystem::temp_directory_path() /
+                          "axiom_topo_shell_orientation.json";
+        if (orientation_kernel.diagnostics()
+                .export_report_json(invalid.diagnostic_id, path.string()).status !=
+            axiom::StatusCode::Ok) return 1;
+        std::ifstream input(path);
+        const std::string json((std::istreambuf_iterator<char>(input)),
+                               std::istreambuf_iterator<char>());
+        input.close();
+        std::filesystem::remove(path);
+        if (json.find(axiom::diag_codes::kTopoLoopOrientationMismatch) ==
+                std::string::npos ||
+            json.find("related_entities") == std::string::npos) return 1;
+
+        // A coincident two-face shell is geometrically degenerate, but its exact
+        // topological orientation pairing is valid and must pass this validator.
+        if (orientation_kernel.topology().validate()
+                .validate_shell_closedness(*valid_degenerate_shell.value).status !=
+                axiom::StatusCode::Ok ||
+            txn.rollback().status != axiom::StatusCode::Ok ||
+            orientation_kernel.topology_count().value != std::optional<std::uint64_t>{0}) {
+            std::cerr << "opposite shared-coedge directions or rollback failed\n";
+            return 1;
+        }
+    }
+
     // ---- Stage 2+: Strict topology should fail for disconnected (but closed) shells ----
     {
         auto w0 = kernel.primitives().wedge({10.0, 0.0, 0.0}, 2.0, 2.0, 2.0);
@@ -3702,21 +3869,43 @@ int main() {
 
         auto txn = kernel.topology().begin_transaction();
         auto shell = txn.create_shell(combined);
-        auto body = txn.create_body(std::array<axiom::ShellId, 1>{*shell.value});
-        if (shell.status != axiom::StatusCode::Ok || body.status != axiom::StatusCode::Ok ||
-            !shell.value.has_value() || !body.value.has_value()) {
-            std::cerr << "failed to create combined shell/body for strict disconnected-shell test\n";
+        if (shell.status != axiom::StatusCode::Ok || !shell.value.has_value()) {
+            std::cerr << "failed to create combined shell for strict disconnected-shell test\n";
             return 1;
         }
-        auto strict = kernel.validate().validate_topology(*body.value, axiom::ValidationMode::Strict);
-        if (strict.status == axiom::StatusCode::Ok) {
-            std::cerr << "expected strict topology validation to fail for disconnected shell\n";
+        const auto topology_before = kernel.topology_count().value;
+        const auto writes_before = txn.write_operation_count().value;
+        auto strict = kernel.topology().validate().validate_shell_closedness(*shell.value);
+        if (strict.status != axiom::StatusCode::InvalidTopology ||
+            kernel.topology_count().value != topology_before ||
+            txn.write_operation_count().value != writes_before) {
+            std::cerr << "expected disconnected closed shell rejection without state pollution\n";
             return 1;
         }
         auto diag = kernel.diagnostics().get(strict.diagnostic_id);
         if (diag.status != axiom::StatusCode::Ok || !diag.value.has_value() ||
-            !has_issue_code(*diag.value, axiom::diag_codes::kTopoShellDisconnected)) {
+            !issue_links_entities(*diag.value, axiom::diag_codes::kTopoShellDisconnected,
+                                  {shell.value->value, faces0.value->front().value,
+                                   faces1.value->front().value})) {
             std::cerr << "expected strict validation to expose shell-disconnected diagnostic code\n";
+            return 1;
+        }
+        const auto path = std::filesystem::temp_directory_path() /
+                          "axiom_topo_shell_disconnected.json";
+        if (kernel.diagnostics().export_report_json(strict.diagnostic_id, path.string()).status !=
+            axiom::StatusCode::Ok) return 1;
+        std::ifstream input(path);
+        const std::string json((std::istreambuf_iterator<char>(input)),
+                               std::istreambuf_iterator<char>());
+        input.close();
+        std::filesystem::remove(path);
+        if (json.find(axiom::diag_codes::kTopoShellDisconnected) == std::string::npos ||
+            json.find("related_entities") == std::string::npos) return 1;
+
+        if (kernel.topology().validate()
+                .validate_shell_closedness(shells0.value->front()).status !=
+                axiom::StatusCode::Ok) {
+            std::cerr << "connected closed shell was rejected\n";
             return 1;
         }
         auto rb = txn.rollback();
@@ -3792,8 +3981,8 @@ int main() {
     // ---- Stage 2: Face must not reuse the same Edge across outer/inner loops ----
     {
         auto l01 = kernel.curves().make_line({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
-        auto l12 = kernel.curves().make_line({1.0, 0.0, 0.0}, {0.0, 1.0, 0.0});
-        auto l20 = kernel.curves().make_line({0.0, 1.0, 0.0}, {-1.0, -1.0, 0.0});
+        auto l12 = kernel.curves().make_line({1.0, 0.0, 0.0}, {-1.0, 1.0, 0.0});
+        auto l20 = kernel.curves().make_line({0.0, 1.0, 0.0}, {0.0, -1.0, 0.0});
         auto l13 = kernel.curves().make_line({1.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
         auto l34 = kernel.curves().make_line({2.0, 0.0, 0.0}, {0.0, 1.0, 0.0});
         auto l40 = kernel.curves().make_line({2.0, 1.0, 0.0}, {-2.0, -1.0, 0.0});
@@ -4357,6 +4546,175 @@ int main() {
                     return 1;
                 }
             }
+        }
+    }
+
+    // NFR-REL-001: moving a live transaction transfers its sole authority.
+    // The moved-from object remains safely closed and cannot undo committed work.
+    {
+        axiom::Kernel move_kernel;
+        auto source = move_kernel.topology().begin_transaction();
+        const auto committed_vertex = source.create_vertex({7.0, 8.0, 9.0});
+        if (!committed_vertex.value) return 1;
+        axiom::TopologyTransaction target(std::move(source));
+        const auto source_commit = source.commit();
+        const auto source_rollback = source.rollback();
+        if (source.is_active().value != std::optional<bool>{false} ||
+            source_commit.status != axiom::StatusCode::OperationFailed ||
+            source_rollback.status != axiom::StatusCode::OperationFailed ||
+            source.created_entity_count_total().value != std::optional<std::uint64_t>{0} ||
+            target.created_entity_count_total().value != std::optional<std::uint64_t>{1} ||
+            move_kernel.topology().query().has_vertex(*committed_vertex.value).value !=
+                std::optional<bool>{true}) {
+            std::cerr << "moved-from transaction retained authority or changed the model\n";
+            return 1;
+        }
+        if (target.commit().status != axiom::StatusCode::Ok ||
+            move_kernel.topology().query().has_vertex(*committed_vertex.value).value !=
+                std::optional<bool>{true} ||
+            source.rollback().status != axiom::StatusCode::OperationFailed) {
+            std::cerr << "moved transaction commit was not stable\n";
+            return 1;
+        }
+
+        auto rollback_source = move_kernel.topology().begin_transaction();
+        const auto rolled_back_vertex = rollback_source.create_vertex({10.0, 11.0, 12.0});
+        if (!rolled_back_vertex.value) return 1;
+        axiom::TopologyTransaction rollback_target(std::move(rollback_source));
+        const auto rejected_write = rollback_source.create_vertex({13.0, 14.0, 15.0});
+        if (rejected_write.status != axiom::StatusCode::OperationFailed ||
+            rollback_target.rollback().status != axiom::StatusCode::Ok ||
+            move_kernel.topology().query().has_vertex(*committed_vertex.value).value !=
+                std::optional<bool>{true} ||
+            move_kernel.topology().query().has_vertex(*rolled_back_vertex.value).value !=
+                std::optional<bool>{false}) {
+            std::cerr << "moved transaction rollback polluted committed topology\n";
+            return 1;
+        }
+    }
+
+    // NFR-REL-001: abandoning an active transaction must have rollback semantics.
+    {
+        axiom::Kernel scope_kernel;
+        auto& topo = scope_kernel.topology();
+        const auto replacement = scope_kernel.surfaces().make_plane({0, 0, 1}, {0, 0, 1});
+        const auto box = scope_kernel.primitives().box({0, 0, 0}, 1, 2, 3);
+        if (!replacement.value || !box.value) return 1;
+        const auto faces = topo.query().faces_of_body(*box.value);
+        if (!faces.value || faces.value->empty()) return 1;
+        const auto original_face = faces.value->front();
+        const auto original_body = *box.value;
+        const auto original_surface = topo.query().surface_of_face(original_face);
+        if (!original_surface.value) return 1;
+        const auto baseline = scope_kernel.topology_count().value;
+        if (!baseline) return 1;
+
+        axiom::VertexId abandoned_vertex;
+        {
+            auto abandoned = topo.begin_transaction();
+            const auto vertex = abandoned.create_vertex({1, 2, 3});
+            if (!vertex.value ||
+                abandoned.replace_surface(original_face, *replacement.value).status != axiom::StatusCode::Ok ||
+                abandoned.delete_body(original_body).status != axiom::StatusCode::Ok) return 1;
+            abandoned_vertex = *vertex.value;
+            const auto changed_count = scope_kernel.topology_count().value;
+            const auto changed_writes = abandoned.write_operation_count().value;
+            const auto rejected = abandoned.delete_body(original_body);
+            if (rejected.status != axiom::StatusCode::InvalidInput ||
+                scope_kernel.topology_count().value != changed_count ||
+                abandoned.write_operation_count().value != changed_writes) {
+                std::cerr << "rejected write polluted abandoned transaction\n";
+                return 1;
+            }
+            // No explicit close: destructor must restore the committed model.
+        }
+        if (scope_kernel.topology_count().value != baseline ||
+            topo.query().has_vertex(abandoned_vertex).value != std::optional<bool>{false} ||
+            topo.query().has_body(original_body).value != std::optional<bool>{true} ||
+            topo.query().surface_of_face(original_face).value != original_surface.value ||
+            topo.validate().validate_indices_consistency().status != axiom::StatusCode::Ok) {
+            std::cerr << "abandoned transaction polluted committed topology\n";
+            return 1;
+        }
+
+        // Empty abandonment is a no-op, and explicit commit remains durable.
+        { auto empty = topo.begin_transaction(); }
+        axiom::VertexId committed_vertex;
+        {
+            auto committed = topo.begin_transaction();
+            const auto vertex = committed.create_vertex({4, 5, 6});
+            if (!vertex.value || committed.commit().status != axiom::StatusCode::Ok) return 1;
+            committed_vertex = *vertex.value;
+        }
+        if (topo.query().has_vertex(committed_vertex).value != std::optional<bool>{true}) {
+            std::cerr << "closed transaction destructor reverted committed topology\n";
+            return 1;
+        }
+
+        // A moved-from destructor is inert; the active target owns rollback.
+        axiom::VertexId moved_vertex;
+        {
+            auto source = topo.begin_transaction();
+            const auto vertex = source.create_vertex({7, 8, 9});
+            if (!vertex.value) return 1;
+            moved_vertex = *vertex.value;
+            { axiom::TopologyTransaction target(std::move(source)); }
+            if (topo.query().has_vertex(moved_vertex).value != std::optional<bool>{false}) return 1;
+        }
+        if (topo.query().has_vertex(committed_vertex).value != std::optional<bool>{true} ||
+            topo.query().has_body(original_body).value != std::optional<bool>{true}) {
+            std::cerr << "scope rollback or moved-from destruction polluted stable topology\n";
+            return 1;
+        }
+    }
+
+    // NFR-REL-001: a surface replacement is a write even when it is the only
+    // operation, so scope rollback and commit audit must not treat it as empty.
+    {
+        axiom::Kernel replace_kernel;
+        auto& topo = replace_kernel.topology();
+        const auto box = replace_kernel.primitives().box({0, 0, 0}, 1, 1, 1);
+        const auto replacement = replace_kernel.surfaces().make_plane({0, 0, 2}, {0, 0, 1});
+        if (!box.value || !replacement.value) return 1;
+        const auto faces = topo.query().faces_of_body(*box.value);
+        if (!faces.value || faces.value->empty()) return 1;
+        const auto face = faces.value->front();
+        const auto original = topo.query().surface_of_face(face);
+        if (!original.value) return 1;
+
+        {
+            auto abandoned = topo.begin_transaction();
+            const auto rejected = abandoned.replace_surface(face, axiom::SurfaceId{});
+            if (rejected.status != axiom::StatusCode::InvalidInput ||
+                abandoned.write_operation_count().value != std::optional<std::uint64_t>{0} ||
+                topo.query().surface_of_face(face).value != original.value) {
+                std::cerr << "rejected surface replacement polluted transaction\n";
+                return 1;
+            }
+            if (abandoned.replace_surface(face, *replacement.value).status != axiom::StatusCode::Ok ||
+                abandoned.write_operation_count().value != std::optional<std::uint64_t>{1}) return 1;
+        }
+        if (topo.query().surface_of_face(face).value != original.value) {
+            std::cerr << "replacement-only scope exit did not roll back\n";
+            return 1;
+        }
+
+        auto explicit_rollback = topo.begin_transaction();
+        if (explicit_rollback.replace_surface(face, *replacement.value).status != axiom::StatusCode::Ok ||
+            explicit_rollback.rollback().status != axiom::StatusCode::Ok ||
+            explicit_rollback.write_operation_count().value != std::optional<std::uint64_t>{0} ||
+            topo.query().surface_of_face(face).value != original.value) return 1;
+
+        auto committed = topo.begin_transaction();
+        if (committed.replace_surface(face, *replacement.value).status != axiom::StatusCode::Ok ||
+            committed.commit().status != axiom::StatusCode::Ok) return 1;
+        const auto audit = replace_kernel.topology_commit_audit();
+        if (topo.query().surface_of_face(face).value != replacement.value ||
+            !audit.value || audit.value->last_commit_write_operations != 1 ||
+            audit.value->last_commit_write_breakdown.replaced_surfaces != 1 ||
+            audit.value->committed_write_operations_total != 1) {
+            std::cerr << "replacement-only commit audit is inconsistent\n";
+            return 1;
         }
     }
 

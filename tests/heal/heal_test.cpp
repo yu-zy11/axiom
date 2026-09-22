@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <filesystem>
@@ -50,10 +51,47 @@ int count_stage(const axiom::DiagnosticReport& report, std::string_view code, st
     return n;
 }
 
+bool has_related_entity(const axiom::Issue& issue, std::uint64_t entity) {
+    return std::find(issue.related_entities.begin(), issue.related_entities.end(), entity) !=
+           issue.related_entities.end();
+}
+
 }  // namespace
 
 int main() {
     axiom::Kernel kernel;
+
+    const auto bodies_before_invalid_validation = kernel.body_count();
+    const auto objects_before_invalid_validation = kernel.object_count_total();
+    const axiom::BodyId missing_body {987654321};
+    const auto missing_geometry = kernel.validate().validate_geometry(missing_body, axiom::ValidationMode::Strict);
+    const auto bodies_after_invalid_validation = kernel.body_count();
+    const auto objects_after_invalid_validation = kernel.object_count_total();
+    const auto missing_diag = kernel.diagnostics().get(missing_geometry.diagnostic_id);
+    const auto missing_stage = kernel.diagnostics().find_by_issue_stage("heal.validate_geometry.input", 10);
+    if (missing_geometry.status != axiom::StatusCode::InvalidInput ||
+        bodies_before_invalid_validation.status != axiom::StatusCode::Ok ||
+        !bodies_before_invalid_validation.value.has_value() ||
+        bodies_after_invalid_validation.status != axiom::StatusCode::Ok ||
+        !bodies_after_invalid_validation.value.has_value() ||
+        objects_before_invalid_validation.status != axiom::StatusCode::Ok ||
+        !objects_before_invalid_validation.value.has_value() ||
+        objects_after_invalid_validation.status != axiom::StatusCode::Ok ||
+        !objects_after_invalid_validation.value.has_value() ||
+        *bodies_before_invalid_validation.value != *bodies_after_invalid_validation.value ||
+        *objects_before_invalid_validation.value != *objects_after_invalid_validation.value ||
+        missing_diag.status != axiom::StatusCode::Ok || !missing_diag.value.has_value() ||
+        missing_stage.status != axiom::StatusCode::Ok || !missing_stage.value.has_value() || missing_stage.value->empty()) {
+        std::cerr << "invalid geometry validation diagnostics or failure isolation is unexpected\n";
+        return 1;
+    }
+    const auto* missing_issue = find_issue(*missing_diag.value, axiom::diag_codes::kValDegenerateGeometry);
+    if (missing_issue == nullptr || missing_issue->stage != "heal.validate_geometry.input" ||
+        !has_related_entity(*missing_issue, missing_body.value) ||
+        missing_stage.value->back().value != missing_geometry.diagnostic_id.value) {
+        std::cerr << "invalid geometry validation stage/entity evidence is unexpected\n";
+        return 1;
+    }
 
     auto box_a = kernel.primitives().box({0.0, 0.0, 0.0}, 10.0, 10.0, 10.0);
     if (box_a.status != axiom::StatusCode::Ok || !box_a.value.has_value()) {
@@ -466,11 +504,84 @@ int main() {
             std::cerr << "validate_self_intersection_all_shells should pass on fresh box\n";
             return 1;
         }
+        const auto bodies_before_si_failures = si_kernel.body_count();
+        const auto objects_before_si_failures = si_kernel.object_count_total();
+        const axiom::BodyId missing_si_body {987654322};
+        const axiom::ShellId missing_si_shell {987654323};
+        auto missing_body_si = si_kernel.validate().validate_self_intersection(
+            missing_si_body, axiom::ValidationMode::Strict);
+        auto missing_shell_si = si_kernel.validate().validate_self_intersection_shell(
+            *fresh_box.value, missing_si_shell, axiom::ValidationMode::Strict);
+        auto second_box = si_kernel.primitives().box({4.0, 0.0, 0.0}, 1.0, 1.0, 1.0);
+        if (second_box.status != axiom::StatusCode::Ok || !second_box.value.has_value()) {
+            std::cerr << "second box for foreign shell regression failed\n";
+            return 1;
+        }
+        auto second_shells = si_kernel.topology().query().shells_of_body(*second_box.value);
+        if (second_shells.status != axiom::StatusCode::Ok || !second_shells.value.has_value() ||
+            second_shells.value->empty()) {
+            std::cerr << "second box should expose an owned shell\n";
+            return 1;
+        }
+        const auto objects_after_second_box = si_kernel.object_count_total();
+        auto foreign_shell_si = si_kernel.validate().validate_self_intersection_shell(
+            *fresh_box.value, second_shells.value->front(), axiom::ValidationMode::Strict);
         const std::span<const axiom::ShellId> empty_shell_span;
         auto shell_many_empty = si_kernel.validate().validate_self_intersection_shell_many(
             *fresh_box.value, empty_shell_span, axiom::ValidationMode::Strict);
-        if (shell_many_empty.status != axiom::StatusCode::InvalidInput) {
-            std::cerr << "empty shell span should yield InvalidInput for validate_self_intersection_shell_many\n";
+        const auto bodies_after_si_failures = si_kernel.body_count();
+        const auto objects_after_si_failures = si_kernel.object_count_total();
+        const auto missing_body_diag = si_kernel.diagnostics().get(missing_body_si.diagnostic_id);
+        const auto missing_shell_diag = si_kernel.diagnostics().get(missing_shell_si.diagnostic_id);
+        const auto foreign_shell_diag = si_kernel.diagnostics().get(foreign_shell_si.diagnostic_id);
+        const auto empty_shell_diag = si_kernel.diagnostics().get(shell_many_empty.diagnostic_id);
+        const auto body_input_stage = si_kernel.diagnostics().find_by_issue_stage(
+            "heal.validate_self_intersection.input", 10);
+        const auto shell_input_stage = si_kernel.diagnostics().find_by_issue_stage(
+            "heal.validate_self_intersection.shell_input", 10);
+        if (missing_body_si.status != axiom::StatusCode::InvalidInput ||
+            missing_shell_si.status != axiom::StatusCode::InvalidInput ||
+            foreign_shell_si.status != axiom::StatusCode::InvalidInput ||
+            shell_many_empty.status != axiom::StatusCode::InvalidInput ||
+            !missing_body_diag.value.has_value() || !missing_shell_diag.value.has_value() ||
+            !foreign_shell_diag.value.has_value() || !empty_shell_diag.value.has_value()) {
+            std::cerr << "self-intersection invalid input regressions should return diagnostics\n";
+            return 1;
+        }
+        const auto* missing_body_issue = find_issue(*missing_body_diag.value, axiom::diag_codes::kValSelfIntersection);
+        const auto* missing_shell_issue = find_issue(*missing_shell_diag.value, axiom::diag_codes::kValSelfIntersection);
+        const auto* foreign_shell_issue = find_issue(*foreign_shell_diag.value, axiom::diag_codes::kValSelfIntersection);
+        const auto* empty_shell_issue = find_issue(*empty_shell_diag.value, axiom::diag_codes::kValSelfIntersection);
+        if (missing_body_issue == nullptr || missing_body_issue->stage != "heal.validate_self_intersection.input" ||
+            !has_related_entity(*missing_body_issue, missing_si_body.value) || missing_shell_issue == nullptr ||
+            missing_shell_issue->stage != "heal.validate_self_intersection.shell_input" ||
+            !has_related_entity(*missing_shell_issue, fresh_box.value->value) ||
+            !has_related_entity(*missing_shell_issue, missing_si_shell.value) || foreign_shell_issue == nullptr ||
+            foreign_shell_issue->stage != "heal.validate_self_intersection.shell_input" ||
+            !has_related_entity(*foreign_shell_issue, fresh_box.value->value) ||
+            !has_related_entity(*foreign_shell_issue, second_shells.value->front().value) || empty_shell_issue == nullptr ||
+            empty_shell_issue->stage != "heal.validate_self_intersection.shell_input" ||
+            !has_related_entity(*empty_shell_issue, fresh_box.value->value) || !body_input_stage.value.has_value() ||
+            body_input_stage.value->empty() || !shell_input_stage.value.has_value() || shell_input_stage.value->size() < 3) {
+            std::cerr << "self-intersection failure stage/entity evidence is unexpected\n";
+            return 1;
+        }
+        const auto si_json_path = std::filesystem::temp_directory_path() / "axiom_heal_self_intersection_failure.json";
+        const auto si_json_export = si_kernel.diagnostics().export_report_json(foreign_shell_si.diagnostic_id,
+                                                                               si_json_path.string());
+        std::ifstream si_json_in(si_json_path);
+        const std::string si_json((std::istreambuf_iterator<char>(si_json_in)), std::istreambuf_iterator<char>());
+        std::filesystem::remove(si_json_path);
+        if (si_json_export.status != axiom::StatusCode::Ok ||
+            si_json.find("\"stage\":\"heal.validate_self_intersection.shell_input\"") == std::string::npos ||
+            si_json.find(std::to_string(fresh_box.value->value)) == std::string::npos ||
+            si_json.find(std::to_string(second_shells.value->front().value)) == std::string::npos ||
+            !bodies_before_si_failures.value.has_value() || !bodies_after_si_failures.value.has_value() ||
+            *bodies_after_si_failures.value != *bodies_before_si_failures.value + 1 ||
+            !objects_before_si_failures.value.has_value() || !objects_after_second_box.value.has_value() ||
+            !objects_after_si_failures.value.has_value() ||
+            *objects_after_si_failures.value != *objects_after_second_box.value) {
+            std::cerr << "self-intersection JSON evidence or failure non-pollution is unexpected\n";
             return 1;
         }
     }
@@ -553,9 +664,18 @@ int main() {
             return 1;
         }
         auto nd_diag = ndk.diagnostics().get(nd_strict.diagnostic_id);
+        const auto nd_stage = ndk.diagnostics().find_by_issue_stage(
+            "heal.validate_geometry.near_duplicate_vertices", 10);
         if (nd_diag.status != axiom::StatusCode::Ok || !nd_diag.value.has_value() ||
-            !has_issue_code(*nd_diag.value, axiom::diag_codes::kValNearDuplicateVertices)) {
+            !has_issue_code(*nd_diag.value, axiom::diag_codes::kValNearDuplicateVertices) ||
+            nd_stage.status != axiom::StatusCode::Ok || !nd_stage.value.has_value() || nd_stage.value->empty()) {
             std::cerr << "expected kValNearDuplicateVertices diagnostic for near-duplicate vertex body\n";
+            return 1;
+        }
+        const auto* nd_issue = find_issue(*nd_diag.value, axiom::diag_codes::kValNearDuplicateVertices);
+        if (nd_issue == nullptr || nd_issue->stage != "heal.validate_geometry.near_duplicate_vertices" ||
+            !has_related_entity(*nd_issue, bd.value->value)) {
+            std::cerr << "near-duplicate diagnostic stage/entity evidence is unexpected\n";
             return 1;
         }
     }
@@ -635,6 +755,22 @@ int main() {
         if (fn_diag.status != axiom::StatusCode::Ok || !fn_diag.value.has_value() ||
             !has_issue_code(*fn_diag.value, axiom::diag_codes::kValFaceNormalInconsistent)) {
             std::cerr << "expected kValFaceNormalInconsistent diagnostic for wrong plane normal face\n";
+            return 1;
+        }
+        const auto* fn_issue = find_issue(*fn_diag.value, axiom::diag_codes::kValFaceNormalInconsistent);
+        const auto fn_stage = fnk.diagnostics().find_by_issue_stage("heal.validate_geometry.face_normal", 10);
+        const auto json_path = std::filesystem::temp_directory_path() / "axiom_heal_geometry_failure.json";
+        const auto json_export = fnk.diagnostics().export_report_json(fn_strict.diagnostic_id, json_path.string());
+        std::ifstream json_in(json_path);
+        const std::string json((std::istreambuf_iterator<char>(json_in)), std::istreambuf_iterator<char>());
+        std::error_code remove_error;
+        std::filesystem::remove(json_path, remove_error);
+        if (fn_issue == nullptr || fn_issue->stage != "heal.validate_geometry.face_normal" ||
+            !has_related_entity(*fn_issue, fbody.value->value) || fn_stage.status != axiom::StatusCode::Ok ||
+            !fn_stage.value.has_value() || fn_stage.value->empty() || json_export.status != axiom::StatusCode::Ok ||
+            json.find("heal.validate_geometry.face_normal") == std::string::npos ||
+            json.find(axiom::diag_codes::kValFaceNormalInconsistent) == std::string::npos) {
+            std::cerr << "face-normal diagnostic stage/entity JSON evidence is unexpected\n";
             return 1;
         }
     }
