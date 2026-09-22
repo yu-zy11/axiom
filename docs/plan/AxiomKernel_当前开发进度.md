@@ -203,7 +203,7 @@
   - **建议测试入口**：`axiom_smoke_test`、`axiom_kernel_runtime_invariant_test`
 
 - **diag（Diagnostics）**
-  - **已具备**：错误码/诊断码常量、诊断报告、JSON 导出（含 `Issue.stage`）、按 related entity 检索；BOOL/HEAL/IO 关键路径已绑定阶段标签并有回归断言；**按 `Issue.stage` 聚合**：`issue_stage_histogram`、`export_grouped_by_stage_txt/json`（空 `stage` 计入 `(unset)`），`axiom_diagnostics_test` 校验分组 JSON 与已知阶段桶；**全量归档**：`export_all_reports_json` / `export_all_reports_txt`（按 `DiagnosticId` 升序、JSON 与单条 `export_report_json` 结构一致）；**按阶段检索**：`find_by_issue_stage`（`issue.stage` 精确匹配）
+  - **已具备**：错误码/诊断码常量、诊断报告、JSON 导出（含 `Issue.stage`）、按 related entity 检索；BOOL/HEAL/IO 关键路径已绑定阶段标签并有回归断言；**按 `Issue.stage` 聚合**：`issue_stage_histogram`、`export_grouped_by_stage_txt/json`（空 `stage` 计入 `(unset)`；第 24 切片补齐空路径预校验及写入/关闭失败检测），`axiom_diagnostics_test` 校验分组证据、失败诊断、源报告不变与重试；**全量归档**：`export_all_reports_json` / `export_all_reports_txt`（按 `DiagnosticId` 升序、JSON 与单条 `export_report_json` 结构一致）；**按阶段检索**：`find_by_issue_stage`（`issue.stage` 精确匹配）
   - **主要不足**：
     - **阶段化诊断全覆盖**：BOOL/HEAL/IO 等高风险链路仍需把**全部**失败分支纳入阶段结构与门禁（当前为关键路径首批绑定）
     - **批量导出/聚合策略**：面向 CI/回归资产归档的批量导出与检索效率策略仍缺
@@ -370,6 +370,8 @@
 - **未开始/缺失**：**进程外/OS 级隔离**、动态库加载与供应链安全（签名/沙箱）；**完整 SemVer 与多 ABI 并存**（`SameMajor`/`SameMinor` 已支持剥离 `-` 预发布与 `+` 构建元数据后再做核心版本比较；`Exact` 仍为整串相等；多 ABI 并存与完整 SemVer 语义仍不足）；**已闭合（宿主绑定）**：`Kernel` 构造时对 `PluginRegistry::bind_host_kernel_for_plugin_invocation` 绑定 `weak_ptr<KernelState>` 后，**`invoke_registered_importer/exporter/repair/curve`** 在对应策略开关开启时会自动套用与 **`plugin_import_file` / `plugin_export_file` / `plugin_run_repair` / `plugin_create_curve`** 一致的宿主校验语义（未绑定宿主时行为与历史一致：仅调用插件）；**Body** 侧仍可显式 **`validate_after_plugin_mutation`**，**曲线**侧 **`verify_after_plugin_curve`** 与 `plugin_curve_host_consistency_check` 共用实现
 
 ### 需求 7.13 诊断与日志（Diagnostics）
+
+- **FR-DIAG-001 第 24 切片**：`export_grouped_by_stage_txt/json` 显式关闭并检查输出流，设备写入/关闭失败不再误报成功；空路径在打开文件前返回 `InvalidInput`，打开或写入失败返回 `OperationFailed`，均复用 `AXM-IO-E-0005`。`axiom_diagnostics_test` 覆盖正常阶段、空阶段 `(unset)`、空路径、目录、Linux `/dev/full`、参数失败不截断既有文件、源报告不变及失败后重试。无公开签名或错误码变化；设备写入失败不保证恢复目标文件，需求仍为受限可用。
 
 - **NFR-DIA-001 第 20 切片**：`ValidationService::validate_geometry` 的所有失败出口补齐 `heal.validate_geometry.*` 根因阶段；非法句柄和 bbox 失败显式关联目标 Body，owned B-Rep/Strict 检查保留目标 Body 与问题子实体。`axiom_heal_test` 覆盖合法成功、非法句柄、近重复顶点、面法向退化、阶段检索、JSON 导出及持久模型计数不污染。复用既有错误码且无公开签名变化；需求仍为受限可用，其他 HEAL/BOOL/IO 失败路径及全覆盖门禁待继续闭合。
 

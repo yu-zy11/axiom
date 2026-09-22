@@ -181,9 +181,82 @@ bool check_batch_txt_export() {
     return empty_after.value && empty_after.value->summary.empty() && empty_after.value->issues.empty();
 }
 
+bool check_grouped_stage_export_failures() {
+    axiom::Kernel kernel;
+    auto& diagnostics = kernel.diagnostics();
+    axiom::Issue staged;
+    staged.code = std::string(axiom::diag_codes::kBoolInvalidInput);
+    staged.severity = axiom::IssueSeverity::Error;
+    staged.message = "阶段导出证据";
+    staged.stage = "bool.input";
+    staged.related_entities = {41, 42};
+    axiom::Issue unset = staged;
+    unset.stage.clear();
+    const std::array<axiom::Issue, 2> issues {staged, unset};
+    const auto source = diagnostics.create_report("stage source", issues);
+    if (!source.value) return false;
+
+    const auto directory = std::filesystem::temp_directory_path() / "axiom_diag_grouped_stage_slice";
+    std::filesystem::create_directories(directory);
+    struct Cleanup {
+        std::filesystem::path path;
+        ~Cleanup() { std::filesystem::remove_all(path); }
+    } cleanup {directory};
+    const auto txt_path = directory / "stages.txt";
+    const auto json_path = directory / "stages.json";
+    const auto read = [](const std::filesystem::path& path) {
+        std::ifstream in(path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    };
+    if (diagnostics.export_grouped_by_stage_txt(txt_path.string()).status != axiom::StatusCode::Ok ||
+        diagnostics.export_grouped_by_stage_json(json_path.string()).status != axiom::StatusCode::Ok ||
+        read(txt_path).find("bool.input: 1") == std::string::npos ||
+        read(txt_path).find("(unset): 1") == std::string::npos ||
+        read(json_path).find("\"bool.input\":1") == std::string::npos ||
+        read(json_path).find("\"(unset)\":1") == std::string::npos) return false;
+
+    const std::string preserved = "preserve-existing-content";
+    {
+        std::ofstream out(txt_path, std::ios::binary | std::ios::trunc);
+        out << preserved;
+    }
+    const auto empty_txt = diagnostics.export_grouped_by_stage_txt("");
+    const auto empty_json = diagnostics.export_grouped_by_stage_json("");
+    const auto open_txt = diagnostics.export_grouped_by_stage_txt(directory.string());
+    const auto open_json = diagnostics.export_grouped_by_stage_json(directory.string());
+    for (const auto* result : {&empty_txt, &empty_json, &open_txt, &open_json}) {
+        const auto failure = diagnostics.get(result->diagnostic_id);
+        if (!failure.value || !has_issue_code(*failure.value, axiom::diag_codes::kIoExportFailure)) return false;
+    }
+    if (empty_txt.status != axiom::StatusCode::InvalidInput ||
+        empty_json.status != axiom::StatusCode::InvalidInput ||
+        open_txt.status != axiom::StatusCode::OperationFailed ||
+        open_json.status != axiom::StatusCode::OperationFailed || read(txt_path) != preserved) return false;
+#if defined(__linux__)
+    const auto write_txt = diagnostics.export_grouped_by_stage_txt("/dev/full");
+    const auto write_json = diagnostics.export_grouped_by_stage_json("/dev/full");
+    for (const auto* result : {&write_txt, &write_json}) {
+        const auto failure = diagnostics.get(result->diagnostic_id);
+        if (result->status != axiom::StatusCode::OperationFailed || !failure.value ||
+            !has_issue_code(*failure.value, axiom::diag_codes::kIoExportFailure)) return false;
+    }
+#endif
+    const auto source_after = diagnostics.get(*source.value);
+    if (!source_after.value || source_after.value->summary != "stage source" ||
+        source_after.value->issues.size() != 2 ||
+        source_after.value->issues[0].stage != "bool.input" ||
+        !source_after.value->issues[1].stage.empty() ||
+        source_after.value->issues[0].related_entities != std::vector<std::uint64_t>({41, 42})) return false;
+    return diagnostics.export_grouped_by_stage_json(json_path.string()).status == axiom::StatusCode::Ok;
+}
+
 }  // namespace
 
 int main() {
+    if (!check_grouped_stage_export_failures()) {
+        std::cerr << "grouped stage export failure handling or source isolation regression\n";
+        return 1;
+    }
     if (!check_batch_txt_export()) {
         std::cerr << "batch text diagnostic evidence or failure isolation regression\n";
         return 1;
