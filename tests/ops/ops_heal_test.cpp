@@ -755,10 +755,34 @@ int main() {
         return 1;
     }
 
-    const std::array<axiom::CoedgeId, 1> coedges {*coedge.value};
+    // Face modification needs a closed boundary, not a single open coedge.
+    auto v2 = txn.create_vertex({0.0, 1.0, 0.0});
+    auto line12 = kernel.curves().make_line({1.0, 0.0, 0.0}, {-1.0, 1.0, 0.0});
+    auto line20 = kernel.curves().make_line({0.0, 1.0, 0.0}, {0.0, -1.0, 0.0});
+    if (!v2.value || !line12.value || !line20.value) {
+        std::cerr << "failed to create triangle prerequisites\n";
+        return 1;
+    }
+    auto edge12 = txn.create_edge(*line12.value, *v1.value, *v2.value);
+    auto edge20 = txn.create_edge(*line20.value, *v2.value, *v0.value);
+    if (!edge12.value || !edge20.value) {
+        std::cerr << "failed to create triangle edges\n";
+        return 1;
+    }
+    auto coedge12 = txn.create_coedge(*edge12.value, false);
+    auto coedge20 = txn.create_coedge(*edge20.value, false);
+    if (!coedge12.value || !coedge20.value) {
+        std::cerr << "failed to create triangle coedges\n";
+        return 1;
+    }
+    const std::array<axiom::CoedgeId, 3> coedges {*coedge.value, *coedge12.value, *coedge20.value};
     auto loop = txn.create_loop(coedges);
     if (loop.status != axiom::StatusCode::Ok || !loop.value.has_value()) {
         std::cerr << "failed to create loop\n";
+        return 1;
+    }
+    if (kernel.topology().validate().validate_loop(*loop.value).status != axiom::StatusCode::Ok) {
+        std::cerr << "invalid face modification boundary\n";
         return 1;
     }
 

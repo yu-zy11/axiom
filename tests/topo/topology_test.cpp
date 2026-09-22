@@ -138,6 +138,89 @@ int main() {
         }
     }
 
+    // FR-TOPO-001: a single open coedge is not a closed loop, even at coincident coordinates.
+    {
+        axiom::Kernel loop_kernel;
+        const auto line = loop_kernel.curves().make_line({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
+        if (!line.value) return 1;
+        auto setup = loop_kernel.topology().begin_transaction();
+        const auto origin = setup.create_vertex({0.0, 0.0, 0.0});
+        if (!origin.value || setup.commit().status != axiom::StatusCode::Ok) return 1;
+        const auto topology_before = loop_kernel.topology_count().value;
+        const auto geometry_before = loop_kernel.geometry_count().value;
+        auto txn = loop_kernel.topology().begin_transaction();
+        const auto v1 = txn.create_vertex({1.0, 0.0, 0.0});
+        const auto v2 = txn.create_vertex({0.0, 1.0, 0.0});
+        const auto coincident = txn.create_vertex({0.0, 0.0, 0.0});
+        if (!v1.value || !v2.value || !coincident.value) return 1;
+        const auto edge = txn.create_edge(*line.value, *origin.value, *v1.value);
+        const auto collapsed = txn.create_edge(*line.value, *origin.value, *coincident.value);
+        if (!edge.value || !collapsed.value) return 1;
+        std::array<axiom::CoedgeId, 4> singles;
+        for (std::size_t i = 0; i < singles.size(); ++i) {
+            const auto coedge = txn.create_coedge(i < 2 ? *edge.value : *collapsed.value, i % 2 != 0);
+            if (!coedge.value) return 1;
+            singles[i] = *coedge.value;
+        }
+        const auto count_before = loop_kernel.topology_count().value;
+        const auto writes_before = txn.write_operation_count().value;
+        const auto version_before = txn.preview_commit_version().value;
+        for (const auto coedge : singles) {
+            const auto result = txn.create_loop(std::array<axiom::CoedgeId, 1>{coedge});
+            const auto report = loop_kernel.diagnostics().get(result.diagnostic_id);
+            if (result.status != axiom::StatusCode::InvalidTopology || result.value || !report.value ||
+                !has_issue_code(*report.value, axiom::diag_codes::kTopoLoopNotClosed)) {
+                std::cerr << "single open coedge must fail loop closedness validation\n";
+                return 1;
+            }
+            if (loop_kernel.topology_count().value != count_before ||
+                loop_kernel.geometry_count().value != geometry_before ||
+                txn.write_operation_count().value != writes_before ||
+                txn.preview_commit_version().value != version_before ||
+                txn.created_loop_count().value != std::optional<std::uint64_t>{0} ||
+                !txn.created_loops().value || !txn.created_loops().value->empty() ||
+                loop_kernel.topology().query().loops_of_edge(*edge.value).value !=
+                    std::optional<std::vector<axiom::LoopId>>{std::vector<axiom::LoopId>{}} ||
+                loop_kernel.topology().query().loops_of_edge(*collapsed.value).value !=
+                    std::optional<std::vector<axiom::LoopId>>{std::vector<axiom::LoopId>{}} ||
+                txn.is_active().value != std::optional<bool>{true}) {
+                std::cerr << "failed loop creation polluted storage, indices or transaction state\n";
+                return 1;
+            }
+            const auto path = std::filesystem::temp_directory_path() / "axiom_topo_single_coedge.json";
+            if (loop_kernel.diagnostics().export_report_json(result.diagnostic_id, path.string()).status !=
+                axiom::StatusCode::Ok) return 1;
+            std::ifstream input(path);
+            const std::string json((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+            input.close();
+            std::filesystem::remove(path);
+            if (json.find(axiom::diag_codes::kTopoLoopNotClosed) == std::string::npos) return 1;
+        }
+        // The rejected coedge is still unowned and usable in a real closed triangle.
+        const auto line12 = loop_kernel.curves().make_line({1.0, 0.0, 0.0}, {-1.0, 1.0, 0.0});
+        const auto line20 = loop_kernel.curves().make_line({0.0, 1.0, 0.0}, {0.0, -1.0, 0.0});
+        if (!line12.value || !line20.value) return 1;
+        const auto e12 = txn.create_edge(*line12.value, *v1.value, *v2.value);
+        const auto e20 = txn.create_edge(*line20.value, *v2.value, *origin.value);
+        if (!e12.value || !e20.value) return 1;
+        const auto c12 = txn.create_coedge(*e12.value, false);
+        const auto c20 = txn.create_coedge(*e20.value, false);
+        if (!c12.value || !c20.value) return 1;
+        const auto loop = txn.create_loop(std::array<axiom::CoedgeId, 3>{singles[0], *c12.value, *c20.value});
+        if (!loop.value || loop_kernel.topology().validate().validate_loop(*loop.value).status !=
+                axiom::StatusCode::Ok ||
+            loop_kernel.topology().query().loops_of_edge(*edge.value).value !=
+                std::optional<std::vector<axiom::LoopId>>{{*loop.value}} ||
+            txn.rollback().status != axiom::StatusCode::Ok ||
+            loop_kernel.topology_count().value != topology_before ||
+            loop_kernel.topology().query().has_vertex(*origin.value).value != std::optional<bool>{true} ||
+            loop_kernel.topology().query().has_loop(*loop.value).value != std::optional<bool>{false} ||
+            txn.write_operation_count().value != std::optional<std::uint64_t>{0}) {
+            std::cerr << "closed triangle creation or rollback failed after rejected single-coedge loops\n";
+            return 1;
+        }
+    }
+
     // NFR-REL-001: existing coedge bindings must survive rejected writes and rollback.
     {
         axiom::Kernel binding_kernel;

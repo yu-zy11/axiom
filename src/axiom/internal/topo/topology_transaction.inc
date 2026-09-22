@@ -115,7 +115,6 @@ TopologyTransaction::create_loop(std::span<const CoedgeId> coedges) {
         *state_, StatusCode::InvalidTopology, diag_codes::kTopoLoopDuplicateEdge,
         "创建环失败：定向边序列包含重复引用", "创建环失败");
   }
-  const auto id = LoopId{state_->allocate_id()};
   detail::LoopRecord loop{
       std::vector<CoedgeId>(coedges.begin(), coedges.end())};
   std::string reason;
@@ -127,6 +126,7 @@ TopologyTransaction::create_loop(std::span<const CoedgeId> coedges) {
     return detail::failed_result<LoopId>(*state_, StatusCode::InvalidTopology, fail_code,
                                          "创建环失败：" + reason, "创建环失败");
   }
+  const auto id = LoopId{state_->allocate_id()};
   state_->loops.emplace(id.value, std::move(loop));
   created_loops_.push_back(id.value);
   rebuild_topology_indices(*state_);

@@ -289,6 +289,8 @@
 
 ### 需求 7.2 拓扑结构管理（TopoCore）
 
+- **FR-TOPO-001 第 7 切片**：移除 `validate_loop_record` 对单共边的特殊放行，创建入口与环验证共享首尾顶点 ID 闭合规则；未闭合返回 `AXM-TOPO-E-0002`，创建失败不分配环 ID、不改存储、索引或事务写计数。`axiom_topology_test` 覆盖正反方向、坐标重合但 ID 不同、失败后复用共边构造闭合三角环、回滚保留已有顶点及诊断 JSON。`axiom_ops_heal_test` 的面修改夹具已由单条开放边改为闭合三角环，保留来源追踪等原有断言。当前 `create_edge` 仍拒绝同一端点 ID，故本切片不宣称支持单边周期环；FR-TOPO-001 保持受限可用。验证：`ctest --test-dir build-agent --output-on-failure` 16/16 通过，总耗时 24.91 秒，性能项 2.89 秒；文档检查通过。
+
 - **拓扑元素与关系**
   - **已完成（基础可用）**：Vertex/Edge/Coedge/Loop/Face/Shell/Body；外环与内环；基础反向邻接索引；来源追踪的基础查询
   - **部分完成**：壳闭合/非流形检测（既有告警 + Strict hard；**`validate_shell` 开放边界/非流形告警带壳+边 `related_entities`**）；来源引用一致性 Strict 校验；**面环方向**（无 PCurve：平面/球/圆柱/圆锥侧壁、**环面**管向截面径向）；**环级 `coedge_to_loop` 一致性**；**`validate_loop` 在 `loop_to_faces` 有条目时与面互指**；**定向边级 `validate_coedge`：`edge_to_coedges` 必含本 coedge；若已有 `coedge_to_loop` 则与环成员互指**（未入环中间态不强制）；**面级 `loop_to_faces` 与面外/内环互指**；**`face_to_shells` 有条目时与壳 `faces` 互指**（`validate_face`）；**trim bridge**（UV 闭合、内外环 UV 方向、PCurve↔3D 采样/端点一致性，`validate_face_trim_consistency` 等）

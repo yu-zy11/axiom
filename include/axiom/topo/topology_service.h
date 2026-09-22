@@ -119,6 +119,7 @@ public:
     Result<EdgeId> create_edge(CurveId curve_id, VertexId v0, VertexId v1);
     Result<CoedgeId> create_coedge(EdgeId edge_id, bool reversed);
     Result<void> set_coedge_pcurve(CoedgeId coedge_id, PCurveId pcurve_id);
+    /// 按定向端点 ID 首尾闭合；单共边不豁免。未闭合返回 InvalidTopology / AXM-TOPO-E-0002，不写入环或事务计数。
     Result<LoopId> create_loop(std::span<const CoedgeId> coedges);
     Result<FaceId> create_face(SurfaceId surface_id, LoopId outer_loop, std::span<const LoopId> inner_loops);
     Result<ShellId> create_shell(std::span<const FaceId> faces);

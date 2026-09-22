@@ -227,7 +227,7 @@
 | 错误码 | 严重级别 | 含义 |
 |---|---|---|
 | `AXM-TOPO-E-0001` | Error | 边缺少合法端点 |
-| `AXM-TOPO-E-0002` | Error | 环未闭合 |
+| `AXM-TOPO-E-0002` | Error | 环未闭合（含单共边的定向首尾顶点 ID 不同；坐标重合不等于拓扑闭合） |
 | `AXM-TOPO-E-0003` | Error | 面外环非法（含：外环已被其他面引用时 `create_face` 拒绝） |
 | `AXM-TOPO-E-0004` | Error | 面内环非法（含：内环已被其他面引用时 `create_face` 拒绝） |
 | `AXM-TOPO-E-0005` | Error | 壳未封闭（含：`validate_indices_consistency` 发现体记录中 `shells` 列表含重复壳 id） |
