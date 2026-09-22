@@ -918,6 +918,85 @@ int main() {
             return 1;
         }
     }
+    // Explicit spline knots: reject inverted/collapsed domains before storing geometry.
+    for (const bool rational : {false, true}) {
+        axiom::BSplineCurveDesc spline;
+        spline.poles = {{0.0, 0.0, 0.0}, {1.0, 2.0, 0.0}, {2.0, 0.0, 0.0}};
+        const auto create = [&]() {
+            if (!rational) {
+                return kernel.curves().make_bspline(spline);
+            }
+            axiom::NURBSCurveDesc desc;
+            desc.poles = spline.poles;
+            desc.knots = spline.knots;
+            desc.degree = spline.degree;
+            desc.weights = {1.0, 1.0, 1.0};
+            return kernel.curves().make_nurbs(desc);
+        };
+        spline.degree = 2;
+        spline.knots = {2.0, 2.0, 2.0, 4.0, 4.0, 4.0};
+        const auto valid = create();
+        if (valid.status != axiom::StatusCode::Ok || !valid.value) {
+            std::cerr << "expected valid repeated spline knots\n";
+            return 1;
+        }
+        const auto domain = kernel.curve_service().domain(*valid.value);
+        if (!domain.value || !approx(domain.value->min, 2.0) || !approx(domain.value->max, 4.0)) {
+            std::cerr << "unexpected explicit spline domain\n";
+            return 1;
+        }
+        for (const double t : {2.0, 3.0, 4.0}) {
+            const auto ev = kernel.curve_service().eval(*valid.value, t, 2);
+            const double u = (t - 2.0) / 2.0;
+            if (!ev.value || ev.status != axiom::StatusCode::Ok ||
+                ev.value->derivatives.size() != 2 ||
+                !approx(ev.value->point.x, 2.0 * u) ||
+                !approx(ev.value->point.y, 4.0 * u * (1.0 - u)) ||
+                !approx(ev.value->derivatives[0].x, 1.0) ||
+                !approx(ev.value->derivatives[0].y, 2.0 - 4.0 * u) ||
+                !approx(ev.value->derivatives[1].y, -2.0)) {
+                std::cerr << "unexpected spline evaluation on non-unit domain\n";
+                return 1;
+            }
+        }
+        const auto count_before = kernel.geometry_count();
+        const auto cache_before = kernel.cache_entry_count();
+        if (!count_before.value || !cache_before.value) {
+            return 1;
+        }
+        const std::vector<std::vector<double>> invalid_knots = {
+            {1.0, 1.0, 1.0, 1.0, 1.0, 1.0},
+            {0.0, 0.0, 1.0, 1.0, 2.0, 2.0},
+            {0.0, 0.0, 0.0, 1.0, std::nextafter(1.0, 0.0), 1.0},
+            {0.0, 0.0, 0.0, 1.0, 1.0, std::numeric_limits<double>::infinity()},
+            {0.0, 0.0, 0.0, 1.0, 1.0, std::numeric_limits<double>::quiet_NaN()}
+        };
+        for (const int degree : {-1, 2}) {
+            spline.degree = degree;
+            for (const auto& knots : invalid_knots) {
+                spline.knots = knots;
+                const auto failed = create();
+                const auto code = kernel.diagnostics().has_issue_code(
+                    failed.diagnostic_id, "AXM-GEO-E-0001");
+                const auto count_after = kernel.geometry_count();
+                const auto cache_after = kernel.cache_entry_count();
+                if (failed.status != axiom::StatusCode::InvalidInput || failed.value ||
+                    !code.value || !*code.value || !count_after.value || !cache_after.value ||
+                    *count_before.value != *count_after.value ||
+                    *cache_before.value != *cache_after.value) {
+                    std::cerr << "invalid spline knots must fail diagnostically without pollution\n";
+                    return 1;
+                }
+            }
+        }
+        // An existing curve must remain usable after all rejected creations.
+        const auto after = kernel.curve_service().eval(*valid.value, 2.5, 2);
+        if (!after.value || !approx(after.value->point.x, 0.5) ||
+            !approx(after.value->point.y, 0.75)) {
+            std::cerr << "rejected spline creation changed existing geometry\n";
+            return 1;
+        }
+    }
     axiom::NURBSCurveDesc invalid_nurbs_curve;
     invalid_nurbs_curve.poles = {{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}};
     invalid_nurbs_curve.weights = {1.0, -1.0};

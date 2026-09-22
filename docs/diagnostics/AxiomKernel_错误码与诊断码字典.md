@@ -211,7 +211,7 @@
 
 | 错误码 | 严重级别 | 含义 |
 |---|---|---|
-| `AXM-GEO-E-0001` | Error | 曲线创建参数非法 |
+| `AXM-GEO-E-0001` | Error | 曲线创建参数非法（含显式 BSpline/NURBS 结点逆序、零长度有效参数域） |
 | `AXM-GEO-E-0002` | Error | 曲面创建参数非法 |
 | `AXM-GEO-E-0003` | Error | 几何对象退化 |
 | `AXM-GEO-E-0004` | Error | 参数超出定义域 |

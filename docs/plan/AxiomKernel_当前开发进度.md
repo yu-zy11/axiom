@@ -215,7 +215,7 @@
   - **建议测试入口**：`axiom_math_services_test`（本阶段 P1 条目已闭合）；跨模块对齐见各 workflow 测试
 
 - **geo（Curves/Surfaces/PCurve/Eval/Closest）**
-  - **已具备**：曲线/曲面/PCurve 的创建与最小 eval/domain/bbox/closest，含批量接口；派生曲面（revolved/swept/trimmed/offset）具备 stage2 minimal 语义
+  - **已具备**：曲线/曲面/PCurve 的创建与最小 eval/domain/bbox/closest，含批量接口；派生曲面（revolved/swept/trimmed/offset）具备 stage2 minimal 语义；BSpline/NURBS 曲线显式结点已校验严格非减和非零有效参数域，`axiom_geometry_test` 覆盖重复结点、非单位域端点/导数、非法结点诊断及失败不污染
   - **主要不足**：
     - **高质量样条与曲率**：NURBS/BSpline 的导数/曲率、鲁棒反求（最近点/最近参数）与退化处理未工业化
     - **真实 Trim 语义**：Trimmed 目前偏“参数域裁剪占位”，缺基于 loop/coedge/PCurve 的修剪边界
