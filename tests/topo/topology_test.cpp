@@ -9,6 +9,7 @@
 #include <optional>
 #include <iostream>
 #include <string_view>
+#include <type_traits>
 #include <unordered_set>
 
 #include "axiom/diag/error_codes.h"
@@ -50,6 +51,10 @@ bool issue_links_entities(const axiom::DiagnosticReport& report, std::string_vie
 }  // namespace
 
 int main() {
+    static_assert(!std::is_copy_constructible_v<axiom::TopologyTransaction>);
+    static_assert(!std::is_copy_assignable_v<axiom::TopologyTransaction>);
+    static_assert(std::is_move_constructible_v<axiom::TopologyTransaction>);
+    static_assert(!std::is_move_assignable_v<axiom::TopologyTransaction>);
     axiom::Kernel kernel;
 
     // Non-finite vertex coordinates must fail before mutating topology or transaction tracking.
@@ -4456,6 +4461,50 @@ int main() {
                     return 1;
                 }
             }
+        }
+    }
+
+    // NFR-REL-001: moving a live transaction transfers its sole authority.
+    // The moved-from object remains safely closed and cannot undo committed work.
+    {
+        axiom::Kernel move_kernel;
+        auto source = move_kernel.topology().begin_transaction();
+        const auto committed_vertex = source.create_vertex({7.0, 8.0, 9.0});
+        if (!committed_vertex.value) return 1;
+        axiom::TopologyTransaction target(std::move(source));
+        const auto source_commit = source.commit();
+        const auto source_rollback = source.rollback();
+        if (source.is_active().value != std::optional<bool>{false} ||
+            source_commit.status != axiom::StatusCode::OperationFailed ||
+            source_rollback.status != axiom::StatusCode::OperationFailed ||
+            source.created_entity_count_total().value != std::optional<std::uint64_t>{0} ||
+            target.created_entity_count_total().value != std::optional<std::uint64_t>{1} ||
+            move_kernel.topology().query().has_vertex(*committed_vertex.value).value !=
+                std::optional<bool>{true}) {
+            std::cerr << "moved-from transaction retained authority or changed the model\n";
+            return 1;
+        }
+        if (target.commit().status != axiom::StatusCode::Ok ||
+            move_kernel.topology().query().has_vertex(*committed_vertex.value).value !=
+                std::optional<bool>{true} ||
+            source.rollback().status != axiom::StatusCode::OperationFailed) {
+            std::cerr << "moved transaction commit was not stable\n";
+            return 1;
+        }
+
+        auto rollback_source = move_kernel.topology().begin_transaction();
+        const auto rolled_back_vertex = rollback_source.create_vertex({10.0, 11.0, 12.0});
+        if (!rolled_back_vertex.value) return 1;
+        axiom::TopologyTransaction rollback_target(std::move(rollback_source));
+        const auto rejected_write = rollback_source.create_vertex({13.0, 14.0, 15.0});
+        if (rejected_write.status != axiom::StatusCode::OperationFailed ||
+            rollback_target.rollback().status != axiom::StatusCode::Ok ||
+            move_kernel.topology().query().has_vertex(*committed_vertex.value).value !=
+                std::optional<bool>{true} ||
+            move_kernel.topology().query().has_vertex(*rolled_back_vertex.value).value !=
+                std::optional<bool>{false}) {
+            std::cerr << "moved transaction rollback polluted committed topology\n";
+            return 1;
         }
     }
 

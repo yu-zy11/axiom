@@ -4,6 +4,38 @@ TopologyTransaction::TopologyTransaction(
       transaction_state_(std::make_shared<detail::TopologyTransactionState>()) {
 }
 
+TopologyTransaction::TopologyTransaction(TopologyTransaction&& other)
+    : state_(other.state_) {
+  // Allocate the moved-from sentinel before transferring any undo state, so a
+  // failed allocation leaves the source transaction untouched.
+  auto closed_state = std::make_shared<detail::TopologyTransactionState>();
+  transaction_state_ = std::move(other.transaction_state_);
+  created_vertices_ = std::move(other.created_vertices_);
+  created_edges_ = std::move(other.created_edges_);
+  created_coedges_ = std::move(other.created_coedges_);
+  created_loops_ = std::move(other.created_loops_);
+  created_faces_ = std::move(other.created_faces_);
+  created_shells_ = std::move(other.created_shells_);
+  created_bodies_ = std::move(other.created_bodies_);
+  txn_deleted_faces_ = other.txn_deleted_faces_;
+  txn_deleted_shells_ = other.txn_deleted_shells_;
+  txn_deleted_bodies_ = other.txn_deleted_bodies_;
+  txn_replaced_surfaces_ = other.txn_replaced_surfaces_;
+  txn_coedge_pcurve_binds_ = other.txn_coedge_pcurve_binds_;
+  txn_coedge_pcurve_clears_ = other.txn_coedge_pcurve_clears_;
+  txn_write_ops_ = other.txn_write_ops_;
+  active_ = other.active_;
+  other.transaction_state_ = std::move(closed_state);
+  other.txn_deleted_faces_ = 0;
+  other.txn_deleted_shells_ = 0;
+  other.txn_deleted_bodies_ = 0;
+  other.txn_replaced_surfaces_ = 0;
+  other.txn_coedge_pcurve_binds_ = 0;
+  other.txn_coedge_pcurve_clears_ = 0;
+  other.txn_write_ops_ = 0;
+  other.active_ = false;
+}
+
 Result<VertexId> TopologyTransaction::create_vertex(const Point3 &point) {
   if (!active_) {
     return detail::failed_result<VertexId>(

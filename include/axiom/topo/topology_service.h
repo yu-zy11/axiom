@@ -108,8 +108,10 @@ private:
 class TopologyTransaction {
 public:
     explicit TopologyTransaction(std::shared_ptr<detail::KernelState> state);
-    TopologyTransaction(TopologyTransaction&&) noexcept = default;
-    TopologyTransaction& operator=(TopologyTransaction&&) noexcept = default;
+    /// 事务为唯一所有权对象：可移动构造，但不可复制或移动赋值。
+    /// 移动后源对象保持可析构、可查询的关闭状态，不能再提交或回滚。
+    TopologyTransaction(TopologyTransaction&& other);
+    TopologyTransaction& operator=(TopologyTransaction&&) = delete;
     TopologyTransaction(const TopologyTransaction&) = delete;
     TopologyTransaction& operator=(const TopologyTransaction&) = delete;
     ~TopologyTransaction() = default;
