@@ -138,6 +138,98 @@ int main() {
         }
     }
 
+    // NFR-REL-001: existing coedge bindings must survive rejected writes and rollback.
+    {
+        axiom::Kernel binding_kernel;
+        const std::array<axiom::Point2, 2> uv_a {{{0.0, 0.0}, {1.0, 0.0}}};
+        const std::array<axiom::Point2, 2> uv_b {{{0.0, 1.0}, {1.0, 1.0}}};
+        const auto pc_a = binding_kernel.pcurves().make_polyline(uv_a);
+        const auto pc_b = binding_kernel.pcurves().make_polyline(uv_b);
+        const auto line = binding_kernel.curves().make_line({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
+        if (!pc_a.value || !pc_b.value || !line.value) {
+            std::cerr << "failed to create binding rollback geometry\n";
+            return 1;
+        }
+        auto setup = binding_kernel.topology().begin_transaction();
+        const auto v0 = setup.create_vertex({0.0, 0.0, 0.0});
+        const auto v1 = setup.create_vertex({1.0, 0.0, 0.0});
+        if (!v0.value || !v1.value) return 1;
+        const auto edge = setup.create_edge(*line.value, *v0.value, *v1.value);
+        if (!edge.value) return 1;
+        const auto coedge = setup.create_coedge(*edge.value, false);
+        if (!coedge.value || setup.commit().status != axiom::StatusCode::Ok) return 1;
+        const auto topology_before = binding_kernel.topology_count().value;
+        const auto geometry_before = binding_kernel.geometry_count().value;
+        if (!topology_before || !geometry_before) return 1;
+        auto& query = binding_kernel.topology().query();
+        // Cover both initially unbound and initially bound coedges; the first snapshot must win.
+        for (const auto original : {axiom::PCurveId{}, *pc_a.value}) {
+            auto baseline = binding_kernel.topology().begin_transaction();
+            if (baseline.set_coedge_pcurve(*coedge.value, original).status != axiom::StatusCode::Ok ||
+                baseline.commit().status != axiom::StatusCode::Ok ||
+                !query.pcurve_of_coedge(*coedge.value).value ||
+                query.pcurve_of_coedge(*coedge.value).value->value != original.value) {
+                std::cerr << "committed coedge binding was not retained\n";
+                return 1;
+            }
+            auto txn = binding_kernel.topology().begin_transaction();
+            const auto version_before = txn.preview_commit_version().value;
+            const std::array<axiom::PCurveId, 4> changes {{*pc_b.value, *pc_b.value, {}, *pc_a.value}};
+            for (std::size_t i = 0; i < changes.size(); ++i) {
+                if (txn.set_coedge_pcurve(*coedge.value, changes[i]).status != axiom::StatusCode::Ok) return 1;
+                const auto invalid_curve = txn.set_coedge_pcurve(
+                    *coedge.value, axiom::PCurveId{std::numeric_limits<std::uint64_t>::max()});
+                const auto invalid_coedge = txn.set_coedge_pcurve(axiom::CoedgeId{}, *pc_a.value);
+                for (const auto& rejected : {invalid_curve, invalid_coedge}) {
+                    const auto report = binding_kernel.diagnostics().get(rejected.diagnostic_id);
+                    if (rejected.status != axiom::StatusCode::InvalidInput || !report.value ||
+                        !has_issue_code(*report.value, axiom::diag_codes::kCoreInvalidHandle)) {
+                        std::cerr << "invalid binding did not return a stable diagnostic\n";
+                        return 1;
+                    }
+                }
+                const auto current = query.pcurve_of_coedge(*coedge.value);
+                if (!current.value || current.value->value != changes[i].value ||
+                    txn.write_operation_count().value != std::optional<std::uint64_t>{i + 1} ||
+                    txn.preview_commit_version().value != version_before ||
+                    binding_kernel.topology_count().value != topology_before ||
+                    binding_kernel.geometry_count().value != geometry_before ||
+                    binding_kernel.topology().validate().validate_coedge(*coedge.value).status != axiom::StatusCode::Ok) {
+                    std::cerr << "rejected binding polluted topology, binding or transaction state\n";
+                    return 1;
+                }
+            }
+            // Finish at a different binding from either baseline.
+            if (txn.set_coedge_pcurve(*coedge.value, *pc_b.value).status != axiom::StatusCode::Ok ||
+                txn.coedge_pcurve_bind_count().value != std::optional<std::uint64_t>{4} ||
+                txn.coedge_pcurve_clear_count().value != std::optional<std::uint64_t>{1} ||
+                txn.rollback().status != axiom::StatusCode::Ok) return 1;
+            const auto restored = query.pcurve_of_coedge(*coedge.value);
+            if (!restored.value || restored.value->value != original.value ||
+                binding_kernel.topology_count().value != topology_before ||
+                binding_kernel.geometry_count().value != geometry_before ||
+                txn.write_operation_count().value != std::optional<std::uint64_t>{0} ||
+                txn.coedge_pcurve_bind_count().value != std::optional<std::uint64_t>{0} ||
+                txn.coedge_pcurve_clear_count().value != std::optional<std::uint64_t>{0} ||
+                binding_kernel.topology().validate().validate_coedge(*coedge.value).status != axiom::StatusCode::Ok) {
+                std::cerr << "rollback did not restore the original coedge binding\n";
+                return 1;
+            }
+            auto next = binding_kernel.topology().begin_transaction();
+            if (next.preview_commit_version().value != version_before ||
+                next.rollback().status != axiom::StatusCode::Ok) return 1;
+            const auto closed = txn.set_coedge_pcurve(*coedge.value, *pc_b.value);
+            const auto report = binding_kernel.diagnostics().get(closed.diagnostic_id);
+            const auto after_closed = query.pcurve_of_coedge(*coedge.value);
+            if (closed.status != axiom::StatusCode::OperationFailed || !report.value ||
+                !has_issue_code(*report.value, axiom::diag_codes::kTxCommitFailure) ||
+                !after_closed.value || after_closed.value->value != original.value) {
+                std::cerr << "closed transaction changed the restored binding\n";
+                return 1;
+            }
+        }
+    }
+
     // ---- Stage 2: Coedge can bind PCurveId (trim bridge foundation) ----
     {
         const std::array<axiom::Point2, 3> uv_poly {{ {0.0, 0.0}, {1.0, 0.0}, {1.0, 1.0} }};

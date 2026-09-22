@@ -294,6 +294,7 @@
   - **部分完成**：壳闭合/非流形检测（既有告警 + Strict hard；**`validate_shell` 开放边界/非流形告警带壳+边 `related_entities`**）；来源引用一致性 Strict 校验；**面环方向**（无 PCurve：平面/球/圆柱/圆锥侧壁、**环面**管向截面径向）；**环级 `coedge_to_loop` 一致性**；**`validate_loop` 在 `loop_to_faces` 有条目时与面互指**；**定向边级 `validate_coedge`：`edge_to_coedges` 必含本 coedge；若已有 `coedge_to_loop` 则与环成员互指**（未入环中间态不强制）；**面级 `loop_to_faces` 与面外/内环互指**；**`face_to_shells` 有条目时与壳 `faces` 互指**（`validate_face`）；**trim bridge**（UV 闭合、内外环 UV 方向、PCurve↔3D 采样/端点一致性，`validate_face_trim_consistency` 等）
   - **未开始/缺失**：更复杂解析组合面/退化参数域上的绕向规则；悬挂/重复/非流形在「全规则集」意义上的完备覆盖；工业级 **PCurve↔3D** 修复策略与全分支诊断
 - **事务/一致性**
+  - **NFR-REL-001 可靠性增量**：`set_coedge_pcurve` 保存首次修改前的绑定，回滚恢复已有共边的原 PCurve（含未绑定状态）；重复绑定/清除不覆盖原快照，无效句柄拒绝不改变绑定、存储数量或事务写计数。`axiom_topology_test` 覆盖提交保留、重复绑定、清除、失败诊断与回滚后共边验证；需求仍为受限可用，尚不代表完整事务隔离或取消能力。
   - **已完成（基础可用）**：begin/commit/rollback；删除面/壳/体支持；回滚后索引恢复回归覆盖
   - **未开始/缺失**：更细粒度写集/读集、并发/隔离级别定义、事务可观测性（更系统的审计/统计）
 

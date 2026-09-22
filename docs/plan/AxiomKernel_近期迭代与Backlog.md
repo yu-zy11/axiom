@@ -33,7 +33,7 @@
 ### 2.3 `topo`
 
 - 继续加严 Strict 规则。拓扑创建入口的有限坐标检查切片已闭合：`create_vertex` 拒绝 NaN/±Inf，失败不写入模型或事务计数，并覆盖诊断 JSON 导出与回滚。
-- 推进 trim bridge 的可物化子规则。
+- 推进 trim bridge 的可物化子规则。NFR-REL-001 共边 PCurve 绑定回滚切片已闭合：已有共边重复绑定/清除后回滚恢复原值，无效句柄失败不污染，提交保留新值；由 `axiom_topology_test` 回归。
 
 **DoD**
 

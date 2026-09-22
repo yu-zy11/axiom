@@ -21,6 +21,7 @@ using namespace topo_internal;
 namespace detail {
 
 struct TopologyTransactionState {
+  std::unordered_map<std::uint64_t, PCurveId> original_coedge_pcurves;
   std::unordered_map<std::uint64_t, FaceRecord> original_faces;
   std::unordered_map<std::uint64_t, ShellRecord> original_shells;
   std::unordered_map<std::uint64_t, BodyRecord> original_bodies;

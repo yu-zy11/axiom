@@ -75,6 +75,8 @@ Result<void> TopologyTransaction::set_coedge_pcurve(CoedgeId coedge_id,
                                       "绑定共边参数曲线失败");
   }
   const auto prev_pcurve = it->second.pcurve_id.value;
+  transaction_state_->original_coedge_pcurves.try_emplace(coedge_id.value,
+                                                         it->second.pcurve_id);
   it->second.pcurve_id = pcurve_id;
   rebuild_topology_indices(*state_);
   if (pcurve_id.value != 0) {
@@ -580,6 +582,12 @@ Result<void> TopologyTransaction::rollback() {
                                diag_codes::kTxRollbackFailure,
                                "事务回滚失败：事务已关闭", "事务回滚失败");
   }
+  for (const auto &[id, pcurve_id] : transaction_state_->original_coedge_pcurves) {
+    const auto it = state_->coedges.find(id);
+    if (it != state_->coedges.end()) {
+      it->second.pcurve_id = pcurve_id;
+    }
+  }
   for (const auto id : created_bodies_) {
     state_->bodies.erase(id);
   }
@@ -882,6 +890,7 @@ Result<void> TopologyTransaction::clear_tracking_records() {
   txn_coedge_pcurve_binds_ = 0;
   txn_coedge_pcurve_clears_ = 0;
   txn_write_ops_ = 0;
+  transaction_state_->original_coedge_pcurves.clear();
   transaction_state_->original_faces.clear();
   transaction_state_->original_shells.clear();
   transaction_state_->original_bodies.clear();
