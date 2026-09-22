@@ -12,6 +12,8 @@
 
 ### 2.1 `diag + ops`
 
+- **NFR-DIA-001 第 35 切片**：OBJ 导入的空路径、缺失文件、非普通文件/打开失败、解析失败与退化三角形分别绑定 `io.import.obj.input/path/open/parse/validation`；非普通文件在读取前拒绝，避免目录读取抛出裸异常。`axiom_io_workflow_test` 覆盖阶段检索、JSON、Body/Mesh 不污染及失败后成功重试。复用现有 IO/VAL 错误码，不扩大 OBJ 格式支持范围，需求仍为受限可用。
+
 - **FR-DIAG-001 第 34 切片**：单报告 `export_report` / `export_report_json` 显式关闭并检查输出流，设备写入/关闭失败不再误报成功；空路径、目录打开失败与 Linux `/dev/full` 均返回结构化失败。`axiom_diagnostics_test` 覆盖成功完整证据、参数/打开/写入失败、源报告不污染及失败后重试。复用 `AXM-IO-E-0005`，无公开签名变化；需求仍为受限可用。
 
 - **NFR-DIA-001 第 30 切片**：STEP 导入的空路径、文件不存在与非可读常规文件分别绑定 `io.import.step.input/path/open`；失败均发生在 Body ID 分配和存储写入之前。`axiom_io_workflow_test` 覆盖阶段检索、JSON、退化输入、模型不污染和失败后成功重试。复用 `AXM-IO-E-0004`，无公开签名变化；需求仍为受限可用，不扩展 STEP 实体交换范围。

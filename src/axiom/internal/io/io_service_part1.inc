@@ -505,29 +505,40 @@ Result<BodyId> IOService::import_brep(std::string_view path, const ImportOptions
 }
 
 Result<BodyId> IOService::import_obj(std::string_view path, const ImportOptions& options) {
+    const auto fail_before_import = [this](StatusCode status, std::string_view code, std::string message,
+                                           std::string_view stage) {
+        auto issue = detail::make_error_issue(code, std::move(message));
+        issue.stage = std::string(stage);
+        return error_result<BodyId>(status, state_->create_diagnostic("OBJ 导入失败", {std::move(issue)}));
+    };
     if (path.empty()) {
-        return detail::invalid_input_result<BodyId>(*state_, diag_codes::kIoImportFailure, "OBJ 导入失败：输入路径为空",
-                                                    "OBJ 导入失败");
+        return fail_before_import(StatusCode::InvalidInput, diag_codes::kIoImportFailure,
+                                  "OBJ 导入失败：输入路径为空", "io.import.obj.input");
     }
     if (!std::filesystem::exists(path)) {
-        return detail::failed_result<BodyId>(*state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
-                                             "OBJ 导入失败：输入文件不存在", "OBJ 导入失败");
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                  "OBJ 导入失败：输入文件不存在", "io.import.obj.path");
+    }
+    std::error_code file_type_error;
+    if (!std::filesystem::is_regular_file(path, file_type_error) || file_type_error) {
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                  "OBJ 导入失败：输入路径不是可读取的普通文件", "io.import.obj.open");
     }
     std::ifstream in {std::string(path)};
     if (!in) {
-        return detail::failed_result<BodyId>(*state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
-                                             "OBJ 导入失败：无法打开输入文件", "OBJ 导入失败");
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                  "OBJ 导入失败：无法打开输入文件", "io.import.obj.open");
     }
     std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     detail::MeshRecord mesh;
     const auto err = parse_obj_text_to_mesh(text, mesh);
     if (err.has_value()) {
-        return detail::failed_result<BodyId>(*state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure, *err,
-                                             "OBJ 导入失败");
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure, *err,
+                                  "io.import.obj.parse");
     }
     if (detail::has_degenerate_triangles(mesh.vertices, mesh.indices)) {
-        return detail::failed_result<BodyId>(*state_, StatusCode::DegenerateGeometry, diag_codes::kValDegenerateGeometry,
-                                             "OBJ 导入失败：存在退化三角形", "OBJ 导入失败");
+        return fail_before_import(StatusCode::DegenerateGeometry, diag_codes::kValDegenerateGeometry,
+                                  "OBJ 导入失败：存在退化三角形", "io.import.obj.validation");
     }
     mesh.label = "obj_import";
     mesh.tessellation_strategy = "io_import_obj";

@@ -148,6 +148,74 @@ int main() {
         return 1;
     }
 
+    const auto body_count_before_obj_import_failures = kernel.body_count();
+    const auto mesh_count_before_obj_import_failures = kernel.mesh_count();
+    const auto missing_obj_path = tmp / ("axiom_io_missing_import_" + uniq + ".obj");
+    const auto malformed_obj_path = tmp / ("axiom_io_malformed_import_" + uniq + ".obj");
+    const auto degenerate_obj_path = tmp / ("axiom_io_degenerate_import_" + uniq + ".obj");
+    const auto valid_obj_path = tmp / ("axiom_io_valid_import_" + uniq + ".obj");
+    {
+        std::ofstream malformed {malformed_obj_path};
+        malformed << "v 0 0 0\nf 1 2 3\n";
+        std::ofstream degenerate {degenerate_obj_path};
+        degenerate << "v 0 0 0\nv 1 0 0\nv 2 0 0\nf 1 2 3\n";
+        std::ofstream valid {valid_obj_path};
+        valid << "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+    }
+    const auto check_obj_import_failure = [&](const axiom::Result<axiom::BodyId>& result,
+                                              axiom::StatusCode expected_status, std::string_view expected_code,
+                                              std::string_view expected_stage) {
+        const auto report = kernel.diagnostics().get(result.diagnostic_id);
+        const auto* issue = report.value ? find_issue(*report.value, expected_code) : nullptr;
+        return result.status == expected_status && !result.value.has_value() && issue != nullptr &&
+               issue->severity == axiom::IssueSeverity::Error && issue->stage == expected_stage &&
+               issue->related_entities.empty();
+    };
+    const auto empty_obj_import = kernel.io().import_obj("", axiom::ImportOptions {});
+    const auto missing_obj_import = kernel.io().import_obj(missing_obj_path.string(), axiom::ImportOptions {});
+    const auto directory_obj_import = kernel.io().import_obj(tmp.string(), axiom::ImportOptions {});
+    const auto malformed_obj_import = kernel.io().import_obj(malformed_obj_path.string(), axiom::ImportOptions {});
+    const auto degenerate_obj_import = kernel.io().import_obj(degenerate_obj_path.string(), axiom::ImportOptions {});
+    if (!check_obj_import_failure(empty_obj_import, axiom::StatusCode::InvalidInput,
+                                  axiom::diag_codes::kIoImportFailure, "io.import.obj.input") ||
+        !check_obj_import_failure(missing_obj_import, axiom::StatusCode::OperationFailed,
+                                  axiom::diag_codes::kIoImportFailure, "io.import.obj.path") ||
+        !check_obj_import_failure(directory_obj_import, axiom::StatusCode::OperationFailed,
+                                  axiom::diag_codes::kIoImportFailure, "io.import.obj.open") ||
+        !check_obj_import_failure(malformed_obj_import, axiom::StatusCode::OperationFailed,
+                                  axiom::diag_codes::kIoImportFailure, "io.import.obj.parse") ||
+        !check_obj_import_failure(degenerate_obj_import, axiom::StatusCode::DegenerateGeometry,
+                                  axiom::diag_codes::kValDegenerateGeometry, "io.import.obj.validation")) {
+        std::cerr << "OBJ import failure is missing stable root-cause stage evidence\n";
+        return 1;
+    }
+    const auto obj_failure_json = tmp / ("axiom_io_obj_import_failure_" + uniq + ".json");
+    const auto exported_obj_failure = kernel.diagnostics().export_report_json(
+        degenerate_obj_import.diagnostic_id, obj_failure_json.string());
+    std::ifstream obj_failure_json_in {obj_failure_json, std::ios::binary};
+    const std::string obj_failure_json_text {
+        (std::istreambuf_iterator<char>(obj_failure_json_in)), std::istreambuf_iterator<char>()};
+    const auto staged_obj_import_failures = kernel.diagnostics().find_by_issue_stage_prefix("io.import.obj.", 10);
+    const auto body_count_after_obj_import_failures = kernel.body_count();
+    const auto mesh_count_after_obj_import_failures = kernel.mesh_count();
+    const auto valid_obj_import = kernel.io().import_obj(valid_obj_path.string(), axiom::ImportOptions {});
+    std::filesystem::remove(obj_failure_json);
+    std::filesystem::remove(malformed_obj_path);
+    std::filesystem::remove(degenerate_obj_path);
+    std::filesystem::remove(valid_obj_path);
+    if (exported_obj_failure.status != axiom::StatusCode::Ok ||
+        obj_failure_json_text.find("\"stage\":\"io.import.obj.validation\"") == std::string::npos ||
+        !staged_obj_import_failures.value || staged_obj_import_failures.value->size() != 5 ||
+        !body_count_before_obj_import_failures.value || !body_count_after_obj_import_failures.value ||
+        *body_count_before_obj_import_failures.value != *body_count_after_obj_import_failures.value ||
+        !mesh_count_before_obj_import_failures.value || !mesh_count_after_obj_import_failures.value ||
+        *mesh_count_before_obj_import_failures.value != *mesh_count_after_obj_import_failures.value ||
+        valid_obj_import.status != axiom::StatusCode::Ok || !valid_obj_import.value.has_value() ||
+        std::filesystem::exists(missing_obj_path)) {
+        std::cerr << "OBJ import failure lookup, JSON evidence, isolation, or retry is unexpected\n";
+        return 1;
+    }
+
     const auto body_count_before_step_failures = kernel.body_count();
     const auto check_step_failure = [&](const axiom::Result<void>& result, axiom::StatusCode expected_status,
                                         std::string_view expected_stage) {

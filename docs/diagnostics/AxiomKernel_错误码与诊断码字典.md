@@ -339,7 +339,7 @@
 | `AXM-IO-E-0001` | Error | 文件不存在（如 `IOService::validate_import_path` 校验时目标路径不存在） |
 | `AXM-IO-E-0002` | Error | 文件格式无法识别 |
 | `AXM-IO-E-0003` | Error | 文件内容损坏 |
-| `AXM-IO-E-0004` | Error | 导入解析失败；STEP 早期失败按根因绑定 `io.import.step.input/path/open` |
+| `AXM-IO-E-0004` | Error | 导入解析失败；STEP 早期失败绑定 `io.import.step.input/path/open`，OBJ 物化前失败绑定 `io.import.obj.input/path/open/parse`（退化网格复用 `AXM-VAL-E-0002` 与 `io.import.obj.validation`） |
 | `AXM-IO-E-0005` | Error | 导出失败 |
 | `AXM-IO-E-0006` | Error | 严格网格导出 QA 失败（越界索引、退化三角形或检查不可用；`Issue.stage=io.export.mesh_strict_qa`，关联输入 Body） |
 | `AXM-IO-E-0007` | Warning | 导入后存在未映射属性 |

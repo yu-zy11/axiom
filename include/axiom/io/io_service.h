@@ -32,6 +32,7 @@ public:
   Result<BodyId> import_gltf(std::string_view path, const ImportOptions &options);
   Result<BodyId> import_iges(std::string_view path, const ImportOptions &options);
   Result<BodyId> import_brep(std::string_view path, const ImportOptions &options);
+  /// 物化前失败按根因返回 `io.import.obj.input/path/open/parse/validation`阶段，不写入 Body/Mesh store。
   Result<BodyId> import_obj(std::string_view path, const ImportOptions &options);
   Result<BodyId> import_3mf(std::string_view path, const ImportOptions &options);
   Result<void> export_axmjson(BodyId body_id, std::string_view path,
