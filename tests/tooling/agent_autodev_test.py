@@ -117,6 +117,12 @@ class AgentAutodevTest(unittest.TestCase):
                         with self.assertRaises(agent_autodev.RunnerError):
                             agent_autodev.load_report()
 
+    def test_changed_paths_preserves_leading_status_space(self) -> None:
+        output = " M scripts/agent_autodev.py\0R  new.txt\0old.txt\0?? extra.txt\0"
+        with patch.object(agent_autodev, "run", return_value=Mock(returncode=0, stdout=output)):
+            self.assertEqual(agent_autodev.changed_paths(),
+                             {"scripts/agent_autodev.py", "new.txt", "old.txt", "extra.txt"})
+
     def test_automation_files_are_protected(self) -> None:
         self.assertIn(".gitignore", agent_autodev.PROTECTED_AUTOMATION_FILES)
         self.assertIn(

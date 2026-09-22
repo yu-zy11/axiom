@@ -174,8 +174,11 @@ def git_status() -> str:
 
 def changed_paths() -> set[str]:
     """Return paths changed relative to HEAD, including untracked files."""
-    output = checked_output(["git", "status", "--porcelain", "-z"])
-    entries = output.split("\0")
+    result = run(["git", "status", "--porcelain", "-z"], capture=True)
+    if result.returncode != 0:
+        raise RunnerError(result.stderr.strip() or "git status failed")
+    # Leading spaces are status columns, not whitespace to strip.
+    entries = result.stdout.split("\0")
     paths: set[str] = set()
     index = 0
     while index < len(entries):
