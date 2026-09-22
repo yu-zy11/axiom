@@ -10,6 +10,12 @@ Result<VertexId> TopologyTransaction::create_vertex(const Point3 &point) {
         *state_, StatusCode::OperationFailed, diag_codes::kTxCommitFailure,
         "创建顶点失败：事务已关闭", "创建顶点失败");
   }
+  if (!std::isfinite(point.x) || !std::isfinite(point.y) ||
+      !std::isfinite(point.z)) {
+    return detail::invalid_input_result<VertexId>(
+        *state_, diag_codes::kCoreParameterOutOfRange,
+        "创建顶点失败：顶点坐标必须为有限值", "创建顶点失败");
+  }
   const auto id = VertexId{state_->allocate_id()};
   state_->vertices.emplace(id.value, detail::VertexRecord{point});
   created_vertices_.push_back(id.value);

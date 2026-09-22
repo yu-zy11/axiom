@@ -222,6 +222,7 @@
   - **建议测试入口**：`axiom_geometry_test`（增加曲率/导数/退化场景后再逐步收紧）
 
 - **topo（Transaction/Query/Validation/Trim Bridge）**
+  - **本轮一致性增量**：`create_vertex` 在写入前拒绝任一非有限坐标（`InvalidInput` / `AXM-CORE-E-0002`），有限极值与次正规值仍可创建；`axiom_topology_test` 覆盖三个轴的 NaN/±Inf、诊断 JSON、失败不污染计数、后续创建与回滚。FR-TOPO-001 仍为受限可用。
   - **已具备**：事务 begin/commit/rollback、反向索引查询、Strict 的闭合性/来源一致性一部分校验、trim bridge 的最小校验入口；**`validate_loop` 校验 `coedge_to_loop` 与环成员一致**；**若 `loop_to_faces` 已有本环条目则校验与面记录互指、单面归属**（无条目时不判错，兼容「仅有环」的事务中间态）；**`validate_coedge` 校验 `edge_to_coedges` 列出本定向边；若已存在 `coedge_to_loop` 则校验环与成员列表互指**（尚未入环的事务中间态不强制环索引，与 `set_coedge_pcurve` 等兼容；悬挂 coedge 仍由 **`validate_indices_consistency`** 兜底）；**`validate_face` 校验外/内环在 `loop_to_faces` 中恰指向本面**；**若 `face_to_shells` 已有本面条目则校验各壳的 `faces` 列出本面**（孤立面无条目时不强制）；**`validate_shell` 对开放边界/非流形边的告警 Issue 附带 `related_entities`（壳+边）**；无 PCurve 时 **平面/球/圆柱/圆锥/环面** 外环绕向与几何外向的一致性规则已进入 `validate_face` 并由 `axiom_topology_test` 回归
   - **主要不足**：
     - **拓扑规则集仍不完整**：更系统的非流形/悬挂规则与诊断覆盖仍不足（解析面外环绕向已覆盖平面/球/柱/锥/环面管向）

@@ -2,6 +2,11 @@
 #include <array>
 #include <cmath>
 #include <initializer_list>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <limits>
+#include <optional>
 #include <iostream>
 #include <string_view>
 #include <unordered_set>
@@ -46,6 +51,92 @@ bool issue_links_entities(const axiom::DiagnosticReport& report, std::string_vie
 
 int main() {
     axiom::Kernel kernel;
+
+    // Non-finite vertex coordinates must fail before mutating topology or transaction tracking.
+    {
+        axiom::Kernel vertex_kernel;
+        auto txn = vertex_kernel.topology().begin_transaction();
+        auto origin = txn.create_vertex({0.0, -0.0, 0.0});
+        if (origin.status != axiom::StatusCode::Ok || !origin.value) {
+            std::cerr << "failed to create finite origin vertex\n";
+            return 1;
+        }
+        const auto before_count = vertex_kernel.topology_count();
+        const auto before_version = txn.preview_commit_version();
+        if (!before_count.value || !before_version.value) {
+            std::cerr << "failed to snapshot vertex transaction state\n";
+            return 1;
+        }
+        const std::array<double, 3> invalid_values {
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::infinity(),
+            -std::numeric_limits<double>::infinity()};
+        for (const auto invalid : invalid_values) {
+            for (int axis = 0; axis < 3; ++axis) {
+                axiom::Point3 point {1.0, 2.0, 3.0};
+                if (axis == 0) point.x = invalid;
+                if (axis == 1) point.y = invalid;
+                if (axis == 2) point.z = invalid;
+                const auto result = txn.create_vertex(point);
+                const auto report = vertex_kernel.diagnostics().get(result.diagnostic_id);
+                if (result.status != axiom::StatusCode::InvalidInput || result.value ||
+                    !report.value ||
+                    !has_issue_code(*report.value, axiom::diag_codes::kCoreParameterOutOfRange)) {
+                    std::cerr << "expected diagnostic rejection of non-finite vertex coordinate\n";
+                    return 1;
+                }
+                const auto count = vertex_kernel.topology_count();
+                const auto created = txn.created_vertices();
+                const auto writes = txn.write_operation_count();
+                const auto version = txn.preview_commit_version();
+                if (!count.value || count.value != before_count.value ||
+                    !created.value || created.value->size() != 1 ||
+                    created.value->front().value != origin.value->value ||
+                    txn.created_vertex_count().value != std::optional<std::uint64_t>{1} ||
+                    !writes.value || *writes.value != 1 || !version.value ||
+                    version.value != before_version.value ||
+                    txn.is_active().value != std::optional<bool>{true}) {
+                    std::cerr << "failed vertex creation polluted topology or transaction tracking\n";
+                    return 1;
+                }
+                const auto path = std::filesystem::temp_directory_path() / "axiom_topo_vertex_nonfinite.json";
+                if (vertex_kernel.diagnostics().export_report_json(result.diagnostic_id, path.string()).status !=
+                    axiom::StatusCode::Ok) {
+                    std::cerr << "failed to export vertex rejection diagnostic\n";
+                    return 1;
+                }
+                std::ifstream input(path);
+                const std::string json((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+                input.close();
+                std::filesystem::remove(path);
+                if (json.find(axiom::diag_codes::kCoreParameterOutOfRange) == std::string::npos) {
+                    std::cerr << "exported vertex diagnostic lost stable error code\n";
+                    return 1;
+                }
+            }
+        }
+        // Finite extreme/subnormal values are permitted: this gate imposes no magnitude tolerance.
+        const auto finite = txn.create_vertex({std::numeric_limits<double>::max(),
+            -std::numeric_limits<double>::max(), std::numeric_limits<double>::denorm_min()});
+        if (finite.status != axiom::StatusCode::Ok || !finite.value ||
+            txn.write_operation_count().value != std::optional<std::uint64_t>{2} ||
+            txn.rollback().status != axiom::StatusCode::Ok ||
+            vertex_kernel.topology_count().value != std::optional<std::uint64_t>{0} ||
+            vertex_kernel.topology().query().has_vertex(*origin.value).value != std::optional<bool>{false} ||
+            vertex_kernel.topology().query().has_vertex(*finite.value).value != std::optional<bool>{false} ||
+            txn.created_vertex_count().value != std::optional<std::uint64_t>{2} ||
+            txn.write_operation_count().value != std::optional<std::uint64_t>{0}) {
+            std::cerr << "finite vertex creation or rollback failed after rejected inputs\n";
+            return 1;
+        }
+        const auto closed = txn.create_vertex({0.0, 0.0, 0.0});
+        const auto closed_report = vertex_kernel.diagnostics().get(closed.diagnostic_id);
+        if (closed.status != axiom::StatusCode::OperationFailed || !closed_report.value ||
+            !has_issue_code(*closed_report.value, axiom::diag_codes::kTxCommitFailure)) {
+            std::cerr << "closed transaction vertex creation contract changed\n";
+            return 1;
+        }
+    }
 
     // ---- Stage 2: Coedge can bind PCurveId (trim bridge foundation) ----
     {

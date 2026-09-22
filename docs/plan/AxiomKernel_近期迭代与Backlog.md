@@ -32,7 +32,7 @@
 
 ### 2.3 `topo`
 
-- 继续加严 Strict 规则。
+- 继续加严 Strict 规则。拓扑创建入口的有限坐标检查切片已闭合：`create_vertex` 拒绝 NaN/±Inf，失败不写入模型或事务计数，并覆盖诊断 JSON 导出与回滚。
 - 推进 trim bridge 的可物化子规则。
 
 **DoD**

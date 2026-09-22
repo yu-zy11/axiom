@@ -357,6 +357,7 @@ enum class TopologyIsolationLevel : std::uint8_t {
 
 class TopologyTransaction {
 public:
+  // 坐标必须为有限值；NaN/±Inf 返回 InvalidInput / AXM-CORE-E-0002，拓扑与事务写计数不变。
   Result<VertexId> create_vertex(const Point3&);
   Result<EdgeId> create_edge(CurveId, VertexId, VertexId);
   Result<CoedgeId> create_coedge(EdgeId, bool reversed);

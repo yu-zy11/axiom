@@ -114,6 +114,7 @@ public:
     TopologyTransaction& operator=(const TopologyTransaction&) = delete;
     ~TopologyTransaction() = default;
 
+    /// 坐标必须为有限值；否则返回 InvalidInput / AXM-CORE-E-0002，且不修改拓扑或事务写计数。
     Result<VertexId> create_vertex(const Point3& point);
     Result<EdgeId> create_edge(CurveId curve_id, VertexId v0, VertexId v1);
     Result<CoedgeId> create_coedge(EdgeId edge_id, bool reversed);
