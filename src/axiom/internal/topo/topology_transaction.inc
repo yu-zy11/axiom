@@ -876,6 +876,12 @@ Result<bool> TopologyTransaction::has_snapshot_body(BodyId body_id) const {
 }
 
 Result<void> TopologyTransaction::clear_tracking_records() {
+  if (active_) {
+    return detail::failed_void(*state_, StatusCode::OperationFailed,
+                               diag_codes::kTxActiveTrackingClear,
+                               "清空事务跟踪记录失败：请先提交或回滚活动事务",
+                               "清空事务跟踪记录失败");
+  }
   created_vertices_.clear();
   created_edges_.clear();
   created_coedges_.clear();

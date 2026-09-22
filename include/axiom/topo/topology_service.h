@@ -168,6 +168,8 @@ public:
     Result<bool> has_snapshot_face(FaceId face_id) const;
     Result<bool> has_snapshot_shell(ShellId shell_id) const;
     Result<bool> has_snapshot_body(BodyId body_id) const;
+    /// 仅在提交或回滚后清理审计/撤销记录，可重复调用且不改变模型。
+    /// 活动事务（含空事务）返回 OperationFailed / AXM-TX-E-0006，保留全部跟踪记录。
     Result<void> clear_tracking_records();
     Result<std::vector<VertexId>> created_vertices() const;
     Result<std::vector<EdgeId>> created_edges() const;

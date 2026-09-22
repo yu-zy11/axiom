@@ -35,7 +35,7 @@
 
 | ID | 需求 | 当前状态 | 衡量方式 | 当前证据 | 发布门禁 |
 |---|---|---|---|---|---|
-| NFR-REL-001 | 失败不污染、事务一致性 | 受限可用 | 失败注入后句柄/存储/拓扑不变量 | runtime invariant、boolean/heal 测试；`axiom_topology_test` 覆盖已有共边 PCurve 绑定/清除的回滚、无效句柄拒绝与失败不污染 | S0/S1 回归全通过 |
+| NFR-REL-001 | 失败不污染、事务一致性 | 受限可用 | 失败注入后句柄/存储/拓扑不变量 | runtime invariant、boolean/heal 测试；`axiom_topology_test` 覆盖已有共边 PCurve 绑定/清除的回滚、无效句柄拒绝与失败不污染；活动事务清理跟踪记录拒绝、创建/删除/PCurve 快照保留及关闭后幂等清理 | S0/S1 回归全通过 |
 | NFR-DIA-001 | 可解释失败 | 受限可用 | 稳定错误码、`diagnostic_id`、阶段和问题实体 | diagnostics 及 workflow 测试；`axiom_boolean_prep_test` 覆盖诊断开关两种模式下的早期失败阶段、输入实体、检索/JSON 与失败不污染 | 支持范围内无静默失败 |
 | NFR-PERF-001 | 可重复性能基线 | 进行中 | 总耗时、均值/P95、数据集/环境元数据 | `axiom_perf_baseline_test` | 不超过批准阈值；回退有批准记录 |
 | NFR-COMP-001 | API/格式兼容性 | 进行中 | 版本策略、编译兼容、round-trip | plugin 与 IO 测试 | 破坏性变化有迁移说明和版本决策 |

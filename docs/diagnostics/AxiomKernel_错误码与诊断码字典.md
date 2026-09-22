@@ -389,6 +389,7 @@
 | `AXM-TX-E-0003` | Error | 写事务冲突 |
 | `AXM-TX-E-0004` | Error | 目标版本不存在 |
 | `AXM-TX-E-0005` | Fatal | 版本图损坏 |
+| `AXM-TX-E-0006` | Error | 活动事务禁止清空跟踪记录；`clear_tracking_records` 返回 `OperationFailed`，保留模型与撤销记录，须先提交或回滚（含空事务） |
 
 ## 8. 标准警告码清单
 

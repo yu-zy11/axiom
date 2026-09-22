@@ -271,6 +271,13 @@ int main() {
                         return 1;
                     }
                 }
+                const auto clear = txn.clear_tracking_records();
+                const auto clear_report = binding_kernel.diagnostics().get(clear.diagnostic_id);
+                if (clear.status != axiom::StatusCode::OperationFailed || !clear_report.value ||
+                    !has_issue_code(*clear_report.value, axiom::diag_codes::kTxActiveTrackingClear)) {
+                    std::cerr << "active binding transaction must preserve undo records\n";
+                    return 1;
+                }
                 const auto current = query.pcurve_of_coedge(*coedge.value);
                 if (!current.value || current.value->value != changes[i].value ||
                     txn.write_operation_count().value != std::optional<std::uint64_t>{i + 1} ||
@@ -4057,29 +4064,85 @@ int main() {
         }
     }
 
-    auto clear_txn = kernel.topology().begin_transaction();
-    auto clear_v = clear_txn.create_vertex({2.0, 2.0, 2.0});
-    if (clear_v.status != axiom::StatusCode::Ok || !clear_v.value.has_value()) {
-        std::cerr << "failed to create vertex for clear tracking test\n";
-        return 1;
-    }
-    auto clear_before = clear_txn.created_vertex_count();
-    auto clear_w0 = clear_txn.write_operation_count();
-    auto clear_ret = clear_txn.clear_tracking_records();
-    auto clear_after = clear_txn.created_vertex_count();
-    auto clear_w1 = clear_txn.write_operation_count();
-    if (clear_before.status != axiom::StatusCode::Ok || !clear_before.value.has_value() || *clear_before.value != 1 ||
-        clear_w0.status != axiom::StatusCode::Ok || !clear_w0.value.has_value() || *clear_w0.value != 1 ||
-        clear_ret.status != axiom::StatusCode::Ok ||
-        clear_after.status != axiom::StatusCode::Ok || !clear_after.value.has_value() || *clear_after.value != 0 ||
-        clear_w1.status != axiom::StatusCode::Ok || !clear_w1.value.has_value() || *clear_w1.value != 0) {
-        std::cerr << "clear_tracking_records behavior is unexpected\n";
-        return 1;
-    }
-    auto clear_rollback = clear_txn.rollback();
-    if (clear_rollback.status != axiom::StatusCode::Ok) {
-        std::cerr << "rollback failed for clear tracking transaction\n";
-        return 1;
+    // NFR-REL-001: clearing live undo records must never disable rollback.
+    {
+        axiom::Kernel clear_kernel;
+        auto& topo = clear_kernel.topology();
+        const auto body = clear_kernel.primitives().box({0.0, 0.0, 0.0}, 1.0, 2.0, 3.0);
+        if (!body.value) return 1;
+        const auto original_count = clear_kernel.topology_count().value;
+        const auto original_shells = topo.query().shells_of_body(*body.value).value;
+        if (!original_count || !original_shells) return 1;
+        for (const bool commit : {false, true}) {
+            auto txn = topo.begin_transaction();
+            const auto version = txn.preview_commit_version().value;
+            // Even an empty active transaction follows the same lifecycle contract.
+            const auto empty_clear = txn.clear_tracking_records();
+            const auto empty_report = clear_kernel.diagnostics().get(empty_clear.diagnostic_id);
+            if (empty_clear.status != axiom::StatusCode::OperationFailed || !empty_report.value ||
+                !has_issue_code(*empty_report.value, axiom::diag_codes::kTxActiveTrackingClear) ||
+                txn.created_entity_count_total().value != std::optional<std::uint64_t>{0} ||
+                txn.write_operation_count().value != std::optional<std::uint64_t>{0}) {
+                std::cerr << "empty active transaction must reject tracking cleanup\n";
+                return 1;
+            }
+            const auto vertex = txn.create_vertex({2.0, 2.0, 2.0});
+            if (!vertex.value || txn.delete_body(*body.value).status != axiom::StatusCode::Ok) return 1;
+            const auto modified_count = clear_kernel.topology_count().value;
+            // Repeated rejection must preserve both creation records and deletion snapshots.
+            for (int attempt = 0; attempt < 2; ++attempt) {
+                const auto rejected = txn.clear_tracking_records();
+                const auto report = clear_kernel.diagnostics().get(rejected.diagnostic_id);
+                if (rejected.status != axiom::StatusCode::OperationFailed || !report.value ||
+                    !has_issue_code(*report.value, axiom::diag_codes::kTxActiveTrackingClear) ||
+                    txn.is_active().value != std::optional<bool>{true} ||
+                    txn.created_vertices().value != std::optional<std::vector<axiom::VertexId>>{{*vertex.value}} ||
+                    txn.has_snapshot_body(*body.value).value != std::optional<bool>{true} ||
+                    txn.deleted_body_count().value != std::optional<std::uint64_t>{1} ||
+                    txn.write_operation_count().value != std::optional<std::uint64_t>{2} ||
+                    txn.preview_commit_version().value != version ||
+                    clear_kernel.topology_count().value != modified_count ||
+                    topo.query().has_body(*body.value).value != std::optional<bool>{false} ||
+                    topo.query().has_vertex(*vertex.value).value != std::optional<bool>{true}) {
+                    std::cerr << "rejected tracking cleanup changed model or undo records\n";
+                    return 1;
+                }
+                const auto path = std::filesystem::temp_directory_path() / "axiom_topo_tracking_cleanup.json";
+                if (clear_kernel.diagnostics().export_report_json(rejected.diagnostic_id, path.string()).status !=
+                    axiom::StatusCode::Ok) return 1;
+                std::ifstream input(path);
+                const std::string json((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+                input.close();
+                std::filesystem::remove(path);
+                if (json.find("AXM-TX-E-0006") == std::string::npos) return 1;
+            }
+            if (commit) {
+                if (txn.commit().status != axiom::StatusCode::Ok) return 1;
+            } else {
+                if (txn.rollback().status != axiom::StatusCode::Ok ||
+                    clear_kernel.topology_count().value != original_count ||
+                    topo.query().shells_of_body(*body.value).value != original_shells ||
+                    topo.validate().validate_body(*body.value).status != axiom::StatusCode::Ok) {
+                    std::cerr << "rollback after rejected cleanup did not restore original model\n";
+                    return 1;
+                }
+            }
+            const auto closed_count = clear_kernel.topology_count().value;
+            for (int attempt = 0; attempt < 2; ++attempt) {
+                if (txn.clear_tracking_records().status != axiom::StatusCode::Ok ||
+                    txn.created_entity_count_total().value != std::optional<std::uint64_t>{0} ||
+                    txn.has_snapshot_body(*body.value).value != std::optional<bool>{false} ||
+                    txn.deleted_body_count().value != std::optional<std::uint64_t>{0} ||
+                    txn.write_operation_count().value != std::optional<std::uint64_t>{0} ||
+                    txn.is_active().value != std::optional<bool>{false} ||
+                    clear_kernel.topology_count().value != closed_count ||
+                    topo.query().has_vertex(*vertex.value).value != std::optional<bool>{commit} ||
+                    topo.query().has_body(*body.value).value != std::optional<bool>{!commit}) {
+                    std::cerr << "closed transaction cleanup must be idempotent and preserve model\n";
+                    return 1;
+                }
+            }
+        }
     }
 
     return 0;
