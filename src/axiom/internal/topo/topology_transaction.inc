@@ -605,15 +605,6 @@ Result<void> TopologyTransaction::rollback() {
       it->second.pcurve_id = pcurve_id;
     }
   }
-  for (const auto id : created_bodies_) {
-    state_->bodies.erase(id);
-  }
-  for (const auto id : created_shells_) {
-    state_->shells.erase(id);
-  }
-  for (const auto id : created_faces_) {
-    state_->faces.erase(id);
-  }
   for (const auto &[id, record] : transaction_state_->original_faces) {
     state_->faces[id] = record;
   }
@@ -624,8 +615,19 @@ Result<void> TopologyTransaction::rollback() {
     state_->bodies[id] = record;
   }
 
-  // 恢复面/壳/体之后再删除本事务创建的环/共边/边/顶点，且仅删除已不再被当前状态引用的项，
-  // 否则会出现“面仍引用环 id，但环记录已被擦除”的断裂（例如同事务内 delete_face 后 rollback）。
+  // 新建实体也可能因后续修改或级联删除进入快照。先恢复快照，再移除本事务
+  // 创建的面/壳/体，避免快照将它们复活；保留现有触达/快照查询的语义。
+  for (const auto id : created_bodies_) {
+    state_->bodies.erase(id);
+  }
+  for (const auto id : created_shells_) {
+    state_->shells.erase(id);
+  }
+  for (const auto id : created_faces_) {
+    state_->faces.erase(id);
+  }
+
+  // 最后清理本事务创建且已无引用的低层实体，并重建反向索引。
   auto loop_referenced = [this](std::uint64_t loop_id) {
     for (const auto &[fid, face] : state_->faces) {
       (void)fid;

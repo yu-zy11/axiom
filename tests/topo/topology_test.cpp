@@ -4153,6 +4153,132 @@ int main() {
         }
     }
 
+    // NFR-REL-001: undo snapshots must not resurrect entities created in this transaction.
+    for (int mutation = 0; mutation < 4; ++mutation) {
+        axiom::Kernel rollback_kernel;
+        auto& topo = rollback_kernel.topology();
+        auto& query = topo.query();
+        const auto plane = rollback_kernel.surfaces().make_plane({0, 0, 0}, {0, 0, 1});
+        const auto replacement = rollback_kernel.surfaces().make_plane({0, 0, 0}, {0, 0, 2});
+        const std::array<axiom::Point3, 3> points {{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}}};
+        const std::array<axiom::Vec3, 3> directions {{{1, 0, 0}, {-1, 1, 0}, {0, -1, 0}}};
+        std::array<axiom::CurveId, 3> curves;
+        if (!plane.value || !replacement.value) return 1;
+        for (std::size_t i = 0; i < curves.size(); ++i) {
+            const auto line = rollback_kernel.curves().make_line(points[i], directions[i]);
+            if (!line.value) return 1;
+            curves[i] = *line.value;
+        }
+        auto make_face = [&](axiom::TopologyTransaction& txn) -> std::optional<axiom::FaceId> {
+            std::array<axiom::VertexId, 3> vertices;
+            std::array<axiom::CoedgeId, 3> coedges;
+            for (std::size_t i = 0; i < vertices.size(); ++i) {
+                const auto vertex = txn.create_vertex(points[i]);
+                if (!vertex.value) return std::nullopt;
+                vertices[i] = *vertex.value;
+            }
+            for (std::size_t i = 0; i < coedges.size(); ++i) {
+                const auto edge = txn.create_edge(curves[i], vertices[i], vertices[(i + 1) % 3]);
+                if (!edge.value) return std::nullopt;
+                const auto coedge = txn.create_coedge(*edge.value, false);
+                if (!coedge.value) return std::nullopt;
+                coedges[i] = *coedge.value;
+            }
+            const auto loop = txn.create_loop(coedges);
+            if (!loop.value) return std::nullopt;
+            return txn.create_face(*plane.value, *loop.value, {}).value;
+        };
+        auto setup = topo.begin_transaction();
+        const auto original_face = make_face(setup);
+        if (!original_face) return 1;
+        const auto original_shell = setup.create_shell(std::array{*original_face});
+        if (!original_shell.value) return 1;
+        const auto original_body = setup.create_body(std::array{*original_shell.value});
+        if (!original_body.value || setup.commit().status != axiom::StatusCode::Ok) return 1;
+        const auto baseline = rollback_kernel.topology_count().value;
+        const auto original_loops = query.loops_of_face(*original_face).value;
+        if (!baseline || !original_loops) return 1;
+
+        auto txn = topo.begin_transaction();
+        const auto version = txn.preview_commit_version().value;
+        const auto face = make_face(txn);
+        if (!face) return 1;
+        const auto shell = txn.create_shell(std::array{*face});
+        if (!shell.value) return 1;
+        const auto body = txn.create_body(std::array{*shell.value});
+        // New owners of an existing face also receive snapshots on cascading deletion.
+        const auto shared_shell = txn.create_shell(std::array{*original_face});
+        if (!body.value || !shared_shell.value) return 1;
+        const auto shared_body = txn.create_body(std::array{*shared_shell.value});
+        if (!shared_body.value) return 1;
+        axiom::Result<void> changed;
+        if (mutation == 0) changed = txn.replace_surface(*face, *replacement.value);
+        if (mutation == 1) changed = txn.delete_face(*face);
+        if (mutation == 2) changed = txn.delete_shell(*shell.value);
+        if (mutation == 3) changed = txn.delete_body(*body.value);
+        if (changed.status != axiom::StatusCode::Ok ||
+            txn.replace_surface(*original_face, *replacement.value).status != axiom::StatusCode::Ok ||
+            txn.delete_face(*original_face).status != axiom::StatusCode::Ok) return 1;
+        const auto modified_count = rollback_kernel.topology_count().value;
+        const auto writes = txn.write_operation_count().value;
+        // Repeating a cascade deletion is a diagnosed failure, not a second mutation.
+        const auto rejected = txn.delete_face(*original_face);
+        const auto report = rollback_kernel.diagnostics().get(rejected.diagnostic_id);
+        if (rejected.status != axiom::StatusCode::InvalidInput || !report.value ||
+            !has_issue_code(*report.value, axiom::diag_codes::kCoreInvalidHandle) ||
+            rollback_kernel.topology_count().value != modified_count ||
+            txn.write_operation_count().value != writes ||
+            txn.preview_commit_version().value != version) {
+            std::cerr << "rejected repeated deletion polluted transaction\n";
+            return 1;
+        }
+        const auto vertices = txn.created_vertices().value;
+        const auto edges = txn.created_edges().value;
+        const auto coedges = txn.created_coedges().value;
+        const auto loops = txn.created_loops().value;
+        if (!vertices || !edges || !coedges || !loops ||
+            txn.rollback().status != axiom::StatusCode::Ok) return 1;
+        if (rollback_kernel.topology_count().value != baseline ||
+            query.has_face(*face).value != std::optional<bool>{false} ||
+            query.has_shell(*shell.value).value != std::optional<bool>{false} ||
+            query.has_body(*body.value).value != std::optional<bool>{false} ||
+            query.has_shell(*shared_shell.value).value != std::optional<bool>{false} ||
+            query.has_body(*shared_body.value).value != std::optional<bool>{false} ||
+            query.surface_of_face(*original_face).value != plane.value ||
+            query.loops_of_face(*original_face).value != original_loops ||
+            query.shells_of_face(*original_face).value != std::optional<std::vector<axiom::ShellId>>{{*original_shell.value}} ||
+            query.bodies_of_shell(*original_shell.value).value != std::optional<std::vector<axiom::BodyId>>{{*original_body.value}} ||
+            topo.validate().validate_body(*original_body.value).status != axiom::StatusCode::Ok ||
+            topo.validate().validate_indices_consistency().status != axiom::StatusCode::Ok) {
+            std::cerr << "rollback resurrected new topology or lost original model, mutation " << mutation << '\n';
+            return 1;
+        }
+        for (const auto id : *vertices) if (query.has_vertex(id).value != std::optional<bool>{false}) return 1;
+        for (const auto id : *edges) if (query.has_edge(id).value != std::optional<bool>{false}) return 1;
+        for (const auto id : *loops) if (query.has_loop(id).value != std::optional<bool>{false}) return 1;
+        for (const auto id : *coedges) if (query.pcurve_of_coedge(id).status != axiom::StatusCode::InvalidInput) return 1;
+        const auto closed = txn.rollback();
+        const auto closed_report = rollback_kernel.diagnostics().get(closed.diagnostic_id);
+        if (closed.status != axiom::StatusCode::OperationFailed || !closed_report.value ||
+            !has_issue_code(*closed_report.value, axiom::diag_codes::kTxRollbackFailure) ||
+            rollback_kernel.topology_count().value != baseline) return 1;
+        // Empty rollback and a subsequent successful commit must remain usable.
+        auto empty = topo.begin_transaction();
+        if (empty.preview_commit_version().value != version ||
+            empty.rollback().status != axiom::StatusCode::Ok ||
+            rollback_kernel.topology_count().value != baseline) return 1;
+        auto next = topo.begin_transaction();
+        const auto committed_face = make_face(next);
+        if (!committed_face) return 1;
+        const auto committed_shell = next.create_shell(std::array{*committed_face});
+        if (!committed_shell.value) return 1;
+        const auto committed_body = next.create_body(std::array{*committed_shell.value});
+        if (!committed_body.value || next.replace_surface(*committed_face, *replacement.value).status != axiom::StatusCode::Ok ||
+            next.commit().status != axiom::StatusCode::Ok ||
+            query.surface_of_face(*committed_face).value != replacement.value ||
+            topo.validate().validate_indices_consistency().status != axiom::StatusCode::Ok) return 1;
+    }
+
     // NFR-REL-001: clearing live undo records must never disable rollback.
     {
         axiom::Kernel clear_kernel;
