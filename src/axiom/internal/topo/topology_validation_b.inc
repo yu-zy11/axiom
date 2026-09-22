@@ -253,6 +253,12 @@ TopologyValidationService::validate_shell_closedness(ShellId shell_id) const {
   // 复用与 validate_shell 相同的计数逻辑，但在此处作为硬门禁返回失败。
   std::unordered_map<std::uint64_t, std::uint64_t> edge_use_count;
   std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> edge_to_faces;
+  struct EdgeUse {
+    CoedgeId coedge_id;
+    FaceId face_id;
+    bool reversed;
+  };
+  std::unordered_map<std::uint64_t, std::vector<EdgeUse>> edge_uses;
   for (const auto face_id : shell_it->second.faces) {
     const auto face_it = state_->faces.find(face_id.value);
     if (face_it == state_->faces.end()) {
@@ -274,6 +280,8 @@ TopologyValidationService::validate_shell_closedness(ShellId shell_id) const {
         }
         ++edge_use_count[coedge_it->second.edge_id.value];
         edge_to_faces[coedge_it->second.edge_id.value].push_back(face_id.value);
+        edge_uses[coedge_it->second.edge_id.value].push_back(
+            EdgeUse{coedge_id, face_id, coedge_it->second.reversed});
       }
     }
   }
@@ -346,6 +354,21 @@ TopologyValidationService::validate_shell_closedness(ShellId shell_id) const {
                                  diag_codes::kTopoNonManifoldEdge, msg,
                                  "壳非流形",
                                  std::move(related));
+    }
+    const auto uses_it = edge_uses.find(edge_value);
+    if (uses_it != edge_uses.end() && uses_it->second.size() == 2 &&
+        uses_it->second[0].face_id.value != uses_it->second[1].face_id.value &&
+        uses_it->second[0].reversed == uses_it->second[1].reversed) {
+      const auto &first = uses_it->second[0];
+      const auto &second = uses_it->second[1];
+      return detail::failed_void(
+          *state_, StatusCode::InvalidTopology,
+          diag_codes::kTopoLoopOrientationMismatch,
+          "壳闭合性验证失败：共享边两侧定向边方向相同",
+          "壳共边方向不一致",
+          {shell_id.value, edge_value, first.face_id.value,
+           second.face_id.value, first.coedge_id.value,
+           second.coedge_id.value});
     }
   }
   return ok_void(state_->create_diagnostic("壳闭合性验证通过"));

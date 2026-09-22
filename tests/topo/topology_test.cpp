@@ -3669,6 +3669,105 @@ int main() {
 
     // ---- Stage 2+: same-surface same-loop-id duplicate shell signature is blocked at create_face (7.2); Strict duplicate-signature path is covered by Heal strict_check when data is corrupted. ----
 
+    // ---- FR-TOPO-001: closed-shell shared coedges must have opposite directions ----
+    {
+        axiom::Kernel orientation_kernel;
+        const auto plane_up = orientation_kernel.surfaces().make_plane(
+            {0.0, 0.0, 0.0}, {0.0, 0.0, 1.0});
+        const auto plane_down = orientation_kernel.surfaces().make_plane(
+            {0.0, 0.0, 0.0}, {0.0, 0.0, -1.0});
+        const auto l01 = orientation_kernel.curves().make_line(
+            {0.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
+        const auto l12 = orientation_kernel.curves().make_line(
+            {1.0, 0.0, 0.0}, {-1.0, 1.0, 0.0});
+        const auto l20 = orientation_kernel.curves().make_line(
+            {0.0, 1.0, 0.0}, {0.0, -1.0, 0.0});
+        if (!plane_up.value || !plane_down.value || !l01.value ||
+            !l12.value || !l20.value) {
+            std::cerr << "failed to create geometry for shell orientation test\n";
+            return 1;
+        }
+        auto txn = orientation_kernel.topology().begin_transaction();
+        const auto v0 = txn.create_vertex({0.0, 0.0, 0.0});
+        const auto v1 = txn.create_vertex({1.0, 0.0, 0.0});
+        const auto v2 = txn.create_vertex({0.0, 1.0, 0.0});
+        if (!v0.value || !v1.value || !v2.value) return 1;
+        const auto e01 = txn.create_edge(*l01.value, *v0.value, *v1.value);
+        const auto e12 = txn.create_edge(*l12.value, *v1.value, *v2.value);
+        const auto e20 = txn.create_edge(*l20.value, *v2.value, *v0.value);
+        if (!e01.value || !e12.value || !e20.value) return 1;
+
+        const auto make_face = [&](bool opposite, axiom::SurfaceId surface)
+            -> std::optional<axiom::FaceId> {
+            std::array<axiom::CoedgeId, 3> coedges;
+            if (opposite) {
+                const auto c20 = txn.create_coedge(*e20.value, true);
+                const auto c12 = txn.create_coedge(*e12.value, true);
+                const auto c01 = txn.create_coedge(*e01.value, true);
+                if (!c20.value || !c12.value || !c01.value) return {};
+                coedges = {*c20.value, *c12.value, *c01.value};
+            } else {
+                const auto c01 = txn.create_coedge(*e01.value, false);
+                const auto c12 = txn.create_coedge(*e12.value, false);
+                const auto c20 = txn.create_coedge(*e20.value, false);
+                if (!c01.value || !c12.value || !c20.value) return {};
+                coedges = {*c01.value, *c12.value, *c20.value};
+            }
+            const auto loop = txn.create_loop(coedges);
+            if (!loop.value) return {};
+            return txn.create_face(surface, *loop.value, {}).value;
+        };
+
+        const auto face_up = make_face(false, *plane_up.value);
+        const auto face_same = make_face(false, *plane_up.value);
+        const auto face_opposite = make_face(true, *plane_down.value);
+        if (!face_up || !face_same || !face_opposite) return 1;
+        const auto invalid_shell = txn.create_shell(
+            std::array<axiom::FaceId, 2>{*face_up, *face_same});
+        const auto valid_degenerate_shell = txn.create_shell(
+            std::array<axiom::FaceId, 2>{*face_up, *face_opposite});
+        if (!invalid_shell.value || !valid_degenerate_shell.value) return 1;
+
+        const auto topology_before = orientation_kernel.topology_count().value;
+        const auto writes_before = txn.write_operation_count().value;
+        const auto invalid = orientation_kernel.topology().validate()
+                                 .validate_shell_closedness(*invalid_shell.value);
+        const auto report = orientation_kernel.diagnostics().get(invalid.diagnostic_id);
+        if (invalid.status != axiom::StatusCode::InvalidTopology || !report.value ||
+            !issue_links_entities(*report.value,
+                                  axiom::diag_codes::kTopoLoopOrientationMismatch,
+                                  {invalid_shell.value->value}) ||
+            orientation_kernel.topology_count().value != topology_before ||
+            txn.write_operation_count().value != writes_before) {
+            std::cerr << "same-direction shared coedges were accepted or polluted state\n";
+            return 1;
+        }
+        const auto path = std::filesystem::temp_directory_path() /
+                          "axiom_topo_shell_orientation.json";
+        if (orientation_kernel.diagnostics()
+                .export_report_json(invalid.diagnostic_id, path.string()).status !=
+            axiom::StatusCode::Ok) return 1;
+        std::ifstream input(path);
+        const std::string json((std::istreambuf_iterator<char>(input)),
+                               std::istreambuf_iterator<char>());
+        input.close();
+        std::filesystem::remove(path);
+        if (json.find(axiom::diag_codes::kTopoLoopOrientationMismatch) ==
+                std::string::npos ||
+            json.find("related_entities") == std::string::npos) return 1;
+
+        // A coincident two-face shell is geometrically degenerate, but its exact
+        // topological orientation pairing is valid and must pass this validator.
+        if (orientation_kernel.topology().validate()
+                .validate_shell_closedness(*valid_degenerate_shell.value).status !=
+                axiom::StatusCode::Ok ||
+            txn.rollback().status != axiom::StatusCode::Ok ||
+            orientation_kernel.topology_count().value != std::optional<std::uint64_t>{0}) {
+            std::cerr << "opposite shared-coedge directions or rollback failed\n";
+            return 1;
+        }
+    }
+
     // ---- Stage 2+: Strict topology should fail for disconnected (but closed) shells ----
     {
         auto w0 = kernel.primitives().wedge({10.0, 0.0, 0.0}, 2.0, 2.0, 2.0);

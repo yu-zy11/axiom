@@ -240,7 +240,7 @@
 | `AXM-TOPO-E-0012` | Error | 派生/传播来源引用无效或丢失 |
 | `AXM-TOPO-E-0013` | Error | 面/壳/体的来源集合不一致 |
 | `AXM-TOPO-E-0014` | Error | 同一环内重复引用同一条拓扑边，或同一面跨环复用拓扑边；`create_face` 在写入前拒绝，关联两个冲突环与边 ID，`validate_face` 保留验证门禁 |
-| `AXM-TOPO-E-0015` | Error | 面环方向与外向规则不一致（含：内外环在 UV 空间绕向不符合孔洞规则；**全量 PCurve** 且基曲面为**平面**时，外环 UV 映射到 3D 的 Newell 与基平面法向不一致；无 PCurve 时平面/球/柱/锥/环面外环与解析外向一致性等） |
+| `AXM-TOPO-E-0015` | Error | 面环方向与外向规则不一致（含：内外环在 UV 空间绕向不符合孔洞规则；**全量 PCurve** 且基曲面为**平面**时，外环 UV 映射到 3D 的 Newell 与基平面法向不一致；无 PCurve 时平面/球/柱/锥/环面外环与解析外向一致性；`validate_shell_closedness` 发现共享边两侧 coedge 方向相同） |
 | `AXM-TOPO-E-0016` | Error | 定向边已归属其他环（共边跨环复用） |
 | `AXM-TOPO-E-0017` | Warning / Error | 壳内重复面：`validate_shell` 对同曲面同边界环签名给 **Warning**；`create_shell` / `validate_indices_consistency` 对壳 `faces` 列表中重复 `FaceId` 给 **Error** |
 | `AXM-TOPO-E-0018` | Warning | 壳不连通（面集合存在多个连通分量） |
