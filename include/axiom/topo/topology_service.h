@@ -226,6 +226,7 @@ public:
     // - kTopoOpenBoundary when any edge is used < 2 times within the shell
     // - kTopoNonManifoldEdge when any edge is used > 2 times within the shell
     // - kTopoLoopOrientationMismatch when the two coedges of a shared edge have the same direction
+    // - kTopoShellDisconnected when paired faces form more than one connected component
     Result<void> validate_shell_closedness(ShellId shell_id) const;
     Result<void> validate_shell_sources(ShellId shell_id) const;
     Result<void> validate_body(BodyId body_id) const;

@@ -243,7 +243,7 @@
 | `AXM-TOPO-E-0015` | Error | 面环方向与外向规则不一致（含：内外环在 UV 空间绕向不符合孔洞规则；**全量 PCurve** 且基曲面为**平面**时，外环 UV 映射到 3D 的 Newell 与基平面法向不一致；无 PCurve 时平面/球/柱/锥/环面外环与解析外向一致性；`validate_shell_closedness` 发现共享边两侧 coedge 方向相同） |
 | `AXM-TOPO-E-0016` | Error | 定向边已归属其他环（共边跨环复用） |
 | `AXM-TOPO-E-0017` | Warning / Error | 壳内重复面：`validate_shell` 对同曲面同边界环签名给 **Warning**；`create_shell` / `validate_indices_consistency` 对壳 `faces` 列表中重复 `FaceId` 给 **Error** |
-| `AXM-TOPO-E-0018` | Warning | 壳不连通（面集合存在多个连通分量） |
+| `AXM-TOPO-E-0018` | Warning / Error | 壳不连通（`validate_shell` 作为结构告警；`validate_shell_closedness` 将多个面连通分量作为 Strict 闭合性错误） |
 | `AXM-TOPO-E-0019` | Error | 定向边未被任何环引用（悬挂定向边） |
 | `AXM-TOPO-E-0020` | Error | 顶点未作为任何边的端点（悬挂顶点；`validate_vertex` 与 `validate_indices_consistency`） |
 | `AXM-TOPO-E-0021` | Error | 环未被任何面引用（孤立环，例如删除面后残留） |

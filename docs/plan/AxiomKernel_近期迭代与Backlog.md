@@ -46,6 +46,8 @@
 
 ### 2.3 `topo`
 
+- FR-TOPO-001 第 22 切片：`validate_shell_closedness` 将“只有一个面连通分量”纳入 Strict 壳闭合性合同；两个各自闭合但互不共享边的分量返回 `InvalidTopology` / `AXM-TOPO-E-0018`，诊断关联壳和各分量代表面。`axiom_topology_test` 覆盖单分量成功、双闭合分量失败、诊断 JSON、失败不污染及回滚。未增加公开签名或错误码，需求保持受限可用。
+
 - NFR-REL-001 第 18 切片：收紧 `TopologyTransaction` 唯一所有权。事务只能移动构造，禁止复制和移动赋值；移动后源对象保持可查询的关闭状态，不能写入、提交或回滚，避免默认移动留下活动源对象并发生空状态访问或误撤销。`axiom_topology_test` 覆盖编译期所有权约束、目标提交/回滚、源对象重复关闭操作、失败不污染和已提交实体存续。需求保持受限可用，完整隔离与取消仍待交付。
 
 - FR-TOPO-001 第 17 切片：`validate_shell_closedness` 在边恰由两个不同面使用时进一步要求两侧 coedge 的 `reversed` 相反；同向配对返回 `InvalidTopology` / `AXM-TOPO-E-0015`，关联壳、边、两面与两 coedge。`axiom_topology_test` 覆盖同向失败、反向成功、零厚度双面退化壳、JSON 诊断、验证失败不改变拓扑/事务写计数及回滚。未增加公开签名或错误码，需求保持受限可用。

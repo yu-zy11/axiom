@@ -397,6 +397,9 @@ public:
   Result<void> validate_edge(EdgeId) const;
   Result<void> validate_face(FaceId) const;
   Result<void> validate_shell(ShellId) const;
+  // Strict 闭合性：每条边须由两个不同面反向配对，且全部面只能形成一个连通分量。
+  // 多个独立闭合分量返回 InvalidTopology / AXM-TOPO-E-0018。
+  Result<void> validate_shell_closedness(ShellId) const;
   Result<void> validate_body(BodyId) const;
 };
 ```

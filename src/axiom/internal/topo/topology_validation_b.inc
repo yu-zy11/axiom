@@ -371,6 +371,61 @@ TopologyValidationService::validate_shell_closedness(ShellId shell_id) const {
            second.coedge_id.value});
     }
   }
+
+  // A closed shell is one connected 2-manifold component.  Edge pairing alone
+  // is insufficient: concatenating two otherwise closed solids must not turn
+  // them into one valid shell.
+  std::unordered_map<std::uint64_t, std::size_t> face_index;
+  face_index.reserve(shell_it->second.faces.size());
+  for (std::size_t i = 0; i < shell_it->second.faces.size(); ++i) {
+    face_index.emplace(shell_it->second.faces[i].value, i);
+  }
+  std::vector<std::vector<std::size_t>> adjacent(shell_it->second.faces.size());
+  for (const auto& [edge_value, faces] : edge_to_faces) {
+    (void)edge_value;
+    if (faces.size() != 2) {
+      continue;
+    }
+    const auto first = face_index.find(faces[0]);
+    const auto second = face_index.find(faces[1]);
+    if (first == face_index.end() || second == face_index.end() ||
+        first->second == second->second) {
+      continue;
+    }
+    adjacent[first->second].push_back(second->second);
+    adjacent[second->second].push_back(first->second);
+  }
+
+  std::vector<bool> visited(shell_it->second.faces.size(), false);
+  std::vector<std::uint64_t> component_faces;
+  for (std::size_t start = 0; start < visited.size(); ++start) {
+    if (visited[start]) {
+      continue;
+    }
+    component_faces.push_back(shell_it->second.faces[start].value);
+    std::vector<std::size_t> pending{start};
+    visited[start] = true;
+    while (!pending.empty()) {
+      const auto current = pending.back();
+      pending.pop_back();
+      for (const auto next : adjacent[current]) {
+        if (!visited[next]) {
+          visited[next] = true;
+          pending.push_back(next);
+        }
+      }
+    }
+  }
+  if (component_faces.size() > 1) {
+    std::vector<std::uint64_t> related{shell_id.value};
+    related.insert(related.end(), component_faces.begin(), component_faces.end());
+    return detail::failed_void(
+        *state_, StatusCode::InvalidTopology,
+        diag_codes::kTopoShellDisconnected,
+        "壳闭合性验证失败：面集合包含 " +
+            std::to_string(component_faces.size()) + " 个连通分量",
+        "壳不连通", std::move(related));
+  }
   return ok_void(state_->create_diagnostic("壳闭合性验证通过"));
 }
 

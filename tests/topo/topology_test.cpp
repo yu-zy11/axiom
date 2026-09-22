@@ -3806,21 +3806,43 @@ int main() {
 
         auto txn = kernel.topology().begin_transaction();
         auto shell = txn.create_shell(combined);
-        auto body = txn.create_body(std::array<axiom::ShellId, 1>{*shell.value});
-        if (shell.status != axiom::StatusCode::Ok || body.status != axiom::StatusCode::Ok ||
-            !shell.value.has_value() || !body.value.has_value()) {
-            std::cerr << "failed to create combined shell/body for strict disconnected-shell test\n";
+        if (shell.status != axiom::StatusCode::Ok || !shell.value.has_value()) {
+            std::cerr << "failed to create combined shell for strict disconnected-shell test\n";
             return 1;
         }
-        auto strict = kernel.validate().validate_topology(*body.value, axiom::ValidationMode::Strict);
-        if (strict.status == axiom::StatusCode::Ok) {
-            std::cerr << "expected strict topology validation to fail for disconnected shell\n";
+        const auto topology_before = kernel.topology_count().value;
+        const auto writes_before = txn.write_operation_count().value;
+        auto strict = kernel.topology().validate().validate_shell_closedness(*shell.value);
+        if (strict.status != axiom::StatusCode::InvalidTopology ||
+            kernel.topology_count().value != topology_before ||
+            txn.write_operation_count().value != writes_before) {
+            std::cerr << "expected disconnected closed shell rejection without state pollution\n";
             return 1;
         }
         auto diag = kernel.diagnostics().get(strict.diagnostic_id);
         if (diag.status != axiom::StatusCode::Ok || !diag.value.has_value() ||
-            !has_issue_code(*diag.value, axiom::diag_codes::kTopoShellDisconnected)) {
+            !issue_links_entities(*diag.value, axiom::diag_codes::kTopoShellDisconnected,
+                                  {shell.value->value, faces0.value->front().value,
+                                   faces1.value->front().value})) {
             std::cerr << "expected strict validation to expose shell-disconnected diagnostic code\n";
+            return 1;
+        }
+        const auto path = std::filesystem::temp_directory_path() /
+                          "axiom_topo_shell_disconnected.json";
+        if (kernel.diagnostics().export_report_json(strict.diagnostic_id, path.string()).status !=
+            axiom::StatusCode::Ok) return 1;
+        std::ifstream input(path);
+        const std::string json((std::istreambuf_iterator<char>(input)),
+                               std::istreambuf_iterator<char>());
+        input.close();
+        std::filesystem::remove(path);
+        if (json.find(axiom::diag_codes::kTopoShellDisconnected) == std::string::npos ||
+            json.find("related_entities") == std::string::npos) return 1;
+
+        if (kernel.topology().validate()
+                .validate_shell_closedness(shells0.value->front()).status !=
+                axiom::StatusCode::Ok) {
+            std::cerr << "connected closed shell was rejected\n";
             return 1;
         }
         auto rb = txn.rollback();
