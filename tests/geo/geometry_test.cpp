@@ -591,6 +591,73 @@ int main() {
             return 1;
         }
     }
+    // Explicit surface knots follow the same non-degenerate-domain and multiplicity contract as curves.
+    {
+        std::vector<axiom::Point3> poles;
+        for (int u = 0; u < 4; ++u) {
+            for (int v = 0; v < 4; ++v) {
+                poles.push_back({static_cast<double>(u), static_cast<double>(v),
+                                 static_cast<double>(u + v)});
+            }
+        }
+        const auto count_before = kernel.geometry_count();
+        const auto cache_before = kernel.cache_entry_count();
+        if (!count_before.value || !cache_before.value) {
+            std::cerr << "failed to read geometry state before surface-knot regression\n";
+            return 1;
+        }
+
+        const std::array<std::vector<double>, 2> invalid_knots{{
+            {0.0, 0.0, 0.0, 0.0, 1.0, 1.0}, // degree 1, excess multiplicity with positive active domain
+            {0.0, 0.0, 0.0, 0.0, 0.0, 0.0}  // zero-length active domain
+        }};
+        for (bool rational : {false, true}) {
+            for (bool invalid_u : {true, false}) {
+                for (const auto& knots : invalid_knots) {
+                    axiom::Result<axiom::SurfaceId> failed;
+                    if (rational) {
+                        axiom::NURBSSurfaceDesc desc;
+                        desc.poles = poles;
+                        desc.weights.assign(poles.size(), 2.0);
+                        (invalid_u ? desc.knots_u : desc.knots_v) = knots;
+                        failed = kernel.surfaces().make_nurbs(desc);
+                    } else {
+                        axiom::BSplineSurfaceDesc desc;
+                        desc.poles = poles;
+                        (invalid_u ? desc.knots_u : desc.knots_v) = knots;
+                        failed = kernel.surfaces().make_bspline(desc);
+                    }
+                    const auto code = kernel.diagnostics().has_issue_code(
+                        failed.diagnostic_id, "AXM-GEO-E-0002");
+                    if (failed.status != axiom::StatusCode::InvalidInput || failed.value ||
+                        !code.value || !*code.value ||
+                        kernel.geometry_count().value != count_before.value ||
+                        kernel.cache_entry_count().value != cache_before.value) {
+                        std::cerr << "invalid surface knots must fail without pollution\n";
+                        return 1;
+                    }
+                }
+            }
+        }
+
+        // Full multiplicity remains valid and selects a one-sided patch at the discontinuity.
+        axiom::BSplineSurfaceDesc valid;
+        valid.poles = poles;
+        valid.degree_u = 1;
+        valid.degree_v = 1;
+        valid.knots_u = {0.0, 0.0, 0.5, 0.5, 1.0, 1.0};
+        valid.knots_v = valid.knots_u;
+        const auto surface = kernel.surfaces().make_bspline(valid);
+        const auto eval = surface.value
+            ? kernel.surface_service().eval(*surface.value, 1.5, 1.5, 1)
+            : axiom::Result<axiom::SurfaceEvalResult>{};
+        if (!surface.value || !eval.value || !std::isfinite(eval.value->point.x) ||
+            !std::isfinite(eval.value->point.y) || !std::isfinite(eval.value->point.z) ||
+            !std::isfinite(eval.value->du.x) || !std::isfinite(eval.value->dv.y)) {
+            std::cerr << "full-multiplicity surface knots must remain evaluable\n";
+            return 1;
+        }
+    }
     // closest_parameter for spline-like curves should stay within domain.
     auto bspline_single_t = kernel.curve_service().closest_parameter(*bspline.value, {100.0, 100.0, 0.0});
     if (bspline_single_t.status != axiom::StatusCode::Ok || !bspline_single_t.value.has_value() ||

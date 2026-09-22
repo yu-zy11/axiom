@@ -1266,6 +1266,17 @@ bool resolve_bspline_surface_axis(int n_ctrl, int degree_hint,
     if (!bspline_knot_vector_non_decreasing(knots_out)) {
       return false;
     }
+    if (!(knots_out[static_cast<std::size_t>(p_out)] <
+          knots_out[static_cast<std::size_t>(n)])) {
+      return false;
+    }
+    int multiplicity = 1;
+    for (std::size_t i = 1; i < knots_out.size(); ++i) {
+      multiplicity = knots_out[i] == knots_out[i - 1] ? multiplicity + 1 : 1;
+      if (multiplicity > p_out + 1) {
+        return false;
+      }
+    }
     bspline_affine_scale_knots_to_span(knots_out, p_out, static_cast<std::size_t>(n),
                                        span_end);
     return true;

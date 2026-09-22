@@ -360,7 +360,7 @@ struct BSplineSurfaceDesc {
   int degree_u{-1};
   /// v 向阶数；<0 表示自动推断。
   int degree_v{-1};
-  /// 非空时作为 u 向结点向量（长度须为 n_u + degree_u + 1，degree 由向量长度隐含或与 degree_u 一致）；求值前会仿射归一化到与参数域 [0, max(1,n_u-1)] 对齐。
+  /// 非空时作为 u 向结点向量（长度须为 n_u + degree_u + 1，有限、非递减、有效参数域非零，且重数不超过 degree_u+1；degree 由向量长度隐含或与 degree_u 一致）；求值前会仿射归一化到与参数域 [0, max(1,n_u-1)] 对齐。
   std::vector<Scalar> knots_u;
   /// v 向结点；语义同 knots_u。
   std::vector<Scalar> knots_v;
