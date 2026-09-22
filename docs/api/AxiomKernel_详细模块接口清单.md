@@ -371,6 +371,7 @@ public:
   // 坐标必须为有限值；NaN/±Inf 返回 InvalidInput / AXM-CORE-E-0002，拓扑与事务写计数不变。
   Result<VertexId> create_vertex(const Point3&);
   Result<EdgeId> create_edge(CurveId, VertexId, VertexId);
+  // validate_edge 要求两个拓扑端点在引用的 3D Curve 上（采用内核线性容差）；不一致返回 InvalidTopology / AXM-TOPO-E-0008。
   Result<CoedgeId> create_coedge(EdgeId, bool reversed);
   // 按定向端点 ID 首尾闭合，单共边不豁免；未闭合返回 InvalidTopology / AXM-TOPO-E-0002，失败不写入环或事务计数。
   Result<LoopId> create_loop(std::span<const CoedgeId>);

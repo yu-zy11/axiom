@@ -144,6 +144,68 @@ int main() {
         }
     }
 
+    // FR-TOPO-001: an edge's topological endpoints must lie on its 3D curve.
+    {
+        axiom::Kernel edge_kernel;
+        const auto line = edge_kernel.curves().make_line(
+            {0.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
+        if (!line.value) return 1;
+        auto txn = edge_kernel.topology().begin_transaction();
+        const auto v0 = txn.create_vertex({0.0, 0.0, 0.0});
+        const auto v1 = txn.create_vertex({2.0, 0.0, 0.0});
+        const auto near = txn.create_vertex({3.0, 5.0e-8, 0.0});
+        const auto off = txn.create_vertex({1.0, 1.0, 0.0});
+        if (!v0.value || !v1.value || !near.value || !off.value) return 1;
+        const auto valid_edge = txn.create_edge(*line.value, *v0.value, *v1.value);
+        const auto tolerant_edge = txn.create_edge(*line.value, *v1.value, *near.value);
+        const auto invalid_edge = txn.create_edge(*line.value, *v0.value, *off.value);
+        if (!valid_edge.value || !tolerant_edge.value || !invalid_edge.value) return 1;
+        if (!txn.create_coedge(*valid_edge.value, false).value ||
+            !txn.create_coedge(*tolerant_edge.value, false).value ||
+            !txn.create_coedge(*invalid_edge.value, false).value) return 1;
+
+        if (edge_kernel.topology().validate().validate_edge(*valid_edge.value).status !=
+                axiom::StatusCode::Ok ||
+            edge_kernel.topology().validate().validate_edge(*tolerant_edge.value).status !=
+                axiom::StatusCode::Ok) {
+            std::cerr << "on-curve or tolerance-boundary edge endpoint was rejected\n";
+            return 1;
+        }
+        const auto topology_before = edge_kernel.topology_count().value;
+        const auto writes_before = txn.write_operation_count().value;
+        const auto invalid =
+            edge_kernel.topology().validate().validate_edge(*invalid_edge.value);
+        const auto report = edge_kernel.diagnostics().get(invalid.diagnostic_id);
+        if (invalid.status != axiom::StatusCode::InvalidTopology || !report.value ||
+            !issue_links_entities(*report.value,
+                                  axiom::diag_codes::kTopoCurveTopologyMismatch,
+                                  {invalid_edge.value->value, line.value->value,
+                                   off.value->value}) ||
+            edge_kernel.topology_count().value != topology_before ||
+            txn.write_operation_count().value != writes_before) {
+            std::cerr << "off-curve edge endpoint was accepted or validation polluted state\n";
+            return 1;
+        }
+        const auto path = std::filesystem::temp_directory_path() /
+                          "axiom_topo_edge_curve_mismatch.json";
+        if (edge_kernel.diagnostics()
+                .export_report_json(invalid.diagnostic_id, path.string()).status !=
+            axiom::StatusCode::Ok) return 1;
+        std::ifstream input(path);
+        const std::string json((std::istreambuf_iterator<char>(input)),
+                               std::istreambuf_iterator<char>());
+        input.close();
+        std::filesystem::remove(path);
+        if (json.find(axiom::diag_codes::kTopoCurveTopologyMismatch) ==
+                std::string::npos ||
+            json.find("related_entities") == std::string::npos ||
+            txn.rollback().status != axiom::StatusCode::Ok ||
+            edge_kernel.topology_count().value != std::optional<std::uint64_t>{0}) {
+            std::cerr << "edge mismatch diagnostic export or rollback failed\n";
+            return 1;
+        }
+    }
+
     // FR-TOPO-001: a single open coedge is not a closed loop, even at coincident coordinates.
     {
         axiom::Kernel loop_kernel;
@@ -3919,8 +3981,8 @@ int main() {
     // ---- Stage 2: Face must not reuse the same Edge across outer/inner loops ----
     {
         auto l01 = kernel.curves().make_line({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
-        auto l12 = kernel.curves().make_line({1.0, 0.0, 0.0}, {0.0, 1.0, 0.0});
-        auto l20 = kernel.curves().make_line({0.0, 1.0, 0.0}, {-1.0, -1.0, 0.0});
+        auto l12 = kernel.curves().make_line({1.0, 0.0, 0.0}, {-1.0, 1.0, 0.0});
+        auto l20 = kernel.curves().make_line({0.0, 1.0, 0.0}, {0.0, -1.0, 0.0});
         auto l13 = kernel.curves().make_line({1.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
         auto l34 = kernel.curves().make_line({2.0, 0.0, 0.0}, {0.0, 1.0, 0.0});
         auto l40 = kernel.curves().make_line({2.0, 1.0, 0.0}, {-2.0, -1.0, 0.0});

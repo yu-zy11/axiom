@@ -68,6 +68,39 @@ Result<void> TopologyValidationService::validate_edge(EdgeId edge_id) const {
                                "边验证失败：边的两个端点不能相同",
                                "边验证失败", {edge_id.value, edge_it->second.v0.value});
   }
+  // The topological endpoints must lie on the referenced 3D curve.  Merely
+  // keeping valid handles is not sufficient: such an edge cannot provide a
+  // consistent geometric boundary for a coedge/loop.
+  const CurveService curve_service(state_);
+  const auto tolerance =
+      detail::resolve_linear_tolerance(0.0, state_->config.tolerance);
+  const std::array<std::pair<VertexId, Point3>, 2> endpoints{{
+      {edge_it->second.v0, state_->vertices.at(edge_it->second.v0.value).point},
+      {edge_it->second.v1, state_->vertices.at(edge_it->second.v1.value).point}}};
+  for (const auto &[vertex_id, point] : endpoints) {
+    const auto closest = curve_service.closest_point(edge_it->second.curve_id, point);
+    if (closest.status != StatusCode::Ok || !closest.value.has_value()) {
+      return detail::failed_void(
+          *state_, StatusCode::InvalidTopology,
+          diag_codes::kTopoCurveTopologyMismatch,
+          "边验证失败：无法计算端点到引用曲线的最近点", "边验证失败",
+          {edge_id.value, edge_it->second.curve_id.value, vertex_id.value});
+    }
+    const auto dx = closest.value->x - point.x;
+    const auto dy = closest.value->y - point.y;
+    const auto dz = closest.value->z - point.z;
+    const auto distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+    if (!std::isfinite(distance) || distance > tolerance) {
+      return detail::failed_void(
+          *state_, StatusCode::InvalidTopology,
+          diag_codes::kTopoCurveTopologyMismatch,
+          "边验证失败：拓扑端点不在引用曲线上（distance=" +
+              std::to_string(distance) + ", tolerance=" +
+              std::to_string(tolerance) + ")",
+          "边验证失败",
+          {edge_id.value, edge_it->second.curve_id.value, vertex_id.value});
+    }
+  }
   return ok_void(state_->create_diagnostic("边验证通过"));
 }
 

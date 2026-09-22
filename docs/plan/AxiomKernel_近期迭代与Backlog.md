@@ -51,6 +51,8 @@
 
 ### 2.3 `topo`
 
+- FR-TOPO-001 第 27 切片：`validate_edge` 使用内核线性容差检查两个拓扑端点是否位于引用的 3D Curve 上；偏离或最近点求解失败返回 `InvalidTopology` / `AXM-TOPO-E-0008`，诊断关联边、曲线与问题顶点。`axiom_topology_test` 覆盖成功、容差内端点、明显偏离、诊断 JSON、验证不污染和回滚；同时修正一处既有跨环测试夹具中与端点不一致的直线方向。无公开签名或错误码变化，需求保持受限可用。
+
 - NFR-REL-001 第 23 切片：活动 `TopologyTransaction` 未显式关闭便离开作用域时由 `noexcept` 析构自动回滚，防止创建、删除和替换直接泄漏到共享 store；空事务、已关闭事务和移动后的源对象析构不改变模型。`axiom_topology_test` 覆盖创建、既有面替换、级联删除、移动目标回滚、显式提交持久性和索引不变量。需求保持受限可用，完整隔离、协作式取消和全量 S0/S1 门禁仍待闭合。
 
 - FR-TOPO-001 第 22 切片：`validate_shell_closedness` 将“只有一个面连通分量”纳入 Strict 壳闭合性合同；两个各自闭合但互不共享边的分量返回 `InvalidTopology` / `AXM-TOPO-E-0018`，诊断关联壳和各分量代表面。`axiom_topology_test` 覆盖单分量成功、双闭合分量失败、诊断 JSON、失败不污染及回滚。未增加公开签名或错误码，需求保持受限可用。

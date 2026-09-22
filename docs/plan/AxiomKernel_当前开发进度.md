@@ -226,6 +226,7 @@
   - **建议测试入口**：`axiom_geometry_test`（增加曲率/导数/退化场景后再逐步收紧）
 
 - **topo（Transaction/Query/Validation/Trim Bridge）**
+  - **第 27 切片一致性增量**：`validate_edge` 以当前线性容差校验两个拓扑端点位于引用的 3D Curve 上；偏离或最近点求解失败返回 `InvalidTopology` / `AXM-TOPO-E-0008`，关联边、曲线与问题顶点。`axiom_topology_test` 覆盖成功、容差边界、失败、JSON、验证不污染与回滚；FR-TOPO-001 仍为受限可用。
   - **第 17 切片一致性增量**：`validate_shell_closedness` 除共享计数外校验同一 Edge 两侧 coedge 必须反向；同向时返回 `InvalidTopology` / `AXM-TOPO-E-0015` 并关联壳、边、两面与两 coedge。`axiom_topology_test` 覆盖同向失败、反向成功、零厚度退化壳、JSON、失败不污染计数及回滚。FR-TOPO-001 仍为受限可用。
   - **第 22 切片一致性增量**：`validate_shell_closedness` 在边双面反向配对通过后继续验证面邻接图只有一个连通分量，拒绝把多个独立闭合实体拼成一个壳；失败返回 `InvalidTopology` / `AXM-TOPO-E-0018`，关联壳及各分量代表面。`axiom_topology_test` 覆盖单个闭合壳成功、两个闭合分量失败、诊断 JSON、验证失败不污染模型/事务写计数及回滚。FR-TOPO-001 仍为受限可用。
   - **本轮一致性增量**：`create_vertex` 在写入前拒绝任一非有限坐标（`InvalidInput` / `AXM-CORE-E-0002`），有限极值与次正规值仍可创建；`axiom_topology_test` 覆盖三个轴的 NaN/±Inf、诊断 JSON、失败不污染计数、后续创建与回滚。FR-TOPO-001 仍为受限可用。
