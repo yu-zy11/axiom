@@ -713,13 +713,16 @@ public:
   Result<void> append_issue(DiagnosticId, const Issue&);
   Result<void> export_report(DiagnosticId, std::string_view path) const;
   Result<void> export_report_json(DiagnosticId, std::string_view path) const;
+  Result<void> export_reports_txt(std::span<const DiagnosticId>, std::string_view path) const;
   Result<void> export_reports_json(std::span<const DiagnosticId>, std::string_view path) const;
 };
 ```
 
 `export_reports_json` 顶层为 `{"diagnostics":[...]}`，每项与单报告 JSON 一致，包含 `id/summary/issues` 及问题的 `code/severity/message/stage/related_entities`；字符串控制字节转义后保留。按输入顺序导出，重复 ID 重复输出，无问题报告输出空 `issues`。
 
-空 ID 列表或空路径返回 `InvalidInput` / `AXM-IO-E-0005`；任一 ID 不存在返回 `InvalidInput` / `AXM-CORE-E-0001`。上述参数失败均在打开文件前返回，不创建或截断目标，不修改源报告（仍生成失败诊断）。打开或写入失败返回 `OperationFailed` / `AXM-IO-E-0005`；写入期间的设备错误不保证恢复原文件。
+`export_reports_txt` 按输入顺序拼接单报告文本，保留摘要、每个问题的严重级别、错误码、消息及非空阶段与关联实体；重复 ID 重复输出，空报告仍包含 ID 和摘要。文本中的特殊字节原样保留。
+
+上述两个指定 ID 批量导出接口：空 ID 列表或空路径返回 `InvalidInput` / `AXM-IO-E-0005`；任一 ID 不存在返回 `InvalidInput` / `AXM-CORE-E-0001`。上述参数失败均在打开文件前返回，不创建或截断目标，不修改源报告（仍生成失败诊断）。打开或写入失败返回 `OperationFailed` / `AXM-IO-E-0005`；写入期间的设备错误不保证恢复原文件。
 
 ## 13. `TopoCore` 门面补充接口
 

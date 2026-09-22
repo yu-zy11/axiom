@@ -53,6 +53,25 @@ std::string json_escape(std::string_view input) {
     return out;
 }
 
+void write_diagnostic_report_txt(std::ostream& out, const DiagnosticReport& report) {
+    out << "DiagnosticId: " << report.id.value << '\n';
+    out << "Summary: " << report.summary << '\n';
+    for (const auto& issue : report.issues) {
+        out << "- [" << issue_severity_name(issue.severity) << "] "
+            << issue.code << ": " << issue.message;
+        if (!issue.stage.empty()) {
+            out << " | Stage:" << issue.stage;
+        }
+        if (!issue.related_entities.empty()) {
+            out << " | RelatedEntities:";
+            for (const auto entity : issue.related_entities) {
+                out << ' ' << entity;
+            }
+        }
+        out << '\n';
+    }
+}
+
 void write_diagnostic_report_json_object(std::ostream& out, const DiagnosticReport& report) {
     out << "{";
     out << "\"id\":" << report.id.value << ",";
@@ -123,22 +142,7 @@ Result<void> DiagnosticService::export_report(DiagnosticId id, std::string_view 
             "诊断导出失败：无法打开输出文件", "诊断导出失败");
     }
 
-    out << "DiagnosticId: " << it->second.id.value << '\n';
-    out << "Summary: " << it->second.summary << '\n';
-    for (const auto& issue : it->second.issues) {
-        out << "- [" << issue_severity_name(issue.severity) << "] "
-            << issue.code << ": " << issue.message;
-        if (!issue.stage.empty()) {
-            out << " | Stage:" << issue.stage;
-        }
-        if (!issue.related_entities.empty()) {
-            out << " | RelatedEntities:";
-            for (const auto entity : issue.related_entities) {
-                out << ' ' << entity;
-            }
-        }
-        out << '\n';
-    }
+    write_diagnostic_report_txt(out, it->second);
 
     return ok_void(id);
 }
@@ -478,13 +482,19 @@ Result<std::uint64_t> DiagnosticService::total_fatal_count() const {
 
 Result<void> DiagnosticService::export_reports_txt(std::span<const DiagnosticId> ids, std::string_view path) const {
     if (ids.empty() || path.empty()) return detail::invalid_input_void(*state_, diag_codes::kIoExportFailure, "批量导出失败：输入非法", "批量导出失败");
+    for (const auto id : ids) {
+        if (state_->diagnostics.find(id.value) == state_->diagnostics.end()) {
+            return detail::invalid_input_void(*state_, diag_codes::kCoreInvalidHandle,
+                                              "批量导出失败：目标诊断不存在", "批量导出失败");
+        }
+    }
     std::ofstream out{std::string(path)};
     if (!out) return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure, "批量导出失败：无法打开文件", "批量导出失败");
     for (const auto id : ids) {
-        const auto it = state_->diagnostics.find(id.value);
-        if (it == state_->diagnostics.end()) continue;
-        out << "DiagnosticId: " << id.value << "\nSummary: " << it->second.summary << "\n";
+        write_diagnostic_report_txt(out, state_->diagnostics.at(id.value));
     }
+    out.close();
+    if (!out) return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure, "批量导出失败：文件写入失败", "批量导出失败");
     return ok_void(state_->create_diagnostic("已批量导出诊断文本"));
 }
 
