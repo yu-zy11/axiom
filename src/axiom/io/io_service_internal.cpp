@@ -41,6 +41,13 @@ Result<void> reject_if_export_directory_not_writable(detail::KernelState& state,
     if (!std::filesystem::is_directory(dir, ec)) {
         return detail::invalid_input_void(state, diag_codes::kIoExportFailure, "导出路径校验失败：输出路径父级不是目录", "导出路径校验失败");
     }
+    ec.clear();
+    if (std::filesystem::exists(file_path, ec) && !ec && !std::filesystem::is_directory(file_path, ec)) {
+        // Replacing an existing file only requires access to that file. The parent
+        // directory may legitimately reject creation (for example /dev/full in a
+        // restricted runtime), so let the exporter classify open/write failures.
+        return ok_void({});
+    }
     static std::atomic<std::uint64_t> wchk_seq {0};
     const auto probe = dir / (".axiom_export_wchk_" + std::to_string(wchk_seq.fetch_add(1, std::memory_order_relaxed)) + "_" +
                               std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));

@@ -376,6 +376,8 @@
 
 ### 需求 7.13 诊断与日志（Diagnostics）
 
+- **NFR-DIA-001 第 30 切片**：`import_step` 的空路径、文件不存在与非可读常规文件分别绑定 `io.import.step.input/path/open`；拒绝发生在 Body ID 分配和存储写入前。`axiom_io_workflow_test` 覆盖成功导入、空/缺失/目录输入、阶段检索、JSON 导出、模型计数不污染及失败后重试。复用既有 `AXM-IO-E-0004`，无公开签名变化；不宣称标准 STEP 实体交换，需求仍为受限可用。
+
 - **NFR-DIA-001 第 25 切片**：`validate_self_intersection`、壳级及批量壳级变体的非法 Body/Shell、异属 Shell、空批量、退化偏置和 Strict 网格分析失败统一绑定 `heal.validate_self_intersection.*` 细分阶段，并保留目标 Body/Shell。`axiom_heal_test` 覆盖正常 Strict、非法/异属句柄、空批量、阶段检索、JSON 及模型计数不污染。复用既有错误码，无公开签名变化；网格 SAT 仍为三角化近似，需求保持受限可用。
 
 - **FR-DIAG-001 第 29 切片**：`export_step` 的无效 Body/空路径、路径校验、打开与最终写入失败分别绑定 `io.export.step.input/path/open/write` 并关联输入 Body；显式检查写入与关闭状态，Linux `/dev/full` 不再误报成功。`axiom_io_workflow_test` 覆盖成功、空/无效输入、不存在父目录、设备写入失败、阶段检索、JSON、模型不污染及失败后重试。无公开签名或错误码变化，需求仍为受限可用。

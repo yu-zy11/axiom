@@ -109,6 +109,45 @@ int main() {
 
     axiom::ExportOptions export_options;
 
+    const auto body_count_before_step_import_failures = kernel.body_count();
+    const auto missing_import_path = tmp / ("axiom_io_missing_import_" + uniq + ".step");
+    const auto check_step_import_failure = [&](const axiom::Result<axiom::BodyId>& result,
+                                               axiom::StatusCode expected_status,
+                                               std::string_view expected_stage) {
+        const auto report = kernel.diagnostics().get(result.diagnostic_id);
+        const auto* issue = report.value ? find_issue(*report.value, axiom::diag_codes::kIoImportFailure) : nullptr;
+        return result.status == expected_status && !result.value.has_value() && issue != nullptr &&
+               issue->severity == axiom::IssueSeverity::Error && issue->stage == expected_stage &&
+               issue->related_entities.empty();
+    };
+    const auto empty_step_import = kernel.io().import_step("", axiom::ImportOptions {});
+    const auto missing_step_import = kernel.io().import_step(missing_import_path.string(), axiom::ImportOptions {});
+    const auto directory_step_import = kernel.io().import_step(tmp.string(), axiom::ImportOptions {});
+    if (!check_step_import_failure(empty_step_import, axiom::StatusCode::InvalidInput, "io.import.step.input") ||
+        !check_step_import_failure(missing_step_import, axiom::StatusCode::OperationFailed, "io.import.step.path") ||
+        !check_step_import_failure(directory_step_import, axiom::StatusCode::OperationFailed, "io.import.step.open")) {
+        std::cerr << "STEP import failure is missing stable stage evidence\n";
+        return 1;
+    }
+    const auto import_failure_json = tmp / ("axiom_io_step_import_failure_" + uniq + ".json");
+    const auto exported_import_failure = kernel.diagnostics().export_report_json(
+        directory_step_import.diagnostic_id, import_failure_json.string());
+    std::ifstream import_failure_json_in {import_failure_json, std::ios::binary};
+    const std::string import_failure_json_text {
+        (std::istreambuf_iterator<char>(import_failure_json_in)), std::istreambuf_iterator<char>()};
+    std::filesystem::remove(import_failure_json);
+    const auto staged_step_import_failures = kernel.diagnostics().find_by_issue_stage_prefix("io.import.step.", 10);
+    const auto body_count_after_step_import_failures = kernel.body_count();
+    if (exported_import_failure.status != axiom::StatusCode::Ok ||
+        import_failure_json_text.find("\"stage\":\"io.import.step.open\"") == std::string::npos ||
+        !staged_step_import_failures.value || staged_step_import_failures.value->size() != 3 ||
+        !body_count_before_step_import_failures.value || !body_count_after_step_import_failures.value ||
+        *body_count_before_step_import_failures.value != *body_count_after_step_import_failures.value ||
+        std::filesystem::exists(missing_import_path)) {
+        std::cerr << "STEP import failure lookup, JSON evidence, or model isolation is unexpected\n";
+        return 1;
+    }
+
     const auto body_count_before_step_failures = kernel.body_count();
     const auto check_step_failure = [&](const axiom::Result<void>& result, axiom::StatusCode expected_status,
                                         std::string_view expected_stage) {

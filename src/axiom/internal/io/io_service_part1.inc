@@ -1,21 +1,29 @@
 Result<BodyId> IOService::import_step(std::string_view path, const ImportOptions& options) {
+    const auto fail_before_import = [this](StatusCode status, std::string message,
+                                           std::string_view stage) {
+        auto issue = detail::make_error_issue(diag_codes::kIoImportFailure, std::move(message));
+        issue.stage = std::string(stage);
+        return error_result<BodyId>(
+            status, state_->create_diagnostic("STEP 导入失败", {std::move(issue)}));
+    };
     if (path.empty()) {
-        return detail::invalid_input_result<BodyId>(
-            *state_, diag_codes::kIoImportFailure,
-            "STEP 导入失败：输入路径为空", "STEP 导入失败");
+        return fail_before_import(StatusCode::InvalidInput,
+                                  "STEP 导入失败：输入路径为空", "io.import.step.input");
     }
     if (!std::filesystem::exists(path)) {
-        return detail::failed_result<BodyId>(
-            *state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
-            "STEP 导入失败：输入文件不存在", "STEP 导入失败");
+        return fail_before_import(StatusCode::OperationFailed,
+                                  "STEP 导入失败：输入文件不存在", "io.import.step.path");
     }
 
     constexpr std::size_t kStepIgesProbeMaxBytes = static_cast<std::size_t>(64) * 1024 * 1024;
-    const auto file_text = read_regular_file_bytes_limited(path, kStepIgesProbeMaxBytes);
+    std::error_code step_path_error;
+    const bool is_regular_step_file = std::filesystem::is_regular_file(path, step_path_error);
+    const auto file_text = is_regular_step_file
+                               ? read_regular_file_bytes_limited(path, kStepIgesProbeMaxBytes)
+                               : std::optional<std::string> {};
     if (!file_text.has_value()) {
-        return detail::failed_result<BodyId>(
-            *state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
-            "STEP 导入失败：无法打开输入文件", "STEP 导入失败");
+        return fail_before_import(StatusCode::OperationFailed,
+                                  "STEP 导入失败：无法打开输入文件", "io.import.step.open");
     }
     if (step_file_requires_full_standard_importer(std::string_view(*file_text))) {
         std::vector<Issue> issues;
