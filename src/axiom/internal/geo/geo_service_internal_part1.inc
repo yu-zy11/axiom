@@ -1152,14 +1152,40 @@ Scalar approximate_curve_parameter(const detail::CurveRecord &curve,
   const int samples = 64;
   Scalar best_t = domain.min;
   Scalar best_distance = std::numeric_limits<Scalar>::max();
+  const auto consider = [&](Scalar t, Scalar &candidate_t,
+                            Scalar &candidate_distance) {
+    const auto distance =
+        detail::norm(detail::subtract(point, evaluate_curve_point(curve, t)));
+    if (distance < candidate_distance) {
+      candidate_distance = distance;
+      candidate_t = t;
+    }
+  };
   for (int i = 0; i <= samples; ++i) {
     const auto alpha = static_cast<Scalar>(i) / static_cast<Scalar>(samples);
     const auto t = domain.min + (domain.max - domain.min) * alpha;
-    const auto sample = evaluate_curve_point(curve, t);
-    const auto distance = detail::norm(detail::subtract(point, sample));
-    if (distance < best_distance) {
-      best_distance = distance;
-      best_t = t;
+    consider(t, best_t, best_distance);
+  }
+  // A fixed grid over the full domain can completely miss a narrow, valid knot
+  // span. Seed every non-empty spline span so the subsequent local refinement
+  // starts on the correct branch even at a full-multiplicity discontinuity.
+  if ((curve.kind == detail::CurveKind::BSpline ||
+       curve.kind == detail::CurveKind::Nurbs) &&
+      !curve.knots_u.empty()) {
+    constexpr int kSamplesPerKnotSpan = 4;
+    for (std::size_t i = 0; i + 1 < curve.knots_u.size(); ++i) {
+      const auto span_min = std::max(curve.knots_u[i], domain.min);
+      const auto span_max = std::min(curve.knots_u[i + 1], domain.max);
+      if (!(span_max > span_min)) {
+        continue;
+      }
+      for (int sample_index = 0; sample_index <= kSamplesPerKnotSpan;
+           ++sample_index) {
+        const auto alpha = static_cast<Scalar>(sample_index) /
+                           static_cast<Scalar>(kSamplesPerKnotSpan);
+        consider(span_min + (span_max - span_min) * alpha, best_t,
+                 best_distance);
+      }
     }
   }
   const auto radius = (domain.max - domain.min) * 0.125;

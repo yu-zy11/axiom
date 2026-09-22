@@ -1155,6 +1155,73 @@ int main() {
             }
         }
     }
+    // Closest-point seeding must inspect every non-empty knot span. A fixed
+    // whole-domain grid misses this narrow, discontinuous middle branch.
+    for (const bool rational : {false, true}) {
+        for (const int degree : {-1, 1}) {
+            axiom::BSplineCurveDesc desc;
+            desc.degree = degree;
+            desc.poles = {{0, 0, 0}, {0, 2, 0}, {100, 0, 0},
+                          {100, 2, 0}, {200, 0, 0}, {200, 2, 0}};
+            desc.knots = {0, 0, 0.501, 0.501, 0.502, 0.502, 1, 1};
+            const auto create = [&]() {
+                if (!rational) {
+                    return kernel.curves().make_bspline(desc);
+                }
+                axiom::NURBSCurveDesc nurbs;
+                nurbs.degree = desc.degree;
+                nurbs.poles = desc.poles;
+                nurbs.knots = desc.knots;
+                nurbs.weights = {1, 1, 2, 2, 1, 1};
+                return kernel.curves().make_nurbs(nurbs);
+            };
+            const auto curve = create();
+            if (!curve.value) {
+                std::cerr << "narrow-span closest-point setup failed\n";
+                return 1;
+            }
+            const auto closest_t = kernel.curve_service().closest_parameter(
+                *curve.value, {100, 1, 0});
+            const auto closest = kernel.curve_service().closest_point(
+                *curve.value, {100, 1, 0});
+            if (!closest_t.value || *closest_t.value < 0.501 || *closest_t.value > 0.502 ||
+                !closest.value || !approx(closest.value->x, 100) ||
+                !approx(closest.value->y, 1, 1e-5)) {
+                std::cerr << "spline closest point missed narrow knot span\n";
+                return 1;
+            }
+
+            // A zero-speed span remains a valid closest-point candidate.
+            desc.poles[2] = desc.poles[3] = {100, 1, 0};
+            const auto constant = create();
+            const auto constant_t = constant.value
+                ? kernel.curve_service().closest_parameter(*constant.value, {100, 1, 0})
+                : axiom::Result<double>{};
+            if (!constant.value || !constant_t.value || *constant_t.value < 0.501 ||
+                *constant_t.value > 0.502) {
+                std::cerr << "constant narrow knot span was not considered\n";
+                return 1;
+            }
+
+            const auto count_before = kernel.geometry_count();
+            const auto cache_before = kernel.cache_entry_count();
+            const auto failed = kernel.curve_service().closest_parameter(
+                *curve.value, {std::numeric_limits<double>::quiet_NaN(), 0, 0});
+            const auto code = kernel.diagnostics().has_issue_code(
+                failed.diagnostic_id, "AXM-CORE-E-0002");
+            if (failed.status != axiom::StatusCode::InvalidInput || failed.value ||
+                !code.value || !*code.value || kernel.geometry_count().value != count_before.value ||
+                kernel.cache_entry_count().value != cache_before.value) {
+                std::cerr << "invalid closest-point input must fail without pollution\n";
+                return 1;
+            }
+            const auto after = kernel.curve_service().closest_point(*curve.value, {100, 1, 0});
+            if (!after.value || !approx(after.value->x, 100) || !approx(after.value->y, 1, 1e-5)) {
+                std::cerr << "failed closest-point query changed existing spline\n";
+                return 1;
+            }
+        }
+    }
     axiom::NURBSCurveDesc invalid_nurbs_curve;
     invalid_nurbs_curve.poles = {{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}};
     invalid_nurbs_curve.weights = {1.0, -1.0};
