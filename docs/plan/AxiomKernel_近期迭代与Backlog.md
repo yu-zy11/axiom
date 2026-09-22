@@ -12,6 +12,8 @@
 
 ### 2.1 `diag + ops`
 
+- **FR-DIAG-001 第 34 切片**：单报告 `export_report` / `export_report_json` 显式关闭并检查输出流，设备写入/关闭失败不再误报成功；空路径、目录打开失败与 Linux `/dev/full` 均返回结构化失败。`axiom_diagnostics_test` 覆盖成功完整证据、参数/打开/写入失败、源报告不污染及失败后重试。复用 `AXM-IO-E-0005`，无公开签名变化；需求仍为受限可用。
+
 - **NFR-DIA-001 第 30 切片**：STEP 导入的空路径、文件不存在与非可读常规文件分别绑定 `io.import.step.input/path/open`；失败均发生在 Body ID 分配和存储写入之前。`axiom_io_workflow_test` 覆盖阶段检索、JSON、退化输入、模型不污染和失败后成功重试。复用 `AXM-IO-E-0004`，无公开签名变化；需求仍为受限可用，不扩展 STEP 实体交换范围。
 
 - **FR-DIAG-001 第 29 切片**：STEP 导出的无效 Body/空路径、路径校验、打开与最终写入失败绑定 `io.export.step.input/path/open/write` 及输入 Body；显式检查写入/关闭状态，避免 `/dev/full` 误报成功。`axiom_io_workflow_test` 覆盖成功、退化输入、路径/设备失败、阶段检索、JSON、模型不污染和重试。复用 `AXM-IO-E-0005`，无公开签名变化；需求仍为受限可用，其他 IO/BOOL/HEAL 失败出口仍待闭合。

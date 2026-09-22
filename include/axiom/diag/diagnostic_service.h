@@ -20,7 +20,9 @@ public:
 
     Result<DiagnosticReport> get(DiagnosticId id) const;
     Result<void> append_issue(DiagnosticId id, const Issue& issue);
+    /// 单报告文本导出；空路径、打开或最终写入失败均返回结构化错误。
     Result<void> export_report(DiagnosticId id, std::string_view path) const;
+    /// 单报告 JSON 导出；空路径、打开或最终写入失败均返回结构化错误。
     Result<void> export_report_json(DiagnosticId id, std::string_view path) const;
     Result<std::uint64_t> count() const;
     Result<std::uint64_t> count_by_severity(IssueSeverity severity) const;

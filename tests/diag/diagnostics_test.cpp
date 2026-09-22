@@ -28,6 +28,74 @@ const axiom::Issue* find_issue(const axiom::DiagnosticReport& report, std::strin
     return nullptr;
 }
 
+bool check_single_report_export_failures() {
+    axiom::Kernel kernel;
+    auto& diagnostics = kernel.diagnostics();
+    axiom::Issue issue;
+    issue.code = std::string(axiom::diag_codes::kBoolInvalidInput);
+    issue.severity = axiom::IssueSeverity::Error;
+    issue.message = "single export evidence";
+    issue.stage = "bool.input";
+    issue.related_entities = {71, 72};
+    const std::array<axiom::Issue, 1> issues {issue};
+    const auto source = diagnostics.create_report("single export source", issues);
+    const auto empty = diagnostics.create_report("", {});
+    if (!source.value || !empty.value) return false;
+
+    const auto directory = std::filesystem::temp_directory_path() / "axiom_diag_single_export_slice";
+    std::filesystem::create_directories(directory);
+    struct Cleanup {
+        std::filesystem::path path;
+        ~Cleanup() { std::filesystem::remove_all(path); }
+    } cleanup {directory};
+    const auto txt_path = directory / "report.txt";
+    const auto json_path = directory / "report.json";
+    const auto empty_txt_path = directory / "empty.txt";
+    const auto empty_json_path = directory / "empty.json";
+    const auto read = [](const std::filesystem::path& path) {
+        std::ifstream in(path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    };
+    if (diagnostics.export_report(*source.value, txt_path.string()).status != axiom::StatusCode::Ok ||
+        diagnostics.export_report_json(*source.value, json_path.string()).status != axiom::StatusCode::Ok ||
+        read(txt_path).find("Stage:bool.input | RelatedEntities: 71 72") == std::string::npos ||
+        read(json_path).find("\"stage\":\"bool.input\",\"related_entities\":[71,72]") == std::string::npos) return false;
+    if (diagnostics.export_report(*empty.value, empty_txt_path.string()).status != axiom::StatusCode::Ok ||
+        diagnostics.export_report_json(*empty.value, empty_json_path.string()).status != axiom::StatusCode::Ok ||
+        read(empty_txt_path) != "DiagnosticId: " + std::to_string(empty.value->value) + "\nSummary: \n" ||
+        read(empty_json_path) != "{\"id\":" + std::to_string(empty.value->value) +
+                                 ",\"summary\":\"\",\"issues\":[]}") return false;
+
+    const auto source_before = diagnostics.get(*source.value);
+    if (!source_before.value) return false;
+    const auto invalid_txt = diagnostics.export_report(axiom::DiagnosticId {}, txt_path.string());
+    const auto empty_json = diagnostics.export_report_json(*source.value, "");
+    const auto open_txt = diagnostics.export_report(*source.value, directory.string());
+    const auto open_json = diagnostics.export_report_json(*source.value, directory.string());
+    for (const auto* result : {&invalid_txt, &empty_json, &open_txt, &open_json}) {
+        const auto failure = diagnostics.get(result->diagnostic_id);
+        if (!failure.value) return false;
+    }
+    if (invalid_txt.status != axiom::StatusCode::InvalidInput ||
+        empty_json.status != axiom::StatusCode::InvalidInput ||
+        open_txt.status != axiom::StatusCode::OperationFailed ||
+        open_json.status != axiom::StatusCode::OperationFailed) return false;
+#if defined(__linux__)
+    const auto write_txt = diagnostics.export_report(*source.value, "/dev/full");
+    const auto write_json = diagnostics.export_report_json(*source.value, "/dev/full");
+    for (const auto* result : {&write_txt, &write_json}) {
+        const auto failure = diagnostics.get(result->diagnostic_id);
+        if (result->status != axiom::StatusCode::OperationFailed || !failure.value ||
+            !has_issue_code(*failure.value, axiom::diag_codes::kIoExportFailure)) return false;
+    }
+#endif
+    const auto source_after = diagnostics.get(*source.value);
+    if (!source_after.value || source_after.value->summary != source_before.value->summary ||
+        source_after.value->issues.size() != source_before.value->issues.size()) return false;
+    return diagnostics.export_report(*source.value, txt_path.string()).status == axiom::StatusCode::Ok &&
+           diagnostics.export_report_json(*source.value, json_path.string()).status == axiom::StatusCode::Ok;
+}
+
 bool check_batch_json_export() {
     axiom::Kernel kernel;
     auto& diagnostics = kernel.diagnostics();
@@ -253,6 +321,10 @@ bool check_grouped_stage_export_failures() {
 }  // namespace
 
 int main() {
+    if (!check_single_report_export_failures()) {
+        std::cerr << "single report export failure handling regression\n";
+        return 1;
+    }
     if (!check_grouped_stage_export_failures()) {
         std::cerr << "grouped stage export failure handling or source isolation regression\n";
         return 1;

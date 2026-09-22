@@ -379,6 +379,8 @@
 
 ### 需求 7.13 诊断与日志（Diagnostics）
 
+- **FR-DIAG-001 第 34 切片**：`export_report` / `export_report_json` 在序列化单条完整诊断后显式关闭并检查输出流，Linux `/dev/full` 等最终写入/关闭失败返回 `OperationFailed` / `AXM-IO-E-0005`，不再误报成功。`axiom_diagnostics_test` 覆盖 TXT/JSON 成功证据、无效 ID、空路径、目录打开失败、设备写入失败、源报告不污染及失败后重试。无公开签名或错误码变化；设备写入失败不保证恢复目标文件，需求仍为受限可用。
+
 - **NFR-DIA-001 第 30 切片**：`import_step` 的空路径、文件不存在与非可读常规文件分别绑定 `io.import.step.input/path/open`；拒绝发生在 Body ID 分配和存储写入前。`axiom_io_workflow_test` 覆盖成功导入、空/缺失/目录输入、阶段检索、JSON 导出、模型计数不污染及失败后重试。复用既有 `AXM-IO-E-0004`，无公开签名变化；不宣称标准 STEP 实体交换，需求仍为受限可用。
 
 - **NFR-DIA-001 第 25 切片**：`validate_self_intersection`、壳级及批量壳级变体的非法 Body/Shell、异属 Shell、空批量、退化偏置和 Strict 网格分析失败统一绑定 `heal.validate_self_intersection.*` 细分阶段，并保留目标 Body/Shell。`axiom_heal_test` 覆盖正常 Strict、非法/异属句柄、空批量、阶段检索、JSON 及模型计数不污染。复用既有错误码，无公开签名变化；网格 SAT 仍为三角化近似，需求保持受限可用。

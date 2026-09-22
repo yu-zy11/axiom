@@ -144,6 +144,13 @@ Result<void> DiagnosticService::export_report(DiagnosticId id, std::string_view 
 
     write_diagnostic_report_txt(out, it->second);
 
+    out.close();
+    if (!out) {
+        return detail::failed_void(
+            *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+            "诊断导出失败：文件写入失败", "诊断导出失败");
+    }
+
     return ok_void(id);
 }
 
@@ -166,6 +173,12 @@ Result<void> DiagnosticService::export_report_json(DiagnosticId id, std::string_
             "诊断JSON导出失败：无法打开输出文件", "诊断JSON导出失败");
     }
     write_diagnostic_report_json_object(out, it->second);
+    out.close();
+    if (!out) {
+        return detail::failed_void(
+            *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+            "诊断JSON导出失败：文件写入失败", "诊断JSON导出失败");
+    }
     return ok_void(id);
 }
 

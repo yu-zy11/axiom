@@ -791,6 +791,11 @@ int main() {
         std::cerr << "failed to create face\n";
         return 1;
     }
+    auto face_commit = txn.commit();
+    if (face_commit.status != axiom::StatusCode::Ok) {
+        std::cerr << "failed to commit face modification fixture\n";
+        return 1;
+    }
 
     auto replace_face = kernel.modify().replace_face(*box_a.value, *face.value, *plane1.value);
     auto delete_face_and_heal = kernel.modify().delete_face_and_heal(*box_a.value, *face.value);
