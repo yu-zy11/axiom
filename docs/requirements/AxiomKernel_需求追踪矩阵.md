@@ -35,7 +35,7 @@
 
 | ID | 需求 | 当前状态 | 衡量方式 | 当前证据 | 发布门禁 |
 |---|---|---|---|---|---|
-| NFR-REL-001 | 失败不污染、事务一致性 | 受限可用 | 失败注入后句柄/存储/拓扑不变量 | runtime invariant、boolean/heal 测试；`axiom_topology_test` 覆盖已有共边 PCurve 绑定/清除的回滚、无效句柄拒绝与失败不污染；活动事务清理跟踪记录拒绝、创建/删除/PCurve 快照保留及关闭后幂等清理；第 13 切片覆盖新建面/壳/体修改与删除后回滚不复活；第 18 切片覆盖事务唯一所有权；第 23 切片覆盖活动事务析构自动回滚、空事务 no-op、移动所有权及提交持久性 | S0/S1 回归全通过；继续闭合完整事务隔离与取消语义 |
+| NFR-REL-001 | 失败不污染、事务一致性 | 受限可用 | 失败注入后句柄/存储/拓扑不变量 | runtime invariant、boolean/heal 测试；`axiom_topology_test` 覆盖已有共边 PCurve 绑定/清除的回滚、无效句柄拒绝与失败不污染；活动事务清理跟踪记录拒绝、创建/删除/PCurve 快照保留及关闭后幂等清理；第 13 切片覆盖新建面/壳/体修改与删除后回滚不复活；第 18 切片覆盖事务唯一所有权；第 23 切片覆盖活动事务析构自动回滚、空事务 no-op、移动所有权及提交持久性；第 28 切片覆盖仅 `replace_surface` 写入的作用域回滚、失败不污染及提交审计一致性 | S0/S1 回归全通过；继续闭合完整事务隔离与取消语义 |
 | NFR-DIA-001 | 可解释失败 | 受限可用 | 稳定错误码、`diagnostic_id`、阶段和问题实体 | diagnostics 及 workflow 测试；`axiom_boolean_prep_test` 覆盖诊断开关两种模式下的早期失败阶段、输入实体、检索/JSON 与失败不污染；第 10 切片补齐非法 BooleanOp 拒绝及合法枚举回归，拒绝不触发 Eval 失效传播；第 15 切片覆盖预处理统计导出输入/打开/写入失败阶段、实体、检索/JSON、参数失败文件及模型不污染、Linux `/dev/full` 拒绝假成功；第 20 切片为 `validate_geometry` 全部分支绑定 `heal.validate_geometry.*` 阶段及目标 Body/问题子实体；第 25 切片为体/壳/批量壳自交验证失败绑定 `heal.validate_self_intersection.*` 阶段及 Body/Shell，`axiom_heal_test` 覆盖成功、非法/异属句柄、空批量、检索/JSON 与失败不污染 | 支持范围内无静默失败 |
 | NFR-PERF-001 | 可重复性能基线 | 进行中 | 总耗时、均值/P95、数据集/环境元数据 | `axiom_perf_baseline_test` | 不超过批准阈值；回退有批准记录 |
 | NFR-COMP-001 | API/格式兼容性 | 进行中 | 版本策略、编译兼容、round-trip | plugin 与 IO 测试 | 破坏性变化有迁移说明和版本决策 |

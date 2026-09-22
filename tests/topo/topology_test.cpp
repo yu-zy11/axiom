@@ -4668,5 +4668,55 @@ int main() {
         }
     }
 
+    // NFR-REL-001: a surface replacement is a write even when it is the only
+    // operation, so scope rollback and commit audit must not treat it as empty.
+    {
+        axiom::Kernel replace_kernel;
+        auto& topo = replace_kernel.topology();
+        const auto box = replace_kernel.primitives().box({0, 0, 0}, 1, 1, 1);
+        const auto replacement = replace_kernel.surfaces().make_plane({0, 0, 2}, {0, 0, 1});
+        if (!box.value || !replacement.value) return 1;
+        const auto faces = topo.query().faces_of_body(*box.value);
+        if (!faces.value || faces.value->empty()) return 1;
+        const auto face = faces.value->front();
+        const auto original = topo.query().surface_of_face(face);
+        if (!original.value) return 1;
+
+        {
+            auto abandoned = topo.begin_transaction();
+            const auto rejected = abandoned.replace_surface(face, axiom::SurfaceId{});
+            if (rejected.status != axiom::StatusCode::InvalidInput ||
+                abandoned.write_operation_count().value != std::optional<std::uint64_t>{0} ||
+                topo.query().surface_of_face(face).value != original.value) {
+                std::cerr << "rejected surface replacement polluted transaction\n";
+                return 1;
+            }
+            if (abandoned.replace_surface(face, *replacement.value).status != axiom::StatusCode::Ok ||
+                abandoned.write_operation_count().value != std::optional<std::uint64_t>{1}) return 1;
+        }
+        if (topo.query().surface_of_face(face).value != original.value) {
+            std::cerr << "replacement-only scope exit did not roll back\n";
+            return 1;
+        }
+
+        auto explicit_rollback = topo.begin_transaction();
+        if (explicit_rollback.replace_surface(face, *replacement.value).status != axiom::StatusCode::Ok ||
+            explicit_rollback.rollback().status != axiom::StatusCode::Ok ||
+            explicit_rollback.write_operation_count().value != std::optional<std::uint64_t>{0} ||
+            topo.query().surface_of_face(face).value != original.value) return 1;
+
+        auto committed = topo.begin_transaction();
+        if (committed.replace_surface(face, *replacement.value).status != axiom::StatusCode::Ok ||
+            committed.commit().status != axiom::StatusCode::Ok) return 1;
+        const auto audit = replace_kernel.topology_commit_audit();
+        if (topo.query().surface_of_face(face).value != replacement.value ||
+            !audit.value || audit.value->last_commit_write_operations != 1 ||
+            audit.value->last_commit_write_breakdown.replaced_surfaces != 1 ||
+            audit.value->committed_write_operations_total != 1) {
+            std::cerr << "replacement-only commit audit is inconsistent\n";
+            return 1;
+        }
+    }
+
     return 0;
 }

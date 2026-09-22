@@ -594,6 +594,7 @@ Result<void> TopologyTransaction::replace_surface(FaceId face_id,
   it->second.surface_id = replacement;
   rebuild_topology_indices(*state_);
   ++txn_replaced_surfaces_;
+  ++txn_write_ops_;
   return ok_void(state_->create_diagnostic("已替换面曲面"));
 }
 
