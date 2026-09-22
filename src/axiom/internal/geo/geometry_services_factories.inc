@@ -245,11 +245,17 @@ Result<CurveId> CurveFactory::make_bspline(const BSplineCurveDesc &desc) {
       }
     }
     for (std::size_t i = 1; i < knots.size(); ++i) {
-      if (knots[i] < knots[i - 1] - static_cast<Scalar>(1e-14)) {
+      if (knots[i] < knots[i - 1]) {
         return detail::invalid_input_result<CurveId>(
             *state_, diag_codes::kGeoCurveCreationInvalid,
             "BSpline 曲线创建失败：结点须为非减序列", "BSpline 曲线创建失败");
       }
+    }
+    // The active domain is [U[p], U[n]], not the full knot-vector span.
+    if (knots[static_cast<std::size_t>(p)] >= knots[n]) {
+      return detail::invalid_input_result<CurveId>(
+          *state_, diag_codes::kGeoCurveCreationInvalid,
+          "BSpline 曲线创建失败：有效参数域必须具有正长度", "BSpline 曲线创建失败");
     }
   } else {
     const int p_default = bspline_degree_for_control_count(n);
@@ -324,11 +330,17 @@ Result<CurveId> CurveFactory::make_nurbs(const NURBSCurveDesc &desc) {
       }
     }
     for (std::size_t i = 1; i < knots.size(); ++i) {
-      if (knots[i] < knots[i - 1] - static_cast<Scalar>(1e-14)) {
+      if (knots[i] < knots[i - 1]) {
         return detail::invalid_input_result<CurveId>(
             *state_, diag_codes::kGeoCurveCreationInvalid,
             "NURBS 曲线创建失败：结点须为非减序列", "NURBS 曲线创建失败");
       }
+    }
+    // The active domain is [U[p], U[n]], not the full knot-vector span.
+    if (knots[static_cast<std::size_t>(p)] >= knots[n]) {
+      return detail::invalid_input_result<CurveId>(
+          *state_, diag_codes::kGeoCurveCreationInvalid,
+          "NURBS 曲线创建失败：有效参数域必须具有正长度", "NURBS 曲线创建失败");
     }
   } else {
     knots = nurbs_clamped_bezier_knots(n);
