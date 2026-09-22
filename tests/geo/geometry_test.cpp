@@ -997,6 +997,79 @@ int main() {
             return 1;
         }
     }
+    // Knot multiplicity: degree+1 permits separate spans; larger runs are invalid.
+    for (const bool rational : {false, true}) {
+        for (const int degree : {-1, 2}) {
+            axiom::BSplineCurveDesc desc;
+            desc.degree = degree;
+            desc.poles = {{0, 0, 0}, {1, 0, 0}, {2, 0, 0},
+                          {4, 1, 0}, {4, 2, 0}, {4, 3, 0}};
+            const auto create = [&]() {
+                if (!rational) {
+                    return kernel.curves().make_bspline(desc);
+                }
+                axiom::NURBSCurveDesc nurbs;
+                nurbs.degree = desc.degree;
+                nurbs.poles = desc.poles;
+                nurbs.knots = desc.knots;
+                nurbs.weights = {1, 1, 1, 1, 2, 1};
+                return kernel.curves().make_nurbs(nurbs);
+            };
+            desc.knots = {0, 0, 0, 1, 1, 1, 2, 2, 2};
+            const auto valid = create();
+            if (!valid.value || valid.status != axiom::StatusCode::Ok) {
+                std::cerr << "degree+1 knot multiplicity must remain valid\n";
+                return 1;
+            }
+            // At an internal break, use the right span; at the upper end, use the left.
+            for (const double t : {0.0, 1.0, 2.0}) {
+                const auto ev = kernel.curve_service().eval(*valid.value, t, 2);
+                const double speed = rational ? 4.0 : 2.0;
+                if (!ev.value || ev.value->derivatives.size() != 2 ||
+                    !approx(ev.value->point.x, t == 0.0 ? 0.0 : 4.0) ||
+                    !approx(ev.value->point.y, t == 0.0 ? 0.0 : (t == 1.0 ? 1.0 : 3.0)) ||
+                    !approx(ev.value->derivatives[0].x, t == 0.0 ? 2.0 : 0.0) ||
+                    !approx(ev.value->derivatives[0].y, t == 0.0 ? 0.0 : speed) ||
+                    !approx(ev.value->derivatives[1].x, 0.0) ||
+                    !approx(ev.value->derivatives[1].y,
+                            !rational || t == 0.0 ? 0.0 : (t == 1.0 ? -20.0 : 20.0))) {
+                    std::cerr << "unexpected one-sided evaluation at spline break/end\n";
+                    return 1;
+                }
+            }
+            const auto count_before = kernel.geometry_count();
+            const auto cache_before = kernel.cache_entry_count();
+            if (!count_before.value || !cache_before.value) {
+                return 1;
+            }
+            // All have a positive active domain and correct length, isolating multiplicity.
+            for (const auto& knots : std::vector<std::vector<double>>{
+                     {0, 0, 0, 0, 1, 1, 2, 2, 2},
+                     {0, 0, 0, 1, 1, 1, 1, 2, 2},
+                     {0, 0, 0, 1, 1, 2, 2, 2, 2}}) {
+                desc.knots = knots;
+                const auto failed = create();
+                const auto code = kernel.diagnostics().has_issue_code(
+                    failed.diagnostic_id, "AXM-GEO-E-0001");
+                const auto count_after = kernel.geometry_count();
+                const auto cache_after = kernel.cache_entry_count();
+                if (failed.status != axiom::StatusCode::InvalidInput || failed.value ||
+                    !code.value || !*code.value || !count_after.value || !cache_after.value ||
+                    *count_after.value != *count_before.value ||
+                    *cache_after.value != *cache_before.value) {
+                    std::cerr << "excess knot multiplicity must fail without pollution\n";
+                    return 1;
+                }
+            }
+            const auto after = kernel.curve_service().eval(*valid.value, 0.5, 2);
+            if (!after.value || !approx(after.value->point.x, 1.0) ||
+                !approx(after.value->point.y, 0.0) ||
+                !approx(after.value->derivatives[0].x, 2.0)) {
+                std::cerr << "rejected multiplicity changed existing spline\n";
+                return 1;
+            }
+        }
+    }
     axiom::NURBSCurveDesc invalid_nurbs_curve;
     invalid_nurbs_curve.poles = {{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}};
     invalid_nurbs_curve.weights = {1.0, -1.0};

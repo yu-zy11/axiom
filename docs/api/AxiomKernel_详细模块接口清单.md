@@ -259,7 +259,7 @@ public:
 };
 ```
 
-`CurveFactory::make_bspline/make_nurbs` 的显式结点向量须有限、严格满足非减顺序（不使用几何容差吞掉逆序），且有效参数域 `knots[degree] < knots[poles.size()]`；合法重复结点保留。零长度有效域或结点逆序返回 `InvalidInput` 和 `AXM-GEO-E-0001`，不创建几何对象、不改动已有求值缓存。省略结点时的默认生成规则不变。
+`CurveFactory::make_bspline/make_nurbs` 的显式结点向量须有限、严格满足非减顺序（不使用几何容差吞掉逆序），且有效参数域 `knots[degree] < knots[poles.size()]`；每个结点的重数不得超过 `degree + 1`（精确数值比较），合法重复结点保留。内部重数为 `degree + 1` 的断点按右侧分段求值，上端点按左侧分段求值；返回的一、二阶导数是对应分段的单侧值，不表示断点处全局可微。零长度有效域、结点逆序或重数超限返回 `InvalidInput` 和 `AXM-GEO-E-0001`，不创建几何对象、不改动已有求值缓存。省略结点时的默认生成规则不变。
 
 #### `SurfaceFactory`
 

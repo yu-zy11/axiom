@@ -244,11 +244,18 @@ Result<CurveId> CurveFactory::make_bspline(const BSplineCurveDesc &desc) {
             "BSpline 曲线创建失败：结点包含非法数值", "BSpline 曲线创建失败");
       }
     }
+    int multiplicity = 1;
     for (std::size_t i = 1; i < knots.size(); ++i) {
       if (knots[i] < knots[i - 1]) {
         return detail::invalid_input_result<CurveId>(
             *state_, diag_codes::kGeoCurveCreationInvalid,
             "BSpline 曲线创建失败：结点须为非减序列", "BSpline 曲线创建失败");
+      }
+      multiplicity = knots[i] == knots[i - 1] ? multiplicity + 1 : 1;
+      if (multiplicity > p + 1) {
+        return detail::invalid_input_result<CurveId>(
+            *state_, diag_codes::kGeoCurveCreationInvalid,
+            "BSpline 曲线创建失败：结点重数不能超过 degree + 1", "BSpline 曲线创建失败");
       }
     }
     // The active domain is [U[p], U[n]], not the full knot-vector span.
@@ -329,11 +336,18 @@ Result<CurveId> CurveFactory::make_nurbs(const NURBSCurveDesc &desc) {
             "NURBS 曲线创建失败：结点包含非法数值", "NURBS 曲线创建失败");
       }
     }
+    int multiplicity = 1;
     for (std::size_t i = 1; i < knots.size(); ++i) {
       if (knots[i] < knots[i - 1]) {
         return detail::invalid_input_result<CurveId>(
             *state_, diag_codes::kGeoCurveCreationInvalid,
             "NURBS 曲线创建失败：结点须为非减序列", "NURBS 曲线创建失败");
+      }
+      multiplicity = knots[i] == knots[i - 1] ? multiplicity + 1 : 1;
+      if (multiplicity > p + 1) {
+        return detail::invalid_input_result<CurveId>(
+            *state_, diag_codes::kGeoCurveCreationInvalid,
+            "NURBS 曲线创建失败：结点重数不能超过 degree + 1", "NURBS 曲线创建失败");
       }
     }
     // The active domain is [U[p], U[n]], not the full knot-vector span.
