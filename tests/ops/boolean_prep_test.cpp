@@ -2,6 +2,7 @@
 #include <iostream>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 
 #include "axiom/diag/error_codes.h"
 #include "axiom/sdk/kernel.h"
@@ -124,6 +125,8 @@ int main() {
     const auto bodies_before = kernel.body_count();
     const auto geometry_before = kernel.geometry_count();
     const auto topology_before = kernel.topology_count();
+    const auto eval_before = kernel.eval_graph_metrics();
+    if (!eval_before.value) return 1;
     auto subtract_empty = kernel.booleans().run(axiom::BooleanOp::Subtract, *inner.value, *outer.value, {});
     if (subtract_empty.status != axiom::StatusCode::OperationFailed) {
         std::cerr << "expected subtract containment failure\n";
@@ -181,6 +184,14 @@ int main() {
         std::string_view stage;
     };
     const FailureCase failures[] = {
+        {static_cast<axiom::BooleanOp>(-1), *outer.value, *inner.value, axiom::StatusCode::InvalidInput,
+         axiom::diag_codes::kBoolInvalidInput, "bool.input"},
+        {static_cast<axiom::BooleanOp>(4), *outer.value, *far.value, axiom::StatusCode::InvalidInput,
+         axiom::diag_codes::kBoolInvalidInput, "bool.input"},
+        {static_cast<axiom::BooleanOp>(std::numeric_limits<int>::max()), *outer.value, *outer.value,
+         axiom::StatusCode::InvalidInput, axiom::diag_codes::kBoolInvalidInput, "bool.input"},
+        {static_cast<axiom::BooleanOp>(-1), {}, {}, axiom::StatusCode::InvalidInput,
+         axiom::diag_codes::kBoolInvalidInput, "bool.input"},
         {axiom::BooleanOp::Union, {}, *outer.value, axiom::StatusCode::InvalidInput,
          axiom::diag_codes::kBoolInvalidInput, "bool.input"},
         {axiom::BooleanOp::Union, *outer.value, {}, axiom::StatusCode::InvalidInput,
@@ -198,8 +209,11 @@ int main() {
         for (const auto& test : failures) {
             const auto failed = kernel.booleans().run(test.op, test.lhs, test.rhs, options);
             const auto report = kernel.diagnostics().get(failed.diagnostic_id);
+            const auto eval_after = kernel.eval_graph_metrics();
             if (failed.status != test.status || failed.value || failed.diagnostic_id.value == 0 ||
-                !report.value || (!diagnostics && report.value->issues.size() != 1)) {
+                !report.value || (!diagnostics && report.value->issues.size() != 1) ||
+                !eval_after.value || eval_after.value->invalidation_bridge.for_bodies_batches !=
+                    eval_before.value->invalidation_bridge.for_bodies_batches) {
                 std::cerr << "missing minimal boolean failure report\n";
                 return 1;
             }
@@ -233,6 +247,21 @@ int main() {
                 kernel.geometry_count().value != geometry_before.value ||
                 kernel.topology_count().value != topology_before.value) {
                 std::cerr << "boolean failure export mismatch or model pollution\n";
+                return 1;
+            }
+        }
+    }
+
+    // The input gate must continue to accept all four declared operations after rejection.
+    // These are the existing limited boolean semantics, not evidence of exact B-Rep results.
+    for (const bool diagnostics : {false, true}) {
+        axiom::BooleanOptions options;
+        options.diagnostics = diagnostics;
+        for (const auto op : {axiom::BooleanOp::Union, axiom::BooleanOp::Subtract,
+                              axiom::BooleanOp::Intersect, axiom::BooleanOp::Split}) {
+            const auto valid = kernel.booleans().run(op, *outer.value, *inner.value, options);
+            if (valid.status != axiom::StatusCode::Ok || !valid.value || valid.value->output.value == 0) {
+                std::cerr << "valid boolean operation rejected after invalid input\n";
                 return 1;
             }
         }

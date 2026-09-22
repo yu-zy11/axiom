@@ -421,6 +421,12 @@ Result<BodyId> SweepService::thicken(FaceId face_id, Scalar distance) {
 BooleanService::BooleanService(std::shared_ptr<detail::KernelState> state) : state_(std::move(state)) {}
 
 Result<OpReport> BooleanService::run(BooleanOp op, BodyId lhs, BodyId rhs, const BooleanOptions& boolean_options) {
+    if (op != BooleanOp::Union && op != BooleanOp::Subtract &&
+        op != BooleanOp::Intersect && op != BooleanOp::Split) {
+        return boolean_op_fail_staged(state_, boolean_options.diagnostics, StatusCode::InvalidInput,
+                                      diag_codes::kBoolInvalidInput,
+                                      "布尔运算失败：运算类型无效", "布尔运算失败", lhs, rhs, nullptr);
+    }
     if (!detail::has_body(*state_, lhs) || !detail::has_body(*state_, rhs)) {
         return boolean_op_fail_staged(state_, boolean_options.diagnostics, StatusCode::InvalidInput,
                                       diag_codes::kBoolInvalidInput,
