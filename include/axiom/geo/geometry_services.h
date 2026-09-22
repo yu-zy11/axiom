@@ -116,6 +116,7 @@ public:
         SurfaceId surface_id, std::span<const std::pair<Scalar, Scalar>> uvs, int deriv_order) const;
     Result<Point3> closest_point(SurfaceId surface_id, const Point3& point) const;
     Result<std::vector<Point3>> closest_points_batch(SurfaceId surface_id, std::span<const Point3> points) const;
+    /// BSpline/NURBS 会从每个非空结点片启动局部求解；结果仍不承诺任意曲面的全局最优。
     Result<std::pair<Scalar, Scalar>> closest_uv(SurfaceId surface_id, const Point3& point) const;
     Result<std::vector<std::pair<Scalar, Scalar>>> closest_uv_batch(
         SurfaceId surface_id, std::span<const Point3> points) const;
