@@ -401,7 +401,8 @@ BooleanPrepStats compute_boolean_prep_stats(const detail::KernelState& state, Bo
 /// 为布尔工作流诊断问题绑定稳定阶段标签，供 JSON 导出与 CI 聚合（与 error_codes 中 BOOL 码一致）。
 void set_boolean_diagnostic_stage(Issue& issue, std::string_view code) {
     using namespace diag_codes;
-    if (code == kBoolPrepCandidatesBuilt || code == kBoolLocalClipApplied || code == kBoolFaceCandidatesBuilt) {
+    if (code == kBoolPrepCandidatesBuilt || code == kBoolLocalClipApplied || code == kBoolFaceCandidatesBuilt ||
+        code == kBoolNearDegenerateWarning || code == kBoolPrepNoCandidateWarning) {
         issue.stage = "bool.prep";
     } else if (code == kBoolRunStageSummary) {
         issue.stage = "bool.summary";

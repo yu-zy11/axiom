@@ -182,7 +182,7 @@
 | 错误码 | 严重级别 | 含义 |
 |---|---|---|
 | `AXM-CORE-E-0001` | Error | 输入对象为空或句柄无效 |
-| `AXM-CORE-E-0002` | Error | 参数越界 |
+| `AXM-CORE-E-0002` | Error | 参数越界（含 `TopologyTransaction::create_vertex` 拒绝任一坐标为 NaN/±Inf；返回 `InvalidInput`，不写入拓扑或事务计数） |
 | `AXM-CORE-E-0003` | Error | 当前对象不存在 |
 | `AXM-CORE-E-0004` | Error | 不支持的操作模式 |
 | `AXM-CORE-E-0005` | Fatal | 内部状态损坏 |
@@ -211,7 +211,7 @@
 
 | 错误码 | 严重级别 | 含义 |
 |---|---|---|
-| `AXM-GEO-E-0001` | Error | 曲线创建参数非法（含显式 BSpline/NURBS 结点逆序、零长度有效参数域） |
+| `AXM-GEO-E-0001` | Error | 曲线创建参数非法（含显式 BSpline/NURBS 结点逆序、零长度有效参数域、结点重数超过 degree + 1） |
 | `AXM-GEO-E-0002` | Error | 曲面创建参数非法 |
 | `AXM-GEO-E-0003` | Error | 几何对象退化 |
 | `AXM-GEO-E-0004` | Error | 参数超出定义域 |
@@ -227,7 +227,7 @@
 | 错误码 | 严重级别 | 含义 |
 |---|---|---|
 | `AXM-TOPO-E-0001` | Error | 边缺少合法端点 |
-| `AXM-TOPO-E-0002` | Error | 环未闭合 |
+| `AXM-TOPO-E-0002` | Error | 环未闭合（含单共边的定向首尾顶点 ID 不同；坐标重合不等于拓扑闭合） |
 | `AXM-TOPO-E-0003` | Error | 面外环非法（含：外环已被其他面引用时 `create_face` 拒绝） |
 | `AXM-TOPO-E-0004` | Error | 面内环非法（含：内环已被其他面引用时 `create_face` 拒绝） |
 | `AXM-TOPO-E-0005` | Error | 壳未封闭（含：`validate_indices_consistency` 发现体记录中 `shells` 列表含重复壳 id） |
@@ -239,7 +239,7 @@
 | `AXM-TOPO-E-0011` | Error | 壳内存在非流形边（边被过多拓扑面共享） |
 | `AXM-TOPO-E-0012` | Error | 派生/传播来源引用无效或丢失 |
 | `AXM-TOPO-E-0013` | Error | 面/壳/体的来源集合不一致 |
-| `AXM-TOPO-E-0014` | Error | 同一环内重复引用同一条拓扑边 |
+| `AXM-TOPO-E-0014` | Error | 同一环内重复引用同一条拓扑边，或同一面跨环复用拓扑边；`create_face` 在写入前拒绝，关联两个冲突环与边 ID，`validate_face` 保留验证门禁 |
 | `AXM-TOPO-E-0015` | Error | 面环方向与外向规则不一致（含：内外环在 UV 空间绕向不符合孔洞规则；**全量 PCurve** 且基曲面为**平面**时，外环 UV 映射到 3D 的 Newell 与基平面法向不一致；无 PCurve 时平面/球/柱/锥/环面外环与解析外向一致性等） |
 | `AXM-TOPO-E-0016` | Error | 定向边已归属其他环（共边跨环复用） |
 | `AXM-TOPO-E-0017` | Warning / Error | 壳内重复面：`validate_shell` 对同曲面同边界环签名给 **Warning**；`create_shell` / `validate_indices_consistency` 对壳 `faces` 列表中重复 `FaceId` 给 **Error** |
@@ -253,7 +253,7 @@
 
 | 错误码 | 严重级别 | 含义 |
 |---|---|---|
-| `AXM-BOOL-E-0001` | Error | 输入实体无效 |
+| `AXM-BOOL-E-0001` | Error | 输入实体或布尔运算类型无效；预处理统计导出输入无效或路径为空 |
 | `AXM-BOOL-E-0002` | Error | 候选相交对生成失败 |
 | `AXM-BOOL-E-0003` | Error | 曲面求交失败 |
 | `AXM-BOOL-E-0004` | Error | 交线切分失败 |
@@ -389,6 +389,7 @@
 | `AXM-TX-E-0003` | Error | 写事务冲突 |
 | `AXM-TX-E-0004` | Error | 目标版本不存在 |
 | `AXM-TX-E-0005` | Fatal | 版本图损坏 |
+| `AXM-TX-E-0006` | Error | 活动事务禁止清空跟踪记录；`clear_tracking_records` 返回 `OperationFailed`，保留模型与撤销记录，须先提交或回滚（含空事务） |
 
 ## 8. 标准警告码清单
 
@@ -399,7 +400,8 @@
 | `AXM-CORE-W-0001` | 当前操作采用默认容差 |
 | `AXM-MATH-W-0001` | 谓词进入高精度回退 |
 | `AXM-GEO-W-0001` | 几何求值结果接近退化区域 |
-| `AXM-BOOL-W-0001` | 布尔操作遇到近共面情形 |
+| `AXM-BOOL-W-0001` | 布尔预处理近退化/仅接触或受限 bbox 语义告警（包括分离输入与 Split 占位）；`Issue.stage=bool.prep` |
+| `AXM-BOOL-W-0002` | 壳/区域级无局部候选，交集回退全局 bbox 或减运算保留左体；`Issue.stage=bool.prep` |
 | `AXM-BOOL-W-0003` | 布尔结果在重建后 Strict 验证仍残留问题（可审计告警） |
 | `AXM-BLEND-W-0002` | 圆角/倒角一次处理多条边时角区仍为占位实现 |
 | `AXM-HEAL-W-0001` | 修复时删除了局部小特征 |
@@ -433,7 +435,9 @@
 | `AXM-BOOL-D-0017` | 布尔验证阶段开始（Strict/Standard validation 入口，`kBoolStageValidate`） |
 | `AXM-BOOL-D-0018` | 布尔修复阶段开始（auto_repair/heal 入口，`kBoolStageRepair`） |
 
-与 **`AXM-BOOL-E-*` 错误码**绑定的布尔早期失败路径会在 `Issue.stage` 中写入可聚合阶段标签（与 `export_report_json` 一致）：`bool.input`（输入体无效，`AXM-BOOL-E-0001`）、`bool.abort.intersect`（交集在包围盒层面不相交，`AXM-BOOL-E-0003`）、`bool.abort.classify`（如减运算右包左无法表达空结果，`AXM-BOOL-E-0005`）。Strict 残留告警见 `bool.validate.residual`（`AXM-BOOL-W-0003`）。
+`BooleanService::export_boolean_prep_stats` 失败均携带 `[lhs, rhs]`（保留无效 ID）：参数失败为 `InvalidInput` / `AXM-BOOL-E-0001` / `bool.prep.export.input`；文件打开失败为 `OperationFailed` / `AXM-IO-E-0005` / `bool.prep.export.open`（修正此前误用的 BOOL 输入码）；写入或关闭失败为 `OperationFailed` / `AXM-IO-E-0005` / `bool.prep.export.write`。参数校验先于文件打开，失败不创建或截断目标；所有失败不修改模型，底层写入失败不保证目标文件恢复。回归入口：`axiom_boolean_prep_test`，Linux 使用 `/dev/full` 覆盖缓冲写入失败。
+
+与 **`AXM-BOOL-E-*` 错误码**绑定的布尔早期失败路径会在 `Issue.stage` 中写入可聚合阶段标签（与 `export_report_json` 一致）：`bool.input`（输入体或布尔运算类型无效，`AXM-BOOL-E-0001`）、`bool.abort.intersect`（交集在包围盒层面不相交，`AXM-BOOL-E-0003`）、`bool.abort.classify`（如减运算右包左无法表达空结果，`AXM-BOOL-E-0005`）。上述早期失败即使设置 `BooleanOptions::diagnostics=false`，也保留单条 Error Issue、阶段标签与 `[lhs, rhs]`（包括无效输入值），只省略候选阶段/统计信息；成功时关闭诊断的行为不变。启用布尔诊断时，返回的预处理告警 `AXM-BOOL-W-0001/W-0002` 同步写入报告，保留原文案和 Warning 级别，并绑定 `bool.prep` 与 `[lhs, rhs, output]` 实体 ID，可按阶段检索及导出 JSON；这些告警不表示精确布尔能力。Strict 残留告警见 `bool.validate.residual`（`AXM-BOOL-W-0003`）。
 
 ## 9.2 `HEAL` 诊断码
 

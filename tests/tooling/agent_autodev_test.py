@@ -3,10 +3,15 @@
 
 from __future__ import annotations
 
+import argparse
+import copy
+from contextlib import ExitStack
 import importlib.util
 import sys
 import tempfile
+import time
 import unittest
+from unittest.mock import patch, Mock
 from pathlib import Path
 
 
@@ -91,6 +96,33 @@ class AgentAutodevTest(unittest.TestCase):
             agent_autodev.Requirement("FR-OPS-001", "进行中"),
         )
 
+    def test_timeout_stops_child_before_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "orphan-write"
+            child = f"import time; from pathlib import Path; time.sleep(0.6); Path({str(marker)!r}).touch()"
+            parent = ("import subprocess,sys,time; "
+                      f"subprocess.Popen([sys.executable, '-c', {child!r}]); time.sleep(10)")
+            with self.assertRaisesRegex(agent_autodev.RunnerError, "timed out"):
+                agent_autodev.run([sys.executable, "-c", parent], timeout=0.2, capture=True)
+            time.sleep(0.7)
+            self.assertFalse(marker.exists())
+
+    def test_malformed_report_is_a_repairable_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "result.json"
+            with patch.object(agent_autodev, "REPORT_PATH", path):
+                for content in ('null', '[]', '{"status": "blocked"}'):
+                    with self.subTest(content=content):
+                        path.write_text(content)
+                        with self.assertRaises(agent_autodev.RunnerError):
+                            agent_autodev.load_report()
+
+    def test_changed_paths_preserves_leading_status_space(self) -> None:
+        output = " M scripts/agent_autodev.py\0R  new.txt\0old.txt\0?? extra.txt\0"
+        with patch.object(agent_autodev, "run", return_value=Mock(returncode=0, stdout=output)):
+            self.assertEqual(agent_autodev.changed_paths(),
+                             {"scripts/agent_autodev.py", "new.txt", "old.txt", "extra.txt"})
+
     def test_automation_files_are_protected(self) -> None:
         self.assertIn(".gitignore", agent_autodev.PROTECTED_AUTOMATION_FILES)
         self.assertIn(
@@ -100,6 +132,120 @@ class AgentAutodevTest(unittest.TestCase):
             "automation/agent_autodev.json",
             agent_autodev.PROTECTED_AUTOMATION_FILES,
         )
+
+
+class RepairLoopTest(unittest.TestCase):
+    def run_loop(self, *, failures=(), reports=None, limit=0, commit_fail=False,
+                 resume=False, mismatch=False):
+        config = agent_autodev.load_config(agent_autodev.DEFAULT_CONFIG)
+        config["max_consecutive_failures"] = limit
+        config["retry_delay_seconds"] = 0
+        targets = [agent_autodev.Requirement("FR-GEO-001", "进行中"),
+                   agent_autodev.Requirement("FR-TOPO-001", "进行中")]
+        config["requirement_tiers"] = [[item.requirement_id for item in targets]]
+        state = {"successful_cycles": 0, "consecutive_failures": 0,
+                 "requirement_cycles": {}, "history": []}
+        if resume:
+            state.update(last_error="previous performance gate failed", pending={
+                "head": "head", "files": {"file": "old" if mismatch else "hash"},
+                "requirement_id": "FR-GEO-001"})
+        args = argparse.Namespace(config=agent_autodev.DEFAULT_CONFIG, agent_command=None,
+                                  allow_dirty=False, no_commit=False, resume_failed=resume,
+                                  max_cycles=2, dry_run=False)
+        geo = dict(status="completed_slice", requirement_id="FR-GEO-001", module="Geo",
+                   summary="fix", tests=[], remaining="next")
+        topo = dict(geo, requirement_id="FR-TOPO-001", module="Topo")
+        outcomes = list(failures) + [None, None]
+        default_reports = [geo] * (len(failures) + 1) + [topo]
+        prompts = []
+        checkpoints = []
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+            ledger = Path(directory) / "ledger.md"
+            ledger.write_text("header\n")
+            replacements = {
+                "parse_args": Mock(return_value=args),
+                "load_config": Mock(return_value=config),
+                "load_state": Mock(return_value=state),
+                "ensure_safe_start": Mock(),
+                "read_requirements": Mock(return_value=targets),
+                "checked_output": Mock(return_value="head"),
+                "workspace_snapshot": Mock(return_value={"file": "hash"}),
+                "save_state": Mock(side_effect=lambda value: checkpoints.append(copy.deepcopy(value))),
+                "run": Mock(side_effect=lambda *a, **kw: (prompts.append(kw["stdin"]) or Mock(returncode=0, stdout="agent output", stderr=""))),
+                "load_report": Mock(side_effect=reports or default_reports),
+                "verify_slice": Mock(side_effect=outcomes),
+                "git_status": Mock(return_value=" M file"),
+                "execute_gate": Mock(),
+                "commit_slice": Mock(side_effect=[agent_autodev.RunnerError("commit hook failed"),
+                                                    "commit1", "commit2"] if commit_fail else None,
+                                     return_value="commit"),
+            }
+            if commit_fail:
+                replacements["load_report"].side_effect = [geo, geo, topo]
+                replacements["verify_slice"].side_effect = [None, None, None]
+            for name, value in replacements.items():
+                stack.enter_context(patch.object(agent_autodev, name, value))
+            stack.enter_context(patch.object(agent_autodev, "LOG_DIR", Path(directory) / "logs"))
+            stack.enter_context(patch.object(agent_autodev, "PROGRESS_LEDGER", ledger))
+            stack.enter_context(patch.object(agent_autodev, "REPORT_PATH", Path(directory) / "report.json"))
+            stack.enter_context(patch.object(agent_autodev.time, "sleep"))
+            result = agent_autodev.main()
+            return result, state, prompts, ledger.read_text(), replacements, checkpoints
+
+    def test_more_than_three_gate_failures_then_continue_next_requirement(self):
+        errors = [agent_autodev.RunnerError(f"gate failure {i}") for i in range(4)]
+        result, state, prompts, ledger, calls, snapshots = self.run_loop(failures=errors)
+        self.assertEqual(result, 0)
+        self.assertEqual(state["successful_cycles"], 2)
+        self.assertEqual(calls["commit_slice"].call_count, 2)
+        self.assertEqual(len(state["failures"]), 4)
+        self.assertIn("gate failure 3", prompts[4])
+        self.assertTrue(calls["verify_slice"].call_args_list[4].kwargs["force_full"])
+        self.assertIn("唯一目标是 **FR-GEO-001", prompts[4])
+        self.assertIn("唯一目标是 **FR-TOPO-001", prompts[5])
+        self.assertNotIn("last_error", state)
+        self.assertNotIn("pending", state)
+        self.assertTrue(all(s["successful_cycles"] == 0 for s in snapshots[:8]))
+
+    def test_explicit_failure_limit_still_supported_without_commit(self):
+        result, state, _, ledger, calls, _ = self.run_loop(
+            failures=[agent_autodev.RunnerError("bad gate")], limit=1)
+        self.assertEqual(result, 1)
+        calls["commit_slice"].assert_not_called()
+        self.assertEqual(ledger, "header\n")
+        self.assertIn("pending", state)
+
+    def test_blocked_agent_is_sent_back_for_root_cause_repair(self):
+        blocked = dict(status="blocked", requirement_id="FR-GEO-001", module="Geo",
+                       summary="blocked", tests=[], remaining="performance 4891 > 4000")
+        geo = dict(blocked, status="completed_slice")
+        topo = dict(geo, requirement_id="FR-TOPO-001", module="Topo")
+        result, state, prompts, _, calls, _ = self.run_loop(reports=[blocked, geo, topo])
+        self.assertEqual(result, 0)
+        self.assertIn("performance 4891 > 4000", prompts[1])
+        self.assertIn("不得提高耗时阈值", prompts[1])
+        self.assertEqual(calls["commit_slice"].call_count, 2)
+
+    def test_commit_failure_retries_without_duplicate_ledger_rows(self):
+        result, state, prompts, ledger, calls, _ = self.run_loop(commit_fail=True)
+        self.assertEqual(result, 0)
+        self.assertEqual(ledger.count("FR-GEO-001"), 1)
+        self.assertEqual(ledger.count("FR-TOPO-001"), 1)
+        self.assertIn("commit hook failed", prompts[1])
+
+    def test_resume_carries_failure_into_first_prompt(self):
+        result, _, prompts, _, _, _ = self.run_loop(resume=True)
+        self.assertEqual(result, 0)
+        self.assertIn("previous performance gate failed", prompts[0])
+
+    def test_resume_rejects_unrelated_file_changes(self):
+        with self.assertRaisesRegex(agent_autodev.RunnerError, "changed since checkpoint"):
+            self.run_loop(resume=True, mismatch=True)
+
+    def test_shipped_config_is_complete_and_retries_without_limit(self):
+        config = agent_autodev.load_config(agent_autodev.DEFAULT_CONFIG)
+        self.assertEqual(config["max_consecutive_failures"], 0)
+        self.assertNotIn("--full-auto", config["agent_command"])
 
 
 if __name__ == "__main__":

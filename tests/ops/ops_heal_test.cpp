@@ -53,6 +53,51 @@ bool has_issue_stage(const axiom::DiagnosticReport& report, std::string_view sta
 }  // namespace
 
 int main() {
+    // Fresh primitive indexing must preserve both new and pre-existing adjacency.
+    {
+        axiom::Kernel indexed;
+        auto query = indexed.topology().query();
+        std::vector<axiom::BodyId> bodies;
+        for (int i = 0; i < 9; ++i) {
+            const axiom::Point3 origin {i * 20.0, 0.0, 0.0};
+            const auto body = i % 3 == 0 ? indexed.primitives().box(origin, 3.0, 4.0, 5.0) :
+                i % 3 == 1 ? indexed.primitives().wedge(origin, 3.0, 4.0, 5.0) :
+                             indexed.primitives().cylinder(origin, {0.0, 0.0, 1.0}, 2.0, 5.0);
+            if (!body.value) return 1;
+            bodies.push_back(*body.value);
+            for (const auto existing : bodies) {
+                const auto shells = query.shells_of_body(existing);
+                const auto faces = query.faces_of_body(existing);
+                const auto edges = query.edges_of_body(existing);
+                if (!shells.value || shells.value->size() != 1 || !faces.value || faces.value->empty() ||
+                    !edges.value || edges.value->empty()) return 1;
+                const auto shell = shells.value->front();
+                const auto owners = query.bodies_of_shell(shell);
+                if (!owners.value || owners.value->size() != 1 || owners.value->front().value != existing.value)
+                    return 1;
+                for (const auto face : *faces.value) {
+                    const auto face_shells = query.shells_of_face(face);
+                    const auto face_bodies = query.bodies_of_face(face);
+                    if (!face_shells.value || face_shells.value->size() != 1 ||
+                        face_shells.value->front().value != shell.value || !face_bodies.value ||
+                        face_bodies.value->size() != 1 || face_bodies.value->front().value != existing.value)
+                        return 1;
+                }
+                for (const auto edge : *edges.value) {
+                    const auto coedges = query.coedges_of_edge(edge);
+                    const auto loops = query.loops_of_edge(edge);
+                    const auto edge_faces = query.faces_of_edge(edge);
+                    const auto edge_shells = query.shells_of_edge(edge);
+                    if (!coedges.value || coedges.value->size() != 2 || !loops.value || loops.value->size() != 2 ||
+                        !edge_faces.value || edge_faces.value->size() != 2 || !edge_shells.value ||
+                        edge_shells.value->size() != 1 || edge_shells.value->front().value != shell.value) {
+                        std::cerr << "primitive adjacency missing, duplicated or linked to another body\n";
+                        return 1;
+                    }
+                }
+            }
+        }
+    }
     axiom::Kernel kernel;
 
     auto box_a = kernel.primitives().box({0.0, 0.0, 0.0}, 10.0, 10.0, 10.0);
@@ -710,10 +755,34 @@ int main() {
         return 1;
     }
 
-    const std::array<axiom::CoedgeId, 1> coedges {*coedge.value};
+    // Face modification needs a closed boundary, not a single open coedge.
+    auto v2 = txn.create_vertex({0.0, 1.0, 0.0});
+    auto line12 = kernel.curves().make_line({1.0, 0.0, 0.0}, {-1.0, 1.0, 0.0});
+    auto line20 = kernel.curves().make_line({0.0, 1.0, 0.0}, {0.0, -1.0, 0.0});
+    if (!v2.value || !line12.value || !line20.value) {
+        std::cerr << "failed to create triangle prerequisites\n";
+        return 1;
+    }
+    auto edge12 = txn.create_edge(*line12.value, *v1.value, *v2.value);
+    auto edge20 = txn.create_edge(*line20.value, *v2.value, *v0.value);
+    if (!edge12.value || !edge20.value) {
+        std::cerr << "failed to create triangle edges\n";
+        return 1;
+    }
+    auto coedge12 = txn.create_coedge(*edge12.value, false);
+    auto coedge20 = txn.create_coedge(*edge20.value, false);
+    if (!coedge12.value || !coedge20.value) {
+        std::cerr << "failed to create triangle coedges\n";
+        return 1;
+    }
+    const std::array<axiom::CoedgeId, 3> coedges {*coedge.value, *coedge12.value, *coedge20.value};
     auto loop = txn.create_loop(coedges);
     if (loop.status != axiom::StatusCode::Ok || !loop.value.has_value()) {
         std::cerr << "failed to create loop\n";
+        return 1;
+    }
+    if (kernel.topology().validate().validate_loop(*loop.value).status != axiom::StatusCode::Ok) {
+        std::cerr << "invalid face modification boundary\n";
         return 1;
     }
 

@@ -32,18 +32,14 @@ Result<OpReport> boolean_op_fail_staged(std::shared_ptr<detail::KernelState> sta
                                         BodyId lhs,
                                         BodyId rhs,
                                         const BooleanPrepStats* prep) {
-    if (!diagnostics) {
-        if (st == StatusCode::InvalidInput) {
-            return detail::invalid_input_result<OpReport>(*state, code, std::move(message), std::move(summary));
-        }
-        return detail::failed_result<OpReport>(*state, st, code, std::move(message), std::move(summary));
-    }
     const DiagnosticId diag = state->create_diagnostic(std::move(summary));
-    append_boolean_stage_issue(*state, diag, diag_codes::kBoolStageCandidates,
-                               "布尔早期退出：在候选/包围盒关系检查阶段已中止，未生成结果体",
-                               {lhs.value, rhs.value});
-    if (prep != nullptr) {
-        append_boolean_prep_candidate_issue(*state, diag, lhs, rhs, *prep);
+    if (diagnostics) {
+        append_boolean_stage_issue(*state, diag, diag_codes::kBoolStageCandidates,
+                                   "布尔早期退出：在候选/包围盒关系检查阶段已中止，未生成结果体",
+                                   {lhs.value, rhs.value});
+        if (prep != nullptr) {
+            append_boolean_prep_candidate_issue(*state, diag, lhs, rhs, *prep);
+        }
     }
     auto issue = detail::make_error_issue(code, std::move(message), {lhs.value, rhs.value});
     set_boolean_diagnostic_stage(issue, code);
@@ -425,6 +421,12 @@ Result<BodyId> SweepService::thicken(FaceId face_id, Scalar distance) {
 BooleanService::BooleanService(std::shared_ptr<detail::KernelState> state) : state_(std::move(state)) {}
 
 Result<OpReport> BooleanService::run(BooleanOp op, BodyId lhs, BodyId rhs, const BooleanOptions& boolean_options) {
+    if (op != BooleanOp::Union && op != BooleanOp::Subtract &&
+        op != BooleanOp::Intersect && op != BooleanOp::Split) {
+        return boolean_op_fail_staged(state_, boolean_options.diagnostics, StatusCode::InvalidInput,
+                                      diag_codes::kBoolInvalidInput,
+                                      "布尔运算失败：运算类型无效", "布尔运算失败", lhs, rhs, nullptr);
+    }
     if (!detail::has_body(*state_, lhs) || !detail::has_body(*state_, rhs)) {
         return boolean_op_fail_staged(state_, boolean_options.diagnostics, StatusCode::InvalidInput,
                                       diag_codes::kBoolInvalidInput,
@@ -867,8 +869,10 @@ Result<OpReport> BooleanService::run(BooleanOp op, BodyId lhs, BodyId rhs, const
     }
     if (diag.value != 0) {
         for (const auto& warning : warnings) {
-            state_->diagnostics[diag.value].issues.push_back(
-                detail::make_warning_issue(warning.code, warning.message));
+            auto issue = detail::make_warning_issue(warning.code, warning.message);
+            issue.related_entities = {lhs.value, rhs.value, output.value};
+            set_boolean_diagnostic_stage(issue, warning.code);
+            state_->append_diagnostic_issue(diag, std::move(issue));
         }
     }
 
@@ -877,16 +881,18 @@ Result<OpReport> BooleanService::run(BooleanOp op, BodyId lhs, BodyId rhs, const
 
 Result<void> BooleanService::export_boolean_prep_stats(BodyId lhs, BodyId rhs, std::string_view path) const {
     if (!detail::has_body(*state_, lhs) || !detail::has_body(*state_, rhs) || path.empty()) {
-        return detail::invalid_input_void(
-            *state_, diag_codes::kBoolInvalidInput,
-            "布尔预处理统计导出失败：输入实体无效或输出路径为空", "布尔预处理统计导出失败");
+        return detail::failed_void(
+            *state_, StatusCode::InvalidInput, diag_codes::kBoolInvalidInput,
+            "布尔预处理统计导出失败：输入实体无效或输出路径为空", "布尔预处理统计导出失败",
+            {lhs.value, rhs.value}, "bool.prep.export.input");
     }
     const auto stats = compute_boolean_prep_stats(*state_, lhs, rhs);
     std::ofstream out {std::string(path)};
     if (!out) {
         return detail::failed_void(
-            *state_, StatusCode::OperationFailed, diag_codes::kBoolInvalidInput,
-            "布尔预处理统计导出失败：无法打开输出文件", "布尔预处理统计导出失败");
+            *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+            "布尔预处理统计导出失败：无法打开输出文件", "布尔预处理统计导出失败",
+            {lhs.value, rhs.value}, "bool.prep.export.open");
     }
     out << "{";
     out << "\"lhs_regions\":" << stats.lhs_regions << ",";
@@ -904,6 +910,13 @@ Result<void> BooleanService::export_boolean_prep_stats(BodyId lhs, BodyId rhs, s
             << "\"max_z\":" << stats.local_overlap_bbox.max.z << "}";
     }
     out << "}";
+    out.close();
+    if (!out) {
+        return detail::failed_void(
+            *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+            "布尔预处理统计导出失败：文件写入失败", "布尔预处理统计导出失败",
+            {lhs.value, rhs.value}, "bool.prep.export.write");
+    }
     return ok_void(state_->create_diagnostic("已导出布尔预处理统计"));
 }
 

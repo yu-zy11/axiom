@@ -2,6 +2,11 @@
 #include <array>
 #include <cmath>
 #include <initializer_list>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <limits>
+#include <optional>
 #include <iostream>
 #include <string_view>
 #include <unordered_set>
@@ -46,6 +51,274 @@ bool issue_links_entities(const axiom::DiagnosticReport& report, std::string_vie
 
 int main() {
     axiom::Kernel kernel;
+
+    // Non-finite vertex coordinates must fail before mutating topology or transaction tracking.
+    {
+        axiom::Kernel vertex_kernel;
+        auto txn = vertex_kernel.topology().begin_transaction();
+        auto origin = txn.create_vertex({0.0, -0.0, 0.0});
+        if (origin.status != axiom::StatusCode::Ok || !origin.value) {
+            std::cerr << "failed to create finite origin vertex\n";
+            return 1;
+        }
+        const auto before_count = vertex_kernel.topology_count();
+        const auto before_version = txn.preview_commit_version();
+        if (!before_count.value || !before_version.value) {
+            std::cerr << "failed to snapshot vertex transaction state\n";
+            return 1;
+        }
+        const std::array<double, 3> invalid_values {
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::infinity(),
+            -std::numeric_limits<double>::infinity()};
+        for (const auto invalid : invalid_values) {
+            for (int axis = 0; axis < 3; ++axis) {
+                axiom::Point3 point {1.0, 2.0, 3.0};
+                if (axis == 0) point.x = invalid;
+                if (axis == 1) point.y = invalid;
+                if (axis == 2) point.z = invalid;
+                const auto result = txn.create_vertex(point);
+                const auto report = vertex_kernel.diagnostics().get(result.diagnostic_id);
+                if (result.status != axiom::StatusCode::InvalidInput || result.value ||
+                    !report.value ||
+                    !has_issue_code(*report.value, axiom::diag_codes::kCoreParameterOutOfRange)) {
+                    std::cerr << "expected diagnostic rejection of non-finite vertex coordinate\n";
+                    return 1;
+                }
+                const auto count = vertex_kernel.topology_count();
+                const auto created = txn.created_vertices();
+                const auto writes = txn.write_operation_count();
+                const auto version = txn.preview_commit_version();
+                if (!count.value || count.value != before_count.value ||
+                    !created.value || created.value->size() != 1 ||
+                    created.value->front().value != origin.value->value ||
+                    txn.created_vertex_count().value != std::optional<std::uint64_t>{1} ||
+                    !writes.value || *writes.value != 1 || !version.value ||
+                    version.value != before_version.value ||
+                    txn.is_active().value != std::optional<bool>{true}) {
+                    std::cerr << "failed vertex creation polluted topology or transaction tracking\n";
+                    return 1;
+                }
+                const auto path = std::filesystem::temp_directory_path() / "axiom_topo_vertex_nonfinite.json";
+                if (vertex_kernel.diagnostics().export_report_json(result.diagnostic_id, path.string()).status !=
+                    axiom::StatusCode::Ok) {
+                    std::cerr << "failed to export vertex rejection diagnostic\n";
+                    return 1;
+                }
+                std::ifstream input(path);
+                const std::string json((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+                input.close();
+                std::filesystem::remove(path);
+                if (json.find(axiom::diag_codes::kCoreParameterOutOfRange) == std::string::npos) {
+                    std::cerr << "exported vertex diagnostic lost stable error code\n";
+                    return 1;
+                }
+            }
+        }
+        // Finite extreme/subnormal values are permitted: this gate imposes no magnitude tolerance.
+        const auto finite = txn.create_vertex({std::numeric_limits<double>::max(),
+            -std::numeric_limits<double>::max(), std::numeric_limits<double>::denorm_min()});
+        if (finite.status != axiom::StatusCode::Ok || !finite.value ||
+            txn.write_operation_count().value != std::optional<std::uint64_t>{2} ||
+            txn.rollback().status != axiom::StatusCode::Ok ||
+            vertex_kernel.topology_count().value != std::optional<std::uint64_t>{0} ||
+            vertex_kernel.topology().query().has_vertex(*origin.value).value != std::optional<bool>{false} ||
+            vertex_kernel.topology().query().has_vertex(*finite.value).value != std::optional<bool>{false} ||
+            txn.created_vertex_count().value != std::optional<std::uint64_t>{2} ||
+            txn.write_operation_count().value != std::optional<std::uint64_t>{0}) {
+            std::cerr << "finite vertex creation or rollback failed after rejected inputs\n";
+            return 1;
+        }
+        const auto closed = txn.create_vertex({0.0, 0.0, 0.0});
+        const auto closed_report = vertex_kernel.diagnostics().get(closed.diagnostic_id);
+        if (closed.status != axiom::StatusCode::OperationFailed || !closed_report.value ||
+            !has_issue_code(*closed_report.value, axiom::diag_codes::kTxCommitFailure)) {
+            std::cerr << "closed transaction vertex creation contract changed\n";
+            return 1;
+        }
+    }
+
+    // FR-TOPO-001: a single open coedge is not a closed loop, even at coincident coordinates.
+    {
+        axiom::Kernel loop_kernel;
+        const auto line = loop_kernel.curves().make_line({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
+        if (!line.value) return 1;
+        auto setup = loop_kernel.topology().begin_transaction();
+        const auto origin = setup.create_vertex({0.0, 0.0, 0.0});
+        if (!origin.value || setup.commit().status != axiom::StatusCode::Ok) return 1;
+        const auto topology_before = loop_kernel.topology_count().value;
+        const auto geometry_before = loop_kernel.geometry_count().value;
+        auto txn = loop_kernel.topology().begin_transaction();
+        const auto v1 = txn.create_vertex({1.0, 0.0, 0.0});
+        const auto v2 = txn.create_vertex({0.0, 1.0, 0.0});
+        const auto coincident = txn.create_vertex({0.0, 0.0, 0.0});
+        if (!v1.value || !v2.value || !coincident.value) return 1;
+        const auto edge = txn.create_edge(*line.value, *origin.value, *v1.value);
+        const auto collapsed = txn.create_edge(*line.value, *origin.value, *coincident.value);
+        if (!edge.value || !collapsed.value) return 1;
+        std::array<axiom::CoedgeId, 4> singles;
+        for (std::size_t i = 0; i < singles.size(); ++i) {
+            const auto coedge = txn.create_coedge(i < 2 ? *edge.value : *collapsed.value, i % 2 != 0);
+            if (!coedge.value) return 1;
+            singles[i] = *coedge.value;
+        }
+        const auto count_before = loop_kernel.topology_count().value;
+        const auto writes_before = txn.write_operation_count().value;
+        const auto version_before = txn.preview_commit_version().value;
+        for (const auto coedge : singles) {
+            const auto result = txn.create_loop(std::array<axiom::CoedgeId, 1>{coedge});
+            const auto report = loop_kernel.diagnostics().get(result.diagnostic_id);
+            if (result.status != axiom::StatusCode::InvalidTopology || result.value || !report.value ||
+                !has_issue_code(*report.value, axiom::diag_codes::kTopoLoopNotClosed)) {
+                std::cerr << "single open coedge must fail loop closedness validation\n";
+                return 1;
+            }
+            if (loop_kernel.topology_count().value != count_before ||
+                loop_kernel.geometry_count().value != geometry_before ||
+                txn.write_operation_count().value != writes_before ||
+                txn.preview_commit_version().value != version_before ||
+                txn.created_loop_count().value != std::optional<std::uint64_t>{0} ||
+                !txn.created_loops().value || !txn.created_loops().value->empty() ||
+                loop_kernel.topology().query().loops_of_edge(*edge.value).value !=
+                    std::optional<std::vector<axiom::LoopId>>{std::vector<axiom::LoopId>{}} ||
+                loop_kernel.topology().query().loops_of_edge(*collapsed.value).value !=
+                    std::optional<std::vector<axiom::LoopId>>{std::vector<axiom::LoopId>{}} ||
+                txn.is_active().value != std::optional<bool>{true}) {
+                std::cerr << "failed loop creation polluted storage, indices or transaction state\n";
+                return 1;
+            }
+            const auto path = std::filesystem::temp_directory_path() / "axiom_topo_single_coedge.json";
+            if (loop_kernel.diagnostics().export_report_json(result.diagnostic_id, path.string()).status !=
+                axiom::StatusCode::Ok) return 1;
+            std::ifstream input(path);
+            const std::string json((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+            input.close();
+            std::filesystem::remove(path);
+            if (json.find(axiom::diag_codes::kTopoLoopNotClosed) == std::string::npos) return 1;
+        }
+        // The rejected coedge is still unowned and usable in a real closed triangle.
+        const auto line12 = loop_kernel.curves().make_line({1.0, 0.0, 0.0}, {-1.0, 1.0, 0.0});
+        const auto line20 = loop_kernel.curves().make_line({0.0, 1.0, 0.0}, {0.0, -1.0, 0.0});
+        if (!line12.value || !line20.value) return 1;
+        const auto e12 = txn.create_edge(*line12.value, *v1.value, *v2.value);
+        const auto e20 = txn.create_edge(*line20.value, *v2.value, *origin.value);
+        if (!e12.value || !e20.value) return 1;
+        const auto c12 = txn.create_coedge(*e12.value, false);
+        const auto c20 = txn.create_coedge(*e20.value, false);
+        if (!c12.value || !c20.value) return 1;
+        const auto loop = txn.create_loop(std::array<axiom::CoedgeId, 3>{singles[0], *c12.value, *c20.value});
+        if (!loop.value || loop_kernel.topology().validate().validate_loop(*loop.value).status !=
+                axiom::StatusCode::Ok ||
+            loop_kernel.topology().query().loops_of_edge(*edge.value).value !=
+                std::optional<std::vector<axiom::LoopId>>{{*loop.value}} ||
+            txn.rollback().status != axiom::StatusCode::Ok ||
+            loop_kernel.topology_count().value != topology_before ||
+            loop_kernel.topology().query().has_vertex(*origin.value).value != std::optional<bool>{true} ||
+            loop_kernel.topology().query().has_loop(*loop.value).value != std::optional<bool>{false} ||
+            txn.write_operation_count().value != std::optional<std::uint64_t>{0}) {
+            std::cerr << "closed triangle creation or rollback failed after rejected single-coedge loops\n";
+            return 1;
+        }
+    }
+
+    // NFR-REL-001: existing coedge bindings must survive rejected writes and rollback.
+    {
+        axiom::Kernel binding_kernel;
+        const std::array<axiom::Point2, 2> uv_a {{{0.0, 0.0}, {1.0, 0.0}}};
+        const std::array<axiom::Point2, 2> uv_b {{{0.0, 1.0}, {1.0, 1.0}}};
+        const auto pc_a = binding_kernel.pcurves().make_polyline(uv_a);
+        const auto pc_b = binding_kernel.pcurves().make_polyline(uv_b);
+        const auto line = binding_kernel.curves().make_line({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
+        if (!pc_a.value || !pc_b.value || !line.value) {
+            std::cerr << "failed to create binding rollback geometry\n";
+            return 1;
+        }
+        auto setup = binding_kernel.topology().begin_transaction();
+        const auto v0 = setup.create_vertex({0.0, 0.0, 0.0});
+        const auto v1 = setup.create_vertex({1.0, 0.0, 0.0});
+        if (!v0.value || !v1.value) return 1;
+        const auto edge = setup.create_edge(*line.value, *v0.value, *v1.value);
+        if (!edge.value) return 1;
+        const auto coedge = setup.create_coedge(*edge.value, false);
+        if (!coedge.value || setup.commit().status != axiom::StatusCode::Ok) return 1;
+        const auto topology_before = binding_kernel.topology_count().value;
+        const auto geometry_before = binding_kernel.geometry_count().value;
+        if (!topology_before || !geometry_before) return 1;
+        auto& query = binding_kernel.topology().query();
+        // Cover both initially unbound and initially bound coedges; the first snapshot must win.
+        for (const auto original : {axiom::PCurveId{}, *pc_a.value}) {
+            auto baseline = binding_kernel.topology().begin_transaction();
+            if (baseline.set_coedge_pcurve(*coedge.value, original).status != axiom::StatusCode::Ok ||
+                baseline.commit().status != axiom::StatusCode::Ok ||
+                !query.pcurve_of_coedge(*coedge.value).value ||
+                query.pcurve_of_coedge(*coedge.value).value->value != original.value) {
+                std::cerr << "committed coedge binding was not retained\n";
+                return 1;
+            }
+            auto txn = binding_kernel.topology().begin_transaction();
+            const auto version_before = txn.preview_commit_version().value;
+            const std::array<axiom::PCurveId, 4> changes {{*pc_b.value, *pc_b.value, {}, *pc_a.value}};
+            for (std::size_t i = 0; i < changes.size(); ++i) {
+                if (txn.set_coedge_pcurve(*coedge.value, changes[i]).status != axiom::StatusCode::Ok) return 1;
+                const auto invalid_curve = txn.set_coedge_pcurve(
+                    *coedge.value, axiom::PCurveId{std::numeric_limits<std::uint64_t>::max()});
+                const auto invalid_coedge = txn.set_coedge_pcurve(axiom::CoedgeId{}, *pc_a.value);
+                for (const auto& rejected : {invalid_curve, invalid_coedge}) {
+                    const auto report = binding_kernel.diagnostics().get(rejected.diagnostic_id);
+                    if (rejected.status != axiom::StatusCode::InvalidInput || !report.value ||
+                        !has_issue_code(*report.value, axiom::diag_codes::kCoreInvalidHandle)) {
+                        std::cerr << "invalid binding did not return a stable diagnostic\n";
+                        return 1;
+                    }
+                }
+                const auto clear = txn.clear_tracking_records();
+                const auto clear_report = binding_kernel.diagnostics().get(clear.diagnostic_id);
+                if (clear.status != axiom::StatusCode::OperationFailed || !clear_report.value ||
+                    !has_issue_code(*clear_report.value, axiom::diag_codes::kTxActiveTrackingClear)) {
+                    std::cerr << "active binding transaction must preserve undo records\n";
+                    return 1;
+                }
+                const auto current = query.pcurve_of_coedge(*coedge.value);
+                if (!current.value || current.value->value != changes[i].value ||
+                    txn.write_operation_count().value != std::optional<std::uint64_t>{i + 1} ||
+                    txn.preview_commit_version().value != version_before ||
+                    binding_kernel.topology_count().value != topology_before ||
+                    binding_kernel.geometry_count().value != geometry_before ||
+                    binding_kernel.topology().validate().validate_coedge(*coedge.value).status != axiom::StatusCode::Ok) {
+                    std::cerr << "rejected binding polluted topology, binding or transaction state\n";
+                    return 1;
+                }
+            }
+            // Finish at a different binding from either baseline.
+            if (txn.set_coedge_pcurve(*coedge.value, *pc_b.value).status != axiom::StatusCode::Ok ||
+                txn.coedge_pcurve_bind_count().value != std::optional<std::uint64_t>{4} ||
+                txn.coedge_pcurve_clear_count().value != std::optional<std::uint64_t>{1} ||
+                txn.rollback().status != axiom::StatusCode::Ok) return 1;
+            const auto restored = query.pcurve_of_coedge(*coedge.value);
+            if (!restored.value || restored.value->value != original.value ||
+                binding_kernel.topology_count().value != topology_before ||
+                binding_kernel.geometry_count().value != geometry_before ||
+                txn.write_operation_count().value != std::optional<std::uint64_t>{0} ||
+                txn.coedge_pcurve_bind_count().value != std::optional<std::uint64_t>{0} ||
+                txn.coedge_pcurve_clear_count().value != std::optional<std::uint64_t>{0} ||
+                binding_kernel.topology().validate().validate_coedge(*coedge.value).status != axiom::StatusCode::Ok) {
+                std::cerr << "rollback did not restore the original coedge binding\n";
+                return 1;
+            }
+            auto next = binding_kernel.topology().begin_transaction();
+            if (next.preview_commit_version().value != version_before ||
+                next.rollback().status != axiom::StatusCode::Ok) return 1;
+            const auto closed = txn.set_coedge_pcurve(*coedge.value, *pc_b.value);
+            const auto report = binding_kernel.diagnostics().get(closed.diagnostic_id);
+            const auto after_closed = query.pcurve_of_coedge(*coedge.value);
+            if (closed.status != axiom::StatusCode::OperationFailed || !report.value ||
+                !has_issue_code(*report.value, axiom::diag_codes::kTxCommitFailure) ||
+                !after_closed.value || after_closed.value->value != original.value) {
+                std::cerr << "closed transaction changed the restored binding\n";
+                return 1;
+            }
+        }
+    }
 
     // ---- Stage 2: Coedge can bind PCurveId (trim bridge foundation) ----
     {
@@ -3589,39 +3862,128 @@ int main() {
             return 1;
         }
 
-        auto face = txn.create_face(*plane0.value, *outer.value, std::array<axiom::LoopId, 1>{*inner.value});
-        if (face.status != axiom::StatusCode::Ok || !face.value) {
-            std::cerr << "failed to create face for face cross-loop duplicate-edge test\n";
+        const auto before_count = kernel.topology_count().value;
+        const auto before_writes = txn.write_operation_count().value;
+        const auto face = txn.create_face(*plane0.value, *outer.value,
+                                         std::array<axiom::LoopId, 1>{*inner.value});
+        const auto diag = kernel.diagnostics().get(face.diagnostic_id);
+        if (face.status != axiom::StatusCode::InvalidTopology || face.value || !diag.value ||
+            !issue_links_entities(*diag.value, axiom::diag_codes::kTopoLoopDuplicateEdge,
+                                  {outer.value->value, inner.value->value, e01.value->value}) ||
+            kernel.topology_count().value != before_count ||
+            txn.write_operation_count().value != before_writes ||
+            txn.created_face_count().value != std::optional<std::uint64_t>{0}) {
+            std::cerr << "cross-loop shared edge must be rejected before creating a face\n";
             return 1;
         }
+        // The same Edge may still belong to distinct faces through distinct coedges.
+        const auto face_a = txn.create_face(*plane0.value, *outer.value, {});
+        const auto face_b = txn.create_face(*plane0.value, *inner.value, {});
+        const auto owners = kernel.topology().query().faces_of_edge(*e01.value);
+        if (!face_a.value || !face_b.value || !owners.value || owners.value->size() != 2 ||
+            kernel.topology().validate().validate_face(*face_a.value).status != axiom::StatusCode::Ok ||
+            kernel.topology().validate().validate_face(*face_b.value).status != axiom::StatusCode::Ok ||
+            txn.rollback().status != axiom::StatusCode::Ok) {
+            std::cerr << "valid separate faces or rollback failed after shared-edge rejection\n";
+            return 1;
+        }
+    }
 
-        auto shell = txn.create_shell(std::array<axiom::FaceId, 1>{*face.value});
-        auto body = txn.create_body(std::array<axiom::ShellId, 1>{*shell.value});
-        if (shell.status != axiom::StatusCode::Ok || body.status != axiom::StatusCode::Ok ||
-            !shell.value.has_value() || !body.value.has_value()) {
-            std::cerr << "failed to create shell/body for face cross-loop duplicate-edge test\n";
+    // FR-TOPO-001: inner/inner collisions, coincident boundaries and either coedge direction.
+    for (const bool reversed : {false, true}) {
+        axiom::Kernel face_kernel;
+        const auto plane = face_kernel.surfaces().make_plane({0, 0, 0}, {0, 0, 1});
+        if (!plane.value) return 1;
+        auto setup = face_kernel.topology().begin_transaction();
+        auto triangle = [&](const std::array<axiom::Point3, 3>& points,
+                            std::array<axiom::EdgeId, 3>& edges) -> std::optional<axiom::LoopId> {
+            std::array<axiom::VertexId, 3> vertices;
+            std::array<axiom::CoedgeId, 3> coedges;
+            for (std::size_t i = 0; i < 3; ++i) {
+                const auto vertex = setup.create_vertex(points[i]);
+                if (!vertex.value) return {};
+                vertices[i] = *vertex.value;
+            }
+            for (std::size_t i = 0; i < 3; ++i) {
+                const auto& a = points[i];
+                const auto& b = points[(i + 1) % 3];
+                const auto line = face_kernel.curves().make_line(a, {b.x-a.x, b.y-a.y, b.z-a.z});
+                if (!line.value) return {};
+                const auto edge = setup.create_edge(*line.value, vertices[i], vertices[(i + 1) % 3]);
+                if (!edge.value) return {};
+                edges[i] = *edge.value;
+                const auto coedge = setup.create_coedge(edges[i], false);
+                if (!coedge.value) return {};
+                coedges[i] = *coedge.value;
+            }
+            return setup.create_loop(coedges).value;
+        };
+        std::array<axiom::EdgeId, 3> outer_edges, hole_edges, other_edges;
+        const auto outer = triangle({axiom::Point3{0, 0, 0}, {10, 0, 0}, {0, 10, 0}}, outer_edges);
+        const auto hole = triangle({axiom::Point3{1, 1, 0}, {1, 2, 0}, {2, 1, 0}}, hole_edges);
+        const auto other = triangle({axiom::Point3{3, 1, 0}, {3, 2, 0}, {4, 1, 0}}, other_edges);
+        if (!outer || !hole || !other) return 1;
+        std::array<axiom::CoedgeId, 3> duplicate_coedges;
+        for (std::size_t i = 0; i < 3; ++i) {
+            const auto coedge = setup.create_coedge(hole_edges[reversed ? 2 - i : i], reversed);
+            if (!coedge.value) return 1;
+            duplicate_coedges[i] = *coedge.value;
+        }
+        const auto duplicate = setup.create_loop(duplicate_coedges);
+        if (!duplicate.value || setup.commit().status != axiom::StatusCode::Ok) return 1;
+        const auto topology_before = face_kernel.topology_count().value;
+        const auto geometry_before = face_kernel.geometry_count().value;
+        auto txn = face_kernel.topology().begin_transaction();
+        const auto version_before = txn.preview_commit_version().value;
+        // Include a disjoint hole before the collision to cover a partially scanned boundary set.
+        for (const auto& holes : {std::vector<axiom::LoopId>{*hole, *duplicate.value},
+                                std::vector<axiom::LoopId>{*other, *hole, *duplicate.value},
+                                std::vector<axiom::LoopId>{*duplicate.value, *hole}}) {
+            const auto result = txn.create_face(*plane.value, *outer, holes);
+            const auto report = face_kernel.diagnostics().get(result.diagnostic_id);
+            const auto owners = face_kernel.topology().query().faces_of_edge(hole_edges[0]);
+            const auto loops = face_kernel.topology().query().loops_of_edge(hole_edges[0]);
+            if (result.status != axiom::StatusCode::InvalidTopology || result.value || !report.value ||
+                !issue_links_entities(*report.value, axiom::diag_codes::kTopoLoopDuplicateEdge,
+                                     {hole->value, duplicate.value->value}) ||
+                face_kernel.topology_count().value != topology_before ||
+                face_kernel.geometry_count().value != geometry_before ||
+                txn.preview_commit_version().value != version_before ||
+                txn.created_entity_count_total().value != std::optional<std::uint64_t>{0} ||
+                txn.write_operation_count().value != std::optional<std::uint64_t>{0} ||
+                !owners.value || !owners.value->empty() || !loops.value || loops.value->size() != 2 ||
+                face_kernel.topology().validate().validate_loop(*duplicate.value).status != axiom::StatusCode::Ok) {
+                std::cerr << "inner-loop collision rejection polluted topology or tracking\n";
+                return 1;
+            }
+            const auto path = std::filesystem::temp_directory_path() / "axiom_topo_face_duplicate_edge.json";
+            if (face_kernel.diagnostics().export_report_json(result.diagnostic_id, path.string()).status !=
+                axiom::StatusCode::Ok) return 1;
+            std::ifstream input(path);
+            const std::string json((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+            input.close();
+            std::filesystem::remove(path);
+            if (json.find(axiom::diag_codes::kTopoLoopDuplicateEdge) == std::string::npos ||
+                json.find("related_entities") == std::string::npos) return 1;
+        }
+        // Rejected loops remain available for a valid face with two disjoint holes.
+        const auto face = txn.create_face(*plane.value, *outer, std::array<axiom::LoopId, 2>{*hole, *other});
+        if (!face.value ||
+            face_kernel.topology().validate().validate_face(*face.value).status != axiom::StatusCode::Ok ||
+            txn.write_operation_count().value != std::optional<std::uint64_t>{1} ||
+            txn.rollback().status != axiom::StatusCode::Ok ||
+            face_kernel.topology_count().value != topology_before ||
+            face_kernel.topology().query().has_face(*face.value).value != std::optional<bool>{false} ||
+            face_kernel.topology().validate().validate_loop(*hole).status != axiom::StatusCode::Ok ||
+            face_kernel.topology().validate().validate_loop(*duplicate.value).status != axiom::StatusCode::Ok) {
+            std::cerr << "valid holed face or rollback failed after rejected duplicate boundaries\n";
             return 1;
         }
-
-        auto r = kernel.validate().validate_topology(*body.value, axiom::ValidationMode::Standard);
-        if (r.status == axiom::StatusCode::Ok) {
-            std::cerr << "expected validate_topology to fail for cross-loop duplicate edge in one face\n";
-            return 1;
-        }
-        auto diag = kernel.diagnostics().get(r.diagnostic_id);
-        if (diag.status != axiom::StatusCode::Ok || !diag.value) {
-            std::cerr << "expected diagnostics for cross-loop duplicate edge validation failure\n";
-            return 1;
-        }
-        const bool has_code = has_issue_code(*diag.value, axiom::diag_codes::kTopoLoopDuplicateEdge);
-        if (!has_code) {
-            std::cerr << "expected kTopoLoopDuplicateEdge for cross-loop duplicate edge in face\n";
-            return 1;
-        }
-
-        auto rb = txn.rollback();
-        if (rb.status != axiom::StatusCode::Ok) {
-            std::cerr << "rollback failed after face cross-loop duplicate-edge test\n";
+        auto retry = face_kernel.topology().begin_transaction();
+        const auto committed = retry.create_face(*plane.value, *outer, std::array<axiom::LoopId, 2>{*hole, *other});
+        if (!committed.value || retry.commit().status != axiom::StatusCode::Ok ||
+            face_kernel.topology().validate().validate_face(*committed.value).status != axiom::StatusCode::Ok) {
+            std::cerr << "rollback left stale loop ownership\n";
             return 1;
         }
     }
@@ -3791,29 +4153,211 @@ int main() {
         }
     }
 
-    auto clear_txn = kernel.topology().begin_transaction();
-    auto clear_v = clear_txn.create_vertex({2.0, 2.0, 2.0});
-    if (clear_v.status != axiom::StatusCode::Ok || !clear_v.value.has_value()) {
-        std::cerr << "failed to create vertex for clear tracking test\n";
-        return 1;
+    // NFR-REL-001: undo snapshots must not resurrect entities created in this transaction.
+    for (int mutation = 0; mutation < 4; ++mutation) {
+        axiom::Kernel rollback_kernel;
+        auto& topo = rollback_kernel.topology();
+        auto& query = topo.query();
+        const auto plane = rollback_kernel.surfaces().make_plane({0, 0, 0}, {0, 0, 1});
+        const auto replacement = rollback_kernel.surfaces().make_plane({0, 0, 0}, {0, 0, 2});
+        const std::array<axiom::Point3, 3> points {{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}}};
+        const std::array<axiom::Vec3, 3> directions {{{1, 0, 0}, {-1, 1, 0}, {0, -1, 0}}};
+        std::array<axiom::CurveId, 3> curves;
+        if (!plane.value || !replacement.value) return 1;
+        for (std::size_t i = 0; i < curves.size(); ++i) {
+            const auto line = rollback_kernel.curves().make_line(points[i], directions[i]);
+            if (!line.value) return 1;
+            curves[i] = *line.value;
+        }
+        auto make_face = [&](axiom::TopologyTransaction& txn) -> std::optional<axiom::FaceId> {
+            std::array<axiom::VertexId, 3> vertices;
+            std::array<axiom::CoedgeId, 3> coedges;
+            for (std::size_t i = 0; i < vertices.size(); ++i) {
+                const auto vertex = txn.create_vertex(points[i]);
+                if (!vertex.value) return std::nullopt;
+                vertices[i] = *vertex.value;
+            }
+            for (std::size_t i = 0; i < coedges.size(); ++i) {
+                const auto edge = txn.create_edge(curves[i], vertices[i], vertices[(i + 1) % 3]);
+                if (!edge.value) return std::nullopt;
+                const auto coedge = txn.create_coedge(*edge.value, false);
+                if (!coedge.value) return std::nullopt;
+                coedges[i] = *coedge.value;
+            }
+            const auto loop = txn.create_loop(coedges);
+            if (!loop.value) return std::nullopt;
+            return txn.create_face(*plane.value, *loop.value, {}).value;
+        };
+        auto setup = topo.begin_transaction();
+        const auto original_face = make_face(setup);
+        if (!original_face) return 1;
+        const auto original_shell = setup.create_shell(std::array{*original_face});
+        if (!original_shell.value) return 1;
+        const auto original_body = setup.create_body(std::array{*original_shell.value});
+        if (!original_body.value || setup.commit().status != axiom::StatusCode::Ok) return 1;
+        const auto baseline = rollback_kernel.topology_count().value;
+        const auto original_loops = query.loops_of_face(*original_face).value;
+        if (!baseline || !original_loops) return 1;
+
+        auto txn = topo.begin_transaction();
+        const auto version = txn.preview_commit_version().value;
+        const auto face = make_face(txn);
+        if (!face) return 1;
+        const auto shell = txn.create_shell(std::array{*face});
+        if (!shell.value) return 1;
+        const auto body = txn.create_body(std::array{*shell.value});
+        // New owners of an existing face also receive snapshots on cascading deletion.
+        const auto shared_shell = txn.create_shell(std::array{*original_face});
+        if (!body.value || !shared_shell.value) return 1;
+        const auto shared_body = txn.create_body(std::array{*shared_shell.value});
+        if (!shared_body.value) return 1;
+        axiom::Result<void> changed;
+        if (mutation == 0) changed = txn.replace_surface(*face, *replacement.value);
+        if (mutation == 1) changed = txn.delete_face(*face);
+        if (mutation == 2) changed = txn.delete_shell(*shell.value);
+        if (mutation == 3) changed = txn.delete_body(*body.value);
+        if (changed.status != axiom::StatusCode::Ok ||
+            txn.replace_surface(*original_face, *replacement.value).status != axiom::StatusCode::Ok ||
+            txn.delete_face(*original_face).status != axiom::StatusCode::Ok) return 1;
+        const auto modified_count = rollback_kernel.topology_count().value;
+        const auto writes = txn.write_operation_count().value;
+        // Repeating a cascade deletion is a diagnosed failure, not a second mutation.
+        const auto rejected = txn.delete_face(*original_face);
+        const auto report = rollback_kernel.diagnostics().get(rejected.diagnostic_id);
+        if (rejected.status != axiom::StatusCode::InvalidInput || !report.value ||
+            !has_issue_code(*report.value, axiom::diag_codes::kCoreInvalidHandle) ||
+            rollback_kernel.topology_count().value != modified_count ||
+            txn.write_operation_count().value != writes ||
+            txn.preview_commit_version().value != version) {
+            std::cerr << "rejected repeated deletion polluted transaction\n";
+            return 1;
+        }
+        const auto vertices = txn.created_vertices().value;
+        const auto edges = txn.created_edges().value;
+        const auto coedges = txn.created_coedges().value;
+        const auto loops = txn.created_loops().value;
+        if (!vertices || !edges || !coedges || !loops ||
+            txn.rollback().status != axiom::StatusCode::Ok) return 1;
+        if (rollback_kernel.topology_count().value != baseline ||
+            query.has_face(*face).value != std::optional<bool>{false} ||
+            query.has_shell(*shell.value).value != std::optional<bool>{false} ||
+            query.has_body(*body.value).value != std::optional<bool>{false} ||
+            query.has_shell(*shared_shell.value).value != std::optional<bool>{false} ||
+            query.has_body(*shared_body.value).value != std::optional<bool>{false} ||
+            query.surface_of_face(*original_face).value != plane.value ||
+            query.loops_of_face(*original_face).value != original_loops ||
+            query.shells_of_face(*original_face).value != std::optional<std::vector<axiom::ShellId>>{{*original_shell.value}} ||
+            query.bodies_of_shell(*original_shell.value).value != std::optional<std::vector<axiom::BodyId>>{{*original_body.value}} ||
+            topo.validate().validate_body(*original_body.value).status != axiom::StatusCode::Ok ||
+            topo.validate().validate_indices_consistency().status != axiom::StatusCode::Ok) {
+            std::cerr << "rollback resurrected new topology or lost original model, mutation " << mutation << '\n';
+            return 1;
+        }
+        for (const auto id : *vertices) if (query.has_vertex(id).value != std::optional<bool>{false}) return 1;
+        for (const auto id : *edges) if (query.has_edge(id).value != std::optional<bool>{false}) return 1;
+        for (const auto id : *loops) if (query.has_loop(id).value != std::optional<bool>{false}) return 1;
+        for (const auto id : *coedges) if (query.pcurve_of_coedge(id).status != axiom::StatusCode::InvalidInput) return 1;
+        const auto closed = txn.rollback();
+        const auto closed_report = rollback_kernel.diagnostics().get(closed.diagnostic_id);
+        if (closed.status != axiom::StatusCode::OperationFailed || !closed_report.value ||
+            !has_issue_code(*closed_report.value, axiom::diag_codes::kTxRollbackFailure) ||
+            rollback_kernel.topology_count().value != baseline) return 1;
+        // Empty rollback and a subsequent successful commit must remain usable.
+        auto empty = topo.begin_transaction();
+        if (empty.preview_commit_version().value != version ||
+            empty.rollback().status != axiom::StatusCode::Ok ||
+            rollback_kernel.topology_count().value != baseline) return 1;
+        auto next = topo.begin_transaction();
+        const auto committed_face = make_face(next);
+        if (!committed_face) return 1;
+        const auto committed_shell = next.create_shell(std::array{*committed_face});
+        if (!committed_shell.value) return 1;
+        const auto committed_body = next.create_body(std::array{*committed_shell.value});
+        if (!committed_body.value || next.replace_surface(*committed_face, *replacement.value).status != axiom::StatusCode::Ok ||
+            next.commit().status != axiom::StatusCode::Ok ||
+            query.surface_of_face(*committed_face).value != replacement.value ||
+            topo.validate().validate_indices_consistency().status != axiom::StatusCode::Ok) return 1;
     }
-    auto clear_before = clear_txn.created_vertex_count();
-    auto clear_w0 = clear_txn.write_operation_count();
-    auto clear_ret = clear_txn.clear_tracking_records();
-    auto clear_after = clear_txn.created_vertex_count();
-    auto clear_w1 = clear_txn.write_operation_count();
-    if (clear_before.status != axiom::StatusCode::Ok || !clear_before.value.has_value() || *clear_before.value != 1 ||
-        clear_w0.status != axiom::StatusCode::Ok || !clear_w0.value.has_value() || *clear_w0.value != 1 ||
-        clear_ret.status != axiom::StatusCode::Ok ||
-        clear_after.status != axiom::StatusCode::Ok || !clear_after.value.has_value() || *clear_after.value != 0 ||
-        clear_w1.status != axiom::StatusCode::Ok || !clear_w1.value.has_value() || *clear_w1.value != 0) {
-        std::cerr << "clear_tracking_records behavior is unexpected\n";
-        return 1;
-    }
-    auto clear_rollback = clear_txn.rollback();
-    if (clear_rollback.status != axiom::StatusCode::Ok) {
-        std::cerr << "rollback failed for clear tracking transaction\n";
-        return 1;
+
+    // NFR-REL-001: clearing live undo records must never disable rollback.
+    {
+        axiom::Kernel clear_kernel;
+        auto& topo = clear_kernel.topology();
+        const auto body = clear_kernel.primitives().box({0.0, 0.0, 0.0}, 1.0, 2.0, 3.0);
+        if (!body.value) return 1;
+        const auto original_count = clear_kernel.topology_count().value;
+        const auto original_shells = topo.query().shells_of_body(*body.value).value;
+        if (!original_count || !original_shells) return 1;
+        for (const bool commit : {false, true}) {
+            auto txn = topo.begin_transaction();
+            const auto version = txn.preview_commit_version().value;
+            // Even an empty active transaction follows the same lifecycle contract.
+            const auto empty_clear = txn.clear_tracking_records();
+            const auto empty_report = clear_kernel.diagnostics().get(empty_clear.diagnostic_id);
+            if (empty_clear.status != axiom::StatusCode::OperationFailed || !empty_report.value ||
+                !has_issue_code(*empty_report.value, axiom::diag_codes::kTxActiveTrackingClear) ||
+                txn.created_entity_count_total().value != std::optional<std::uint64_t>{0} ||
+                txn.write_operation_count().value != std::optional<std::uint64_t>{0}) {
+                std::cerr << "empty active transaction must reject tracking cleanup\n";
+                return 1;
+            }
+            const auto vertex = txn.create_vertex({2.0, 2.0, 2.0});
+            if (!vertex.value || txn.delete_body(*body.value).status != axiom::StatusCode::Ok) return 1;
+            const auto modified_count = clear_kernel.topology_count().value;
+            // Repeated rejection must preserve both creation records and deletion snapshots.
+            for (int attempt = 0; attempt < 2; ++attempt) {
+                const auto rejected = txn.clear_tracking_records();
+                const auto report = clear_kernel.diagnostics().get(rejected.diagnostic_id);
+                if (rejected.status != axiom::StatusCode::OperationFailed || !report.value ||
+                    !has_issue_code(*report.value, axiom::diag_codes::kTxActiveTrackingClear) ||
+                    txn.is_active().value != std::optional<bool>{true} ||
+                    txn.created_vertices().value != std::optional<std::vector<axiom::VertexId>>{{*vertex.value}} ||
+                    txn.has_snapshot_body(*body.value).value != std::optional<bool>{true} ||
+                    txn.deleted_body_count().value != std::optional<std::uint64_t>{1} ||
+                    txn.write_operation_count().value != std::optional<std::uint64_t>{2} ||
+                    txn.preview_commit_version().value != version ||
+                    clear_kernel.topology_count().value != modified_count ||
+                    topo.query().has_body(*body.value).value != std::optional<bool>{false} ||
+                    topo.query().has_vertex(*vertex.value).value != std::optional<bool>{true}) {
+                    std::cerr << "rejected tracking cleanup changed model or undo records\n";
+                    return 1;
+                }
+                const auto path = std::filesystem::temp_directory_path() / "axiom_topo_tracking_cleanup.json";
+                if (clear_kernel.diagnostics().export_report_json(rejected.diagnostic_id, path.string()).status !=
+                    axiom::StatusCode::Ok) return 1;
+                std::ifstream input(path);
+                const std::string json((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+                input.close();
+                std::filesystem::remove(path);
+                if (json.find("AXM-TX-E-0006") == std::string::npos) return 1;
+            }
+            if (commit) {
+                if (txn.commit().status != axiom::StatusCode::Ok) return 1;
+            } else {
+                if (txn.rollback().status != axiom::StatusCode::Ok ||
+                    clear_kernel.topology_count().value != original_count ||
+                    topo.query().shells_of_body(*body.value).value != original_shells ||
+                    topo.validate().validate_body(*body.value).status != axiom::StatusCode::Ok) {
+                    std::cerr << "rollback after rejected cleanup did not restore original model\n";
+                    return 1;
+                }
+            }
+            const auto closed_count = clear_kernel.topology_count().value;
+            for (int attempt = 0; attempt < 2; ++attempt) {
+                if (txn.clear_tracking_records().status != axiom::StatusCode::Ok ||
+                    txn.created_entity_count_total().value != std::optional<std::uint64_t>{0} ||
+                    txn.has_snapshot_body(*body.value).value != std::optional<bool>{false} ||
+                    txn.deleted_body_count().value != std::optional<std::uint64_t>{0} ||
+                    txn.write_operation_count().value != std::optional<std::uint64_t>{0} ||
+                    txn.is_active().value != std::optional<bool>{false} ||
+                    clear_kernel.topology_count().value != closed_count ||
+                    topo.query().has_vertex(*vertex.value).value != std::optional<bool>{commit} ||
+                    topo.query().has_body(*body.value).value != std::optional<bool>{!commit}) {
+                    std::cerr << "closed transaction cleanup must be idempotent and preserve model\n";
+                    return 1;
+                }
+            }
+        }
     }
 
     return 0;

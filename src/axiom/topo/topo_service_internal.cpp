@@ -221,15 +221,6 @@ bool validate_loop_record(const detail::KernelState &state,
     }
   }
 
-  if (loop.coedges.size() == 1) {
-    const auto oriented = oriented_vertices(state, loop.coedges.front());
-    if (!oriented.has_value()) {
-      reason = "环引用了无效定向边或退化边";
-      return false;
-    }
-    return true;
-  }
-
   std::optional<VertexId> first_start;
   std::optional<VertexId> previous_end;
   for (const auto coedge_id : loop.coedges) {

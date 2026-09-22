@@ -10,6 +10,12 @@ Result<VertexId> TopologyTransaction::create_vertex(const Point3 &point) {
         *state_, StatusCode::OperationFailed, diag_codes::kTxCommitFailure,
         "创建顶点失败：事务已关闭", "创建顶点失败");
   }
+  if (!std::isfinite(point.x) || !std::isfinite(point.y) ||
+      !std::isfinite(point.z)) {
+    return detail::invalid_input_result<VertexId>(
+        *state_, diag_codes::kCoreParameterOutOfRange,
+        "创建顶点失败：顶点坐标必须为有限值", "创建顶点失败");
+  }
   const auto id = VertexId{state_->allocate_id()};
   state_->vertices.emplace(id.value, detail::VertexRecord{point});
   created_vertices_.push_back(id.value);
@@ -69,6 +75,8 @@ Result<void> TopologyTransaction::set_coedge_pcurve(CoedgeId coedge_id,
                                       "绑定共边参数曲线失败");
   }
   const auto prev_pcurve = it->second.pcurve_id.value;
+  transaction_state_->original_coedge_pcurves.try_emplace(coedge_id.value,
+                                                         it->second.pcurve_id);
   it->second.pcurve_id = pcurve_id;
   rebuild_topology_indices(*state_);
   if (pcurve_id.value != 0) {
@@ -107,7 +115,6 @@ TopologyTransaction::create_loop(std::span<const CoedgeId> coedges) {
         *state_, StatusCode::InvalidTopology, diag_codes::kTopoLoopDuplicateEdge,
         "创建环失败：定向边序列包含重复引用", "创建环失败");
   }
-  const auto id = LoopId{state_->allocate_id()};
   detail::LoopRecord loop{
       std::vector<CoedgeId>(coedges.begin(), coedges.end())};
   std::string reason;
@@ -119,6 +126,7 @@ TopologyTransaction::create_loop(std::span<const CoedgeId> coedges) {
     return detail::failed_result<LoopId>(*state_, StatusCode::InvalidTopology, fail_code,
                                          "创建环失败：" + reason, "创建环失败");
   }
+  const auto id = LoopId{state_->allocate_id()};
   state_->loops.emplace(id.value, std::move(loop));
   created_loops_.push_back(id.value);
   rebuild_topology_indices(*state_);
@@ -196,6 +204,23 @@ TopologyTransaction::create_face(SurfaceId surface_id, LoopId outer_loop,
               "创建面失败：内环已被其他面引用",
               std::vector<std::uint64_t>{loop_id.value,
                                          inner_used->second.front()}));
+    }
+  }
+  // Each loop is valid and unowned; reject cross-loop Edge reuse before writing
+  // the face or its reverse indices, matching validate_face's boundary rule.
+  std::unordered_map<std::uint64_t, LoopId> edge_loops;
+  for (std::size_t i = 0; i <= inner_loops.size(); ++i) {
+    const auto loop_id = i == 0 ? outer_loop : inner_loops[i - 1];
+    for (const auto coedge_id : state_->loops.at(loop_id.value).coedges) {
+      const auto edge_id = state_->coedges.at(coedge_id.value).edge_id;
+      const auto [it, inserted] = edge_loops.emplace(edge_id.value, loop_id);
+      if (!inserted) {
+        return detail::failed_result<FaceId>(
+            *state_, StatusCode::InvalidTopology,
+            diag_codes::kTopoLoopDuplicateEdge,
+            "创建面失败：面内存在跨环复用的边", "创建面失败",
+            {it->second.value, loop_id.value, edge_id.value});
+      }
     }
   }
   const auto id = FaceId{state_->allocate_id()};
@@ -574,14 +599,11 @@ Result<void> TopologyTransaction::rollback() {
                                diag_codes::kTxRollbackFailure,
                                "事务回滚失败：事务已关闭", "事务回滚失败");
   }
-  for (const auto id : created_bodies_) {
-    state_->bodies.erase(id);
-  }
-  for (const auto id : created_shells_) {
-    state_->shells.erase(id);
-  }
-  for (const auto id : created_faces_) {
-    state_->faces.erase(id);
+  for (const auto &[id, pcurve_id] : transaction_state_->original_coedge_pcurves) {
+    const auto it = state_->coedges.find(id);
+    if (it != state_->coedges.end()) {
+      it->second.pcurve_id = pcurve_id;
+    }
   }
   for (const auto &[id, record] : transaction_state_->original_faces) {
     state_->faces[id] = record;
@@ -593,8 +615,19 @@ Result<void> TopologyTransaction::rollback() {
     state_->bodies[id] = record;
   }
 
-  // 恢复面/壳/体之后再删除本事务创建的环/共边/边/顶点，且仅删除已不再被当前状态引用的项，
-  // 否则会出现“面仍引用环 id，但环记录已被擦除”的断裂（例如同事务内 delete_face 后 rollback）。
+  // 新建实体也可能因后续修改或级联删除进入快照。先恢复快照，再移除本事务
+  // 创建的面/壳/体，避免快照将它们复活；保留现有触达/快照查询的语义。
+  for (const auto id : created_bodies_) {
+    state_->bodies.erase(id);
+  }
+  for (const auto id : created_shells_) {
+    state_->shells.erase(id);
+  }
+  for (const auto id : created_faces_) {
+    state_->faces.erase(id);
+  }
+
+  // 最后清理本事务创建且已无引用的低层实体，并重建反向索引。
   auto loop_referenced = [this](std::uint64_t loop_id) {
     for (const auto &[fid, face] : state_->faces) {
       (void)fid;
@@ -862,6 +895,12 @@ Result<bool> TopologyTransaction::has_snapshot_body(BodyId body_id) const {
 }
 
 Result<void> TopologyTransaction::clear_tracking_records() {
+  if (active_) {
+    return detail::failed_void(*state_, StatusCode::OperationFailed,
+                               diag_codes::kTxActiveTrackingClear,
+                               "清空事务跟踪记录失败：请先提交或回滚活动事务",
+                               "清空事务跟踪记录失败");
+  }
   created_vertices_.clear();
   created_edges_.clear();
   created_coedges_.clear();
@@ -876,6 +915,7 @@ Result<void> TopologyTransaction::clear_tracking_records() {
   txn_coedge_pcurve_binds_ = 0;
   txn_coedge_pcurve_clears_ = 0;
   txn_write_ops_ = 0;
+  transaction_state_->original_coedge_pcurves.clear();
   transaction_state_->original_faces.clear();
   transaction_state_->original_shells.clear();
   transaction_state_->original_bodies.clear();

@@ -193,5 +193,6 @@ inline constexpr std::string_view kPluginDiscoveryReport = "AXM-PLUGIN-D-0001";
 inline constexpr std::string_view kTxCommitFailure = "AXM-TX-E-0001";
 inline constexpr std::string_view kTxRollbackFailure = "AXM-TX-E-0002";
 inline constexpr std::string_view kTxConflict = "AXM-TX-E-0003";
+inline constexpr std::string_view kTxActiveTrackingClear = "AXM-TX-E-0006";
 
 }  // namespace axiom::diag_codes

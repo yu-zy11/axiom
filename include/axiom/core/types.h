@@ -341,6 +341,7 @@ struct BSplineCurveDesc {
   /// 曲线阶数（次数 = degree）；\<0 表示按控制点数量使用内核默认策略（开放均匀 B 样条）。
   int degree{-1};
   /// 非空时作为结点向量，长度须为 `poles.size() + degree + 1`（若指定 `degree`），或由长度隐含阶数 `knots.size() - poles.size() - 1`。
+  /// 每个结点的重数不得超过 degree + 1；相等性按精确数值比较。
   std::vector<Scalar> knots;
 };
 

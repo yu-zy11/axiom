@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -27,9 +28,170 @@ const axiom::Issue* find_issue(const axiom::DiagnosticReport& report, std::strin
     return nullptr;
 }
 
+bool check_batch_json_export() {
+    axiom::Kernel kernel;
+    auto& diagnostics = kernel.diagnostics();
+    axiom::Issue issue;
+    issue.code = std::string(axiom::diag_codes::kBoolInvalidInput);
+    issue.severity = axiom::IssueSeverity::Error;
+    issue.message = "引号\"与反斜线\\\n\t";
+    issue.message.push_back('\0');
+    issue.message.push_back('\x1f');
+    issue.stage = "bool.input";
+    issue.related_entities = {17, 23};
+    const std::array<axiom::Issue, 1> issues {issue};
+    const auto report = diagnostics.create_report("摘要\"\\\n", issues);
+    const auto empty = diagnostics.create_report("", {});
+    if (!report.value || !empty.value) return false;
+    const auto directory = std::filesystem::temp_directory_path() / "axiom_diag_batch_json_slice";
+    std::filesystem::create_directories(directory);
+    struct Cleanup {
+        std::filesystem::path path;
+        ~Cleanup() { std::filesystem::remove_all(path); }
+    } cleanup {directory};
+    const auto single_path = directory / "single.json";
+    const auto batch_path = directory / "batch.json";
+    const auto read = [](const std::filesystem::path& path) {
+        std::ifstream in(path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    };
+    if (diagnostics.export_report_json(*report.value, single_path.string()).status != axiom::StatusCode::Ok) return false;
+    const auto single = read(single_path);
+    if (single.find("\\u0000\\u001f") == std::string::npos ||
+        single.find("\\\"与反斜线\\\\\\n\\t") == std::string::npos ||
+        single.find("\"stage\":\"bool.input\",\"related_entities\":[17,23]") == std::string::npos) return false;
+    const std::array<axiom::DiagnosticId, 3> ids {*empty.value, *report.value, *report.value};
+    if (diagnostics.export_reports_json(ids, batch_path.string()).status != axiom::StatusCode::Ok) return false;
+    const auto expected = "{\"diagnostics\":[{\"id\":" + std::to_string(empty.value->value) +
+                          ",\"summary\":\"\",\"issues\":[]}," + single + "," + single + "]}";
+    if (read(batch_path) != expected) return false;
+
+    // Any invalid position, including after repeated valid IDs, must leave the file intact.
+    for (std::size_t position = 0; position < ids.size(); ++position) {
+        auto invalid_ids = ids;
+        invalid_ids[position] = axiom::DiagnosticId {};
+        const auto result = diagnostics.export_reports_json(invalid_ids, batch_path.string());
+        const auto failure = diagnostics.get(result.diagnostic_id);
+        if (result.status != axiom::StatusCode::InvalidInput || !failure.value ||
+            !has_issue_code(*failure.value, axiom::diag_codes::kCoreInvalidHandle) || read(batch_path) != expected) return false;
+    }
+    const auto absent_path = directory / "absent.json";
+    const std::array<axiom::DiagnosticId, 1> invalid_ids {axiom::DiagnosticId {}};
+    if (diagnostics.export_reports_json(invalid_ids, absent_path.string()).status != axiom::StatusCode::InvalidInput ||
+        std::filesystem::exists(absent_path)) return false;
+    const auto empty_ids = diagnostics.export_reports_json({}, batch_path.string());
+    const auto empty_path = diagnostics.export_reports_json(ids, "");
+    const auto bad_path = diagnostics.export_reports_json(ids, directory.string());
+    for (const auto* result : {&empty_ids, &empty_path, &bad_path}) {
+        const auto failure = diagnostics.get(result->diagnostic_id);
+        if (!failure.value || !has_issue_code(*failure.value, axiom::diag_codes::kIoExportFailure)) return false;
+    }
+    if (empty_ids.status != axiom::StatusCode::InvalidInput || empty_path.status != axiom::StatusCode::InvalidInput ||
+        bad_path.status != axiom::StatusCode::OperationFailed || read(batch_path) != expected) return false;
+#if defined(__linux__)
+    // /dev/full opens successfully but rejects writes, including buffered writes on close.
+    const auto write_failure = diagnostics.export_reports_json(ids, "/dev/full");
+    const auto write_diagnostic = diagnostics.get(write_failure.diagnostic_id);
+    if (write_failure.status != axiom::StatusCode::OperationFailed || !write_diagnostic.value ||
+        !has_issue_code(*write_diagnostic.value, axiom::diag_codes::kIoExportFailure)) return false;
+#endif
+    // Export failure diagnostics may be added, but the source reports must not change.
+    if (diagnostics.export_report_json(*report.value, single_path.string()).status != axiom::StatusCode::Ok ||
+        read(single_path) != single) return false;
+    const auto empty_after = diagnostics.get(*empty.value);
+    return empty_after.value && empty_after.value->summary.empty() && empty_after.value->issues.empty();
+}
+
+bool check_batch_txt_export() {
+    axiom::Kernel kernel;
+    auto& diagnostics = kernel.diagnostics();
+    axiom::Issue issue;
+    issue.code = std::string(axiom::diag_codes::kBoolInvalidInput);
+    issue.severity = axiom::IssueSeverity::Error;
+    issue.message = "引号\"与反斜线\\\n\t";
+    issue.message.push_back('\0');
+    issue.message.push_back('\x1f');
+    issue.stage = "bool.input";
+    issue.related_entities = {17, 23};
+    axiom::Issue warning;
+    warning.code = "AXM-BOOL-W-0001";
+    warning.severity = axiom::IssueSeverity::Warning;
+    warning.message = "无阶段与实体的告警";
+    const std::array<axiom::Issue, 2> issues {issue, warning};
+    const auto report = diagnostics.create_report("摘要\"\\\n", issues);
+    const auto empty = diagnostics.create_report("", {});
+    if (!report.value || !empty.value) return false;
+    const auto directory = std::filesystem::temp_directory_path() / "axiom_diag_batch_txt_slice";
+    std::filesystem::create_directories(directory);
+    struct Cleanup {
+        std::filesystem::path path;
+        ~Cleanup() { std::filesystem::remove_all(path); }
+    } cleanup {directory};
+    const auto single_path = directory / "single.txt";
+    const auto batch_path = directory / "batch.txt";
+    const auto read = [](const std::filesystem::path& path) {
+        std::ifstream in(path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    };
+    if (diagnostics.export_report(*report.value, single_path.string()).status != axiom::StatusCode::Ok) return false;
+    const auto single = read(single_path);
+    const auto expected_single = "DiagnosticId: " + std::to_string(report.value->value) +
+        "\nSummary: 摘要\"\\\n\n- [Error] " + issue.code + ": " + issue.message +
+        " | Stage:bool.input | RelatedEntities: 17 23\n- [Warning] AXM-BOOL-W-0001: 无阶段与实体的告警\n";
+    if (single != expected_single) return false;
+    const std::array<axiom::DiagnosticId, 3> ids {*empty.value, *report.value, *report.value};
+    const auto expected = "DiagnosticId: " + std::to_string(empty.value->value) +
+                          "\nSummary: \n" + single + single;
+    if (diagnostics.export_reports_txt(ids, batch_path.string()).status != axiom::StatusCode::Ok ||
+        read(batch_path) != expected) return false;
+
+    // Any invalid position, including after repeated valid IDs, must leave the file intact.
+    for (std::size_t position = 0; position < ids.size(); ++position) {
+        auto invalid_ids = ids;
+        invalid_ids[position] = axiom::DiagnosticId {};
+        const auto result = diagnostics.export_reports_txt(invalid_ids, batch_path.string());
+        const auto failure = diagnostics.get(result.diagnostic_id);
+        if (result.status != axiom::StatusCode::InvalidInput || !failure.value ||
+            !has_issue_code(*failure.value, axiom::diag_codes::kCoreInvalidHandle) || read(batch_path) != expected) return false;
+    }
+    const auto absent_path = directory / "absent.txt";
+    const std::array<axiom::DiagnosticId, 1> invalid_ids {axiom::DiagnosticId {}};
+    if (diagnostics.export_reports_txt(invalid_ids, absent_path.string()).status != axiom::StatusCode::InvalidInput ||
+        std::filesystem::exists(absent_path)) return false;
+    const auto empty_ids = diagnostics.export_reports_txt({}, batch_path.string());
+    const auto empty_path = diagnostics.export_reports_txt(ids, "");
+    const auto bad_path = diagnostics.export_reports_txt(ids, directory.string());
+    for (const auto* result : {&empty_ids, &empty_path, &bad_path}) {
+        const auto failure = diagnostics.get(result->diagnostic_id);
+        if (!failure.value || !has_issue_code(*failure.value, axiom::diag_codes::kIoExportFailure)) return false;
+    }
+    if (empty_ids.status != axiom::StatusCode::InvalidInput || empty_path.status != axiom::StatusCode::InvalidInput ||
+        bad_path.status != axiom::StatusCode::OperationFailed || read(batch_path) != expected) return false;
+#if defined(__linux__)
+    // /dev/full opens successfully but rejects writes, including buffered writes on close.
+    const auto write_failure = diagnostics.export_reports_txt(ids, "/dev/full");
+    const auto write_diagnostic = diagnostics.get(write_failure.diagnostic_id);
+    if (write_failure.status != axiom::StatusCode::OperationFailed || !write_diagnostic.value ||
+        !has_issue_code(*write_diagnostic.value, axiom::diag_codes::kIoExportFailure)) return false;
+#endif
+    // Export failure diagnostics may be added, but the source reports must not change.
+    if (diagnostics.export_report(*report.value, single_path.string()).status != axiom::StatusCode::Ok ||
+        read(single_path) != single) return false;
+    const auto empty_after = diagnostics.get(*empty.value);
+    return empty_after.value && empty_after.value->summary.empty() && empty_after.value->issues.empty();
+}
+
 }  // namespace
 
 int main() {
+    if (!check_batch_txt_export()) {
+        std::cerr << "batch text diagnostic evidence or failure isolation regression\n";
+        return 1;
+    }
+    if (!check_batch_json_export()) {
+        std::cerr << "batch JSON diagnostic evidence or failure isolation regression\n";
+        return 1;
+    }
     axiom::Kernel kernel;
 
     auto invalid_box = kernel.primitives().box({0.0, 0.0, 0.0}, -1.0, 10.0, 10.0);

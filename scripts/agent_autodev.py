@@ -10,10 +10,12 @@ committing. Use ``--max-cycles 0`` for continuous operation.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -63,18 +65,26 @@ def run(
 ) -> subprocess.CompletedProcess[str]:
     """Run a command without a shell and enforce an optional timeout."""
     try:
-        return subprocess.run(
-            list(command),
-            cwd=cwd,
-            input=stdin,
-            text=True,
-            check=False,
-            timeout=timeout,
-            capture_output=capture,
-            start_new_session=True,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise RunnerError(f"command timed out after {timeout}s: {shlex.join(command)}") from exc
+        with subprocess.Popen(
+            list(command), cwd=cwd, text=True, start_new_session=True,
+            stdin=subprocess.PIPE if stdin is not None else None,
+            stdout=subprocess.PIPE if capture else None,
+            stderr=subprocess.PIPE if capture else None,
+        ) as process:
+            try:
+                stdout, stderr = process.communicate(stdin, timeout=timeout)
+            except subprocess.TimeoutExpired as exc:
+                # An agent may launch a CLI child; do not leave it editing during a retry.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                stdout, stderr = process.communicate()
+                output = (stdout or "") + (stderr or "")
+                raise RunnerError(
+                    f"command timed out after {timeout}s: {shlex.join(command)}\n{output[-4000:]}"
+                ) from exc
+            return subprocess.CompletedProcess(list(command), process.returncode, stdout, stderr)
     except FileNotFoundError as exc:
         raise RunnerError(f"command not found: {command[0]}") from exc
 
@@ -101,6 +111,11 @@ def load_config(path: Path) -> dict[str, Any]:
     missing = required - config.keys()
     if missing:
         raise RunnerError(f"config missing keys: {', '.join(sorted(missing))}")
+    for key in ("max_consecutive_failures", "retry_delay_seconds"):
+        value = config.get(key, 10 if key == "retry_delay_seconds" else 0)
+        if type(value) is not int or value < 0:
+            raise RunnerError(f"{key} must be a non-negative integer")
+        config[key] = value
     if not isinstance(config["agent_command"], list) or not config["agent_command"]:
         raise RunnerError("agent_command must be a non-empty JSON array")
     configured_ids = [
@@ -159,8 +174,11 @@ def git_status() -> str:
 
 def changed_paths() -> set[str]:
     """Return paths changed relative to HEAD, including untracked files."""
-    output = checked_output(["git", "status", "--porcelain", "-z"])
-    entries = output.split("\0")
+    result = run(["git", "status", "--porcelain", "-z"], capture=True)
+    if result.returncode != 0:
+        raise RunnerError(result.stderr.strip() or "git status failed")
+    # Leading spaces are status columns, not whitespace to strip.
+    entries = result.stdout.split("\0")
     paths: set[str] = set()
     index = 0
     while index < len(entries):
@@ -175,6 +193,14 @@ def changed_paths() -> set[str]:
             paths.add(entries[index])
         index += 1
     return paths
+
+
+def workspace_snapshot() -> dict[str, str | None]:
+    return {
+        name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
+        if (ROOT / name).is_file() else None
+        for name in changed_paths()
+    }
 
 
 def ensure_safe_start(config: dict[str, Any], allow_dirty: bool) -> None:
@@ -203,7 +229,9 @@ def load_state() -> dict[str, Any]:
 
 def save_state(state: dict[str, Any]) -> None:
     RUNTIME_DIR.mkdir(exist_ok=True)
-    STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary = STATE_PATH.with_suffix(".tmp")
+    temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(STATE_PATH)
 
 
 def build_prompt(
@@ -218,6 +246,12 @@ def build_prompt(
         repair = (
             "\n上一轮验证失败。保留当前工作树并优先修复以下问题，不要扩大范围：\n"
             f"{previous_failure[-6000:]}\n"
+            f"完整门禁日志：.axiom-agent/logs/cycle-{cycle:04d}-gates.log\n"
+            "进入故障修复模式：先复现、分析根因和证据，再做最小修复并重跑失败门禁。"
+            "性能失败需排查构建类型、环境负载和算法热点；不得提高耗时阈值、减少迭代、"
+            "跳过测试或虚报成功。此前以需要人工检查为由 blocked 的技术问题也应继续调查。"
+            "若相同原因重复出现，换一个有证据支持的诊断方法，不能只重复报告 blocked。"
+            "修复可涉及导致门禁失败的相关模块，完成后回到本轮需求，不扩大功能范围。\n"
         )
     return f"""你是 AxiomKernel 的自动开发代理，正在执行第 {cycle} 个交付切片。
 
@@ -235,6 +269,7 @@ def build_prompt(
 5. 不执行 git commit、git reset、git checkout、git clean、git rebase 或 git push；提交由调度器完成。
 6. 不修改 .gitignore、automation/agent_autodev.json、scripts/agent_autodev.py 或 .axiom-agent/。
 7. 一轮只完成一个有明确 DoD 的切片，避免大范围重写。
+8. 遵循现有代码风格，减少不必要的封装与抽象层，集中相关逻辑，避免代码碎片化。
 
 结束前必须写入 .axiom-agent/result.json，格式严格为：
 {{
@@ -256,9 +291,13 @@ def load_report() -> dict[str, Any]:
         raise RunnerError("agent did not write .axiom-agent/result.json")
     report = json.loads(REPORT_PATH.read_text(encoding="utf-8"))
     required = {"status", "requirement_id", "module", "summary", "tests", "remaining"}
+    if not isinstance(report, dict):
+        raise RunnerError("agent report must be a JSON object")
     missing = required - report.keys()
     if missing:
         raise RunnerError(f"agent report missing keys: {', '.join(sorted(missing))}")
+    if any(not isinstance(report[key], str) for key in required - {"tests"}):
+        raise RunnerError("agent report fields other than tests must be strings")
     known_ids = {item.requirement_id for item in read_requirements()}
     if report["requirement_id"] not in known_ids:
         raise RunnerError(f"unknown requirement_id: {report['requirement_id']}")
@@ -365,6 +404,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="print the next prompt only")
     parser.add_argument("--allow-dirty", action="store_true")
     parser.add_argument("--no-commit", action="store_true")
+    parser.add_argument("--resume-failed", action="store_true",
+                        help="resume the saved failed slice after checking HEAD and file fingerprints")
     parser.add_argument(
         "--agent-command",
         help="override command, parsed with shlex; prompt is supplied on standard input",
@@ -379,11 +420,23 @@ def main() -> int:
     config = load_config(args.config.resolve())
     if args.agent_command:
         config["agent_command"] = shlex.split(args.agent_command)
-    ensure_safe_start(config, args.allow_dirty)
     state = load_state()
+    if args.resume_failed:
+        pending = state.get("pending", {})
+        if not state.get("last_error") or not pending:
+            raise RunnerError("no saved failed slice to resume")
+        if (pending.get("head") != checked_output(["git", "rev-parse", "HEAD"])
+                or pending.get("files") != workspace_snapshot()):
+            raise RunnerError("failed worktree changed since checkpoint; review before resuming")
+    ensure_safe_start(config, args.allow_dirty or args.resume_failed)
     cycle = int(state["successful_cycles"]) + 1
     target_cycle = None if args.max_cycles == 0 else cycle + args.max_cycles - 1
     target = select_target(read_requirements(), state, config)
+    if args.resume_failed:
+        target = next((item for item in read_requirements()
+                       if item.requirement_id == state["pending"]["requirement_id"]), None)
+        if target is None:
+            raise RunnerError("saved requirement no longer exists")
     if target is None:
         print("all traceability-matrix requirements are already satisfied")
         return 0
@@ -392,23 +445,33 @@ def main() -> int:
         return 0
 
     while target_cycle is None or cycle <= target_cycle:
-        previous_failure: str | None = None
+        previous_failure = state.get("last_error")
         ledger_before = PROGRESS_LEDGER.read_text(encoding="utf-8")
         while True:
             REPORT_PATH.unlink(missing_ok=True)
-            target = select_target(read_requirements(), state, config)
-            if target is None:
-                print("all traceability-matrix requirements are already satisfied")
-                return 0
+            # Keep the same target through repairs, even if the agent edits the matrix.
+            state["pending"] = {
+                "head": checked_output(["git", "rev-parse", "HEAD"]),
+                "requirement_id": target.requirement_id,
+                "files": workspace_snapshot(),
+            }
+            save_state(state)
+            ledger_written = False
             prompt = build_prompt(cycle, target, previous_failure)
             try:
                 result = run(
                     config["agent_command"],
                     stdin=prompt,
                     timeout=int(config["agent_timeout_seconds"]),
+                    capture=True,
                 )
+                output = (result.stdout or "") + (result.stderr or "")
+                LOG_DIR.mkdir(parents=True, exist_ok=True)
+                attempt = int(state["consecutive_failures"]) + 1
+                (LOG_DIR / f"cycle-{cycle:04d}-attempt-{attempt:04d}-agent.log").write_text(
+                    output, encoding="utf-8")
                 if result.returncode != 0:
-                    raise RunnerError(f"agent exited with status {result.returncode}")
+                    raise RunnerError(f"agent exited with status {result.returncode}\n{output[-4000:]}")
                 report = load_report()
                 if report["requirement_id"] != target.requirement_id:
                     raise RunnerError(
@@ -423,44 +486,50 @@ def main() -> int:
                     read_requirements()
                 ):
                     raise RunnerError("project_complete rejected: traceability matrix is unfinished")
-                full_gate = report["status"] == "project_complete" or (
+                full_gate = bool(previous_failure) or report["status"] == "project_complete" or (
                     cycle % int(config["full_test_interval"]) == 0
                 )
                 verify_slice(
                     cycle,
                     report,
                     config,
-                    force_full=report["status"] == "project_complete",
+                    force_full=full_gate,
                 )
+                if not git_status():
+                    raise RunnerError("agent reported success but made no changes")
+                record_progress(cycle, report, full_gate)
+                ledger_written = True
+                execute_gate(
+                    [sys.executable, "scripts/check_docs.py"],
+                    LOG_DIR / f"cycle-{cycle:04d}-gates.log",
+                )
+                commit = commit_slice(report, args.no_commit)
                 break
             except (RunnerError, json.JSONDecodeError) as exc:
+                if ledger_written:
+                    PROGRESS_LEDGER.write_text(ledger_before, encoding="utf-8")
                 state["consecutive_failures"] = int(state["consecutive_failures"]) + 1
                 state["last_error"] = str(exc)
+                state["pending"]["files"] = workspace_snapshot()
+                state.setdefault("failures", []).append({
+                    "cycle": cycle, "requirement_id": target.requirement_id,
+                    "error": str(exc), "timestamp": int(time.time()),
+                })
                 save_state(state)
                 previous_failure = str(exc)
                 print(f"cycle {cycle} attempt failed: {exc}", file=sys.stderr)
-                if state["consecutive_failures"] >= int(
-                    config["max_consecutive_failures"]
-                ):
-                    print("failure limit reached; human review required", file=sys.stderr)
+                limit = config["max_consecutive_failures"]
+                if limit and state["consecutive_failures"] >= limit:
+                    print("configured failure limit reached", file=sys.stderr)
                     return 1
-                print("asking the agent to repair the retained worktree", file=sys.stderr)
-
-        try:
-            record_progress(cycle, report, full_gate)
-            execute_gate(
-                [sys.executable, "scripts/check_docs.py"],
-                LOG_DIR / f"cycle-{cycle:04d}-gates.log",
-            )
-            commit = commit_slice(report, args.no_commit)
-        except RunnerError as exc:
-            state["last_error"] = str(exc)
-            save_state(state)
-            print(f"cycle {cycle} could not be recorded: {exc}", file=sys.stderr)
-            return 1
+                delay = min(60, config["retry_delay_seconds"] * state["consecutive_failures"])
+                print(f"repairing the same slice after {delay}s; gates remain unchanged", file=sys.stderr)
+                time.sleep(delay)
 
         state["successful_cycles"] = int(state["successful_cycles"]) + 1
         state["consecutive_failures"] = 0
+        state.pop("last_error", None)
+        state.pop("pending", None)
         requirement_cycles = state.setdefault("requirement_cycles", {})
         requirement_cycles[report["requirement_id"]] = (
             int(requirement_cycles.get(report["requirement_id"], 0)) + 1
@@ -484,6 +553,9 @@ def main() -> int:
             print("stopping after one cycle because --no-commit leaves a dirty worktree")
             return 0
         cycle += 1
+        target = select_target(read_requirements(), state, config)
+        if target is None:
+            return 0
     return 0
 
 

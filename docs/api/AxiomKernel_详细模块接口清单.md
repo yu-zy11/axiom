@@ -259,7 +259,7 @@ public:
 };
 ```
 
-`CurveFactory::make_bspline/make_nurbs` 的显式结点向量须有限、严格满足非减顺序（不使用几何容差吞掉逆序），且有效参数域 `knots[degree] < knots[poles.size()]`；合法重复结点保留。零长度有效域或结点逆序返回 `InvalidInput` 和 `AXM-GEO-E-0001`，不创建几何对象、不改动已有求值缓存。省略结点时的默认生成规则不变。
+`CurveFactory::make_bspline/make_nurbs` 的显式结点向量须有限、严格满足非减顺序（不使用几何容差吞掉逆序），且有效参数域 `knots[degree] < knots[poles.size()]`；每个结点的重数不得超过 `degree + 1`（精确数值比较），合法重复结点保留。内部重数为 `degree + 1` 的断点按右侧分段求值，上端点按左侧分段求值；返回的一、二阶导数是对应分段的单侧值，不表示断点处全局可微。非夹持结点向量在有效域端点出现重复结点时，跳过零长度分段，下端点使用第一个非空右侧分段、上端点使用最后一个非空左侧分段；点值、一二阶导数和曲率均遵循此约定，域外参数钳制后同样适用。常值分段允许求值，导数与曲率返回零。零长度有效域、结点逆序或重数超限返回 `InvalidInput` 和 `AXM-GEO-E-0001`，不创建几何对象、不改动已有求值缓存。省略结点时的默认生成规则不变。
 
 #### `SurfaceFactory`
 
@@ -357,10 +357,13 @@ enum class TopologyIsolationLevel : std::uint8_t {
 
 class TopologyTransaction {
 public:
+  // 坐标必须为有限值；NaN/±Inf 返回 InvalidInput / AXM-CORE-E-0002，拓扑与事务写计数不变。
   Result<VertexId> create_vertex(const Point3&);
   Result<EdgeId> create_edge(CurveId, VertexId, VertexId);
   Result<CoedgeId> create_coedge(EdgeId, bool reversed);
+  // 按定向端点 ID 首尾闭合，单共边不豁免；未闭合返回 InvalidTopology / AXM-TOPO-E-0002，失败不写入环或事务计数。
   Result<LoopId> create_loop(std::span<const CoedgeId>);
+  // 外环/内环及内环之间不得复用 EdgeId；返回 InvalidTopology / AXM-TOPO-E-0014，失败不分配面或改变索引、事务写计数。
   Result<FaceId> create_face(SurfaceId, LoopId outer_loop, std::span<const LoopId> inner_loops);
   Result<ShellId> create_shell(std::span<const FaceId>);
   Result<BodyId> create_body(std::span<const ShellId>);
@@ -376,7 +379,7 @@ public:
 };
 ```
 
-> 说明：`TopologyTransaction` 的完整签名见 `include/axiom/topo/topology_service.h`；另含 `set_coedge_pcurve`、删除壳/体、以及 trim 桥接审计读数 `coedge_pcurve_bind_count()` / `coedge_pcurve_clear_count()` 等。`write_operation_count()` 统计本事务内每次**成功**的写操作（创建/删除实体、`replace_surface`、每次 `set_coedge_pcurve` 含清除）；回滚或 `clear_tracking_records()` 归零。`effective_isolation_level()` 当前实现返回 `SnapshotSerializable`（单事务 + 快照回滚的工程占位，见头文件注释）。
+> 说明：`TopologyTransaction` 的完整签名见 `include/axiom/topo/topology_service.h`；另含 `set_coedge_pcurve`、删除壳/体、以及 trim 桥接审计读数 `coedge_pcurve_bind_count()` / `coedge_pcurve_clear_count()` 等。`write_operation_count()` 统计本事务内每次**成功**的写操作（创建/删除实体、`replace_surface`、每次 `set_coedge_pcurve` 含清除）；回滚或 `clear_tracking_records()` 归零。`clear_tracking_records()` 仅在提交或回滚后允许调用，可重复清理且不改变模型；活动事务（含空事务）返回 `OperationFailed` / `AXM-TX-E-0006`，保留创建记录、修改快照与计数。`effective_isolation_level()` 当前实现返回 `SnapshotSerializable`（单事务 + 快照回滚的工程占位，见头文件注释）。
 
 ### 6.3 拓扑验证接口
 
@@ -533,8 +536,11 @@ struct OpReport {
 class BooleanService {
 public:
   Result<OpReport> run(BooleanOp op, BodyId lhs, BodyId rhs, const BooleanOptions&);
+  Result<void> export_boolean_prep_stats(BodyId lhs, BodyId rhs, std::string_view path) const;
 };
 ```
+
+`export_boolean_prep_stats` 导出当前壳/区域级候选统计，不表示精确布尔能力。成功在输出流关闭且检查通过后返回；失败报告保留输入体 ID，并用 `bool.prep.export.input/open/write` 区分参数、打开文件及写入失败。参数失败不改写目标文件；设备写入失败不保证文件恢复。
 
 ### 8.3 修改操作接口
 
@@ -709,8 +715,17 @@ public:
   Result<DiagnosticReport> get(DiagnosticId) const;
   Result<void> append_issue(DiagnosticId, const Issue&);
   Result<void> export_report(DiagnosticId, std::string_view path) const;
+  Result<void> export_report_json(DiagnosticId, std::string_view path) const;
+  Result<void> export_reports_txt(std::span<const DiagnosticId>, std::string_view path) const;
+  Result<void> export_reports_json(std::span<const DiagnosticId>, std::string_view path) const;
 };
 ```
+
+`export_reports_json` 顶层为 `{"diagnostics":[...]}`，每项与单报告 JSON 一致，包含 `id/summary/issues` 及问题的 `code/severity/message/stage/related_entities`；字符串控制字节转义后保留。按输入顺序导出，重复 ID 重复输出，无问题报告输出空 `issues`。
+
+`export_reports_txt` 按输入顺序拼接单报告文本，保留摘要、每个问题的严重级别、错误码、消息及非空阶段与关联实体；重复 ID 重复输出，空报告仍包含 ID 和摘要。文本中的特殊字节原样保留。
+
+上述两个指定 ID 批量导出接口：空 ID 列表或空路径返回 `InvalidInput` / `AXM-IO-E-0005`；任一 ID 不存在返回 `InvalidInput` / `AXM-CORE-E-0001`。上述参数失败均在打开文件前返回，不创建或截断目标，不修改源报告（仍生成失败诊断）。打开或写入失败返回 `OperationFailed` / `AXM-IO-E-0005`；写入期间的设备错误不保证恢复原文件。
 
 ## 13. `TopoCore` 门面补充接口
 

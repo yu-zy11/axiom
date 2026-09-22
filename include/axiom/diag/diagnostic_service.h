@@ -60,6 +60,7 @@ public:
     Result<std::uint64_t> total_error_count() const;
     Result<std::uint64_t> total_fatal_count() const;
     Result<void> export_reports_txt(std::span<const DiagnosticId> ids, std::string_view path) const;
+    /// 按输入顺序（保留重复 ID）导出完整报告；任一 ID 无效时在打开文件前拒绝。
     Result<void> export_reports_json(std::span<const DiagnosticId> ids, std::string_view path) const;
     /// 导出当前存储内**全部**诊断报告为单个 JSON（与 `export_report_json` 单条结构一致，顶层为 `{"diagnostics":[...]}`）；顺序为 `DiagnosticId` 升序，供 CI/回归归档。
     Result<void> export_all_reports_json(std::string_view path) const;

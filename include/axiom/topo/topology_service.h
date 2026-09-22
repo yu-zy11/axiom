@@ -114,11 +114,14 @@ public:
     TopologyTransaction& operator=(const TopologyTransaction&) = delete;
     ~TopologyTransaction() = default;
 
+    /// 坐标必须为有限值；否则返回 InvalidInput / AXM-CORE-E-0002，且不修改拓扑或事务写计数。
     Result<VertexId> create_vertex(const Point3& point);
     Result<EdgeId> create_edge(CurveId curve_id, VertexId v0, VertexId v1);
     Result<CoedgeId> create_coedge(EdgeId edge_id, bool reversed);
     Result<void> set_coedge_pcurve(CoedgeId coedge_id, PCurveId pcurve_id);
+    /// 按定向端点 ID 首尾闭合；单共边不豁免。未闭合返回 InvalidTopology / AXM-TOPO-E-0002，不写入环或事务计数。
     Result<LoopId> create_loop(std::span<const CoedgeId> coedges);
+    /// 同一面各环不得复用 EdgeId；失败返回 InvalidTopology / AXM-TOPO-E-0014，不写入模型。
     Result<FaceId> create_face(SurfaceId surface_id, LoopId outer_loop, std::span<const LoopId> inner_loops);
     Result<ShellId> create_shell(std::span<const FaceId> faces);
     Result<BodyId> create_body(std::span<const ShellId> shells);
@@ -166,6 +169,8 @@ public:
     Result<bool> has_snapshot_face(FaceId face_id) const;
     Result<bool> has_snapshot_shell(ShellId shell_id) const;
     Result<bool> has_snapshot_body(BodyId body_id) const;
+    /// 仅在提交或回滚后清理审计/撤销记录，可重复调用且不改变模型。
+    /// 活动事务（含空事务）返回 OperationFailed / AXM-TX-E-0006，保留全部跟踪记录。
     Result<void> clear_tracking_records();
     Result<std::vector<VertexId>> created_vertices() const;
     Result<std::vector<EdgeId>> created_edges() const;
