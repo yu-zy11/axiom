@@ -66,6 +66,8 @@
 
 ### 2.4 `heal + io`
 
+- NFR-DIA-001 第 20 切片：`validate_geometry` 的非法目标、bbox、owned B-Rep 引用、Strict 参数域/有限值/近重复顶点/退化边面/面法向失败统一绑定 `heal.validate_geometry.*` 细分阶段，并关联目标 Body 与已有问题子实体。`axiom_heal_test` 覆盖成功、非法句柄、Strict 退化、阶段检索、JSON 导出及模型计数不污染；复用现有错误码，无公开签名变化，需求保持受限可用。
+
 - 在导入侧 mesh 工作流与验证项中继续闭合“自交/流形性/修复追溯”。
 
 **DoD**

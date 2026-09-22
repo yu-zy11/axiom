@@ -368,6 +368,8 @@
 
 ### 需求 7.13 诊断与日志（Diagnostics）
 
+- **NFR-DIA-001 第 20 切片**：`ValidationService::validate_geometry` 的所有失败出口补齐 `heal.validate_geometry.*` 根因阶段；非法句柄和 bbox 失败显式关联目标 Body，owned B-Rep/Strict 检查保留目标 Body 与问题子实体。`axiom_heal_test` 覆盖合法成功、非法句柄、近重复顶点、面法向退化、阶段检索、JSON 导出及持久模型计数不污染。复用既有错误码且无公开签名变化；需求仍为受限可用，其他 HEAL/BOOL/IO 失败路径及全覆盖门禁待继续闭合。
+
 - NFR-DIA-001 第 15 切片：`export_boolean_prep_stats` 显式关闭并检查输出流，避免写入失败返回成功；参数、文件打开、写入失败分别绑定 `bool.prep.export.input/open/write` 和 `[lhs, rhs]`。参数失败复用 `AXM-BOOL-E-0001`，文件打开失败由误用的 BOOL 输入码修正为 `AXM-IO-E-0005`，写入失败复用该 IO 码。`axiom_boolean_prep_test` 覆盖重叠/相同/分离/接触零体积输入、无效句柄/空路径、目录打开失败、Linux `/dev/full`、阶段/错误码检索及 JSON、参数失败文件不污染、模型计数与 Eval 失效不污染和失败后重试。无公开签名变化；设备写入失败不保证目标文件恢复，需求保持受限可用。
 
 - **FR-DIAG-001 第 14 切片**：补齐指定 ID 批量文本归档，复用单报告文本格式保留完整 Issue（严重级别、码、消息、阶段、实体），保留输入顺序、重复 ID 和特殊字节；打开文件前拒绝任意位置的无效 ID，参数失败不创建/截断目标且源报告不变；显式关闭并检查写入错误，复用现有 CORE/IO 错误码，无公开签名变化。`axiom_diagnostics_test` 覆盖成功、空报告/空阶段/重复 ID、非法参数、路径失败、Linux `/dev/full` 写入失败及拒绝后重新导出。设备写入失败不保证目标文件恢复；需求仍为受限可用，全部重量级流程阶段/实体/数值证据待补齐。

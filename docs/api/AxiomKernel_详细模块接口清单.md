@@ -604,6 +604,7 @@ enum class ValidationMode {
 
 class ValidationService {
 public:
+  // 失败报告使用 heal.validate_geometry.* 阶段，并关联目标 Body 及可定位的问题子实体。
   Result<void> validate_geometry(BodyId, ValidationMode) const;
   Result<void> validate_topology(BodyId, ValidationMode) const;
   Result<void> validate_self_intersection(BodyId, ValidationMode) const;

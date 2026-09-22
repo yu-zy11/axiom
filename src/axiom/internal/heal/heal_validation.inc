@@ -3,17 +3,20 @@ ValidationService::ValidationService(std::shared_ptr<detail::KernelState> state)
 Result<void> ValidationService::validate_geometry(BodyId body_id, ValidationMode mode) const {
     if (!detail::has_body(*state_, body_id)) {
         return detail::failed_void(*state_, StatusCode::InvalidInput, diag_codes::kValDegenerateGeometry,
-                                   "几何验证失败：目标实体不存在", "几何验证失败");
+                                   "几何验证失败：目标实体不存在", "几何验证失败", {body_id.value},
+                                   "heal.validate_geometry.input");
     }
     const auto& body = state_->bodies.at(body_id.value);
     if (body.bbox.is_valid &&
         (!point3_components_finite(body.bbox.min) || !point3_components_finite(body.bbox.max))) {
         return detail::failed_void(*state_, StatusCode::DegenerateGeometry, diag_codes::kValNonFiniteGeometry,
-                                   "几何验证失败：包围盒坐标须为有限值", "几何验证失败", {body_id.value});
+                                   "几何验证失败：包围盒坐标须为有限值", "几何验证失败", {body_id.value},
+                                   "heal.validate_geometry.bbox");
     }
     if (!has_valid_bbox(body) || min_extent(body.bbox) <= 0.0) {
         return detail::failed_void(*state_, StatusCode::DegenerateGeometry, diag_codes::kValDegenerateGeometry,
-                                   "几何验证失败：目标实体包围盒退化或无效", "几何验证失败");
+                                   "几何验证失败：目标实体包围盒退化或无效", "几何验证失败", {body_id.value},
+                                   "heal.validate_geometry.bbox");
     }
     // owned B-Rep：句柄完整性（全模式），与 Strict 参数域/退化项解耦，便于 Standard 工作流尽早发现悬空引用。
     if (body.rep_kind == RepKind::ExactBRep && !body.shells.empty() &&
@@ -22,7 +25,8 @@ Result<void> ValidationService::validate_geometry(BodyId body_id, ValidationMode
         std::vector<std::uint64_t> ref_related;
         if (!validate_owned_brep_reference_integrity(state_, body_id, ref_reason, ref_related)) {
             return detail::failed_void(*state_, StatusCode::DegenerateGeometry, diag_codes::kValDegenerateGeometry,
-                                       "几何验证失败：" + ref_reason, "几何验证失败", std::move(ref_related));
+                                       "几何验证失败：" + ref_reason, "几何验证失败", std::move(ref_related),
+                                       "heal.validate_geometry.references");
         }
     }
     if (mode == ValidationMode::Strict) {
@@ -32,31 +36,38 @@ Result<void> ValidationService::validate_geometry(BodyId body_id, ValidationMode
             std::vector<std::uint64_t> dom_related;
             if (!validate_strict_owned_surface_domains(state_, body_id, dom_reason, dom_related)) {
                 return detail::failed_void(*state_, StatusCode::DegenerateGeometry, diag_codes::kValParameterDomainInvalid,
-                                           "几何验证失败：" + dom_reason, "几何验证失败", std::move(dom_related));
+                                           "几何验证失败：" + dom_reason, "几何验证失败", std::move(dom_related),
+                                           "heal.validate_geometry.surface_domain");
             }
             if (!validate_strict_owned_curve_and_pcurve_domains(state_, body_id, dom_reason, dom_related)) {
                 return detail::failed_void(*state_, StatusCode::DegenerateGeometry, diag_codes::kValParameterDomainInvalid,
-                                           "几何验证失败：" + dom_reason, "几何验证失败", std::move(dom_related));
+                                           "几何验证失败：" + dom_reason, "几何验证失败", std::move(dom_related),
+                                           "heal.validate_geometry.curve_domain");
             }
             if (!validate_strict_owned_vertices_finite(state_, body_id, dom_reason, dom_related)) {
                 return detail::failed_void(*state_, StatusCode::DegenerateGeometry, diag_codes::kValNonFiniteGeometry,
-                                           "几何验证失败：" + dom_reason, "几何验证失败", std::move(dom_related));
+                                           "几何验证失败：" + dom_reason, "几何验证失败", std::move(dom_related),
+                                           "heal.validate_geometry.vertices_finite");
             }
             if (!validate_strict_owned_near_duplicate_vertices(state_, body_id, dom_reason, dom_related)) {
                 return detail::failed_void(*state_, StatusCode::DegenerateGeometry, diag_codes::kValNearDuplicateVertices,
-                                           "几何验证失败：" + dom_reason, "几何验证失败", std::move(dom_related));
+                                           "几何验证失败：" + dom_reason, "几何验证失败", std::move(dom_related),
+                                           "heal.validate_geometry.near_duplicate_vertices");
             }
             if (!validate_strict_owned_edges_nondegenerate(state_, body_id, dom_reason, dom_related)) {
                 return detail::failed_void(*state_, StatusCode::DegenerateGeometry, diag_codes::kValDegenerateGeometry,
-                                           "几何验证失败：" + dom_reason, "几何验证失败", std::move(dom_related));
+                                           "几何验证失败：" + dom_reason, "几何验证失败", std::move(dom_related),
+                                           "heal.validate_geometry.edges");
             }
             if (!validate_strict_owned_faces_nondegenerate_area_proxy(state_, body_id, dom_reason, dom_related)) {
                 return detail::failed_void(*state_, StatusCode::DegenerateGeometry, diag_codes::kValDegenerateGeometry,
-                                           "几何验证失败：" + dom_reason, "几何验证失败", std::move(dom_related));
+                                           "几何验证失败：" + dom_reason, "几何验证失败", std::move(dom_related),
+                                           "heal.validate_geometry.face_area");
             }
             if (!validate_strict_owned_plane_face_loop_normals(state_, body_id, dom_reason, dom_related)) {
                 return detail::failed_void(*state_, StatusCode::DegenerateGeometry, diag_codes::kValFaceNormalInconsistent,
-                                           "几何验证失败：" + dom_reason, "几何验证失败", std::move(dom_related));
+                                           "几何验证失败：" + dom_reason, "几何验证失败", std::move(dom_related),
+                                           "heal.validate_geometry.face_normal");
             }
         }
     }
@@ -659,4 +670,3 @@ Result<std::vector<BodyId>> ValidationService::filter_invalid_bodies(
   }
   return ok_result(std::move(out), state_->create_diagnostic("已过滤无效体"));
 }
-

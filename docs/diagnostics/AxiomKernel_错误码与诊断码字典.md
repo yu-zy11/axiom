@@ -323,9 +323,13 @@
 | `AXM-VAL-E-0001` | Error | 检测到自交 |
 | `AXM-VAL-E-0002` | Error | 检测到非法非流形 |
 | `AXM-VAL-E-0003` | Error | 检测到容差冲突 |
-| `AXM-VAL-E-0004` | Error | 检测到退化几何 |
+| `AXM-VAL-E-0004` | Error | 检测到退化几何；`validate_geometry` 按根因绑定 `heal.validate_geometry.*` 阶段并关联目标 Body/问题子实体 |
 | `AXM-VAL-E-0005` | Warning | 检测到薄壁高风险区域 |
 | `AXM-VAL-E-0006` | Warning | 检测到高曲率不稳定区域 |
+
+`validate_geometry` 的失败阶段包括 `input`、`bbox`、`references`、`surface_domain`、`curve_domain`、
+`vertices_finite`、`near_duplicate_vertices`、`edges`、`face_area` 与 `face_normal`，统一使用
+`heal.validate_geometry.` 前缀，便于按阶段聚合。
 
 ## 7.11 `IO` 数据交换模块错误码
 
