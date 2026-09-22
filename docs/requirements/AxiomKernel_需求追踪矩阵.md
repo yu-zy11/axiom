@@ -14,7 +14,7 @@
 
 | ID | 需求域 | 责任模块 | 目标阶段 | 当前状态 | 自动化证据 | 主要缺口 / 下一验收点 |
 |---|---|---|---|---|---|---|
-| FR-GEO-001 | 几何对象、求值与变换 | Math, Geo | Stage 2 | 受限可用 | `axiom_math_services_test`, `axiom_geometry_test` | 已补显式样条结点逆序/零长度有效域/重数超过 degree + 1 拒绝与失败不污染回归，以及合法高重数断点单侧求值回归；仍需扩展曲线/曲面类型及精度语义 |
+| FR-GEO-001 | 几何对象、求值与变换 | Math, Geo | Stage 2 | 受限可用 | `axiom_math_services_test`, `axiom_geometry_test` | 已补显式样条结点逆序/零长度有效域/重数超过 degree + 1 拒绝与失败不污染回归，以及合法高重数断点单侧求值回归；第 11 切片补齐非夹持重复端点的非空单侧点值/导数/曲率及退化、不污染回归；仍需扩展曲线/曲面类型及精度语义 |
 | FR-TOPO-001 | 拓扑实体、关系与一致性 | Topo | Stage 2 | 受限可用 | `axiom_topology_test`（含非有限顶点、单共边未闭合拒绝、退化输入、诊断 JSON、失败不污染与回滚）, `axiom_kernel_runtime_invariant_test` | 完整一致性规则、trim bridge、持久命名 |
 | FR-OPS-001 | 基础体与特征构造 | Ops, Geo, Topo | Stage 3 | 进行中 | `axiom_smoke_test`, `axiom_ops_heal_test` | 真实特征拓扑及跨模块验收模型集 |
 | FR-BOOL-001 | 布尔并/交/差与阶段诊断 | Ops, Heal | Stage 4 | 进行中 | `axiom_boolean_prep_test`, `axiom_boolean_workflow_test` | 工业退化场景、精确切分/分类/重建成功率 |

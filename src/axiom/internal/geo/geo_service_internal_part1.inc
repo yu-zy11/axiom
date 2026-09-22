@@ -634,10 +634,20 @@ int bspline_find_span(std::size_t n, int p, Scalar u, const std::vector<Scalar> 
   const Scalar ulo = U[static_cast<std::size_t>(p)];
   const Scalar uhi = U[n];
   if (u <= ulo) {
-    return p;
+    // Non-clamped vectors (and derivative knot vectors) can have empty
+    // spans at the active endpoints. Use the first nonempty right span.
+    int k = p;
+    while (k < ni - 1 && U[static_cast<std::size_t>(k + 1)] <= ulo) {
+      ++k;
+    }
+    return k;
   }
   if (u >= uhi) {
-    return ni - 1;
+    int k = ni - 1;
+    while (k > p && U[static_cast<std::size_t>(k)] >= uhi) {
+      --k;
+    }
+    return k;
   }
   int low = p;
   int high = ni;
