@@ -3862,39 +3862,128 @@ int main() {
             return 1;
         }
 
-        auto face = txn.create_face(*plane0.value, *outer.value, std::array<axiom::LoopId, 1>{*inner.value});
-        if (face.status != axiom::StatusCode::Ok || !face.value) {
-            std::cerr << "failed to create face for face cross-loop duplicate-edge test\n";
+        const auto before_count = kernel.topology_count().value;
+        const auto before_writes = txn.write_operation_count().value;
+        const auto face = txn.create_face(*plane0.value, *outer.value,
+                                         std::array<axiom::LoopId, 1>{*inner.value});
+        const auto diag = kernel.diagnostics().get(face.diagnostic_id);
+        if (face.status != axiom::StatusCode::InvalidTopology || face.value || !diag.value ||
+            !issue_links_entities(*diag.value, axiom::diag_codes::kTopoLoopDuplicateEdge,
+                                  {outer.value->value, inner.value->value, e01.value->value}) ||
+            kernel.topology_count().value != before_count ||
+            txn.write_operation_count().value != before_writes ||
+            txn.created_face_count().value != std::optional<std::uint64_t>{0}) {
+            std::cerr << "cross-loop shared edge must be rejected before creating a face\n";
             return 1;
         }
+        // The same Edge may still belong to distinct faces through distinct coedges.
+        const auto face_a = txn.create_face(*plane0.value, *outer.value, {});
+        const auto face_b = txn.create_face(*plane0.value, *inner.value, {});
+        const auto owners = kernel.topology().query().faces_of_edge(*e01.value);
+        if (!face_a.value || !face_b.value || !owners.value || owners.value->size() != 2 ||
+            kernel.topology().validate().validate_face(*face_a.value).status != axiom::StatusCode::Ok ||
+            kernel.topology().validate().validate_face(*face_b.value).status != axiom::StatusCode::Ok ||
+            txn.rollback().status != axiom::StatusCode::Ok) {
+            std::cerr << "valid separate faces or rollback failed after shared-edge rejection\n";
+            return 1;
+        }
+    }
 
-        auto shell = txn.create_shell(std::array<axiom::FaceId, 1>{*face.value});
-        auto body = txn.create_body(std::array<axiom::ShellId, 1>{*shell.value});
-        if (shell.status != axiom::StatusCode::Ok || body.status != axiom::StatusCode::Ok ||
-            !shell.value.has_value() || !body.value.has_value()) {
-            std::cerr << "failed to create shell/body for face cross-loop duplicate-edge test\n";
+    // FR-TOPO-001: inner/inner collisions, coincident boundaries and either coedge direction.
+    for (const bool reversed : {false, true}) {
+        axiom::Kernel face_kernel;
+        const auto plane = face_kernel.surfaces().make_plane({0, 0, 0}, {0, 0, 1});
+        if (!plane.value) return 1;
+        auto setup = face_kernel.topology().begin_transaction();
+        auto triangle = [&](const std::array<axiom::Point3, 3>& points,
+                            std::array<axiom::EdgeId, 3>& edges) -> std::optional<axiom::LoopId> {
+            std::array<axiom::VertexId, 3> vertices;
+            std::array<axiom::CoedgeId, 3> coedges;
+            for (std::size_t i = 0; i < 3; ++i) {
+                const auto vertex = setup.create_vertex(points[i]);
+                if (!vertex.value) return {};
+                vertices[i] = *vertex.value;
+            }
+            for (std::size_t i = 0; i < 3; ++i) {
+                const auto& a = points[i];
+                const auto& b = points[(i + 1) % 3];
+                const auto line = face_kernel.curves().make_line(a, {b.x-a.x, b.y-a.y, b.z-a.z});
+                if (!line.value) return {};
+                const auto edge = setup.create_edge(*line.value, vertices[i], vertices[(i + 1) % 3]);
+                if (!edge.value) return {};
+                edges[i] = *edge.value;
+                const auto coedge = setup.create_coedge(edges[i], false);
+                if (!coedge.value) return {};
+                coedges[i] = *coedge.value;
+            }
+            return setup.create_loop(coedges).value;
+        };
+        std::array<axiom::EdgeId, 3> outer_edges, hole_edges, other_edges;
+        const auto outer = triangle({axiom::Point3{0, 0, 0}, {10, 0, 0}, {0, 10, 0}}, outer_edges);
+        const auto hole = triangle({axiom::Point3{1, 1, 0}, {1, 2, 0}, {2, 1, 0}}, hole_edges);
+        const auto other = triangle({axiom::Point3{3, 1, 0}, {3, 2, 0}, {4, 1, 0}}, other_edges);
+        if (!outer || !hole || !other) return 1;
+        std::array<axiom::CoedgeId, 3> duplicate_coedges;
+        for (std::size_t i = 0; i < 3; ++i) {
+            const auto coedge = setup.create_coedge(hole_edges[reversed ? 2 - i : i], reversed);
+            if (!coedge.value) return 1;
+            duplicate_coedges[i] = *coedge.value;
+        }
+        const auto duplicate = setup.create_loop(duplicate_coedges);
+        if (!duplicate.value || setup.commit().status != axiom::StatusCode::Ok) return 1;
+        const auto topology_before = face_kernel.topology_count().value;
+        const auto geometry_before = face_kernel.geometry_count().value;
+        auto txn = face_kernel.topology().begin_transaction();
+        const auto version_before = txn.preview_commit_version().value;
+        // Include a disjoint hole before the collision to cover a partially scanned boundary set.
+        for (const auto& holes : {std::vector<axiom::LoopId>{*hole, *duplicate.value},
+                                std::vector<axiom::LoopId>{*other, *hole, *duplicate.value},
+                                std::vector<axiom::LoopId>{*duplicate.value, *hole}}) {
+            const auto result = txn.create_face(*plane.value, *outer, holes);
+            const auto report = face_kernel.diagnostics().get(result.diagnostic_id);
+            const auto owners = face_kernel.topology().query().faces_of_edge(hole_edges[0]);
+            const auto loops = face_kernel.topology().query().loops_of_edge(hole_edges[0]);
+            if (result.status != axiom::StatusCode::InvalidTopology || result.value || !report.value ||
+                !issue_links_entities(*report.value, axiom::diag_codes::kTopoLoopDuplicateEdge,
+                                     {hole->value, duplicate.value->value}) ||
+                face_kernel.topology_count().value != topology_before ||
+                face_kernel.geometry_count().value != geometry_before ||
+                txn.preview_commit_version().value != version_before ||
+                txn.created_entity_count_total().value != std::optional<std::uint64_t>{0} ||
+                txn.write_operation_count().value != std::optional<std::uint64_t>{0} ||
+                !owners.value || !owners.value->empty() || !loops.value || loops.value->size() != 2 ||
+                face_kernel.topology().validate().validate_loop(*duplicate.value).status != axiom::StatusCode::Ok) {
+                std::cerr << "inner-loop collision rejection polluted topology or tracking\n";
+                return 1;
+            }
+            const auto path = std::filesystem::temp_directory_path() / "axiom_topo_face_duplicate_edge.json";
+            if (face_kernel.diagnostics().export_report_json(result.diagnostic_id, path.string()).status !=
+                axiom::StatusCode::Ok) return 1;
+            std::ifstream input(path);
+            const std::string json((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+            input.close();
+            std::filesystem::remove(path);
+            if (json.find(axiom::diag_codes::kTopoLoopDuplicateEdge) == std::string::npos ||
+                json.find("related_entities") == std::string::npos) return 1;
+        }
+        // Rejected loops remain available for a valid face with two disjoint holes.
+        const auto face = txn.create_face(*plane.value, *outer, std::array<axiom::LoopId, 2>{*hole, *other});
+        if (!face.value ||
+            face_kernel.topology().validate().validate_face(*face.value).status != axiom::StatusCode::Ok ||
+            txn.write_operation_count().value != std::optional<std::uint64_t>{1} ||
+            txn.rollback().status != axiom::StatusCode::Ok ||
+            face_kernel.topology_count().value != topology_before ||
+            face_kernel.topology().query().has_face(*face.value).value != std::optional<bool>{false} ||
+            face_kernel.topology().validate().validate_loop(*hole).status != axiom::StatusCode::Ok ||
+            face_kernel.topology().validate().validate_loop(*duplicate.value).status != axiom::StatusCode::Ok) {
+            std::cerr << "valid holed face or rollback failed after rejected duplicate boundaries\n";
             return 1;
         }
-
-        auto r = kernel.validate().validate_topology(*body.value, axiom::ValidationMode::Standard);
-        if (r.status == axiom::StatusCode::Ok) {
-            std::cerr << "expected validate_topology to fail for cross-loop duplicate edge in one face\n";
-            return 1;
-        }
-        auto diag = kernel.diagnostics().get(r.diagnostic_id);
-        if (diag.status != axiom::StatusCode::Ok || !diag.value) {
-            std::cerr << "expected diagnostics for cross-loop duplicate edge validation failure\n";
-            return 1;
-        }
-        const bool has_code = has_issue_code(*diag.value, axiom::diag_codes::kTopoLoopDuplicateEdge);
-        if (!has_code) {
-            std::cerr << "expected kTopoLoopDuplicateEdge for cross-loop duplicate edge in face\n";
-            return 1;
-        }
-
-        auto rb = txn.rollback();
-        if (rb.status != axiom::StatusCode::Ok) {
-            std::cerr << "rollback failed after face cross-loop duplicate-edge test\n";
+        auto retry = face_kernel.topology().begin_transaction();
+        const auto committed = retry.create_face(*plane.value, *outer, std::array<axiom::LoopId, 2>{*hole, *other});
+        if (!committed.value || retry.commit().status != axiom::StatusCode::Ok ||
+            face_kernel.topology().validate().validate_face(*committed.value).status != axiom::StatusCode::Ok) {
+            std::cerr << "rollback left stale loop ownership\n";
             return 1;
         }
     }

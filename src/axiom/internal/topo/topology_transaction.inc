@@ -206,6 +206,23 @@ TopologyTransaction::create_face(SurfaceId surface_id, LoopId outer_loop,
                                          inner_used->second.front()}));
     }
   }
+  // Each loop is valid and unowned; reject cross-loop Edge reuse before writing
+  // the face or its reverse indices, matching validate_face's boundary rule.
+  std::unordered_map<std::uint64_t, LoopId> edge_loops;
+  for (std::size_t i = 0; i <= inner_loops.size(); ++i) {
+    const auto loop_id = i == 0 ? outer_loop : inner_loops[i - 1];
+    for (const auto coedge_id : state_->loops.at(loop_id.value).coedges) {
+      const auto edge_id = state_->coedges.at(coedge_id.value).edge_id;
+      const auto [it, inserted] = edge_loops.emplace(edge_id.value, loop_id);
+      if (!inserted) {
+        return detail::failed_result<FaceId>(
+            *state_, StatusCode::InvalidTopology,
+            diag_codes::kTopoLoopDuplicateEdge,
+            "创建面失败：面内存在跨环复用的边", "创建面失败",
+            {it->second.value, loop_id.value, edge_id.value});
+      }
+    }
+  }
   const auto id = FaceId{state_->allocate_id()};
   detail::FaceRecord face_record;
   face_record.surface_id = surface_id;

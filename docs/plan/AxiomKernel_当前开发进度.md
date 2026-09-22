@@ -291,6 +291,8 @@
 
 ### 需求 7.2 拓扑结构管理（TopoCore）
 
+- FR-TOPO-001 第 12 切片：`create_face` 在写入前拒绝同一面外环/内环及内环之间复用 EdgeId，复用 `AXM-TOPO-E-0014` 并关联两个冲突环与边。`axiom_topology_test` 覆盖单边共享、完全重合边界、正反共边、内环顺序、诊断 JSON、计数/索引不污染、拒绝后合法双孔面及回滚后重新提交；不同面通过独立共边共享 Edge 仍允许。未增加公开签名或错误码，未扩展 seam/周期修剪支持，需求保持受限可用。 验证：`ctest --test-dir build-agent --output-on-failure` 16/16 通过，总耗时 25.86 秒，性能项 2.64 秒；文档检查通过。
+
 - **FR-TOPO-001 第 7 切片**：移除 `validate_loop_record` 对单共边的特殊放行，创建入口与环验证共享首尾顶点 ID 闭合规则；未闭合返回 `AXM-TOPO-E-0002`，创建失败不分配环 ID、不改存储、索引或事务写计数。`axiom_topology_test` 覆盖正反方向、坐标重合但 ID 不同、失败后复用共边构造闭合三角环、回滚保留已有顶点及诊断 JSON。`axiom_ops_heal_test` 的面修改夹具已由单条开放边改为闭合三角环，保留来源追踪等原有断言。当前 `create_edge` 仍拒绝同一端点 ID，故本切片不宣称支持单边周期环；FR-TOPO-001 保持受限可用。验证：`ctest --test-dir build-agent --output-on-failure` 16/16 通过，总耗时 24.91 秒，性能项 2.89 秒；文档检查通过。
 
 - **拓扑元素与关系**
