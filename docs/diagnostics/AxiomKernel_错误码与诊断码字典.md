@@ -443,6 +443,8 @@
 
 `DiagnosticService::export_grouped_by_stage_txt/json` 的空路径、文件打开及最终写入/关闭失败复用 `AXM-IO-E-0005`；空路径在打开文件前拒绝，失败不修改参与聚合的源报告，底层设备写入失败不保证恢复目标文件。回归入口：`axiom_diagnostics_test`。
 
+`IOService::export_step` 的失败继续复用 `AXM-IO-E-0005`，并关联输入 Body：无效 Body/空路径为 `io.export.step.input`，父目录不存在或不可写为 `io.export.step.path`，打开失败为 `io.export.step.open`，最终写入或关闭失败为 `io.export.step.write`。输入/路径失败不创建目标文件，所有失败不修改模型；底层设备写入失败不保证恢复目标文件。回归入口：`axiom_io_workflow_test`。
+
 与 **`AXM-BOOL-E-*` 错误码**绑定的布尔早期失败路径会在 `Issue.stage` 中写入可聚合阶段标签（与 `export_report_json` 一致）：`bool.input`（输入体或布尔运算类型无效，`AXM-BOOL-E-0001`）、`bool.abort.intersect`（交集在包围盒层面不相交，`AXM-BOOL-E-0003`）、`bool.abort.classify`（如减运算右包左无法表达空结果，`AXM-BOOL-E-0005`）。上述早期失败即使设置 `BooleanOptions::diagnostics=false`，也保留单条 Error Issue、阶段标签与 `[lhs, rhs]`（包括无效输入值），只省略候选阶段/统计信息；成功时关闭诊断的行为不变。启用布尔诊断时，返回的预处理告警 `AXM-BOOL-W-0001/W-0002` 同步写入报告，保留原文案和 Warning 级别，并绑定 `bool.prep` 与 `[lhs, rhs, output]` 实体 ID，可按阶段检索及导出 JSON；这些告警不表示精确布尔能力。Strict 残留告警见 `bool.validate.residual`（`AXM-BOOL-W-0003`）。
 
 ## 9.2 `HEAL` 诊断码

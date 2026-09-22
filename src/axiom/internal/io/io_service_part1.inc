@@ -127,12 +127,22 @@ Result<BodyId> IOService::import_step(std::string_view path, const ImportOptions
 
 Result<void> IOService::export_step(BodyId body_id, std::string_view path, const ExportOptions& options) {
     if (!detail::has_body(*state_, body_id) || path.empty()) {
-        return detail::invalid_input_void(
-            *state_, diag_codes::kIoExportFailure,
-            "STEP 导出失败：目标实体不存在或输出路径为空", "STEP 导出失败");
+        return detail::failed_void(
+            *state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
+            "STEP 导出失败：目标实体不存在或输出路径为空", "STEP 导出失败",
+            {body_id.value}, "io.export.step.input");
     }
     const auto wx = reject_if_export_directory_not_writable(*state_, path);
     if (wx.status != StatusCode::Ok) {
+        const auto diagnostic_it = state_->diagnostics.find(wx.diagnostic_id.value);
+        if (diagnostic_it != state_->diagnostics.end()) {
+            for (auto& issue : diagnostic_it->second.issues) {
+                issue.stage = "io.export.step.path";
+                if (issue.related_entities.empty()) {
+                    issue.related_entities.push_back(body_id.value);
+                }
+            }
+        }
         return wx;
     }
 
@@ -140,7 +150,8 @@ Result<void> IOService::export_step(BodyId body_id, std::string_view path, const
     if (!out) {
         return detail::failed_void(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
-            "STEP 导出失败：无法打开输出文件", "STEP 导出失败");
+            "STEP 导出失败：无法打开输出文件", "STEP 导出失败", {body_id.value},
+            "io.export.step.open");
     }
 
     const auto body_it = state_->bodies.find(body_id.value);
@@ -173,6 +184,14 @@ Result<void> IOService::export_step(BodyId body_id, std::string_view path, const
     out << "/* body " << body_id.value << " */\n";
     out << "ENDSEC;\n";
     out << "END-ISO-10303-21;\n";
+    out.flush();
+    out.close();
+    if (!out) {
+        return detail::failed_void(
+            *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+            "STEP 导出失败：写入输出文件失败", "STEP 导出失败", {body_id.value},
+            "io.export.step.write");
+    }
 
     return ok_void(state_->create_diagnostic("已导出STEP模型"));
 }
