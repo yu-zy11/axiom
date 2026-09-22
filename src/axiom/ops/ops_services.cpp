@@ -32,18 +32,14 @@ Result<OpReport> boolean_op_fail_staged(std::shared_ptr<detail::KernelState> sta
                                         BodyId lhs,
                                         BodyId rhs,
                                         const BooleanPrepStats* prep) {
-    if (!diagnostics) {
-        if (st == StatusCode::InvalidInput) {
-            return detail::invalid_input_result<OpReport>(*state, code, std::move(message), std::move(summary));
-        }
-        return detail::failed_result<OpReport>(*state, st, code, std::move(message), std::move(summary));
-    }
     const DiagnosticId diag = state->create_diagnostic(std::move(summary));
-    append_boolean_stage_issue(*state, diag, diag_codes::kBoolStageCandidates,
-                               "布尔早期退出：在候选/包围盒关系检查阶段已中止，未生成结果体",
-                               {lhs.value, rhs.value});
-    if (prep != nullptr) {
-        append_boolean_prep_candidate_issue(*state, diag, lhs, rhs, *prep);
+    if (diagnostics) {
+        append_boolean_stage_issue(*state, diag, diag_codes::kBoolStageCandidates,
+                                   "布尔早期退出：在候选/包围盒关系检查阶段已中止，未生成结果体",
+                                   {lhs.value, rhs.value});
+        if (prep != nullptr) {
+            append_boolean_prep_candidate_issue(*state, diag, lhs, rhs, *prep);
+        }
     }
     auto issue = detail::make_error_issue(code, std::move(message), {lhs.value, rhs.value});
     set_boolean_diagnostic_stage(issue, code);

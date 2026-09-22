@@ -22,10 +22,12 @@ void clear_primitive_provenance_fields(detail::BodyRecord& record) {
 BodyId make_body(std::shared_ptr<detail::KernelState> state, detail::BodyRecord record, const std::string&) {
     const bool is_derived = record.kind == detail::BodyKind::BooleanResult || record.kind == detail::BodyKind::Modified ||
                            record.kind == detail::BodyKind::BlendResult || record.kind == detail::BodyKind::Sweep;
+    bool fresh_primitive_topology = false;
     if (is_derived) {
         detail::materialize_body_bbox_topology(*state, record);
     } else if (is_primitive_body_kind(record.kind) && record.rep_kind == RepKind::ExactBRep && record.bbox.is_valid &&
                record.shells.empty()) {
+        fresh_primitive_topology = true;
         clear_primitive_provenance_fields(record);
         if (record.kind == detail::BodyKind::Wedge) {
             detail::materialize_body_wedge_shell(*state, record);
@@ -37,7 +39,31 @@ BodyId make_body(std::shared_ptr<detail::KernelState> state, detail::BodyRecord 
     }
     const auto id = BodyId {state->allocate_id()};
     state->bodies.emplace(id.value, std::move(record));
-    detail::rebuild_topology_links(*state);
+    if (fresh_primitive_topology) {
+        // These materializers create disjoint shells/faces/loops/coedges. Index only
+        // the new topology; rebuilding all existing bodies makes batch creation quadratic.
+        for (const auto shell_id : state->bodies.at(id.value).shells) {
+            state->shell_to_bodies[shell_id.value].push_back(id.value);
+            for (const auto face_id : state->shells.at(shell_id.value).faces) {
+                state->face_to_shells[face_id.value].push_back(shell_id.value);
+                const auto& face = state->faces.at(face_id.value);
+                const auto index_loop = [&](LoopId loop_id) {
+                    state->loop_to_faces[loop_id.value].push_back(face_id.value);
+                    for (const auto coedge_id : state->loops.at(loop_id.value).coedges) {
+                        state->coedge_to_loop[coedge_id.value] = loop_id.value;
+                        const auto& coedge = state->coedges.at(coedge_id.value);
+                        state->edge_to_coedges[coedge.edge_id.value].push_back(coedge_id.value);
+                    }
+                };
+                index_loop(face.outer_loop);
+                for (const auto loop_id : face.inner_loops) {
+                    index_loop(loop_id);
+                }
+            }
+        }
+    } else {
+        detail::rebuild_topology_links(*state);
+    }
     return id;
 }
 

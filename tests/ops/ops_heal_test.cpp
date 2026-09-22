@@ -53,6 +53,51 @@ bool has_issue_stage(const axiom::DiagnosticReport& report, std::string_view sta
 }  // namespace
 
 int main() {
+    // Fresh primitive indexing must preserve both new and pre-existing adjacency.
+    {
+        axiom::Kernel indexed;
+        auto query = indexed.topology().query();
+        std::vector<axiom::BodyId> bodies;
+        for (int i = 0; i < 9; ++i) {
+            const axiom::Point3 origin {i * 20.0, 0.0, 0.0};
+            const auto body = i % 3 == 0 ? indexed.primitives().box(origin, 3.0, 4.0, 5.0) :
+                i % 3 == 1 ? indexed.primitives().wedge(origin, 3.0, 4.0, 5.0) :
+                             indexed.primitives().cylinder(origin, {0.0, 0.0, 1.0}, 2.0, 5.0);
+            if (!body.value) return 1;
+            bodies.push_back(*body.value);
+            for (const auto existing : bodies) {
+                const auto shells = query.shells_of_body(existing);
+                const auto faces = query.faces_of_body(existing);
+                const auto edges = query.edges_of_body(existing);
+                if (!shells.value || shells.value->size() != 1 || !faces.value || faces.value->empty() ||
+                    !edges.value || edges.value->empty()) return 1;
+                const auto shell = shells.value->front();
+                const auto owners = query.bodies_of_shell(shell);
+                if (!owners.value || owners.value->size() != 1 || owners.value->front().value != existing.value)
+                    return 1;
+                for (const auto face : *faces.value) {
+                    const auto face_shells = query.shells_of_face(face);
+                    const auto face_bodies = query.bodies_of_face(face);
+                    if (!face_shells.value || face_shells.value->size() != 1 ||
+                        face_shells.value->front().value != shell.value || !face_bodies.value ||
+                        face_bodies.value->size() != 1 || face_bodies.value->front().value != existing.value)
+                        return 1;
+                }
+                for (const auto edge : *edges.value) {
+                    const auto coedges = query.coedges_of_edge(edge);
+                    const auto loops = query.loops_of_edge(edge);
+                    const auto edge_faces = query.faces_of_edge(edge);
+                    const auto edge_shells = query.shells_of_edge(edge);
+                    if (!coedges.value || coedges.value->size() != 2 || !loops.value || loops.value->size() != 2 ||
+                        !edge_faces.value || edge_faces.value->size() != 2 || !edge_shells.value ||
+                        edge_shells.value->size() != 1 || edge_shells.value->front().value != shell.value) {
+                        std::cerr << "primitive adjacency missing, duplicated or linked to another body\n";
+                        return 1;
+                    }
+                }
+            }
+        }
+    }
     axiom::Kernel kernel;
 
     auto box_a = kernel.primitives().box({0.0, 0.0, 0.0}, 10.0, 10.0, 10.0);

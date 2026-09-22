@@ -354,6 +354,9 @@
 
 ### 需求 7.13 诊断与日志（Diagnostics）
 
+- **NFR-DIA-001 本轮增量**：布尔早期失败在 `BooleanOptions::diagnostics=false` 时仍保留单条错误 Issue 的阶段与输入实体；无效输入、分离交集和包含导致空结果在两种诊断模式下均覆盖阶段/错误码检索、JSON 导出及模型计数不污染。`axiom_boolean_prep_test` 回归；需求仍为受限可用，不代表全部失败分支已覆盖。
+- **本切片性能故障修复（2026-09-22）**：默认构建（GCC 13.3.0、`CMAKE_BUILD_TYPE` 为空、无优化参数，2 个可用 CPU，cgroup 无 CPU 配额限制；采集时 load average 为 1.10/1.04/0.95）复现性能门禁失败：150 次迭代 5518 ms，阈值 4000 ms。临时 `steady_clock` 累计计时确认：一次 6887 ms 的基准中，全局 `rebuild_topology_links` 调用 600 次、累计 6549 ms；每次新建图元都清空并重建全部已有拓扑的邻接索引，造成随模型累积增长的重复工作。修复仅在 Ops 新建独立图元拓扑时追加其邻接索引，派生体、修改和回滚仍保留完整重建；未改变物化几何、公共 API、错误码、构建模式、阈值或迭代数。临时计时代码已移除。`axiom_ops_heal_test` 新增连续创建 box/wedge/cylinder 后对全部已有体的五类反向索引查询回归，`axiom_perf_baseline_test` 保留原性能门禁；相关六项测试通过，性能项 3.09 s（ctest 墙钟）。完整 `ctest --test-dir build-agent --output-on-failure` 16/16 通过，性能项 3.03 s，总耗时 28.80 s；本切片门禁已通过。公有查询回归及完整测试未发现语义回归；这些是本机对比证据，不作为跨环境性能保证。
+
 - **FR-DIAG-001 本轮增量**：布尔预处理告警 `AXM-BOOL-W-0001/W-0002` 写入报告时保留 `bool.prep` 与输入/输出体 ID；`axiom_boolean_prep_test` 覆盖成功、仅接触退化、无壳级候选、阶段检索与 JSON，以及前置失败不增加几何/拓扑/体计数。需求仍为受限可用，不提升精确布尔能力口径。
 
 - **部分完成**：错误码常量、诊断报告、JSON 导出（含 `Issue.stage`）、按相关实体检索；BOOL/HEAL/IO **关键路径**阶段标签与 workflow 回归断言

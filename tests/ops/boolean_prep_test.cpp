@@ -171,6 +171,73 @@ int main() {
         return 1;
     }
 
+    // Disabling verbose diagnostics must not erase failure stage or input context.
+    struct FailureCase {
+        axiom::BooleanOp op;
+        axiom::BodyId lhs;
+        axiom::BodyId rhs;
+        axiom::StatusCode status;
+        std::string_view code;
+        std::string_view stage;
+    };
+    const FailureCase failures[] = {
+        {axiom::BooleanOp::Union, {}, *outer.value, axiom::StatusCode::InvalidInput,
+         axiom::diag_codes::kBoolInvalidInput, "bool.input"},
+        {axiom::BooleanOp::Union, *outer.value, {}, axiom::StatusCode::InvalidInput,
+         axiom::diag_codes::kBoolInvalidInput, "bool.input"},
+        {axiom::BooleanOp::Union, {}, {}, axiom::StatusCode::InvalidInput,
+         axiom::diag_codes::kBoolInvalidInput, "bool.input"},
+        {axiom::BooleanOp::Intersect, *outer.value, *far.value, axiom::StatusCode::OperationFailed,
+         axiom::diag_codes::kBoolIntersectionFailure, "bool.abort.intersect"},
+        {axiom::BooleanOp::Subtract, *inner.value, *outer.value, axiom::StatusCode::OperationFailed,
+         axiom::diag_codes::kBoolClassificationFailure, "bool.abort.classify"},
+    };
+    for (const bool diagnostics : {false, true}) {
+        axiom::BooleanOptions options;
+        options.diagnostics = diagnostics;
+        for (const auto& test : failures) {
+            const auto failed = kernel.booleans().run(test.op, test.lhs, test.rhs, options);
+            const auto report = kernel.diagnostics().get(failed.diagnostic_id);
+            if (failed.status != test.status || failed.value || failed.diagnostic_id.value == 0 ||
+                !report.value || (!diagnostics && report.value->issues.size() != 1)) {
+                std::cerr << "missing minimal boolean failure report\n";
+                return 1;
+            }
+            const auto* issue = find_issue(*report.value, test.code);
+            if (issue == nullptr || issue->severity != axiom::IssueSeverity::Error || issue->stage != test.stage ||
+                issue->related_entities != std::vector<std::uint64_t>{test.lhs.value, test.rhs.value}) {
+                std::cerr << "boolean failure lost stage or input context\n";
+                return 1;
+            }
+            const auto ids = kernel.diagnostics().find_by_issue_stage(test.stage, 1000);
+            const auto codes = kernel.diagnostics().find_by_issue_code(test.code, 1000);
+            for (const auto* found : {&ids, &codes}) {
+                if (!found->value || std::none_of(found->value->begin(), found->value->end(),
+                    [&](auto id) { return id.value == failed.diagnostic_id.value; })) {
+                    std::cerr << "boolean failure is not searchable\n";
+                    return 1;
+                }
+            }
+            const auto path = std::filesystem::temp_directory_path() / "axiom_boolean_early_failure.json";
+            if (kernel.diagnostics().export_report_json(failed.diagnostic_id, path.string()).status !=
+                axiom::StatusCode::Ok) return 1;
+            std::ifstream in {path};
+            const std::string json((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            in.close();
+            std::filesystem::remove(path);
+            if (json.find("\"stage\":\"" + std::string(test.stage) + "\"") == std::string::npos ||
+                json.find("\"code\":\"" + std::string(test.code) + "\"") == std::string::npos ||
+                json.find("\"related_entities\":[" + std::to_string(test.lhs.value) + "," +
+                          std::to_string(test.rhs.value) + "]") == std::string::npos ||
+                kernel.body_count().value != bodies_before.value ||
+                kernel.geometry_count().value != geometry_before.value ||
+                kernel.topology_count().value != topology_before.value) {
+                std::cerr << "boolean failure export mismatch or model pollution\n";
+                return 1;
+            }
+        }
+    }
+
     auto union_disjoint = kernel.booleans().run(axiom::BooleanOp::Union, *outer.value, *far.value, {});
     if (union_disjoint.status != axiom::StatusCode::Ok || !union_disjoint.value.has_value()) {
         std::cerr << "expected disjoint union success\n";
