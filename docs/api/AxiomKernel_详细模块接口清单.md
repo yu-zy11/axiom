@@ -536,8 +536,11 @@ struct OpReport {
 class BooleanService {
 public:
   Result<OpReport> run(BooleanOp op, BodyId lhs, BodyId rhs, const BooleanOptions&);
+  Result<void> export_boolean_prep_stats(BodyId lhs, BodyId rhs, std::string_view path) const;
 };
 ```
+
+`export_boolean_prep_stats` 导出当前壳/区域级候选统计，不表示精确布尔能力。成功在输出流关闭且检查通过后返回；失败报告保留输入体 ID，并用 `bool.prep.export.input/open/write` 区分参数、打开文件及写入失败。参数失败不改写目标文件；设备写入失败不保证文件恢复。
 
 ### 8.3 修改操作接口
 

@@ -65,9 +65,107 @@ bool check_prep_warning(axiom::Kernel& kernel, const axiom::OpReport& result,
                      "," + std::to_string(result.output.value) + "]") != std::string::npos;
 }
 
+// Export is read-only: failures may add diagnostics, but must not mutate the model.
+bool check_prep_export_failures() {
+    axiom::Kernel kernel;
+    const auto lhs = kernel.primitives().box({0.0, 0.0, 0.0}, 2.0, 2.0, 2.0);
+    const auto overlap = kernel.primitives().box({1.0, 1.0, 1.0}, 2.0, 2.0, 2.0);
+    const auto touching = kernel.primitives().box({2.0, 0.0, 0.0}, 2.0, 2.0, 2.0);
+    const auto far = kernel.primitives().box({10.0, 0.0, 0.0}, 2.0, 2.0, 2.0);
+    if (!lhs.value || !overlap.value || !touching.value || !far.value) return false;
+    const auto bodies = kernel.body_count().value;
+    const auto geometry = kernel.geometry_count().value;
+    const auto topology = kernel.topology_count().value;
+    const auto eval = kernel.eval_graph_metrics().value;
+    if (!bodies || !geometry || !topology || !eval) return false;
+    const auto root = std::filesystem::temp_directory_path() / "axiom_boolean_prep_export_test";
+    std::filesystem::create_directory(root);
+    const auto path = root / "stats.json";
+    const auto diagnostic_path = root / "failure.json";
+    const auto read_file = [](const std::filesystem::path& file) {
+        std::ifstream in {file};
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    const auto unchanged = [&] {
+        const auto after = kernel.eval_graph_metrics().value;
+        return kernel.body_count().value == bodies && kernel.geometry_count().value == geometry &&
+               kernel.topology_count().value == topology && after &&
+               after->invalidation_bridge.for_bodies_batches == eval->invalidation_bridge.for_bodies_batches;
+    };
+    const auto check_failure = [&](axiom::BodyId a, axiom::BodyId b, const std::string& target,
+                                   axiom::StatusCode status, std::string_view code, std::string_view stage) {
+        const auto result = kernel.booleans().export_boolean_prep_stats(a, b, target);
+        if (result.status != status || result.diagnostic_id.value == 0 || !unchanged()) return false;
+        const auto report = kernel.diagnostics().get(result.diagnostic_id);
+        if (!report.value || report.value->issues.size() != 1) return false;
+        const auto& issue = report.value->issues.front();
+        if (issue.code != code || issue.stage != stage || issue.severity != axiom::IssueSeverity::Error ||
+            issue.related_entities != std::vector<std::uint64_t>{a.value, b.value}) return false;
+        const auto stages = kernel.diagnostics().find_by_issue_stage(stage, 1000);
+        const auto codes = kernel.diagnostics().find_by_issue_code(code, 1000);
+        for (const auto* ids : {&stages, &codes}) {
+            if (!ids->value || std::none_of(ids->value->begin(), ids->value->end(),
+                [&](auto id) { return id.value == result.diagnostic_id.value; })) return false;
+        }
+        if (kernel.diagnostics().export_report_json(result.diagnostic_id, diagnostic_path.string()).status !=
+            axiom::StatusCode::Ok) return false;
+        const auto json = read_file(diagnostic_path);
+        return json.find("\"code\":\"" + std::string(code) + "\"") != std::string::npos &&
+               json.find("\"stage\":\"" + std::string(stage) + "\"") != std::string::npos &&
+               json.find("\"related_entities\":[" + std::to_string(a.value) + "," +
+                         std::to_string(b.value) + "]") != std::string::npos;
+    };
+    // Reject either invalid handle before opening/truncating an existing file.
+    { std::ofstream out {path}; out << "preserve existing file"; }
+    for (const auto invalid : {axiom::BodyId{}, axiom::BodyId{std::numeric_limits<std::uint64_t>::max()}}) {
+        for (const bool invalid_lhs : {false, true}) {
+            if (!check_failure(invalid_lhs ? invalid : *lhs.value, invalid_lhs ? *overlap.value : invalid,
+                               path.string(), axiom::StatusCode::InvalidInput,
+                               axiom::diag_codes::kBoolInvalidInput, "bool.prep.export.input") ||
+                read_file(path) != "preserve existing file") return false;
+        }
+    }
+    const auto absent = root / "absent.json";
+    if (!check_failure({}, {}, absent.string(), axiom::StatusCode::InvalidInput,
+                       axiom::diag_codes::kBoolInvalidInput, "bool.prep.export.input") ||
+        std::filesystem::exists(absent)) return false;
+    if (!check_failure(*lhs.value, *overlap.value, "", axiom::StatusCode::InvalidInput,
+                       axiom::diag_codes::kBoolInvalidInput, "bool.prep.export.input")) return false;
+    // A directory is a deterministic open failure even when the test runs as root.
+    if (!check_failure(*lhs.value, *overlap.value, root.string(), axiom::StatusCode::OperationFailed,
+                       axiom::diag_codes::kIoExportFailure, "bool.prep.export.open")) return false;
+#ifdef __linux__
+    // Small buffered output can fail only on close; it must not be reported as success.
+    if (!check_failure(*lhs.value, *overlap.value, "/dev/full", axiom::StatusCode::OperationFailed,
+                       axiom::diag_codes::kIoExportFailure, "bool.prep.export.write")) return false;
+#endif
+    // Retrying after rejection must export ordinary, touching, disjoint and identical inputs.
+    for (const auto rhs : {*overlap.value, *touching.value, *far.value, *lhs.value}) {
+        const auto result = kernel.booleans().export_boolean_prep_stats(*lhs.value, rhs, path.string());
+        if (result.status != axiom::StatusCode::Ok || result.diagnostic_id.value == 0 || !unchanged()) return false;
+        const auto json = read_file(path);
+        if (json.empty() || json.front() != '{' || json.back() != '}' ||
+            json.find("\"lhs_regions\":1") == std::string::npos ||
+            json.find("\"rhs_regions\":1") == std::string::npos) return false;
+        const bool has_overlap = rhs.value != far.value->value;
+        if (json.find(has_overlap ? "\"local_clip_applied\":true" : "\"local_clip_applied\":false") ==
+            std::string::npos) return false;
+        if ((rhs.value == far.value->value || rhs.value == touching.value->value) &&
+            json.find("\"overlap_volume_sum\":0") == std::string::npos) return false;
+    }
+    std::filesystem::remove(path);
+    std::filesystem::remove(diagnostic_path);
+    std::filesystem::remove(root);
+    return true;
+}
+
 }  // namespace
 
 int main() {
+    if (!check_prep_export_failures()) {
+        std::cerr << "boolean prep export failure contract regression\n";
+        return 1;
+    }
     axiom::Kernel kernel;
 
     auto line = kernel.curves().make_line({0.0, 0.0, -1.0}, {0.0, 0.0, 1.0});

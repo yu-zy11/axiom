@@ -881,16 +881,18 @@ Result<OpReport> BooleanService::run(BooleanOp op, BodyId lhs, BodyId rhs, const
 
 Result<void> BooleanService::export_boolean_prep_stats(BodyId lhs, BodyId rhs, std::string_view path) const {
     if (!detail::has_body(*state_, lhs) || !detail::has_body(*state_, rhs) || path.empty()) {
-        return detail::invalid_input_void(
-            *state_, diag_codes::kBoolInvalidInput,
-            "布尔预处理统计导出失败：输入实体无效或输出路径为空", "布尔预处理统计导出失败");
+        return detail::failed_void(
+            *state_, StatusCode::InvalidInput, diag_codes::kBoolInvalidInput,
+            "布尔预处理统计导出失败：输入实体无效或输出路径为空", "布尔预处理统计导出失败",
+            {lhs.value, rhs.value}, "bool.prep.export.input");
     }
     const auto stats = compute_boolean_prep_stats(*state_, lhs, rhs);
     std::ofstream out {std::string(path)};
     if (!out) {
         return detail::failed_void(
-            *state_, StatusCode::OperationFailed, diag_codes::kBoolInvalidInput,
-            "布尔预处理统计导出失败：无法打开输出文件", "布尔预处理统计导出失败");
+            *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+            "布尔预处理统计导出失败：无法打开输出文件", "布尔预处理统计导出失败",
+            {lhs.value, rhs.value}, "bool.prep.export.open");
     }
     out << "{";
     out << "\"lhs_regions\":" << stats.lhs_regions << ",";
@@ -908,6 +910,13 @@ Result<void> BooleanService::export_boolean_prep_stats(BodyId lhs, BodyId rhs, s
             << "\"max_z\":" << stats.local_overlap_bbox.max.z << "}";
     }
     out << "}";
+    out.close();
+    if (!out) {
+        return detail::failed_void(
+            *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+            "布尔预处理统计导出失败：文件写入失败", "布尔预处理统计导出失败",
+            {lhs.value, rhs.value}, "bool.prep.export.write");
+    }
     return ok_void(state_->create_diagnostic("已导出布尔预处理统计"));
 }
 
