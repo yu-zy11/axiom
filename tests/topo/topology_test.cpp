@@ -1778,13 +1778,12 @@ int main() {
                 std::cerr << "failed to create circle curve for trim consistency regression\n";
                 return 1;
             }
-            auto txn2 = kernel.topology().begin_transaction();
-            auto a = txn2.create_vertex({1.0, 0.0, 0.0});
-            auto b = txn2.create_vertex({0.0, 1.0, 0.0});
-            auto e_arc = txn2.create_edge(*circ.value, *a.value, *b.value);
-            auto e_chord = txn2.create_edge(*l1.value, *b.value, *a.value);
-            auto c_arc = txn2.create_coedge(*e_arc.value, false);
-            auto c_chord = txn2.create_coedge(*e_chord.value, false);
+            auto a = txn.create_vertex({1.0, 0.0, 0.0});
+            auto b = txn.create_vertex({0.0, 1.0, 0.0});
+            auto e_arc = txn.create_edge(*circ.value, *a.value, *b.value);
+            auto e_chord = txn.create_edge(*l1.value, *b.value, *a.value);
+            auto c_arc = txn.create_coedge(*e_arc.value, false);
+            auto c_chord = txn.create_coedge(*e_chord.value, false);
             if (a.status != axiom::StatusCode::Ok || b.status != axiom::StatusCode::Ok ||
                 e_arc.status != axiom::StatusCode::Ok || e_chord.status != axiom::StatusCode::Ok ||
                 c_arc.status != axiom::StatusCode::Ok || c_chord.status != axiom::StatusCode::Ok ||
@@ -1803,11 +1802,11 @@ int main() {
                 std::cerr << "failed to create pcurves for arc/chord trim consistency regression\n";
                 return 1;
             }
-            txn2.set_coedge_pcurve(*c_arc.value, *pc_ab.value);
-            txn2.set_coedge_pcurve(*c_chord.value, *pc_ba.value);
+            txn.set_coedge_pcurve(*c_arc.value, *pc_ab.value);
+            txn.set_coedge_pcurve(*c_chord.value, *pc_ba.value);
             const std::array<axiom::CoedgeId, 2> ring {{ *c_arc.value, *c_chord.value }};
-            auto loop2 = txn2.create_loop(ring);
-            auto face2 = txn2.create_face(*plane.value, *loop2.value, {});
+            auto loop2 = txn.create_loop(ring);
+            auto face2 = txn.create_face(*plane.value, *loop2.value, {});
             if (loop2.status != axiom::StatusCode::Ok || face2.status != axiom::StatusCode::Ok ||
                 !loop2.value.has_value() || !face2.value.has_value()) {
                 std::cerr << "failed to create face for arc/chord trim consistency regression\n";
@@ -1818,7 +1817,6 @@ int main() {
                 std::cerr << "expected pcurve-surface mapping to disagree with 3D edge curve\n";
                 return 1;
             }
-            txn2.rollback();
         }
 
         // Endpoints still match, but the middle point deviates: should fail sampling consistency.
@@ -4799,6 +4797,51 @@ int main() {
             audit.value->last_commit_write_breakdown.replaced_surfaces != 1 ||
             audit.value->committed_write_operations_total != 1) {
             std::cerr << "replacement-only commit audit is inconsistent\n";
+            return 1;
+        }
+    }
+
+    // NFR-REL-001: a kernel has exactly one active topology writer. A rejected
+    // overlapping transaction stays inert and cannot commit or roll back the
+    // owner's changes; closing the owner releases the slot for a retry.
+    {
+        axiom::Kernel isolation_kernel;
+        auto& topo = isolation_kernel.topology();
+        axiom::VertexId committed_vertex;
+
+        auto owner = topo.begin_transaction();
+        const auto owner_vertex = owner.create_vertex({1, 2, 3});
+        if (!owner_vertex.value) return 1;
+
+        auto overlapping = topo.begin_transaction();
+        const auto rejected_write = overlapping.create_vertex({4, 5, 6});
+        if (overlapping.is_active().value != std::optional<bool>{false} ||
+            rejected_write.status != axiom::StatusCode::OperationFailed ||
+            overlapping.write_operation_count().value != std::optional<std::uint64_t>{0} ||
+            overlapping.commit().status != axiom::StatusCode::OperationFailed ||
+            overlapping.rollback().status != axiom::StatusCode::OperationFailed ||
+            topo.query().has_vertex(*owner_vertex.value).value != std::optional<bool>{true}) {
+            std::cerr << "overlapping topology transaction was not isolated\n";
+            return 1;
+        }
+        committed_vertex = *owner_vertex.value;
+        if (owner.commit().status != axiom::StatusCode::Ok) return 1;
+
+        auto retry = topo.begin_transaction();
+        const auto retry_vertex = retry.create_vertex({7, 8, 9});
+        if (!retry_vertex.value || retry.rollback().status != axiom::StatusCode::Ok ||
+            topo.query().has_vertex(committed_vertex).value != std::optional<bool>{true} ||
+            topo.query().has_vertex(*retry_vertex.value).value != std::optional<bool>{false}) {
+            std::cerr << "transaction slot retry polluted committed topology\n";
+            return 1;
+        }
+
+        // Empty scope exit must release ownership as well.
+        { auto empty_owner = topo.begin_transaction(); }
+        auto after_empty = topo.begin_transaction();
+        if (!after_empty.create_vertex({10, 11, 12}).value ||
+            after_empty.rollback().status != axiom::StatusCode::Ok) {
+            std::cerr << "empty transaction scope did not release writer ownership\n";
             return 1;
         }
     }

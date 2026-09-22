@@ -2,6 +2,11 @@ TopologyTransaction::TopologyTransaction(
     std::shared_ptr<detail::KernelState> state)
     : state_(std::move(state)),
       transaction_state_(std::make_shared<detail::TopologyTransactionState>()) {
+  if (!state_->active_topology_transaction.expired()) {
+    active_ = false;
+    return;
+  }
+  state_->active_topology_transaction = transaction_state_;
 }
 
 TopologyTransaction::TopologyTransaction(TopologyTransaction&& other)
@@ -41,6 +46,10 @@ TopologyTransaction::~TopologyTransaction() noexcept {
     return;
   }
   if (txn_write_ops_ == 0) {
+    if (const auto owner = state_->active_topology_transaction.lock();
+        owner.get() == transaction_state_.get()) {
+      state_->active_topology_transaction.reset();
+    }
     active_ = false;
     return;
   }
@@ -628,6 +637,10 @@ Result<VersionId> TopologyTransaction::commit() {
         *state_, StatusCode::OperationFailed, diag_codes::kTxCommitFailure,
         "事务提交失败：事务已关闭", "事务提交失败");
   }
+  if (const auto owner = state_->active_topology_transaction.lock();
+      owner.get() == transaction_state_.get()) {
+    state_->active_topology_transaction.reset();
+  }
   active_ = false;
   const VersionId assigned = state_->next_version;
   state_->topology_commit_success_count += 1;
@@ -771,6 +784,10 @@ Result<void> TopologyTransaction::rollback() {
   txn_coedge_pcurve_binds_ = 0;
   txn_coedge_pcurve_clears_ = 0;
   txn_write_ops_ = 0;
+  if (const auto owner = state_->active_topology_transaction.lock();
+      owner.get() == transaction_state_.get()) {
+    state_->active_topology_transaction.reset();
+  }
   active_ = false;
   return ok_void(state_->create_diagnostic("事务已回滚"));
 }

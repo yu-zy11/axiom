@@ -13,10 +13,10 @@ struct KernelState;
 struct TopologyTransactionState;
 }
 
-/// 拓扑事务隔离/并发语义占位：当前内核为单写入者 + 快照回滚，不等价于数据库 SERIALIZABLE，但可用于宿主侧协议对齐。
+/// 拓扑事务隔离/并发语义：当前内核实例强制单活动写事务 + 快照回滚，不等价于数据库 SERIALIZABLE，但可用于宿主侧协议对齐。
 enum class TopologyIsolationLevel : std::uint8_t {
   Unspecified = 0,
-  /// 单活动事务、修改前快照、回滚恢复（工程上接近「串行化」使用方式，但无跨进程锁）。
+  /// 单活动写事务、修改前快照、回滚恢复（工程上接近「串行化」使用方式，但无跨进程锁）。
   SnapshotSerializable = 1,
 };
 
@@ -107,6 +107,7 @@ private:
 
 class TopologyTransaction {
 public:
+    /// 同一内核已有活动事务时，新事务以关闭状态返回；其写入/提交/回滚均失败且不污染模型。
     explicit TopologyTransaction(std::shared_ptr<detail::KernelState> state);
     /// 事务为唯一所有权对象：可移动构造，但不可复制或移动赋值。
     /// 移动后源对象保持可析构、可查询的关闭状态，不能再提交或回滚。
