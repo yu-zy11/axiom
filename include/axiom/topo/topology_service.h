@@ -114,7 +114,8 @@ public:
     TopologyTransaction& operator=(TopologyTransaction&&) = delete;
     TopologyTransaction(const TopologyTransaction&) = delete;
     TopologyTransaction& operator=(const TopologyTransaction&) = delete;
-    ~TopologyTransaction() = default;
+    /// 活动事务离开作用域时自动回滚；已提交、已回滚或移动后的源对象不改变模型。
+    ~TopologyTransaction() noexcept;
 
     /// 坐标必须为有限值；否则返回 InvalidInput / AXM-CORE-E-0002，且不修改拓扑或事务写计数。
     Result<VertexId> create_vertex(const Point3& point);

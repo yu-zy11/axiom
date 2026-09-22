@@ -36,6 +36,23 @@ TopologyTransaction::TopologyTransaction(TopologyTransaction&& other)
   other.active_ = false;
 }
 
+TopologyTransaction::~TopologyTransaction() noexcept {
+  if (!active_) {
+    return;
+  }
+  if (txn_write_ops_ == 0) {
+    active_ = false;
+    return;
+  }
+  try {
+    (void)rollback();
+  } catch (...) {
+    // Destructors must not propagate. rollback marks the transaction closed
+    // only after restoring the model, so ordinary scope exit follows the same
+    // consistency path as an explicit rollback.
+  }
+}
+
 Result<VertexId> TopologyTransaction::create_vertex(const Point3 &point) {
   if (!active_) {
     return detail::failed_result<VertexId>(

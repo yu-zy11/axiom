@@ -55,6 +55,7 @@ int main() {
     static_assert(!std::is_copy_assignable_v<axiom::TopologyTransaction>);
     static_assert(std::is_move_constructible_v<axiom::TopologyTransaction>);
     static_assert(!std::is_move_assignable_v<axiom::TopologyTransaction>);
+    static_assert(std::is_nothrow_destructible_v<axiom::TopologyTransaction>);
     axiom::Kernel kernel;
 
     // Non-finite vertex coordinates must fail before mutating topology or transaction tracking.
@@ -4526,6 +4527,81 @@ int main() {
             move_kernel.topology().query().has_vertex(*rolled_back_vertex.value).value !=
                 std::optional<bool>{false}) {
             std::cerr << "moved transaction rollback polluted committed topology\n";
+            return 1;
+        }
+    }
+
+    // NFR-REL-001: abandoning an active transaction must have rollback semantics.
+    {
+        axiom::Kernel scope_kernel;
+        auto& topo = scope_kernel.topology();
+        const auto replacement = scope_kernel.surfaces().make_plane({0, 0, 1}, {0, 0, 1});
+        const auto box = scope_kernel.primitives().box({0, 0, 0}, 1, 2, 3);
+        if (!replacement.value || !box.value) return 1;
+        const auto faces = topo.query().faces_of_body(*box.value);
+        if (!faces.value || faces.value->empty()) return 1;
+        const auto original_face = faces.value->front();
+        const auto original_body = *box.value;
+        const auto original_surface = topo.query().surface_of_face(original_face);
+        if (!original_surface.value) return 1;
+        const auto baseline = scope_kernel.topology_count().value;
+        if (!baseline) return 1;
+
+        axiom::VertexId abandoned_vertex;
+        {
+            auto abandoned = topo.begin_transaction();
+            const auto vertex = abandoned.create_vertex({1, 2, 3});
+            if (!vertex.value ||
+                abandoned.replace_surface(original_face, *replacement.value).status != axiom::StatusCode::Ok ||
+                abandoned.delete_body(original_body).status != axiom::StatusCode::Ok) return 1;
+            abandoned_vertex = *vertex.value;
+            const auto changed_count = scope_kernel.topology_count().value;
+            const auto changed_writes = abandoned.write_operation_count().value;
+            const auto rejected = abandoned.delete_body(original_body);
+            if (rejected.status != axiom::StatusCode::InvalidInput ||
+                scope_kernel.topology_count().value != changed_count ||
+                abandoned.write_operation_count().value != changed_writes) {
+                std::cerr << "rejected write polluted abandoned transaction\n";
+                return 1;
+            }
+            // No explicit close: destructor must restore the committed model.
+        }
+        if (scope_kernel.topology_count().value != baseline ||
+            topo.query().has_vertex(abandoned_vertex).value != std::optional<bool>{false} ||
+            topo.query().has_body(original_body).value != std::optional<bool>{true} ||
+            topo.query().surface_of_face(original_face).value != original_surface.value ||
+            topo.validate().validate_indices_consistency().status != axiom::StatusCode::Ok) {
+            std::cerr << "abandoned transaction polluted committed topology\n";
+            return 1;
+        }
+
+        // Empty abandonment is a no-op, and explicit commit remains durable.
+        { auto empty = topo.begin_transaction(); }
+        axiom::VertexId committed_vertex;
+        {
+            auto committed = topo.begin_transaction();
+            const auto vertex = committed.create_vertex({4, 5, 6});
+            if (!vertex.value || committed.commit().status != axiom::StatusCode::Ok) return 1;
+            committed_vertex = *vertex.value;
+        }
+        if (topo.query().has_vertex(committed_vertex).value != std::optional<bool>{true}) {
+            std::cerr << "closed transaction destructor reverted committed topology\n";
+            return 1;
+        }
+
+        // A moved-from destructor is inert; the active target owns rollback.
+        axiom::VertexId moved_vertex;
+        {
+            auto source = topo.begin_transaction();
+            const auto vertex = source.create_vertex({7, 8, 9});
+            if (!vertex.value) return 1;
+            moved_vertex = *vertex.value;
+            { axiom::TopologyTransaction target(std::move(source)); }
+            if (topo.query().has_vertex(moved_vertex).value != std::optional<bool>{false}) return 1;
+        }
+        if (topo.query().has_vertex(committed_vertex).value != std::optional<bool>{true} ||
+            topo.query().has_body(original_body).value != std::optional<bool>{true}) {
+            std::cerr << "scope rollback or moved-from destruction polluted stable topology\n";
             return 1;
         }
     }
