@@ -636,12 +636,14 @@ Result<void> mesh_export_strict_gate(detail::KernelState& state, RepresentationC
     }
     if (!insp.value.has_value()) {
         return detail::failed_void(state, StatusCode::OperationFailed, diag_codes::kIoExportMeshStrictQaFailed,
-                                   "严格导出失败：网格检查不可用", "严格导出失败", {body_id.value});
+                                   "严格导出失败：网格检查不可用", "严格导出失败", {body_id.value},
+                                   "io.export.mesh_strict_qa");
     }
     const auto& r = *insp.value;
     if (r.has_out_of_range_indices || r.has_degenerate_triangles) {
         return detail::failed_void(state, StatusCode::OperationFailed, diag_codes::kIoExportMeshStrictQaFailed,
-                                   "严格导出失败：网格存在越界索引或退化三角形", "严格导出失败", {body_id.value});
+                                   "严格导出失败：网格存在越界索引或退化三角形", "严格导出失败", {body_id.value},
+                                   "io.export.mesh_strict_qa");
     }
     return ok_void(state.create_diagnostic("网格导出严格检查通过"));
 }

@@ -336,7 +336,7 @@
 | `AXM-IO-E-0003` | Error | 文件内容损坏 |
 | `AXM-IO-E-0004` | Error | 导入解析失败 |
 | `AXM-IO-E-0005` | Error | 导出失败 |
-| `AXM-IO-E-0006` | Warning | 导入后发生几何近似 |
+| `AXM-IO-E-0006` | Error | 严格网格导出 QA 失败（越界索引、退化三角形或检查不可用；`Issue.stage=io.export.mesh_strict_qa`，关联输入 Body） |
 | `AXM-IO-E-0007` | Warning | 导入后存在未映射属性 |
 | `AXM-IO-E-0008` | Warning | 导出采用兼容模式降级 |
 | `AXM-IO-E-0009` | Error | 导出目标目录不可写（`kIoExportPathNotWritable`，`Issue.stage=io.export.path`） |

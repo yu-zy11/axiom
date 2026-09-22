@@ -7,6 +7,8 @@
 
 #include "axiom/diag/error_codes.h"
 #include "axiom/sdk/kernel.h"
+#include "axiom/internal/core/kernel_state.h"
+#include "axiom/internal/io/io_service_internal.h"
 
 namespace {
 
@@ -31,6 +33,64 @@ const axiom::Issue* find_issue(const axiom::DiagnosticReport& report, std::strin
 }  // namespace
 
 int main() {
+    {
+        auto state = std::make_shared<axiom::detail::KernelState>(axiom::KernelConfig {});
+        axiom::RepresentationConversionService convert {state};
+        axiom::DiagnosticService diagnostics {state};
+        constexpr axiom::BodyId body_id {7101};
+        const axiom::MeshId valid_id {7102};
+        const axiom::MeshId out_of_range_id {7103};
+        const axiom::MeshId degenerate_id {7104};
+
+        axiom::detail::MeshRecord valid;
+        valid.vertices = {{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}};
+        valid.indices = {0, 1, 2};
+        state->meshes.emplace(valid_id.value, valid);
+        auto out_of_range = valid;
+        out_of_range.indices = {0, 1, 3};
+        state->meshes.emplace(out_of_range_id.value, std::move(out_of_range));
+        auto degenerate = valid;
+        degenerate.indices = {0, 0, 2};
+        state->meshes.emplace(degenerate_id.value, std::move(degenerate));
+
+        axiom::ExportOptions strict;
+        strict.compatibility_mode = false;
+        const auto mesh_count_before = state->meshes.size();
+        const auto passed = axiom::io_internal::mesh_export_strict_gate(*state, convert, valid_id, strict, body_id);
+        const auto bad_index = axiom::io_internal::mesh_export_strict_gate(
+            *state, convert, out_of_range_id, strict, body_id);
+        const auto bad_triangle = axiom::io_internal::mesh_export_strict_gate(
+            *state, convert, degenerate_id, strict, body_id);
+        if (passed.status != axiom::StatusCode::Ok || bad_index.status != axiom::StatusCode::OperationFailed ||
+            bad_triangle.status != axiom::StatusCode::OperationFailed || state->meshes.size() != mesh_count_before) {
+            std::cerr << "strict mesh QA success/failure contract or failure isolation is unexpected\n";
+            return 1;
+        }
+        for (const auto result : {bad_index, bad_triangle}) {
+            const auto report = diagnostics.get(result.diagnostic_id);
+            const auto* issue = report.value ? find_issue(*report.value, axiom::diag_codes::kIoExportMeshStrictQaFailed)
+                                             : nullptr;
+            if (issue == nullptr || issue->severity != axiom::IssueSeverity::Error ||
+                issue->stage != "io.export.mesh_strict_qa" || issue->related_entities.size() != 1 ||
+                issue->related_entities.front() != body_id.value) {
+                std::cerr << "strict mesh QA failure is missing stage or body evidence\n";
+                return 1;
+            }
+        }
+        const auto staged = diagnostics.find_by_issue_stage("io.export.mesh_strict_qa", 10);
+        const auto json_path = std::filesystem::temp_directory_path() / "axiom_io_strict_mesh_qa_diag.json";
+        const auto exported = diagnostics.export_report_json(bad_index.diagnostic_id, json_path.string());
+        std::ifstream json_in {json_path, std::ios::binary};
+        const std::string json {(std::istreambuf_iterator<char>(json_in)), std::istreambuf_iterator<char>()};
+        std::filesystem::remove(json_path);
+        if (!staged.value || staged.value->size() != 2 || exported.status != axiom::StatusCode::Ok ||
+            json.find("\"stage\":\"io.export.mesh_strict_qa\"") == std::string::npos ||
+            json.find("7101") == std::string::npos) {
+            std::cerr << "strict mesh QA diagnostic lookup or JSON evidence is unexpected\n";
+            return 1;
+        }
+    }
+
     axiom::Kernel kernel;
 
     auto body = kernel.primitives().box({0.0, 0.0, 0.0}, 10.0, 20.0, 30.0);

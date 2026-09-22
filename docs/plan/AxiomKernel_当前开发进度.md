@@ -2,6 +2,8 @@
 
 本文档用于记录 `AxiomKernel` 当前阶段的实际开发状态、已完成内容、当前风险和下一阶段执行重点。
 
+> **第 19 切片（FR-DIAG-001）**：严格网格导出 QA 失败 `AXM-IO-E-0006` 现在携带 `io.export.mesh_strict_qa` 阶段和输入 Body；`axiom_io_workflow_test` 覆盖合法网格、越界索引、退化三角形、阶段检索、JSON 导出及失败不污染。需求保持受限可用。
+
 **相关文档（计划层）**：[主开发计划与阶段路线图](AxiomKernel_主开发计划与阶段路线图.md)（总阶段与退出标准）、[MVP 实施蓝图](AxiomKernel_MVP实施蓝图.md)（交付拆解）、[几何引擎功能需求文档](../requirements/AxiomKernel_几何引擎功能需求文档.md)（需求对照见本文 §3.3）、[近期迭代与 Backlog](AxiomKernel_近期迭代与Backlog.md)（近期执行项）、[变更纪要](AxiomKernel_变更纪要.md)（批次历史摘要）；工程约定见仓库根目录 `AGENTS.md`；文档导航见 [`docs/README.md`](../README.md)；结构与文档治理问题见 [`docs/architecture/AxiomKernel_项目结构与文档治理建议.md`](../architecture/AxiomKernel_项目结构与文档治理建议.md)。
 
 ## 1. 当前阶段

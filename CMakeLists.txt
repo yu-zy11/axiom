@@ -41,6 +41,7 @@ if (AXM_ENABLE_TESTS)
 
     add_executable(axiom_io_workflow_test tests/io/io_workflow_test.cpp)
     target_link_libraries(axiom_io_workflow_test PRIVATE axiom_kernel)
+    target_include_directories(axiom_io_workflow_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME axiom_io_workflow_test COMMAND axiom_io_workflow_test)
 
     add_executable(axiom_io_dataset_test tests/io/io_dataset_test.cpp)
