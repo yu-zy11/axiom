@@ -38,9 +38,13 @@ std::string json_escape(std::string_view input) {
             case '\r': out += "\\r"; break;
             case '\t': out += "\\t"; break;
             default:
-                // JSON requires control characters to be escaped; keep it minimal for now.
+                // Preserve every control byte in the exported diagnostic evidence.
                 if (static_cast<unsigned char>(c) < 0x20) {
-                    out += ' ';
+                    constexpr char hex[] = "0123456789abcdef";
+                    const auto byte = static_cast<unsigned char>(c);
+                    out += "\\u00";
+                    out += hex[byte >> 4];
+                    out += hex[byte & 0x0f];
                 } else {
                     out += c;
                 }
@@ -486,18 +490,22 @@ Result<void> DiagnosticService::export_reports_txt(std::span<const DiagnosticId>
 
 Result<void> DiagnosticService::export_reports_json(std::span<const DiagnosticId> ids, std::string_view path) const {
     if (ids.empty() || path.empty()) return detail::invalid_input_void(*state_, diag_codes::kIoExportFailure, "批量导出失败：输入非法", "批量导出失败");
+    for (const auto id : ids) {
+        if (state_->diagnostics.find(id.value) == state_->diagnostics.end()) {
+            return detail::invalid_input_void(*state_, diag_codes::kCoreInvalidHandle,
+                                              "批量导出失败：目标诊断不存在", "批量导出失败");
+        }
+    }
     std::ofstream out{std::string(path)};
     if (!out) return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure, "批量导出失败：无法打开文件", "批量导出失败");
     out << "{\"diagnostics\":[";
-    bool first = true;
-    for (const auto id : ids) {
-        const auto it = state_->diagnostics.find(id.value);
-        if (it == state_->diagnostics.end()) continue;
-        if (!first) out << ",";
-        first = false;
-        out << "{\"id\":" << id.value << ",\"summary\":\"" << it->second.summary << "\"}";
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+        if (i != 0) out << ",";
+        write_diagnostic_report_json_object(out, state_->diagnostics.at(ids[i].value));
     }
     out << "]}";
+    out.close();
+    if (!out) return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure, "批量导出失败：文件写入失败", "批量导出失败");
     return ok_void(state_->create_diagnostic("已批量导出诊断JSON"));
 }
 
