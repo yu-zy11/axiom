@@ -382,7 +382,7 @@ public:
   // 外环/内环及内环之间不得复用 EdgeId；返回 InvalidTopology / AXM-TOPO-E-0014，失败不分配面或改变索引、事务写计数。
   // 不同边界环不得共用 VertexId；返回 InvalidTopology / AXM-TOPO-E-0024，关联冲突环与顶点，失败不分配面。
   Result<FaceId> create_face(SurfaceId, LoopId outer_loop, std::span<const LoopId> inner_loops);
-  // 成员面的外环和所有内环须有效；受损内环返回 InvalidTopology / AXM-TOPO-E-0005，失败不分配壳 ID。
+  // 成员面须引用存在的曲面，外环和所有内环须有效；受损引用返回 InvalidTopology / AXM-TOPO-E-0005，失败不分配壳 ID。
   Result<ShellId> create_shell(std::span<const FaceId>);
   Result<BodyId> create_body(std::span<const ShellId>);
 

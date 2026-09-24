@@ -129,7 +129,7 @@ public:
     /// 同一面各环不得复用 EdgeId；失败返回 InvalidTopology / AXM-TOPO-E-0014，不写入模型。
     /// 不同边界环不得共用 VertexId；失败返回 InvalidTopology / AXM-TOPO-E-0024，不分配 FaceId。
     Result<FaceId> create_face(SurfaceId surface_id, LoopId outer_loop, std::span<const LoopId> inner_loops);
-    /// 成员面的外环及所有内环须有效；受损内环返回 InvalidTopology / AXM-TOPO-E-0005，不分配 ShellId 或修改事务写计数。
+    /// 成员面须引用存在的曲面，外环及所有内环须有效；受损引用返回 InvalidTopology / AXM-TOPO-E-0005，不分配 ShellId 或修改事务写计数。
     Result<ShellId> create_shell(std::span<const FaceId> faces);
     Result<BodyId> create_body(std::span<const ShellId> shells);
     Result<void> delete_face(FaceId face_id);

@@ -380,6 +380,12 @@ TopologyTransaction::create_shell(std::span<const FaceId> faces) {
           *state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
           "创建壳失败：包含非法面拓扑", "创建壳失败");
     }
+    if (!detail::has_surface(*state_, face_it->second.surface_id)) {
+      return detail::failed_result<ShellId>(
+          *state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
+          "创建壳失败：成员面引用的曲面不存在", "创建壳失败",
+          {face_id.value, face_it->second.surface_id.value});
+    }
     for (const auto inner_loop : face_it->second.inner_loops) {
       if (!validate_loop_id(*state_, inner_loop, reason)) {
         return detail::failed_result<ShellId>(

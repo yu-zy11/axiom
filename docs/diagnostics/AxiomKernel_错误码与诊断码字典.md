@@ -230,7 +230,7 @@
 | `AXM-TOPO-E-0002` | Error | 环未闭合（含单共边的定向首尾顶点 ID 不同；坐标重合不等于拓扑闭合） |
 | `AXM-TOPO-E-0003` | Error | 面外环非法（含：外环已被其他面引用，或已闭合外环不足三条共边且不满足同曲线双弧例外时 `create_face` 拒绝） |
 | `AXM-TOPO-E-0004` | Error | 面内环非法（含：内环已被其他面引用，或已闭合内环不足三条共边且不满足同曲线双弧例外时 `create_face` 拒绝） |
-| `AXM-TOPO-E-0005` | Error | 壳未封闭或成员面拓扑受损（含：`create_shell` 拒绝无效外环/内环，内环失败关联面与环 ID；`validate_indices_consistency` 发现体记录中 `shells` 列表含重复壳 id） |
+| `AXM-TOPO-E-0005` | Error | 壳未封闭或成员面拓扑受损（含：`create_shell` 拒绝不存在的面曲面引用、无效外环/内环；曲面失败关联面与曲面 ID，内环失败关联面与环 ID；`validate_indices_consistency` 发现体记录中 `shells` 列表含重复壳 id） |
 | `AXM-TOPO-E-0006` | Error | 非法悬挂边（含：`validate_edge` 与 `validate_indices_consistency` 反向索引发现边无共边引用） |
 | `AXM-TOPO-E-0007` | Error | 拓扑关系不一致（含：`edge_to_coedges` 重复定向边、`face_to_shells`/`shell_to_bodies` 反向列表重复条目、`loop_to_faces` 重复面或同一环对应多面等索引自洽性失败） |
 | `AXM-TOPO-E-0008` | Error | 参数曲线与空间曲线不一致（含 `validate_edge` 检测拓扑端点不在引用 3D Curve 上，关联 `edge/curve/vertex`；`validate_face_trim_consistency`：PCurve 绑定不完整、PCurve 控制点不足、边/曲线/顶点缺失时带 `face/loop/coedge/edge/pcurve` 等；**全量 trim 数据**下 `SurfaceService::closest_uv` 失败亦归此类；**全量 trim** 下 PCurve 定义域非法导致无法完成内点采样一致性校验；端点/曲面与 3D 边不一致时常含 `face/loop/coedge/edge/pcurve`；`validate_indices_consistency` 发现边记录引用不存在顶点时 `related_entities` 含 `edge` 与端点 id） |

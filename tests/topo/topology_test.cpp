@@ -139,6 +139,42 @@ int main() {
 
         auto txn = topology.begin_transaction();
         const auto next_id = state->next_id;
+        // A face can retain valid boundary loops while its surface reference is
+        // damaged. Shell creation must reject that record before allocating an ID.
+        for (const axiom::SurfaceId invalid_surface :
+             {axiom::SurfaceId{}, axiom::SurfaceId{next_id + 1}}) {
+            state->faces.at(face.value->value).surface_id = invalid_surface;
+            const auto invalid = txn.create_shell(std::array{*face.value});
+            const auto invalid_report = diagnostics.get(invalid.diagnostic_id);
+            if (invalid.status != axiom::StatusCode::InvalidTopology || invalid.value ||
+                !invalid_report.value || !issue_links_entities(*invalid_report.value,
+                    axiom::diag_codes::kTopoShellNotClosed,
+                    {face.value->value, invalid_surface.value}) ||
+                state->next_id != next_id || !state->shells.empty() ||
+                state->faces.at(face.value->value).surface_id.value != invalid_surface.value ||
+                state->edge_to_coedges != edge_to_coedges ||
+                state->coedge_to_loop != coedge_to_loop ||
+                state->loop_to_faces != loop_to_faces ||
+                state->face_to_shells != face_to_shells ||
+                txn.created_shell_count().value != std::optional<std::uint64_t>{0} ||
+                txn.write_operation_count().value != std::optional<std::uint64_t>{0}) {
+                std::cerr << "damaged face surface changed shell transaction state\n";
+                return 1;
+            }
+            const auto surface_path = std::filesystem::temp_directory_path() /
+                "axiom_topo_shell_surface_failure.json";
+            if (diagnostics.export_report_json(invalid.diagnostic_id, surface_path.string()).status !=
+                axiom::StatusCode::Ok) return 1;
+            std::ifstream surface_input(surface_path);
+            const std::string surface_json((std::istreambuf_iterator<char>(surface_input)),
+                                           std::istreambuf_iterator<char>());
+            surface_input.close();
+            std::filesystem::remove(surface_path);
+            if (surface_json.find(axiom::diag_codes::kTopoShellNotClosed) == std::string::npos ||
+                surface_json.find(std::to_string(invalid_surface.value)) == std::string::npos)
+                return 1;
+        }
+        state->faces.at(face.value->value).surface_id = surface;
         const axiom::LoopId missing_loop{next_id + 1};
         state->faces.at(face.value->value).inner_loops = {missing_loop};
         const auto missing = txn.create_shell(std::array{*face.value});
