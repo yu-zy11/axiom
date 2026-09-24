@@ -54,6 +54,8 @@ python3 scripts/agent_autodev.py \
 
 `--max-cycles 0` 表示连续模式，不表示绕过验收。默认失败会转入修复循环，重试等待从 10 秒递增到最多 60 秒。显式设置非零失败上限、启动检查失败、外部定时停止或项目完成仍会结束运行。
 
+指定时限运行时，由 `.axiom-agent/timed_run.py` 传入秒数并监督子进程，例如 `python3 -u .axiom-agent/timed_run.py 7200 python3 -u scripts/agent_autodev.py --resume-failed --max-cycles 0`。配置的 `max_consecutive_failures` 设为 `0` 才会在门禁失败后持续修复直至时限；运行在失败切片时用 `--resume-failed` 保留并核对现场。`--allow-dirty --no-commit` 仍只用于单轮调试。
+
 ## 4. 配置
 
 `automation/agent_autodev.json` 定义：
@@ -73,6 +75,7 @@ python3 scripts/agent_autodev.py \
 调度状态、Agent 报告和门禁日志位于 `.axiom-agent/`，该目录不会提交。要从头建立新的调度历史，可在工作树干净且没有运行中的 Agent 时删除该目录。
 
 仓库内的 `docs/plan/AxiomKernel_Agent自动开发进度.md` 是调度器维护的已验收切片台账，会随每个成功 commit 自动更新；需求完成度仍必须由实现与测试证据支撑，不能仅凭台账行数提升。
+Agent 不得修改该台账；发现历史遗留内容时应在报告中说明，由调度器核对并处理。
 
 ## 5. 接纳与停机规则
 

@@ -66,6 +66,9 @@ class AgentAutodevTest(unittest.TestCase):
         self.assertIn(".axiom-agent/result.json", prompt)
         self.assertIn("FR-GEO-001", prompt)
         self.assertIn("唯一目标", prompt)
+        self.assertIn("不修改 .gitignore", prompt)
+        self.assertIn("docs/plan/AxiomKernel_Agent自动开发进度.md", prompt)
+        self.assertIn("台账由调度器在验收通过后追加", prompt)
 
     def test_select_target_rotates_within_the_active_tier(self) -> None:
         requirements = [

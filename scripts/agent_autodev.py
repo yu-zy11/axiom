@@ -328,7 +328,10 @@ def build_prompt(
 3. 实现真实代码，补齐成功、失败、退化和失败不污染的回归测试；遵守模块依赖。
 4. 运行最小相关测试。若修改公共 API、错误码、阶段状态或完成度，同步对应文档。
 5. 不执行 git commit、git reset、git checkout、git clean、git rebase 或 git push；提交由调度器完成。
-6. 不修改 .gitignore、automation/agent_autodev.json、scripts/agent_autodev.py 或 .axiom-agent/。
+6. 不修改 .gitignore、automation/agent_autodev.json、scripts/agent_autodev.py、
+   docs/plan/AxiomKernel_Agent自动开发进度.md 或 .axiom-agent/（仅最终 result.json 例外）。
+   自动开发进度台账由调度器在验收通过后追加；即使发现未验收的旧记录也不要自行改动，
+   应在 result.json 的 remaining 中说明，由调度器处理。
 7. 一轮只完成一个有明确 DoD 的切片，避免大范围重写。
 8. 遵循现有代码风格，减少不必要的封装与抽象层，集中相关逻辑，避免代码碎片化。
 
