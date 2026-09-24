@@ -338,6 +338,14 @@ TopologyTransaction::create_face(SurfaceId surface_id, LoopId outer_loop,
         {(*coincident)[0], (*coincident)[1], (*coincident)[2],
          (*coincident)[3]});
   }
+  if (const auto crossing = face_cross_loop_straight_edge_intersection(
+          *state_, outer_loop, inner_loops)) {
+    return detail::failed_result<FaceId>(
+        *state_, StatusCode::InvalidTopology,
+        diag_codes::kTopoFaceCrossLoopStraightEdgeIntersection,
+        "创建面失败：不同边界环的直线边段在内部相交", "创建面失败",
+        {(*crossing)[0], (*crossing)[1], (*crossing)[2], (*crossing)[3]});
+  }
   const auto id = FaceId{state_->allocate_id()};
   detail::FaceRecord face_record;
   face_record.surface_id = surface_id;

@@ -4621,6 +4621,121 @@ int main() {
         }
     }
 
+    // FR-TOPO-001: straight edges from different face loops may not cross
+    // in their interiors, even when no boundary vertices coincide.
+    {
+        auto state = std::make_shared<axiom::detail::KernelState>(axiom::KernelConfig{});
+        axiom::TopologyService topo{state};
+        axiom::DiagnosticService diagnostics{state};
+        axiom::SurfaceFactory surfaces{state};
+        axiom::CurveFactory curves{state};
+        const auto plane = surfaces.make_plane({0, 0, 0}, {0, 0, 1});
+        if (!plane.value) return 1;
+        auto setup = topo.begin_transaction();
+        struct Triangle { axiom::LoopId loop; std::array<axiom::EdgeId, 3> edges; };
+        const auto triangle = [&](std::array<axiom::Point3, 3> points)
+            -> std::optional<Triangle> {
+            Triangle result{};
+            std::array<axiom::VertexId, 3> vertices;
+            std::array<axiom::CoedgeId, 3> coedges;
+            for (std::size_t i = 0; i < 3; ++i) {
+                const auto vertex = setup.create_vertex(points[i]);
+                if (!vertex.value) return {};
+                vertices[i] = *vertex.value;
+            }
+            for (std::size_t i = 0; i < 3; ++i) {
+                const auto& a = points[i];
+                const auto& b = points[(i + 1) % 3];
+                const auto curve = curves.make_line_segment(a, b);
+                if (!curve.value) return {};
+                const auto edge = setup.create_edge(*curve.value, vertices[i], vertices[(i + 1) % 3]);
+                if (!edge.value) return {};
+                result.edges[i] = *edge.value;
+                const auto coedge = setup.create_coedge(*edge.value, false);
+                if (!coedge.value) return {};
+                coedges[i] = *coedge.value;
+            }
+            const auto loop = setup.create_loop(coedges);
+            if (!loop.value) return {};
+            result.loop = *loop.value;
+            return result;
+        };
+        const auto outer = triangle({{{0, 0, 0}, {10, 0, 0}, {0, 10, 0}}});
+        const auto hole = triangle({{{1, 1, 0}, {1, 2, 0}, {2, 1, 0}}});
+        const auto disjoint = triangle({{{6, 1, 0}, {6, 2, 0}, {7, 1, 0}}});
+        const auto crosses_outer = triangle({{{7, 1, 0}, {9, 3, 0}, {6, 3, 0}}});
+        const auto skew_to_outer = triangle({{{7, 1, 1e-20}, {9, 3, 1e-20}, {6, 3, 1e-20}}});
+        const auto inner_a = triangle({{{2, 2, 0}, {2, 4, 0}, {4, 2, 0}}});
+        const auto inner_b = triangle({{{3, 1, 0}, {3, 4, 0}, {5, 1, 0}}});
+        if (!outer || !hole || !disjoint || !crosses_outer || !skew_to_outer ||
+            !inner_a || !inner_b ||
+            setup.commit().status != axiom::StatusCode::Ok) return 1;
+        auto txn = topo.begin_transaction();
+        const auto next_id = state->next_id;
+        const auto writes = txn.write_operation_count().value;
+        for (const auto& pair : {
+                 std::array<Triangle, 2>{*outer, *crosses_outer},
+                 std::array<Triangle, 2>{*inner_a, *inner_b}}) {
+            const bool crosses_outer_loop = pair[0].loop.value == outer->loop.value;
+            const std::vector<axiom::LoopId> inner =
+                crosses_outer_loop
+                    ? std::vector<axiom::LoopId>{pair[1].loop}
+                    : std::vector<axiom::LoopId>{pair[0].loop, pair[1].loop};
+            const auto rejected = txn.create_face(*plane.value, outer->loop, inner);
+            const auto report = diagnostics.get(rejected.diagnostic_id);
+            if (rejected.status != axiom::StatusCode::InvalidTopology || rejected.value ||
+                !report.value || !issue_links_entities(*report.value,
+                    axiom::diag_codes::kTopoFaceCrossLoopStraightEdgeIntersection,
+                    {pair[0].loop.value, pair[1].loop.value,
+                     pair[0].edges[1].value,
+                     pair[1].edges[0].value}) ||
+                state->next_id != next_id || !state->faces.empty() ||
+                txn.created_face_count().value != std::optional<std::uint64_t>{0} ||
+                txn.write_operation_count().value != writes) {
+                std::cerr << "cross-loop straight-edge intersection rejection polluted transaction\n";
+                return 1;
+            }
+            const auto path = std::filesystem::temp_directory_path() / "axiom_topo_cross_loop_edges.json";
+            if (diagnostics.export_report_json(rejected.diagnostic_id, path.string()).status !=
+                axiom::StatusCode::Ok) return 1;
+            std::ifstream input(path);
+            const std::string json((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+            input.close();
+            std::filesystem::remove(path);
+            if (json.find(axiom::diag_codes::kTopoFaceCrossLoopStraightEdgeIntersection) == std::string::npos ||
+                json.find("related_entities") == std::string::npos) return 1;
+        }
+        const auto good = txn.create_face(*plane.value, outer->loop,
+            std::array<axiom::LoopId, 2>{hole->loop, disjoint->loop});
+        if (!good.value || topo.validate().validate_face(*good.value).status != axiom::StatusCode::Ok)
+            return 1;
+        state->faces.at(good.value->value).inner_loops[1] = crosses_outer->loop;
+        state->loop_to_faces.erase(disjoint->loop.value);
+        state->loop_to_faces[crosses_outer->loop.value] = {good.value->value};
+        const auto writes_before_validation = txn.write_operation_count().value;
+        const auto invalid = topo.validate().validate_face(*good.value);
+        const auto report = diagnostics.get(invalid.diagnostic_id);
+        if (invalid.status != axiom::StatusCode::InvalidTopology || !report.value ||
+            !issue_links_entities(*report.value,
+                axiom::diag_codes::kTopoFaceCrossLoopStraightEdgeIntersection,
+                {good.value->value, outer->loop.value, crosses_outer->loop.value}) ||
+            txn.write_operation_count().value != writes_before_validation ||
+            txn.rollback().status != axiom::StatusCode::Ok ||
+            topo.query().has_face(*good.value).value != std::optional<bool>{false}) {
+            std::cerr << "cross-loop edge validation or rollback failed\n";
+            return 1;
+        }
+        // Identical XY projections at different Z values are skew in 3D.
+        auto skew_txn = topo.begin_transaction();
+        const auto skew_face = skew_txn.create_face(*plane.value, outer->loop,
+            std::array<axiom::LoopId, 1>{skew_to_outer->loop});
+        if (!skew_face.value || skew_txn.rollback().status != axiom::StatusCode::Ok ||
+            topo.query().has_face(*skew_face.value).value != std::optional<bool>{false}) {
+            std::cerr << "3D skew boundaries were treated as crossing\n";
+            return 1;
+        }
+    }
+
     // ---- Stage 2+: PCurve trim -> underlying surface + Trimmed materialization (nested face surface) ----
     {
         auto plane = kernel.surfaces().make_plane({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0});

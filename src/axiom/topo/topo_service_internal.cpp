@@ -356,6 +356,86 @@ face_cross_loop_coincident_vertices(const detail::KernelState &state,
   return std::nullopt;
 }
 
+std::optional<std::array<std::uint64_t, 4>>
+face_cross_loop_straight_edge_intersection(
+    const detail::KernelState &state, LoopId outer_loop,
+    std::span<const LoopId> inner_loops) {
+  struct Segment {
+    LoopId loop;
+    EdgeId edge;
+    std::array<long double, 3> start;
+    std::array<long double, 3> end;
+  };
+  std::vector<Segment> seen;
+  const auto subtract = [](const auto &a, const auto &b) {
+    return std::array<long double, 3>{a[0] - b[0], a[1] - b[1],
+                                      a[2] - b[2]};
+  };
+  const auto cross = [](const auto &a, const auto &b) {
+    return std::array<long double, 3>{a[1] * b[2] - a[2] * b[1],
+                                      a[2] * b[0] - a[0] * b[2],
+                                      a[0] * b[1] - a[1] * b[0]};
+  };
+  const auto dot = [](const auto &a, const auto &b) {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  };
+  for (std::size_t i = 0; i <= inner_loops.size(); ++i) {
+    const auto loop_id = i == 0 ? outer_loop : inner_loops[i - 1];
+    const auto loop_it = state.loops.find(loop_id.value);
+    if (loop_it == state.loops.end()) continue;
+    for (const auto coedge_id : loop_it->second.coedges) {
+      const auto coedge_it = state.coedges.find(coedge_id.value);
+      if (coedge_it == state.coedges.end()) continue;
+      const auto edge_id = coedge_it->second.edge_id;
+      const auto edge_it = state.edges.find(edge_id.value);
+      if (edge_it == state.edges.end()) continue;
+      const auto curve_it = state.curves.find(edge_it->second.curve_id.value);
+      if (curve_it == state.curves.end() ||
+          (curve_it->second.kind != detail::CurveKind::Line &&
+           curve_it->second.kind != detail::CurveKind::LineSegment)) continue;
+      const auto v0 = state.vertices.find(edge_it->second.v0.value);
+      const auto v1 = state.vertices.find(edge_it->second.v1.value);
+      if (v0 == state.vertices.end() || v1 == state.vertices.end()) continue;
+      const auto &a = v0->second.point;
+      const auto &b = v1->second.point;
+      if (!std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(a.z) ||
+          !std::isfinite(b.x) || !std::isfinite(b.y) || !std::isfinite(b.z))
+        continue;
+      const Segment current{loop_id, edge_id, {a.x, a.y, a.z},
+                            {b.x, b.y, b.z}};
+      const auto r = subtract(current.end, current.start);
+      for (const auto &prior : seen) {
+        if (prior.loop.value == loop_id.value) continue;
+        const auto s = subtract(prior.end, prior.start);
+        const auto w = subtract(prior.start, current.start);
+        const auto n = cross(r, s);
+        const auto n2 = dot(n, n);
+        if (n2 == 0.0L) continue;  // Parallel or collinear: separate rule.
+        const long double t = dot(cross(w, s), n) / n2;
+        const long double u = dot(cross(w, r), n) / n2;
+        if (t <= 0.0L || t >= 1.0L || u <= 0.0L || u >= 1.0L)
+          continue;
+        bool same_point = true;
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+          const long double tr = t * r[axis];
+          const long double us = u * s[axis];
+          const long double roundoff =
+              32.0L * std::numeric_limits<long double>::epsilon() *
+              (std::abs(tr) + std::abs(w[axis]) + std::abs(us));
+          if (std::abs(tr - w[axis] - us) > roundoff)
+            same_point = false;
+        }
+        if (same_point) {
+          return std::array<std::uint64_t, 4>{prior.loop.value,
+              loop_id.value, prior.edge.value, edge_id.value};
+        }
+      }
+      seen.push_back(current);
+    }
+  }
+  return std::nullopt;
+}
+
 bool face_record_references_loop(const detail::FaceRecord &face,
                                  std::uint64_t loop_value) {
   if (face.outer_loop.value == loop_value) {

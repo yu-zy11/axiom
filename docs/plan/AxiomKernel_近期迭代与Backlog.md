@@ -76,6 +76,8 @@
 
 ### 2.3 `topo`
 
+- **FR-TOPO-001 第 52 切片**：`create_face` 写入前拒绝不同边界环的直线/线段边在三维内部相交，`validate_face` 检出存量缺陷；`AXM-TOPO-E-0026` 关联两环与两边。`axiom_topology_test` 覆盖外/内及内/内相交、合法双孔面、诊断 JSON、失败不污染和回滚。曲线边、端点触碰、共线重叠与容差邻近相接仍待单独规则，需求保持受限可用。
+
 - **NFR-REL-001 第 48 切片**：`create_shell` 在分配 ShellId 前验证成员面引用的曲面确实存在；空句柄或悬空 `SurfaceId` 返回 `InvalidTopology / AXM-TOPO-E-0005`，关联面与曲面 ID。`axiom_topology_test` 通过受损面注入覆盖诊断 JSON、ID/存储/事务计数不污染，以及恢复曲面引用后的重试、回滚和提交。需求保持受限可用；协作式取消与更广泛的 S0/S1 失败注入仍待闭合。
 
 - **FR-TOPO-001 第 47 切片**：`create_face` 在分配 FaceId 前拒绝不同环中独立 `VertexId` 的三维坐标精确重合，`validate_face` 对已有面执行同一规则；`AXM-TOPO-E-0025` 关联两环与两个顶点。`axiom_topology_test` 覆盖外/内及内/内相接、成功双孔面、诊断 JSON、失败不污染和回滚。仍缺边段相交、容差邻近相接与完整 trim bridge，需求保持受限可用。
