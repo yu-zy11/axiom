@@ -382,10 +382,14 @@ struct PluginCurveDesc {
 struct ProfileRef {
   std::string label;
   /// Optional planar polygon profile in world coordinates (closedness implicit: last connects to first).
-  /// Extrude and line-segment sweep support finite, simple planar polygons (convex or concave, no holes),
+  /// Extrude and line-segment sweep support finite, simple planar polygons (convex or concave),
   /// without repeated vertices or collinear corners, and with non-degenerate volume;
   /// unsupported profiles return InvalidInput instead of a bbox replacement shell.
   std::vector<Point3> polygon_xyz;
+  /// Optional coplanar holes strictly inside polygon_xyz, implicitly closed, with independent winding.
+  /// Rings must be simple, disjoint and non-nested; touching boundaries are rejected.
+  /// Supported by extrude and line-segment sweep only; revolve/loft reject nonempty holes.
+  std::vector<std::vector<Point3>> holes_xyz;
 };
 
 struct TessellationOptions {

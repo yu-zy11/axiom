@@ -14,7 +14,7 @@
 
 - **FR-DIAG-001 第 58 切片**：严重级别检索在限额前按 `DiagnosticId` 升序排序；`report_ids_by_severity` 继承相同语义。`axiom_diagnostics_test` 覆盖限额、重复 issue、空报告/空结果、非法参数、源报告不污染及重试。需求保持受限可用；下一步继续补齐 BOOL/HEAL/IO 重量级流程的阶段、实体和数值证据。
 
-- **FR-OPS-001 第 60 功能包（待统一验收）**：完成简单凹多边形拉伸的耳切端盖、真实闭壳及线段扫掠复用。`axiom_ops_heal_test` 新增 L/U 形跨 Ops/Topo/Heal/Rep 模型集，覆盖双绕向、不同起点、正反/斜向与倾斜平面、公开面边顶点/归属/邻接查询、解析面积/体积/质心、Strict 验证及拓扑驱动网格转换；自交/接触/重复点/共线等退化拒绝、稳定错误码、对象/体/ID 不污染及重试一并回归。门禁修复使 Rep 平面三角化遵守 `generate_texcoords`，默认网格可按位置焊接，开启 UV 时保留接缝，并补充选项/报告/缓存回归。完整构建及全套 ctest 本地复验 16/16 通过（总计 27.18 s），待调度器独立验收。需求保持进行中；下一步推进曲线导轨或带孔特征的真实拓扑及跨模块模型集，无显式轮廓仍为占位能力。
+- **FR-OPS-001 第 61 功能包（待统一验收）**：第 61 包实现带孔多边形拉伸：新增 ProfileRef::holes_xyz，边界约束平面剖分端盖与内外侧壁形成真实闭壳，线段扫掠复用；单孔/多孔、凹外环/凹孔、独立绕向/起点/孔序、正反斜向及倾斜平面模型集覆盖公开拓扑、解析体积/面积/质心/惯性、Strict 与网格转换；越界/相交/接触/嵌套/退化拒绝、对象/几何/ID/缓存/事务计数不污染、回滚及重试回归已编写。为验证新端盖剖分算法，已运行 `cmake --build build-agent --parallel 4 --target axiom_ops_heal_test` 和 `ctest --test-dir build-agent -R '^axiom_ops_heal_test$' --output-on-failure`，定向测试 1/1 通过（4.23 s，含 192 组带孔拉伸变体）。整包待调度器独立完整构建验收，FR-OPS-001 保持进行中；曲线导轨仍待实现，无显式轮廓仍为占位能力。
 
 - **NFR-DIA-001 第 50 切片**：3MF 导入在物化前按根因绑定 `io.import.3mf.input/path/open/read/parse/validation`；目录输入结构化拒绝，非法坐标与超范围索引返回解析或验证失败，不再泄漏数值转换异常或静默截断索引。`axiom_io_workflow_test` 覆盖正常、退化、路径/ZIP/XML/数值失败、阶段检索、JSON、Body/Mesh 不污染及成功重试；`axiom_io_dataset_test` 验证往返。复用现有 IO/VAL 错误码，需求保持受限可用；其他 BOOL/HEAL/IO 失败出口仍待闭合。
 

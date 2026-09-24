@@ -838,6 +838,13 @@ bool try_sweep_body_mass_properties(const detail::BodyRecord& body, MassProperti
         return true;
     }
     if (body.label.size() >= 8 && body.label.compare(0, 8, "extrude:") == 0 && body.a > 0.0) {
+        if (body.sweep_polyhedral_mass_valid) {
+            props.volume = body.sweep_polyhedral_volume;
+            props.area = body.sweep_cached_surface_area;
+            props.centroid = body.sweep_polyhedral_centroid;
+            props.inertia = body.sweep_inertia_about_centroid;
+            return true;
+        }
         props.volume = body.a;
         if (body.extrude_poly_cap_area > 0.0) {
             props.area = 2.0 * body.extrude_poly_cap_area + body.extrude_lateral_area;

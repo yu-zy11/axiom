@@ -166,6 +166,7 @@ struct BodyRecord {
     std::vector<Point3> revolve_profile_xyz;
     /// 多边形 `extrude`：轮廓副本，供 **平面多边形 + 非退化拉伸方向** 的棱柱 BRep 物化（见 `try_materialize_sweep_extrude_prism_body`）。
     std::vector<Point3> extrude_profile_xyz;
+    std::vector<std::vector<Point3>> extrude_holes_xyz;
     /// 三角网格闭壳（ρ=1）质量：体积/质心/惯性（关于质心，世界系行主序 3×3）；与 `sweep_cached_surface_area` 在 `sweep_polyhedral_mass_valid` 时由物化写入。
     bool sweep_polyhedral_mass_valid {false};
     Scalar sweep_polyhedral_volume {0.0};

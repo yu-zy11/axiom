@@ -1450,7 +1450,173 @@ inline bool triangulate_extrude_profile(std::span<const Point3> poly, const Vec3
     return true;
 }
 
-/// 简单平面多边形（可凹、无孔）沿 axis 拉伸：耳切端盖 + 平面侧壁，生成真实闭合棱柱 BRep。
+// Triangulate a polygonal region without inserting geometric vertices. Boundary
+// constraints are extended to a maximal noncrossing planar graph, then its bounded
+// material faces are walked. This avoids duplicated bridge vertices at hole seams.
+// All validation and triangulation finish before allocating kernel objects.
+inline bool triangulate_extrude_region(const std::vector<Point3>& outer,
+                                       const std::vector<std::vector<Point3>>& holes,
+                                       const Vec3& normal, Scalar plane_tol,
+                                       std::vector<Point3>& points,
+                                       std::vector<std::pair<int, int>>& boundary,
+                                       std::vector<std::array<int, 3>>& triangles) {
+    points.clear();
+    boundary.clear();
+    triangles.clear();
+    std::vector<std::vector<int>> rings;
+    for (std::size_t r = 0; r <= holes.size(); ++r) {
+        auto polygon = r == 0 ? outer : holes[r - 1];
+        if (polygon.size() < 3 || polygon.size() > static_cast<std::size_t>(std::numeric_limits<int>::max() / 4) - points.size()) {
+            return false;
+        }
+        for (const auto& p : polygon) {
+            if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z) ||
+                std::abs(dot(subtract(p, outer.front()), normal)) > plane_tol) return false;
+        }
+        const auto raw = newell_normal_unnormalized_poly(polygon);
+        const auto length = norm(raw);
+        std::vector<std::array<int, 3>> unused;
+        if (!std::isfinite(length) || length <= 1e-14 ||
+            !triangulate_extrude_profile(polygon, scale(raw, 1.0 / length), unused)) return false;
+        // Outer CCW, holes CW in the common frame: material lies to the left.
+        if ((dot(raw, normal) > 0) != (r == 0)) std::reverse(polygon.begin(), polygon.end());
+        std::vector<int> ring;
+        for (const auto& p : polygon) {
+            ring.push_back(static_cast<int>(points.size()));
+            points.push_back(p);
+        }
+        for (std::size_t i = 0; i < ring.size(); ++i) boundary.emplace_back(ring[i], ring[(i + 1) % ring.size()]);
+        rings.push_back(std::move(ring));
+    }
+    Vec3 u {}, v {};
+    orthonormal_frame_from_axis(normal, u, v);
+    std::vector<std::array<Scalar, 2>> xy;
+    Scalar extent = 0;
+    for (const auto& p : points) {
+        const auto d = subtract(p, outer.front());
+        const Scalar x = dot(d, u), y = dot(d, v);
+        if (!std::isfinite(x) || !std::isfinite(y)) return false;
+        xy.push_back({x, y});
+        extent = std::max({extent, std::abs(x), std::abs(y)});
+    }
+    const Scalar length_tol = std::max(Scalar(1e-12), 64 * std::numeric_limits<Scalar>::epsilon() * extent);
+    const Scalar area_tol = std::max(Scalar(1e-14), length_tol * extent);
+    const auto turn = [&](int a, int b, int c) {
+        return (static_cast<long double>(xy[b][0]) - xy[a][0]) * (static_cast<long double>(xy[c][1]) - xy[a][1]) -
+               (static_cast<long double>(xy[b][1]) - xy[a][1]) * (static_cast<long double>(xy[c][0]) - xy[a][0]);
+    };
+    const auto on_segment = [&](int a, int b, int p) {
+        return std::abs(turn(a, b, p)) <= area_tol &&
+            xy[p][0] >= std::min(xy[a][0], xy[b][0]) - length_tol &&
+            xy[p][0] <= std::max(xy[a][0], xy[b][0]) + length_tol &&
+            xy[p][1] >= std::min(xy[a][1], xy[b][1]) - length_tol &&
+            xy[p][1] <= std::max(xy[a][1], xy[b][1]) + length_tol;
+    };
+    const auto conflict = [&](int a, int b, int c, int d) {
+        if ((c != a && c != b && on_segment(a, b, c)) ||
+            (d != a && d != b && on_segment(a, b, d)) ||
+            (a != c && a != d && on_segment(c, d, a)) ||
+            (b != c && b != d && on_segment(c, d, b))) return true;
+        const auto t1 = turn(a, b, c), t2 = turn(a, b, d);
+        const auto t3 = turn(c, d, a), t4 = turn(c, d, b);
+        return ((t1 > area_tol && t2 < -area_tol) || (t1 < -area_tol && t2 > area_tol)) &&
+               ((t3 > area_tol && t4 < -area_tol) || (t3 < -area_tol && t4 > area_tol));
+    };
+    for (std::size_t i = 0; i < xy.size(); ++i) {
+        for (std::size_t j = i + 1; j < xy.size(); ++j) {
+            if (std::hypot(xy[i][0] - xy[j][0], xy[i][1] - xy[j][1]) <= length_tol) return false;
+        }
+    }
+    for (std::size_t i = 0; i < boundary.size(); ++i) {
+        for (std::size_t j = i + 1; j < boundary.size(); ++j) {
+            if (conflict(boundary[i].first, boundary[i].second, boundary[j].first, boundary[j].second)) return false;
+        }
+    }
+    const auto inside_ring = [&](const std::array<Scalar, 2>& p, const std::vector<int>& ring) {
+        bool inside = false;
+        for (std::size_t i = 0; i < ring.size(); ++i) {
+            const auto& a = xy[ring[i]];
+            const auto& b = xy[ring[(i + 1) % ring.size()]];
+            if ((a[1] > p[1]) != (b[1] > p[1]) &&
+                p[0] < (static_cast<long double>(b[0]) - a[0]) * (p[1] - a[1]) / (b[1] - a[1]) + a[0]) {
+                inside = !inside;
+            }
+        }
+        return inside;
+    };
+    for (std::size_t i = 1; i < rings.size(); ++i) {
+        if (!inside_ring(xy[rings[i].front()], rings.front())) return false;
+        for (std::size_t j = 1; j < rings.size(); ++j) {
+            if (i != j && inside_ring(xy[rings[i].front()], rings[j])) return false;
+        }
+    }
+    const auto inside_region = [&](const std::array<Scalar, 2>& p) {
+        if (!inside_ring(p, rings.front())) return false;
+        for (std::size_t i = 1; i < rings.size(); ++i) if (inside_ring(p, rings[i])) return false;
+        return true;
+    };
+    auto edges = boundary;
+    const int n = static_cast<int>(points.size());
+    for (int a = 0; a < n; ++a) {
+        for (int b = a + 1; b < n; ++b) {
+            bool blocked = false;
+            for (const auto& [c, d] : edges) {
+                if ((a == c && b == d) || (a == d && b == c) || conflict(a, b, c, d)) {
+                    blocked = true;
+                    break;
+                }
+            }
+            if (!blocked && inside_region({(xy[a][0] + xy[b][0]) / 2, (xy[a][1] + xy[b][1]) / 2})) {
+                edges.emplace_back(a, b);
+            }
+        }
+    }
+    std::vector<std::vector<int>> neighbors(points.size());
+    for (const auto& [a, b] : edges) {
+        neighbors[a].push_back(b);
+        neighbors[b].push_back(a);
+    }
+    for (int a = 0; a < n; ++a) {
+        std::sort(neighbors[a].begin(), neighbors[a].end(), [&](int b, int c) {
+            return std::atan2(xy[b][1] - xy[a][1], xy[b][0] - xy[a][0]) <
+                   std::atan2(xy[c][1] - xy[a][1], xy[c][0] - xy[a][0]);
+        });
+    }
+    std::map<std::pair<int, int>, bool> visited;
+    long double cap_area = 0;
+    for (const auto& edge : edges) {
+        for (const bool reverse : {false, true}) {
+            const auto start = reverse ? std::make_pair(edge.second, edge.first) : edge;
+            if (visited[start]) continue;
+            auto current = start;
+            std::vector<int> face;
+            do {
+                if (visited[current] || face.size() > 2 * edges.size()) return false;
+                visited[current] = true;
+                face.push_back(current.first);
+                const auto& next = neighbors[current.second];
+                const auto it = std::find(next.begin(), next.end(), current.first);
+                const auto offset = static_cast<std::size_t>(it - next.begin());
+                current = {current.second, next[(offset + next.size() - 1) % next.size()]};
+            } while (current != start);
+            if (face.size() != 3 || turn(face[0], face[1], face[2]) <= area_tol) continue;
+            const int a = face[0], b = face[1], c = face[2];
+            if (!inside_region({(xy[a][0] + xy[b][0] + xy[c][0]) / 3,
+                                (xy[a][1] + xy[b][1] + xy[c][1]) / 3})) continue;
+            triangles.push_back({a, b, c});
+            cap_area += turn(a, b, c) / 2;
+        }
+    }
+    long double expected_area = 0;
+    for (const auto& [a, b] : boundary) {
+        expected_area += (static_cast<long double>(xy[a][0]) * xy[b][1] -
+                          static_cast<long double>(xy[a][1]) * xy[b][0]) / 2;
+    }
+    return triangles.size() == points.size() + 2 * holes.size() - 2 && expected_area > area_tol &&
+           std::abs(cap_area - expected_area) <= area_tol * points.size();
+}
+
+/// 简单平面多边形（可凹、可带孔）沿 axis 拉伸：三角端盖 + 平面侧壁，生成真实闭合棱柱 BRep。
 /// 所有可失败检查在对象分配前完成，禁止失败时留下部分拓扑。
 inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRecord& record) {
     if (record.kind != BodyKind::Sweep || record.rep_kind != RepKind::ExactBRep || !record.bbox.is_valid ||
@@ -1464,7 +1630,6 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
     if (poly_in.size() < 3 || poly_in.size() > static_cast<std::size_t>(std::numeric_limits<int>::max() / 4)) {
         return false;
     }
-    const int n = static_cast<int>(poly_in.size());
     const Scalar h = record.b;
     if (!(h > 0.0)) {
         return false;
@@ -1493,23 +1658,34 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
         return false;
     }
 
+    std::vector<Point3> base;
+    std::vector<std::pair<int, int>> boundary;
+    std::vector<std::array<int, 3>> caps;
+    if (record.extrude_holes_xyz.empty()) {
+        base = poly_in;
+        if (!triangulate_extrude_profile(base, n_unit, caps)) return false;
+        for (int i = 0; i < static_cast<int>(base.size()); ++i) {
+            boundary.emplace_back(i, (i + 1) % static_cast<int>(base.size()));
+        }
+    } else if (!triangulate_extrude_region(poly_in, record.extrude_holes_xyz, n_unit, plane_tol,
+                                          base, boundary, caps)) {
+        return false;
+    }
+    const int n = static_cast<int>(base.size());
     std::vector<Point3> pos(static_cast<std::size_t>(2 * n));
     for (int i = 0; i < n; ++i) {
-        pos[static_cast<std::size_t>(i)] = poly_in[static_cast<std::size_t>(i)];
+        pos[static_cast<std::size_t>(i)] = base[static_cast<std::size_t>(i)];
         pos[static_cast<std::size_t>(n + i)] =
-            add_point_vec(poly_in[static_cast<std::size_t>(i)], scale(D, h));
+            add_point_vec(base[static_cast<std::size_t>(i)], scale(D, h));
     }
 
-    std::vector<std::array<int, 3>> caps;
-    if (!triangulate_extrude_profile(poly_in, n_unit, caps)) return false;
     std::vector<std::array<int, 3>> tris;
-    tris.reserve(static_cast<std::size_t>((n - 2) * 2 + n * 2));
+    tris.reserve(2 * (caps.size() + boundary.size()));
     for (const auto& cap : caps) {
         tris.push_back({cap[0], cap[2], cap[1]});
         tris.push_back({n + cap[0], n + cap[1], n + cap[2]});
     }
-    for (int i = 0; i < n; ++i) {
-        const int j = (i + 1) % n;
+    for (const auto& [i, j] : boundary) {
         tris.push_back({i, j, n + j});
         tris.push_back({i, n + j, n + i});
     }
@@ -1517,6 +1693,14 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
         for (auto& t : tris) {
             std::swap(t[1], t[2]);
         }
+    }
+
+    for (const auto& p : pos) {
+        if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) return false;
+    }
+    for (const auto& t : tris) {
+        const auto area = norm(cross(subtract(pos[t[1]], pos[t[0]]), subtract(pos[t[2]], pos[t[0]])));
+        if (!std::isfinite(area) || area <= 1e-14) return false;
     }
 
     Scalar vol_chk = 0.0;
@@ -1611,6 +1795,10 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
     record.sweep_cached_surface_area = area_tmp;
     record.sweep_polyhedral_centroid = cm_tmp;
     record.sweep_inertia_about_centroid = in_tmp;
+    record.a = vol_chk;
+    record.extrude_poly_cap_area = vol_chk / (align * h);
+    record.extrude_lateral_area = area_tmp - 2 * record.extrude_poly_cap_area;
+    record.extrude_mass_centroid = cm_tmp;
     return true;
 }
 

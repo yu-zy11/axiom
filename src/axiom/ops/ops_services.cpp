@@ -175,7 +175,8 @@ Result<BodyId> PrimitiveService::torus(const Point3& center, const Vec3& axis, S
 SweepService::SweepService(std::shared_ptr<detail::KernelState> state) : state_(std::move(state)) {}
 
 Result<BodyId> SweepService::extrude(const ProfileRef& profile, const Vec3& direction, Scalar distance) {
-    if (profile.label.empty() || !std::isfinite(distance) || distance <= 0.0 ||
+    if (profile.label.empty() || (profile.polygon_xyz.empty() && !profile.holes_xyz.empty()) ||
+        !std::isfinite(distance) || distance <= 0.0 ||
         !std::isfinite(direction.x) || !std::isfinite(direction.y) || !std::isfinite(direction.z) ||
         !valid_axis(direction)) {
         return detail::invalid_input_result<BodyId>(
@@ -306,6 +307,7 @@ Result<BodyId> SweepService::extrude(const ProfileRef& profile, const Vec3& dire
             }
         }
         record.extrude_profile_xyz = profile.polygon_xyz;
+        record.extrude_holes_xyz = profile.holes_xyz;
     } else {
         const auto p0 = Point3{0.0, 0.0, 0.0};
         const auto p1 = detail::add_point_vec(p0, detail::scale(dir, distance));
@@ -333,6 +335,10 @@ Result<BodyId> SweepService::extrude(const ProfileRef& profile, const Vec3& dire
 }
 
 Result<BodyId> SweepService::revolve(const ProfileRef& profile, const Axis3& axis, Scalar angle) {
+    if (!profile.holes_xyz.empty()) {
+        return detail::invalid_input_result<BodyId>(
+            *state_, diag_codes::kCoreParameterOutOfRange, "旋转失败：当前不支持带孔轮廓", "旋转失败");
+    }
     if (profile.label.empty() || angle <= 0.0 || !valid_axis(axis.direction)) {
         return detail::invalid_input_result<BodyId>(
             *state_, diag_codes::kCoreParameterOutOfRange,
@@ -403,7 +409,7 @@ Result<BodyId> SweepService::sweep(const ProfileRef& profile, CurveId rail) {
             "扫描失败：轮廓为空或导轨曲线不存在", "扫描失败");
     }
     const auto& curve = state_->curves.at(rail.value);
-    if (!profile.polygon_xyz.empty()) {
+    if (!profile.polygon_xyz.empty() || !profile.holes_xyz.empty()) {
         // 有界直线导轨上的平移扫掠就是棱柱拉伸：轮廓保留世界坐标，
         // 导轨只提供末端相对起点的位移，不移动或旋转输入截面。
         if (curve.kind != detail::CurveKind::LineSegment || curve.poles.size() != 2) {
@@ -437,6 +443,10 @@ Result<BodyId> SweepService::sweep(const ProfileRef& profile, CurveId rail) {
 }
 
 Result<BodyId> SweepService::loft(std::span<const ProfileRef> profiles) {
+    if (std::any_of(profiles.begin(), profiles.end(), [](const ProfileRef& p) { return !p.holes_xyz.empty(); })) {
+        return detail::invalid_input_result<BodyId>(
+            *state_, diag_codes::kCoreParameterOutOfRange, "放样失败：当前不支持带孔轮廓", "放样失败");
+    }
     if (profiles.size() < 2 || std::any_of(profiles.begin(), profiles.end(), [](const ProfileRef& profile) { return profile.label.empty(); })) {
         return detail::invalid_input_result<BodyId>(
             *state_, diag_codes::kCoreParameterOutOfRange,

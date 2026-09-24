@@ -30,7 +30,7 @@ class SweepService {
 public:
     explicit SweepService(std::shared_ptr<detail::KernelState> state);
 
-    /// Simple planar polygons (including concave profiles) produce a triangulated closed prism.
+    /// Simple planar polygons (including concave profiles and disjoint holes) produce a triangulated closed prism.
     /// Requires positive finite distance and a direction transverse to the profile plane.
     Result<BodyId> extrude(const ProfileRef& profile, const Vec3& direction, Scalar distance);
     Result<BodyId> revolve(const ProfileRef& profile, const Axis3& axis, Scalar angle);

@@ -200,6 +200,22 @@ if (solid.status != StatusCode::Ok) {
 }
 ```
 
+带孔截面可用同一入口；各环首尾隐式闭合，无需统一绕向：
+
+```cpp
+ProfileRef plate {"plate", {{0,0,0}, {8,0,0}, {8,6,0}, {0,6,0}},
+                          {{{1,1,0}, {3,1,0}, {3,3,0}, {1,3,0}}}};
+auto holed = kernel.sweeps().extrude(plate, {0,0,1}, 3);
+if (!holed.value) { handle_error(holed); return; }
+auto checked = kernel.validate().validate_all(*holed.value, ValidationMode::Strict);
+auto faces = kernel.topology().query().faces_of_body(*holed.value); // 32 个真实三角面
+auto edges = kernel.topology().query().edges_of_body(*holed.value); // 48 条边
+auto mass = kernel.query().mass_properties(*holed.value); // 体积 (48−4)×3 = 132
+// 同一 plate 可传给 sweep(plate, line_segment_id)，孔随截面一起平移。
+```
+
+孔之间必须分离且不嵌套，不能接触外环；失败不留下部分实体。`revolve/loft` 尚不接受带孔截面。
+
 ## 6.2 旋转
 
 ```cpp
