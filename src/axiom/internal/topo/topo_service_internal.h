@@ -85,6 +85,13 @@ std::optional<std::array<std::uint64_t, 3>>
 face_cross_loop_shared_vertex(const detail::KernelState &state, LoopId outer_loop,
                               std::span<const LoopId> inner_loops);
 
+// Returns two loop IDs and their distinct vertex IDs when boundary vertices
+// occupy exactly the same finite 3D point.
+std::optional<std::array<std::uint64_t, 4>>
+face_cross_loop_coincident_vertices(const detail::KernelState &state,
+                                    LoopId outer_loop,
+                                    std::span<const LoopId> inner_loops);
+
 bool face_record_references_loop(const detail::FaceRecord &face,
                                  std::uint64_t loop_value);
 

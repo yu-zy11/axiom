@@ -1298,6 +1298,15 @@ Result<void> TopologyValidationService::validate_face(FaceId face_id) const {
         "面验证失败：不同边界环共用同一拓扑顶点", "面验证失败",
         {face_id.value, (*shared)[0], (*shared)[1], (*shared)[2]});
   }
+  if (const auto coincident = face_cross_loop_coincident_vertices(
+          *state_, face_it->second.outer_loop, face_it->second.inner_loops)) {
+    return detail::failed_void(
+        *state_, StatusCode::InvalidTopology,
+        diag_codes::kTopoFaceCoincidentBoundaryVertices,
+        "面验证失败：不同边界环的独立顶点坐标重合", "面验证失败",
+        {face_id.value, (*coincident)[0], (*coincident)[1],
+         (*coincident)[2], (*coincident)[3]});
+  }
 
   // Planar faces without PCurve trim: (1) outer 3D winding must align with Surface normal
   // (Newell vs plane normal). (2) With holes, outer/inner signed areas in plane basis must

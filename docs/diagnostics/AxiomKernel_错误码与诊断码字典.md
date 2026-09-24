@@ -250,6 +250,7 @@
 | `AXM-TOPO-E-0022` | Error | 面未被任何壳引用（孤立面；`face_to_shells` 无条目或为空；`validate_indices_consistency`） |
 | `AXM-TOPO-E-0023` | Error | 环在闭合终点之外重复经过同一顶点，形成自接触的非简单边界；`create_loop` 在写入前拒绝并关联重复顶点与两条冲突定向边 |
 | `AXM-TOPO-E-0024` | Error | 同一面中不同边界环共用同一拓扑顶点；`create_face` 在写入前拒绝，`validate_face` 检出存量缺陷，关联冲突环与顶点 ID |
+| `AXM-TOPO-E-0025` | Error | 同一面中不同边界环的独立顶点具有完全相同的有限三维坐标；`create_face` 在写入前拒绝，`validate_face` 检出存量缺陷，关联两个环与两个顶点 ID。仅覆盖顶点坐标精确重合，不代表完整几何自交检测 |
 
 ## 7.5 `BOOL` 布尔模块错误码
 

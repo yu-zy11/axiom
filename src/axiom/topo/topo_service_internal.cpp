@@ -310,6 +310,52 @@ face_cross_loop_shared_vertex(const detail::KernelState &state, LoopId outer_loo
   return std::nullopt;
 }
 
+std::optional<std::array<std::uint64_t, 4>>
+face_cross_loop_coincident_vertices(const detail::KernelState &state,
+                                    LoopId outer_loop,
+                                    std::span<const LoopId> inner_loops) {
+  struct BoundaryVertex {
+    LoopId loop;
+    VertexId vertex;
+    Point3 point;
+  };
+  std::vector<BoundaryVertex> seen;
+  for (std::size_t i = 0; i <= inner_loops.size(); ++i) {
+    const auto loop_id = i == 0 ? outer_loop : inner_loops[i - 1];
+    const auto loop_it = state.loops.find(loop_id.value);
+    if (loop_it == state.loops.end()) {
+      continue;
+    }
+    for (const auto coedge_id : loop_it->second.coedges) {
+      const auto oriented = oriented_vertices(state, coedge_id);
+      if (!oriented) {
+        continue;
+      }
+      const auto vertex = (*oriented)[0];
+      const auto vertex_it = state.vertices.find(vertex.value);
+      if (vertex_it == state.vertices.end()) {
+        continue;
+      }
+      const auto &point = vertex_it->second.point;
+      if (!std::isfinite(point.x) || !std::isfinite(point.y) ||
+          !std::isfinite(point.z)) {
+        continue;
+      }
+      for (const auto &prior : seen) {
+        if (prior.loop.value != loop_id.value &&
+            prior.vertex.value != vertex.value &&
+            prior.point.x == point.x && prior.point.y == point.y &&
+            prior.point.z == point.z) {
+          return std::array<std::uint64_t, 4>{prior.loop.value, loop_id.value,
+                                              prior.vertex.value, vertex.value};
+        }
+      }
+      seen.push_back({loop_id, vertex, point});
+    }
+  }
+  return std::nullopt;
+}
+
 bool face_record_references_loop(const detail::FaceRecord &face,
                                  std::uint64_t loop_value) {
   if (face.outer_loop.value == loop_value) {

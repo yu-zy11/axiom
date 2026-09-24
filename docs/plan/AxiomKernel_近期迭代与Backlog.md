@@ -71,6 +71,8 @@
 
 ### 2.3 `topo`
 
+- **FR-TOPO-001 第 47 切片**：`create_face` 在分配 FaceId 前拒绝不同环中独立 `VertexId` 的三维坐标精确重合，`validate_face` 对已有面执行同一规则；`AXM-TOPO-E-0025` 关联两环与两个顶点。`axiom_topology_test` 覆盖外/内及内/内相接、成功双孔面、诊断 JSON、失败不污染和回滚。仍缺边段相交、容差邻近相接与完整 trim bridge，需求保持受限可用。
+
 - **NFR-REL-001 第 43 切片**：`create_shell` 在分配 ShellId 前检查成员面全部内环，拒绝缺失或已损坏的内环，复用 `AXM-TOPO-E-0005` 并关联面和内环。`axiom_topology_test` 覆盖故障注入、诊断 JSON、ID/存储/事务计数不污染，以及修复输入后的重试、回滚与提交。需求保持受限可用，协作式取消和更广泛的 S0/S1 失败注入门禁仍待闭合。
 
 - **FR-TOPO-001 第 42 切片**：`create_face` 在分配面 ID 前拒绝同一面的不同边界环共用 VertexId，`validate_face` 对存量面执行同一规则；使用 `AXM-TOPO-E-0024` 关联两环与冲突顶点。`axiom_topology_test` 覆盖外/内环及内/内环相接、合法双孔面、诊断 JSON、失败不污染和回滚。规则只识别拓扑顶点 ID，几何自交与完整 trim bridge 仍待补齐，需求保持受限可用。

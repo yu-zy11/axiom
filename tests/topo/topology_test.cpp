@@ -4480,7 +4480,14 @@ int main() {
         const auto other = triangle({*g, *h, *i}, {{{3, 1, 0}, {3, 2, 0}, {4, 1, 0}}});
         const auto touches_outer = triangle({*a, *d, *f}, {{{0, 0, 0}, {1, 1, 0}, {2, 1, 0}}});
         const auto touches_hole = triangle({*d, *g, *i}, {{{1, 1, 0}, {3, 1, 0}, {4, 1, 0}}});
-        if (!outer || !hole || !other || !touches_outer || !touches_hole) return 1;
+        const auto a_copy = vertex({0, 0, 0}), d_copy = vertex({1, 1, 0});
+        if (!a_copy || !d_copy) return 1;
+        const auto coincident_outer = triangle({*a_copy, *d, *f},
+            {{{0, 0, 0}, {1, 1, 0}, {2, 1, 0}}});
+        const auto coincident_hole = triangle({*d_copy, *g, *i},
+            {{{1, 1, 0}, {3, 1, 0}, {4, 1, 0}}});
+        if (!outer || !hole || !other || !touches_outer || !touches_hole ||
+            !coincident_outer || !coincident_hole) return 1;
         const auto count_before = state->next_id;
         const auto writes_before = txn.write_operation_count().value;
         for (const auto& rejected_input : {
@@ -4510,6 +4517,34 @@ int main() {
             if (json.find(axiom::diag_codes::kTopoFaceSharedBoundaryVertex) == std::string::npos ||
                 json.find("related_entities") == std::string::npos) return 1;
         }
+        for (const auto& rejected_input : {
+                 std::array<axiom::LoopId, 2>{*coincident_outer, *other},
+                 std::array<axiom::LoopId, 2>{*hole, *coincident_hole}}) {
+            const bool outer_collision = rejected_input[0].value == coincident_outer->value;
+            const auto rejected = txn.create_face(*plane.value, *outer, rejected_input);
+            const auto report = diagnostics.get(rejected.diagnostic_id);
+            if (rejected.status != axiom::StatusCode::InvalidTopology || rejected.value ||
+                !report.value || !issue_links_entities(*report.value,
+                    axiom::diag_codes::kTopoFaceCoincidentBoundaryVertices,
+                    {outer_collision ? outer->value : hole->value,
+                     outer_collision ? coincident_outer->value : coincident_hole->value,
+                     outer_collision ? a->value : d->value,
+                     outer_collision ? a_copy->value : d_copy->value}) ||
+                state->next_id != count_before || !state->faces.empty() ||
+                txn.write_operation_count().value != writes_before ||
+                txn.created_face_count().value != std::optional<std::uint64_t>{0}) {
+                std::cerr << "coincident boundary vertex rejection polluted face transaction\n";
+                return 1;
+            }
+            const auto path = std::filesystem::temp_directory_path() / "axiom_topo_coincident_boundary.json";
+            if (diagnostics.export_report_json(rejected.diagnostic_id, path.string()).status != axiom::StatusCode::Ok) return 1;
+            std::ifstream input(path);
+            const std::string json((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+            input.close();
+            std::filesystem::remove(path);
+            if (json.find(axiom::diag_codes::kTopoFaceCoincidentBoundaryVertices) == std::string::npos ||
+                json.find("related_entities") == std::string::npos) return 1;
+        }
         const auto good = txn.create_face(*plane.value, *outer,
             std::array<axiom::LoopId, 2>{*hole, *other});
         if (!good.value || topo.validate().validate_face(*good.value).status != axiom::StatusCode::Ok) return 1;
@@ -4527,6 +4562,20 @@ int main() {
                 {good.value->value, hole->value, touches_hole->value, d->value}) ||
             txn.write_operation_count().value != writes_before_validation) {
             std::cerr << "face validator missed shared boundary vertex or changed transaction\n";
+            return 1;
+        }
+        state->faces.at(good.value->value).inner_loops[1] = *coincident_hole;
+        state->loop_to_faces.erase(touches_hole->value);
+        state->loop_to_faces[coincident_hole->value] = {good.value->value};
+        const auto coincident_invalid = topo.validate().validate_face(*good.value);
+        const auto coincident_report = diagnostics.get(coincident_invalid.diagnostic_id);
+        if (coincident_invalid.status != axiom::StatusCode::InvalidTopology ||
+            !coincident_report.value || !issue_links_entities(*coincident_report.value,
+                axiom::diag_codes::kTopoFaceCoincidentBoundaryVertices,
+                {good.value->value, hole->value, coincident_hole->value,
+                 d->value, d_copy->value}) ||
+            txn.write_operation_count().value != writes_before_validation) {
+            std::cerr << "face validator missed coincident boundary vertices or changed transaction\n";
             return 1;
         }
         if (txn.rollback().status != axiom::StatusCode::Ok ||

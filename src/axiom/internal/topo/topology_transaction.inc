@@ -329,6 +329,15 @@ TopologyTransaction::create_face(SurfaceId surface_id, LoopId outer_loop,
         "创建面失败：不同边界环共用同一拓扑顶点", "创建面失败",
         {(*shared)[0], (*shared)[1], (*shared)[2]});
   }
+  if (const auto coincident = face_cross_loop_coincident_vertices(
+          *state_, outer_loop, inner_loops)) {
+    return detail::failed_result<FaceId>(
+        *state_, StatusCode::InvalidTopology,
+        diag_codes::kTopoFaceCoincidentBoundaryVertices,
+        "创建面失败：不同边界环的独立顶点坐标重合", "创建面失败",
+        {(*coincident)[0], (*coincident)[1], (*coincident)[2],
+         (*coincident)[3]});
+  }
   const auto id = FaceId{state_->allocate_id()};
   detail::FaceRecord face_record;
   face_record.surface_id = surface_id;
