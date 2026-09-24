@@ -76,37 +76,24 @@ Point2 evaluate_pcurve_point(const detail::PCurveRecord &pc, Scalar t) {
   return lerp_point2(pc.poles[seg], pc.poles[seg + 1], local_t);
 }
 
-Scalar approximate_pcurve_parameter(const detail::PCurveRecord &pc,
-                                   const Point2 &point) {
-  const auto domain = pcurve_domain(pc);
-  const int samples = 64;
-  Scalar best_t = domain.min;
+Scalar closest_pcurve_parameter(const detail::PCurveRecord &pc,
+                                const Point2 &point) {
+  Scalar best_t = 0.0;
   Scalar best_distance = std::numeric_limits<Scalar>::max();
-  for (int i = 0; i <= samples; ++i) {
-    const auto alpha = static_cast<Scalar>(i) / static_cast<Scalar>(samples);
-    const auto t = domain.min + (domain.max - domain.min) * alpha;
-    const auto sample = evaluate_pcurve_point(pc, t);
-    const auto d = norm2(subtract2(point, sample));
-    if (d < best_distance) {
-      best_distance = d;
-      best_t = t;
-    }
-  }
-  const auto radius = (domain.max - domain.min) * 0.125;
-  for (int iter = 0; iter < kClosestParamRefineIters; ++iter) {
-    const auto step = radius / static_cast<Scalar>(1u << iter);
-    const auto left_t = std::clamp(best_t - step, domain.min, domain.max);
-    const auto right_t = std::clamp(best_t + step, domain.min, domain.max);
-    const auto dl = norm2(subtract2(point, evaluate_pcurve_point(pc, left_t)));
-    const auto dr = norm2(subtract2(point, evaluate_pcurve_point(pc, right_t)));
-    if (dl < best_distance || dr < best_distance) {
-      if (dl <= dr) {
-        best_t = left_t;
-        best_distance = dl;
-      } else {
-        best_t = right_t;
-        best_distance = dr;
-      }
+  for (std::size_t i = 0; i + 1 < pc.poles.size(); ++i) {
+    const auto edge = subtract2(pc.poles[i + 1], pc.poles[i]);
+    const auto length_squared = dot2(edge, edge);
+    const auto from_start = subtract2(point, pc.poles[i]);
+    const auto local = length_squared > 0.0
+                           ? std::clamp(dot2(from_start, edge) / length_squared,
+                                        0.0, 1.0)
+                           : 0.0;
+    const auto projected = lerp_point2(pc.poles[i], pc.poles[i + 1], local);
+    const auto delta = subtract2(point, projected);
+    const auto distance = dot2(delta, delta);
+    if (distance < best_distance) {
+      best_distance = distance;
+      best_t = static_cast<Scalar>(i) + local;
     }
   }
   return best_t;

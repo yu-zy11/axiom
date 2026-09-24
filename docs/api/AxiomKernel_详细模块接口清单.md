@@ -302,6 +302,7 @@ public:
 `CurveService::closest_parameter/closest_point` 对 BSpline/NURBS 会在全域粗采样之外逐个覆盖非空结点分段，再进行阻尼局部细化；因此合法的极窄分段（包括满重数断点隔开的分支与常值退化分段）不会仅因宽度小于全域采样步长而被跳过。返回值仍是数值搜索结果，不构成任意曲线全局最优或工业精度保证。非有限查询点返回 `InvalidInput` / `AXM-CORE-E-0002`，不修改几何或求值缓存。
 椭圆不再直接把查询点的缩放极角当作最近参数：该极角仅作为初值，随后按三维欧氏距离进行阻尼细化，并将周期缝结果归一到 `[0, 2pi)`。该语义已覆盖解析可知最近点、周期缝、非有限输入与失败不污染；仍不宣称任意退化椭圆的全局最优保证。
 `CurveFactory::make_ellipse` 在创建前检查轴向量长度与派生法向长度是否有限；即使输入坐标本身有限，轴长或叉积溢出仍返回 `InvalidInput` / `AXM-GEO-E-0001`，不写入几何对象或求值缓存。
+`PCurveService::closest_parameter/closest_point` 对现有 UV 折线逐段投影并比较欧氏距离，零长度段使用其端点，多个等距最近点取参数最小者。非有限查询点返回 `InvalidInput` / `AXM-CORE-E-0002`，无效句柄返回 `InvalidInput` / `AXM-CORE-E-0001`；这些失败不修改几何或缓存。该合同仅覆盖当前的折线 PCurve。
 
 #### `SurfaceEvaluator`
 

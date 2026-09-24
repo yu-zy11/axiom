@@ -58,6 +58,60 @@ int main() {
         }
     }
 
+    // A short UV branch must be searched even when a fixed whole-domain grid
+    // would miss it; repeated poles are valid zero-length segments.
+    {
+        std::vector<axiom::Point2> long_poly(130, {100.0, 0.0});
+        long_poly[1] = {0.0, 0.0};
+        long_poly[2] = {0.0, 0.0};
+        const auto long_pc = kernel.pcurves().make_polyline(long_poly);
+        if (long_pc.status != axiom::StatusCode::Ok || !long_pc.value) {
+            std::cerr << "failed to create pcurve with narrow branch\n";
+            return 1;
+        }
+        const std::array<axiom::Point2, 3> repeated {{{2.0, 3.0}, {2.0, 3.0}, {2.0, 3.0}}};
+        const auto constant_pc = kernel.pcurves().make_polyline(repeated);
+        if (constant_pc.status != axiom::StatusCode::Ok || !constant_pc.value) {
+            std::cerr << "failed to create constant pcurve\n";
+            return 1;
+        }
+        const auto count_before = kernel.geometry_count();
+        const auto cache_before = kernel.cache_entry_count();
+        const auto tip = kernel.pcurve_service().closest_parameter(*long_pc.value, {0.0, 0.0});
+        const auto interior = kernel.pcurve_service().closest_parameter(*long_pc.value, {75.0, 10.0});
+        const auto closest = kernel.pcurve_service().closest_point(*long_pc.value, {75.0, 10.0});
+        const auto end = kernel.pcurve_service().closest_parameter(*long_pc.value, {200.0, 0.0});
+        const auto constant_t = kernel.pcurve_service().closest_parameter(*constant_pc.value, {9.0, 3.0});
+        if (!tip.value || !approx(*tip.value, 1.0, 1e-12) ||
+            !interior.value || !approx(*interior.value, 0.25, 1e-12) ||
+            !closest.value || !approx(closest.value->x, 75.0, 1e-12) ||
+            !approx(closest.value->y, 0.0, 1e-12) ||
+            !end.value || !approx(*end.value, 0.0, 1e-12) ||
+            !constant_t.value || !approx(*constant_t.value, 0.0, 1e-12)) {
+            std::cerr << "pcurve segment projection returned wrong nearest point\n";
+            return 1;
+        }
+        const auto invalid = kernel.pcurve_service().closest_parameter(
+            *long_pc.value, {std::numeric_limits<double>::quiet_NaN(), 0.0});
+        const auto missing = kernel.pcurve_service().closest_parameter(
+            axiom::PCurveId{}, {0.0, 0.0});
+        const auto invalid_code = kernel.diagnostics().has_issue_code(
+            invalid.diagnostic_id, "AXM-CORE-E-0002");
+        const auto missing_code = kernel.diagnostics().has_issue_code(
+            missing.diagnostic_id, "AXM-CORE-E-0001");
+        const auto retry = kernel.pcurve_service().closest_parameter(*long_pc.value, {0.0, 0.0});
+        if (invalid.status != axiom::StatusCode::InvalidInput || invalid.value ||
+            missing.status != axiom::StatusCode::InvalidInput || missing.value ||
+            !invalid_code.value || !*invalid_code.value ||
+            !missing_code.value || !*missing_code.value ||
+            !retry.value || !approx(*retry.value, 1.0, 1e-12) ||
+            kernel.geometry_count().value != count_before.value ||
+            kernel.cache_entry_count().value != cache_before.value) {
+            std::cerr << "failed pcurve closest query polluted geometry or cache\n";
+            return 1;
+        }
+    }
+
     auto line = kernel.curves().make_line({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
     if (line.status != axiom::StatusCode::Ok || !line.value.has_value()) {
         std::cerr << "failed to create line\n";

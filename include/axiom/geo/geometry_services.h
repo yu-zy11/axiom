@@ -98,6 +98,7 @@ public:
     explicit PCurveService(std::shared_ptr<detail::KernelState> state);
 
     Result<PCurveEvalResult> eval(PCurveId pcurve_id, Scalar t, int deriv_order) const;
+    /// UV 折线逐段投影求最近参数；重复控制点按零长度段处理，等距时取最早参数。
     Result<Scalar> closest_parameter(PCurveId pcurve_id, const Point2& point) const;
     Result<Point2> closest_point(PCurveId pcurve_id, const Point2& point) const;
     Result<Range1D> domain(PCurveId pcurve_id) const;

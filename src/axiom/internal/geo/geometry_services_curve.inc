@@ -81,7 +81,7 @@ Result<Scalar> PCurveService::closest_parameter(PCurveId pcurve_id,
   }
   const auto &pc = it->second;
   const auto domain = pcurve_domain(pc);
-  const auto t = std::clamp(approximate_pcurve_parameter(pc, point), domain.min,
+  const auto t = std::clamp(closest_pcurve_parameter(pc, point), domain.min,
                             domain.max);
   return ok_result(t, state_->create_diagnostic("参数曲线最近参数已求解"));
 }
