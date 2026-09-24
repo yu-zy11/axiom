@@ -1,3 +1,7 @@
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <limits>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -28,6 +32,252 @@ const axiom::Issue* find_issue(const axiom::DiagnosticReport& report, std::strin
         }
     }
     return nullptr;
+}
+
+bool check_mesh_export_failure_package(const std::filesystem::path& root) {
+    using Exporter = axiom::Result<void> (axiom::IOService::*)(
+        axiom::BodyId, std::string_view, const axiom::ExportOptions&);
+    using Importer = axiom::Result<axiom::BodyId> (axiom::IOService::*)(
+        std::string_view, const axiom::ImportOptions&);
+    struct Format {
+        const char* name;
+        Exporter export_file;
+        Importer import_file;
+    };
+    const Format formats[] = {
+        {"obj", &axiom::IOService::export_obj, &axiom::IOService::import_obj},
+        {"stl", &axiom::IOService::export_stl, &axiom::IOService::import_stl},
+        {"gltf", &axiom::IOService::export_gltf, &axiom::IOService::import_gltf},
+        {"3mf", &axiom::IOService::export_3mf, &axiom::IOService::import_3mf},
+    };
+    std::filesystem::create_directories(root);
+    const auto sentinel_path = root / "sentinel";
+    const auto diagnostic_path = root / "diagnostic.json";
+    const std::string sentinel = "keep existing output\n";
+    { std::ofstream out {sentinel_path}; out << sentinel; }
+    const auto read_text = [](const std::filesystem::path& path) {
+        std::ifstream in {path, std::ios::binary};
+        return std::string {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+    };
+
+    for (const auto& format : formats) {
+        auto state = std::make_shared<axiom::detail::KernelState>(axiom::KernelConfig {});
+        axiom::IOService io {state};
+        axiom::DiagnosticService diagnostics {state};
+        axiom::RepresentationConversionService convert {state};
+        axiom::SweepService sweeps {state};
+        axiom::ProfileRef profile;
+        profile.label = "mesh_export_failure_prism";
+        profile.polygon_xyz = {{0, 0, 0}, {2, 0, 0}, {0, 2, 0}};
+        const auto created = sweeps.extrude(profile, {0, 0, 1}, 3);
+        if (created.status != axiom::StatusCode::Ok || !created.value) {
+            std::cerr << format.name << " failed to create mesh export fixture\n";
+            return false;
+        }
+        const auto body = *created.value;
+        const auto prefix = std::string("io.export.") + format.name + ".";
+        const auto output = root / (std::string("retry.") + format.name);
+        const auto sidecar = root / "retry.mesh_report.json";
+        axiom::ExportOptions options;
+
+        const auto check_failure = [&](axiom::BodyId target, const std::filesystem::path& path,
+                                       axiom::StatusCode status, std::string_view code,
+                                       const std::string& stage) {
+            const auto next_id = state->next_id;
+            const auto body_cache = state->tessellation_cache;
+            const auto face_cache = state->face_tessellation_cache;
+            const auto stats = state->tessellation_cache_stats;
+            const auto meshes = state->meshes;
+            const auto counts = std::array {state->bodies.size(), state->shells.size(), state->faces.size(),
+                state->loops.size(), state->coedges.size(), state->edges.size(), state->vertices.size(),
+                state->curves.size(), state->surfaces.size(), state->curve_eval_cache.size(),
+                state->surface_eval_cache.size()};
+            const auto result = (io.*format.export_file)(target, path.string(), options);
+            const auto report = diagnostics.get(result.diagnostic_id);
+            const auto* issue = report.value ? find_issue(*report.value, code) : nullptr;
+            if (result.status != status || result.diagnostic_id.value == 0 || issue == nullptr ||
+                issue->severity != axiom::IssueSeverity::Error || issue->stage != stage ||
+                issue->related_entities != std::vector<std::uint64_t> {target.value}) {
+                std::cerr << format.name << " missing failure evidence for " << stage << '\n';
+                return false;
+            }
+            const auto staged = diagnostics.find_by_issue_stage(stage, 1000);
+            const auto prefixed = diagnostics.find_by_issue_stage_prefix("io.export.", 1000);
+            const auto coded = diagnostics.find_by_issue_code_prefix(code, 1000);
+            const auto related = diagnostics.find_by_related_entity(target.value, 1000);
+            for (const auto* found : {&staged, &prefixed, &coded}) {
+                if (!found->value || std::find(found->value->begin(), found->value->end(), result.diagnostic_id) ==
+                                         found->value->end()) return false;
+            }
+            // Zero is a valid piece of invalid-input evidence, but not a queryable entity handle.
+            if (target.value != 0 && (!related.value ||
+                std::find(related.value->begin(), related.value->end(), result.diagnostic_id) == related.value->end())) {
+                return false;
+            }
+            if (diagnostics.export_report_json(result.diagnostic_id, diagnostic_path.string()).status !=
+                axiom::StatusCode::Ok) return false;
+            const auto json = read_text(diagnostic_path);
+            if (json.find("\"stage\":\"" + stage + "\"") == std::string::npos ||
+                json.find(std::string(code)) == std::string::npos ||
+                json.find("\"related_entities\":[" + std::to_string(target.value) + "]") == std::string::npos) {
+                return false;
+            }
+            const auto& after = state->tessellation_cache_stats;
+            const auto after_counts = std::array {state->bodies.size(), state->shells.size(), state->faces.size(),
+                state->loops.size(), state->coedges.size(), state->edges.size(), state->vertices.size(),
+                state->curves.size(), state->surfaces.size(), state->curve_eval_cache.size(),
+                state->surface_eval_cache.size()};
+            if (state->next_id != next_id || counts != after_counts || state->meshes.size() != meshes.size() ||
+                state->tessellation_cache != body_cache || state->face_tessellation_cache != face_cache ||
+                after.body_cache_hits != stats.body_cache_hits || after.body_cache_misses != stats.body_cache_misses ||
+                after.body_cache_stale_evictions != stats.body_cache_stale_evictions ||
+                after.face_cache_hits != stats.face_cache_hits || after.face_cache_misses != stats.face_cache_misses ||
+                after.face_cache_stale_evictions != stats.face_cache_stale_evictions ||
+                read_text(sentinel_path) != sentinel) {
+                std::cerr << format.name << " export failure polluted model/cache/file at " << stage << '\n';
+                return false;
+            }
+            for (const auto& [id, before] : meshes) {
+                const auto it = state->meshes.find(id);
+                if (it == state->meshes.end() || it->second.indices != before.indices ||
+                    it->second.source_body != before.source_body || it->second.label != before.label ||
+                    it->second.vertices.size() != before.vertices.size()) return false;
+                for (std::size_t i = 0; i < before.vertices.size(); ++i) {
+                    const auto& a = before.vertices[i];
+                    const auto& b = it->second.vertices[i];
+                    const auto same = [](double lhs, double rhs) {
+                        return lhs == rhs || (std::isnan(lhs) && std::isnan(rhs));
+                    };
+                    if (!same(a.x, b.x) || !same(a.y, b.y) || !same(a.z, b.z)) return false;
+                }
+            }
+            return true;
+        };
+
+        // Cover both policy switches, first without caches and then with body/face cache hits.
+        for (const bool compatibility : {false, true}) {
+            for (const bool report : {false, true}) {
+                options.compatibility_mode = compatibility;
+                options.write_mesh_validation_report = report;
+                if (!check_failure({}, sentinel_path, axiom::StatusCode::InvalidInput,
+                                   axiom::diag_codes::kIoExportFailure, prefix + "input") ||
+                    !check_failure({999999}, sentinel_path, axiom::StatusCode::InvalidInput,
+                                   axiom::diag_codes::kIoExportFailure, prefix + "input") ||
+                    !check_failure(body, {}, axiom::StatusCode::InvalidInput,
+                                   axiom::diag_codes::kIoExportFailure, prefix + "input") ||
+                    !check_failure(body, sentinel_path / "child", axiom::StatusCode::OperationFailed,
+                                   axiom::diag_codes::kIoExportFailure, prefix + "path") ||
+                    !check_failure(body, root, axiom::StatusCode::OperationFailed,
+                                   axiom::diag_codes::kIoExportFailure, prefix + "open")) return false;
+                const auto bbox = state->bodies.at(body.value).bbox;
+                state->bodies.at(body.value).bbox.is_valid = false;
+                const bool conversion_rejected = check_failure(body, sentinel_path, axiom::StatusCode::DegenerateGeometry,
+                    axiom::diag_codes::kValDegenerateGeometry, prefix + "convert");
+                state->bodies.at(body.value).bbox = bbox;
+                if (!conversion_rejected) return false;
+#ifdef __linux__
+                // Use a local symlink so a requested sidecar would be observable without writing in /dev.
+                const auto full_path = root / (std::string("full.") + format.name);
+                std::filesystem::remove(full_path);
+                std::filesystem::create_symlink("/dev/full", full_path);
+                if (!check_failure(body, full_path, axiom::StatusCode::OperationFailed,
+                                   axiom::diag_codes::kIoExportFailure, prefix + "write") ||
+                    std::filesystem::exists(root / "full.mesh_report.json")) return false;
+                std::filesystem::remove(full_path);
+#endif
+                if (report) {
+                    std::filesystem::create_directory(sidecar);
+                    if (!check_failure(body, output, axiom::StatusCode::OperationFailed,
+                                       axiom::diag_codes::kIoExportFailure, prefix + "sidecar")) return false;
+                    axiom::Kernel reader;
+                    const auto primary = (reader.io().*format.import_file)(output.string(), axiom::ImportOptions {});
+                    if (primary.status != axiom::StatusCode::Ok || !primary.value) return false;
+                    std::filesystem::remove(sidecar);
+#ifdef __linux__
+                    std::filesystem::create_symlink("/dev/full", sidecar);
+                    if (!check_failure(body, output, axiom::StatusCode::OperationFailed,
+                                       axiom::diag_codes::kIoExportFailure, prefix + "sidecar")) return false;
+                    std::filesystem::remove(sidecar);
+#endif
+                }
+                const auto success = (io.*format.export_file)(body, output.string(), options);
+                if (success.status != axiom::StatusCode::Ok || std::filesystem::file_size(output) == 0 ||
+                    state->tessellation_cache.empty() || state->face_tessellation_cache.empty()) return false;
+                const auto success_report = diagnostics.get(success.diagnostic_id);
+                if (!success_report.value ||
+                    has_issue_code(*success_report.value, axiom::diag_codes::kIoExportMeshReportSidecar) != report ||
+                    std::filesystem::exists(sidecar) != report) return false;
+                // Read back with a separate kernel so import allocations cannot mask export isolation.
+                axiom::Kernel reader;
+                const auto imported = (reader.io().*format.import_file)(output.string(), axiom::ImportOptions {});
+                if (imported.status != axiom::StatusCode::Ok || !imported.value) return false;
+                std::filesystem::remove(output);
+                std::filesystem::remove(sidecar);
+            }
+        }
+
+        // A stale body cache must also be restored after conversion evicts it and reuses face meshes.
+        const auto cached_id = state->tessellation_cache.begin()->second;
+        const auto cached_mesh = state->meshes.at(cached_id.value);
+        state->meshes.erase(cached_id.value);
+        if (!check_failure(body, root, axiom::StatusCode::OperationFailed,
+                           axiom::diag_codes::kIoExportFailure, prefix + "open")) return false;
+        state->meshes.emplace(cached_id.value, cached_mesh);
+
+        // Inject damaged embedded mesh records: validation must precede opening the sentinel file.
+        const axiom::MeshId mesh_id {state->allocate_id()};
+        axiom::detail::MeshRecord valid;
+        valid.vertices = {{0, 0, 0}, {2, 0, 0}, {0, 2, 0}};
+        valid.indices = {0, 1, 2};
+        state->meshes.emplace(mesh_id.value, valid);
+        const auto mesh_body = convert.mesh_to_brep(mesh_id);
+        if (!mesh_body.value) return false;
+        valid = state->meshes.at(mesh_id.value);
+        options.write_mesh_validation_report = true;
+        for (int variant = 0; variant < 8; ++variant) {
+            auto damaged = valid;
+            switch (variant) {
+                case 0: damaged.vertices.clear(); break;
+                case 1: damaged.indices.clear(); break;
+                case 2: damaged.indices = {0, 1}; break;
+                case 3: damaged.indices = {0, 1, 3}; break;
+                case 4: damaged.vertices[0].x = std::numeric_limits<double>::infinity(); break;
+                case 5: damaged.vertices[0].y = std::numeric_limits<double>::quiet_NaN(); break;
+                case 6: damaged.indices = {0, 0, 2}; break;
+                case 7: damaged.vertices[0].x = 1e100; break;
+            }
+            if (variant == 7 && std::string(format.name) != "gltf") continue;
+            state->meshes.at(mesh_id.value) = damaged;
+            // Strict QA retains its published error code and stage for triangle/index failures.
+            options.compatibility_mode = false;
+            const bool qa_failure = variant == 0 || variant == 2 || variant == 3 || variant == 6;
+            if (!check_failure(*mesh_body.value, sentinel_path,
+                               qa_failure ? axiom::StatusCode::OperationFailed : axiom::StatusCode::InvalidInput,
+                               qa_failure ? axiom::diag_codes::kIoExportMeshStrictQaFailed
+                                          : axiom::diag_codes::kIoExportFailure,
+                               qa_failure ? "io.export.mesh_strict_qa" : prefix + "mesh")) return false;
+            options.compatibility_mode = true;
+            if (variant != 6) {
+                if (!check_failure(*mesh_body.value, sentinel_path, axiom::StatusCode::InvalidInput,
+                                   axiom::diag_codes::kIoExportFailure, prefix + "mesh")) return false;
+            } else {
+                // Compatibility still permits degenerate triangles, as documented.
+                if ((io.*format.export_file)(*mesh_body.value, output.string(), options).status !=
+                    axiom::StatusCode::Ok) return false;
+                std::filesystem::remove(output);
+                std::filesystem::remove(sidecar);
+            }
+        }
+        state->meshes.at(mesh_id.value) = valid;
+        options.compatibility_mode = false;
+        if ((io.*format.export_file)(*mesh_body.value, output.string(), options).status != axiom::StatusCode::Ok) {
+            return false;
+        }
+        std::filesystem::remove(output);
+        std::filesystem::remove(sidecar);
+    }
+    std::filesystem::remove_all(root);
+    return true;
 }
 
 }  // namespace
@@ -106,6 +356,11 @@ int main() {
     const auto out_json_path = tmp / ("axiom_io_workflow_test_" + uniq + ".axmjson");
     const auto out_gltf_path = tmp / ("axiom_io_workflow_test_" + uniq + ".gltf");
     const auto out_stl_path = tmp / ("axiom_io_workflow_test_" + uniq + ".stl");
+
+    if (!check_mesh_export_failure_package(tmp / ("axiom_mesh_export_" + uniq))) {
+        std::cerr << "mesh export failure package regression failed\n";
+        return 1;
+    }
 
     axiom::ExportOptions export_options;
 

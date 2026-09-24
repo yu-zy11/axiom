@@ -765,40 +765,51 @@ Result<void> IOService::export_brep(BodyId body_id, std::string_view path, const
 
 Result<void> IOService::export_obj(BodyId body_id, std::string_view path, const ExportOptions& options) {
     if (!detail::has_body(*state_, body_id) || path.empty()) {
-        return detail::invalid_input_void(
-            *state_, diag_codes::kIoExportFailure,
-            "OBJ 导出失败：目标实体不存在或输出路径为空", "OBJ 导出失败");
+        return detail::failed_void(
+            *state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
+            "OBJ 导出失败：目标实体不存在或输出路径为空", "OBJ 导出失败", {body_id.value}, "io.export.obj.input");
     }
     const auto ensured = ensure_parent_directory(path);
-    if (ensured.status != StatusCode::Ok) return ensured;
+    if (ensured.status != StatusCode::Ok) {
+        return bind_mesh_export_failure(*state_, ensured, body_id, "io.export.obj.path");
+    }
     const auto wx_obj = reject_if_export_directory_not_writable(*state_, path);
-    if (wx_obj.status != StatusCode::Ok) return wx_obj;
+    if (wx_obj.status != StatusCode::Ok) {
+        return bind_mesh_export_failure(*state_, wx_obj, body_id, "io.export.obj.path");
+    }
 
+    MeshExportRollback rollback {*state_};
     RepresentationConversionService convert {state_};
     const auto mesh_id = convert.brep_to_mesh(body_id, TessellationOptions{});
     if (mesh_id.status != StatusCode::Ok || !mesh_id.value.has_value()) {
-        return error_void(mesh_id.status, mesh_id.diagnostic_id);
+        return bind_mesh_export_failure(*state_, error_void(mesh_id.status, mesh_id.diagnostic_id),
+                                        body_id, "io.export.obj.convert");
     }
     const auto strict_gate = mesh_export_strict_gate(*state_, convert, *mesh_id.value, options, body_id);
     if (strict_gate.status != StatusCode::Ok) {
-        return strict_gate;
+        return bind_mesh_export_failure(*state_, strict_gate, body_id, "io.export.mesh_strict_qa");
     }
     const auto mesh_it = state_->meshes.find(mesh_id.value->value);
     if (mesh_it == state_->meshes.end()) {
         return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
-                                   "OBJ 导出失败：网格记录不存在", "OBJ 导出失败");
+                                   "OBJ 导出失败：网格记录不存在", "OBJ 导出失败", {body_id.value}, "io.export.obj.mesh");
     }
     const auto& mesh = mesh_it->second;
-    if (mesh.vertices.empty() || mesh.indices.empty() || (mesh.indices.size() % 3) != 0) {
-        return detail::invalid_input_void(*state_, diag_codes::kIoExportFailure, "OBJ 导出失败：网格数据无效",
-                                          "OBJ 导出失败");
+    if (mesh.vertices.empty() || mesh.indices.empty() || (mesh.indices.size() % 3) != 0 ||
+        detail::has_out_of_range_indices(mesh.vertices, mesh.indices) ||
+        std::any_of(mesh.vertices.begin(), mesh.vertices.end(), [](const Point3& point) {
+            return !std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z);
+        })) {
+        return detail::failed_void(*state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
+                                   "OBJ 导出失败：网格数据无效", "OBJ 导出失败", {body_id.value},
+                                   "io.export.obj.mesh");
     }
 
     std::ofstream out {std::string(path)};
     if (!out) {
         return detail::failed_void(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
-            "OBJ 导出失败：无法打开输出文件", "OBJ 导出失败");
+            "OBJ 导出失败：无法打开输出文件", "OBJ 导出失败", {body_id.value}, "io.export.obj.open");
     }
     out << "# AxiomKernel OBJ\n";
     out << "o axiom_body_" << body_id.value << "\n";
@@ -812,36 +823,62 @@ Result<void> IOService::export_obj(BodyId body_id, std::string_view path, const 
         const auto c = static_cast<std::size_t>(mesh.indices[i + 2]) + 1;
         out << "f " << a << " " << b << " " << c << "\n";
     }
+    out.flush();
+    out.close();
+    if (!out) {
+        return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+                                   "OBJ 导出失败：写入输出文件失败", "OBJ 导出失败", {body_id.value},
+                                   "io.export.obj.write");
+    }
     const auto sidecar = mesh_export_write_validation_sidecar(*state_, convert, *mesh_id.value, path, options);
+    if (sidecar.status != StatusCode::Ok) {
+        return bind_mesh_export_failure(*state_, sidecar, body_id, "io.export.obj.sidecar");
+    }
+    rollback.completed = true;
     return merge_mesh_export_sidecar_summary(*state_, sidecar, "已导出OBJ模型");
 }
 
 Result<void> IOService::export_3mf(BodyId body_id, std::string_view path, const ExportOptions& options) {
     if (!detail::has_body(*state_, body_id) || path.empty()) {
-        return detail::invalid_input_void(
-            *state_, diag_codes::kIoExportFailure,
-            "3MF 导出失败：目标实体不存在或输出路径为空", "3MF 导出失败");
+        return detail::failed_void(
+            *state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
+            "3MF 导出失败：目标实体不存在或输出路径为空", "3MF 导出失败", {body_id.value}, "io.export.3mf.input");
     }
     const auto ensured = ensure_parent_directory(path);
-    if (ensured.status != StatusCode::Ok) return ensured;
+    if (ensured.status != StatusCode::Ok) {
+        return bind_mesh_export_failure(*state_, ensured, body_id, "io.export.3mf.path");
+    }
     const auto wx_3mf = reject_if_export_directory_not_writable(*state_, path);
-    if (wx_3mf.status != StatusCode::Ok) return wx_3mf;
+    if (wx_3mf.status != StatusCode::Ok) {
+        return bind_mesh_export_failure(*state_, wx_3mf, body_id, "io.export.3mf.path");
+    }
 
+    MeshExportRollback rollback {*state_};
     RepresentationConversionService convert {state_};
     const auto mesh_id = convert.brep_to_mesh(body_id, TessellationOptions{});
     if (mesh_id.status != StatusCode::Ok || !mesh_id.value.has_value()) {
-        return error_void(mesh_id.status, mesh_id.diagnostic_id);
+        return bind_mesh_export_failure(*state_, error_void(mesh_id.status, mesh_id.diagnostic_id),
+                                        body_id, "io.export.3mf.convert");
     }
     const auto strict_gate = mesh_export_strict_gate(*state_, convert, *mesh_id.value, options, body_id);
     if (strict_gate.status != StatusCode::Ok) {
-        return strict_gate;
+        return bind_mesh_export_failure(*state_, strict_gate, body_id, "io.export.mesh_strict_qa");
     }
     const auto mesh_it = state_->meshes.find(mesh_id.value->value);
     if (mesh_it == state_->meshes.end()) {
         return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
-                                   "3MF 导出失败：网格记录不存在", "3MF 导出失败");
+                                   "3MF 导出失败：网格记录不存在", "3MF 导出失败", {body_id.value}, "io.export.3mf.mesh");
     }
     const auto& mesh = mesh_it->second;
+    if (mesh.vertices.empty() || mesh.indices.empty() || (mesh.indices.size() % 3) != 0 ||
+        detail::has_out_of_range_indices(mesh.vertices, mesh.indices) ||
+        std::any_of(mesh.vertices.begin(), mesh.vertices.end(), [](const Point3& point) {
+            return !std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z);
+        })) {
+        return detail::failed_void(*state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
+                                   "3MF 导出失败：网格数据无效", "3MF 导出失败", {body_id.value},
+                                   "io.export.3mf.mesh");
+    }
 
     const std::string model_xml = build_3mf_model_xml_from_mesh(mesh);
     std::vector<std::uint8_t> model_bytes(model_xml.begin(), model_xml.end());
@@ -870,53 +907,76 @@ Result<void> IOService::export_3mf(BodyId body_id, std::string_view path, const 
     if (!out) {
         return detail::failed_void(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
-            "3MF 导出失败：无法打开输出文件", "3MF 导出失败");
+            "3MF 导出失败：无法打开输出文件", "3MF 导出失败", {body_id.value}, "io.export.3mf.open");
     }
     out.write(reinterpret_cast<const char*>(zip_bytes.data()),
               static_cast<std::streamsize>(zip_bytes.size()));
+    out.flush();
+    out.close();
     if (!out) {
-        return detail::failed_void(
-            *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
-            "3MF 导出失败：写入失败", "3MF 导出失败");
+        return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+                                   "3MF 导出失败：写入输出文件失败", "3MF 导出失败", {body_id.value},
+                                   "io.export.3mf.write");
     }
     const auto sidecar = mesh_export_write_validation_sidecar(*state_, convert, *mesh_id.value, path, options);
+    if (sidecar.status != StatusCode::Ok) {
+        return bind_mesh_export_failure(*state_, sidecar, body_id, "io.export.3mf.sidecar");
+    }
+    rollback.completed = true;
     return merge_mesh_export_sidecar_summary(*state_, sidecar, "已导出3MF模型");
 }
 
 Result<void> IOService::export_gltf(BodyId body_id, std::string_view path, const ExportOptions& options) {
     if (!detail::has_body(*state_, body_id) || path.empty()) {
-        return detail::invalid_input_void(
-            *state_, diag_codes::kIoExportFailure,
-            "glTF 导出失败：目标实体不存在或输出路径为空", "glTF 导出失败");
+        return detail::failed_void(
+            *state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
+            "glTF 导出失败：目标实体不存在或输出路径为空", "glTF 导出失败", {body_id.value}, "io.export.gltf.input");
     }
     const auto ensured = ensure_parent_directory(path);
-    if (ensured.status != StatusCode::Ok) return ensured;
+    if (ensured.status != StatusCode::Ok) {
+        return bind_mesh_export_failure(*state_, ensured, body_id, "io.export.gltf.path");
+    }
     const auto wx_gltf = reject_if_export_directory_not_writable(*state_, path);
-    if (wx_gltf.status != StatusCode::Ok) return wx_gltf;
+    if (wx_gltf.status != StatusCode::Ok) {
+        return bind_mesh_export_failure(*state_, wx_gltf, body_id, "io.export.gltf.path");
+    }
 
+    MeshExportRollback rollback {*state_};
     RepresentationConversionService convert {state_};
     const auto mesh_id = convert.brep_to_mesh(body_id, TessellationOptions{});
     if (mesh_id.status != StatusCode::Ok || !mesh_id.value.has_value()) {
-        return error_void(mesh_id.status, mesh_id.diagnostic_id);
+        return bind_mesh_export_failure(*state_, error_void(mesh_id.status, mesh_id.diagnostic_id),
+                                        body_id, "io.export.gltf.convert");
     }
     const auto strict_gate = mesh_export_strict_gate(*state_, convert, *mesh_id.value, options, body_id);
     if (strict_gate.status != StatusCode::Ok) {
-        return strict_gate;
+        return bind_mesh_export_failure(*state_, strict_gate, body_id, "io.export.mesh_strict_qa");
     }
 
     const auto mesh_it = state_->meshes.find(mesh_id.value->value);
     if (mesh_it == state_->meshes.end()) {
         return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
-                                   "glTF 导出失败：网格记录不存在", "glTF 导出失败");
+                                   "glTF 导出失败：网格记录不存在", "glTF 导出失败", {body_id.value}, "io.export.gltf.mesh");
     }
     const auto& mesh = mesh_it->second;
-    if (mesh.vertices.empty()) {
-        return detail::invalid_input_void(*state_, diag_codes::kIoExportFailure,
-                                          "glTF 导出失败：网格顶点为空", "glTF 导出失败");
+    if (mesh.vertices.empty() || mesh.indices.empty() || (mesh.indices.size() % 3) != 0 ||
+        detail::has_out_of_range_indices(mesh.vertices, mesh.indices) ||
+        std::any_of(mesh.vertices.begin(), mesh.vertices.end(), [](const Point3& point) {
+            return !std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z);
+        })) {
+        return detail::failed_void(*state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
+                                   "glTF 导出失败：网格数据无效", "glTF 导出失败", {body_id.value},
+                                   "io.export.gltf.mesh");
     }
-    if (!mesh.indices.empty() && (mesh.indices.size() % 3) != 0) {
-        return detail::invalid_input_void(*state_, diag_codes::kIoExportFailure,
-                                          "glTF 导出失败：网格索引数量非法", "glTF 导出失败");
+
+    const auto float_limit = static_cast<Scalar>(std::numeric_limits<float>::max());
+    if (std::any_of(mesh.vertices.begin(), mesh.vertices.end(), [float_limit](const Point3& point) {
+            return std::abs(point.x) > float_limit || std::abs(point.y) > float_limit ||
+                   std::abs(point.z) > float_limit;
+        })) {
+        return detail::failed_void(*state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
+                                   "glTF 导出失败：坐标超出 float32 范围", "glTF 导出失败", {body_id.value},
+                                   "io.export.gltf.mesh");
     }
 
     std::vector<std::uint8_t> buffer;
@@ -955,7 +1015,7 @@ Result<void> IOService::export_gltf(BodyId body_id, std::string_view path, const
     if (!out) {
         return detail::failed_void(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
-            "glTF 导出失败：无法打开输出文件", "glTF 导出失败");
+            "glTF 导出失败：无法打开输出文件", "glTF 导出失败", {body_id.value}, "io.export.gltf.open");
     }
 
     const auto vertex_count = static_cast<std::uint64_t>(mesh.vertices.size());
@@ -981,50 +1041,68 @@ Result<void> IOService::export_gltf(BodyId body_id, std::string_view path, const
     out << "]";
     out << "}";
 
+    out.flush();
+    out.close();
+    if (!out) {
+        return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+                                   "glTF 导出失败：写入输出文件失败", "glTF 导出失败", {body_id.value},
+                                   "io.export.gltf.write");
+    }
     const auto sidecar = mesh_export_write_validation_sidecar(*state_, convert, *mesh_id.value, path, options);
+    if (sidecar.status != StatusCode::Ok) {
+        return bind_mesh_export_failure(*state_, sidecar, body_id, "io.export.gltf.sidecar");
+    }
+    rollback.completed = true;
     return merge_mesh_export_sidecar_summary(*state_, sidecar, "已导出glTF模型");
 }
 
 Result<void> IOService::export_stl(BodyId body_id, std::string_view path, const ExportOptions& options) {
     if (!detail::has_body(*state_, body_id) || path.empty()) {
-        return detail::invalid_input_void(
-            *state_, diag_codes::kIoExportFailure,
-            "STL 导出失败：目标实体不存在或输出路径为空", "STL 导出失败");
+        return detail::failed_void(
+            *state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
+            "STL 导出失败：目标实体不存在或输出路径为空", "STL 导出失败", {body_id.value}, "io.export.stl.input");
     }
     const auto ensured = ensure_parent_directory(path);
-    if (ensured.status != StatusCode::Ok) return ensured;
+    if (ensured.status != StatusCode::Ok) {
+        return bind_mesh_export_failure(*state_, ensured, body_id, "io.export.stl.path");
+    }
     const auto wx_stl = reject_if_export_directory_not_writable(*state_, path);
-    if (wx_stl.status != StatusCode::Ok) return wx_stl;
+    if (wx_stl.status != StatusCode::Ok) {
+        return bind_mesh_export_failure(*state_, wx_stl, body_id, "io.export.stl.path");
+    }
 
+    MeshExportRollback rollback {*state_};
     RepresentationConversionService convert {state_};
     const auto mesh_id = convert.brep_to_mesh(body_id, TessellationOptions{});
     if (mesh_id.status != StatusCode::Ok || !mesh_id.value.has_value()) {
-        return error_void(mesh_id.status, mesh_id.diagnostic_id);
+        return bind_mesh_export_failure(*state_, error_void(mesh_id.status, mesh_id.diagnostic_id),
+                                        body_id, "io.export.stl.convert");
     }
     const auto strict_gate = mesh_export_strict_gate(*state_, convert, *mesh_id.value, options, body_id);
     if (strict_gate.status != StatusCode::Ok) {
-        return strict_gate;
+        return bind_mesh_export_failure(*state_, strict_gate, body_id, "io.export.mesh_strict_qa");
     }
     const auto mesh_it = state_->meshes.find(mesh_id.value->value);
     if (mesh_it == state_->meshes.end()) {
         return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
-                                   "STL 导出失败：网格记录不存在", "STL 导出失败");
+                                   "STL 导出失败：网格记录不存在", "STL 导出失败", {body_id.value}, "io.export.stl.mesh");
     }
     const auto& mesh = mesh_it->second;
-    if (mesh.vertices.empty()) {
-        return detail::invalid_input_void(*state_, diag_codes::kIoExportFailure,
-                                          "STL 导出失败：网格顶点为空", "STL 导出失败");
-    }
-    if (mesh.indices.empty() || (mesh.indices.size() % 3) != 0) {
-        return detail::invalid_input_void(*state_, diag_codes::kIoExportFailure,
-                                          "STL 导出失败：网格索引为空或数量非法", "STL 导出失败");
+    if (mesh.vertices.empty() || mesh.indices.empty() || (mesh.indices.size() % 3) != 0 ||
+        detail::has_out_of_range_indices(mesh.vertices, mesh.indices) ||
+        std::any_of(mesh.vertices.begin(), mesh.vertices.end(), [](const Point3& point) {
+            return !std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z);
+        })) {
+        return detail::failed_void(*state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
+                                   "STL 导出失败：网格数据无效", "STL 导出失败", {body_id.value},
+                                   "io.export.stl.mesh");
     }
 
     std::ofstream out {std::string(path)};
     if (!out) {
         return detail::failed_void(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
-            "STL 导出失败：无法打开输出文件", "STL 导出失败");
+            "STL 导出失败：无法打开输出文件", "STL 导出失败", {body_id.value}, "io.export.stl.open");
     }
 
     out << "solid axiom\n";
@@ -1032,10 +1110,6 @@ Result<void> IOService::export_stl(BodyId body_id, std::string_view path, const 
         const auto i0 = static_cast<std::size_t>(mesh.indices[i]);
         const auto i1 = static_cast<std::size_t>(mesh.indices[i + 1]);
         const auto i2 = static_cast<std::size_t>(mesh.indices[i + 2]);
-        if (i0 >= mesh.vertices.size() || i1 >= mesh.vertices.size() || i2 >= mesh.vertices.size()) {
-            return detail::invalid_input_void(*state_, diag_codes::kIoExportFailure,
-                                              "STL 导出失败：网格索引超出顶点范围", "STL 导出失败");
-        }
         const auto& a = mesh.vertices[i0];
         const auto& b = mesh.vertices[i1];
         const auto& c = mesh.vertices[i2];
@@ -1053,7 +1127,18 @@ Result<void> IOService::export_stl(BodyId body_id, std::string_view path, const 
     }
     out << "endsolid axiom\n";
 
+    out.flush();
+    out.close();
+    if (!out) {
+        return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+                                   "STL 导出失败：写入输出文件失败", "STL 导出失败", {body_id.value},
+                                   "io.export.stl.write");
+    }
     const auto sidecar = mesh_export_write_validation_sidecar(*state_, convert, *mesh_id.value, path, options);
+    if (sidecar.status != StatusCode::Ok) {
+        return bind_mesh_export_failure(*state_, sidecar, body_id, "io.export.stl.sidecar");
+    }
+    rollback.completed = true;
     return merge_mesh_export_sidecar_summary(*state_, sidecar, "已导出STL模型");
 }
 

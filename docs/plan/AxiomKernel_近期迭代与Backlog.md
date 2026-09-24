@@ -12,6 +12,8 @@
 
 ### 2.1 `diag + ops`
 
+- **NFR-DIA-001 第 64 功能包（实现就绪，待统一验收）**：OBJ/STL/glTF/3MF 网格导出失败绑定 `io.export.<format>.input/path/convert/mesh/open/write/sidecar` 与输入 Body，严格 QA 保留 `io.export.mesh_strict_qa`。主文件和侧车均检查最终写入/关闭状态；失败回滚本次三角化新增网格、ID、体/面缓存及统计，保留已有网格。兼容模式继续允许退化三角形，但在打开目标前拒绝空网格、非法索引、非有限坐标；glTF 另拒绝超出 float32 范围的坐标。`axiom_io_workflow_test` 新增四格式 × 严格/兼容 × 侧车开关、诊断检索/JSON、冷/热/失效缓存、退化、参数失败文件保护、Linux `/dev/full` 主文件及侧车失败、重试和重新导入回归。复用现有错误码，无公开签名变化；故障修复复现并修正 9 处诊断辅助函数调用不匹配，复用 `failed_void` 保留 `InvalidInput`、Body 和阶段；补齐回归拉伸夹具必需的轮廓标签。build-agent 完整构建通过，`axiom_io_workflow_test`、`axiom_io_dataset_test`、`axiom_representation_io_test`、`axiom_diagnostics_test` 均已有通过结果（IO 工作流在夹具修复后单独复验通过）；待调度器统一验收。设备写入失败不保证恢复文件，侧车失败时主文件可能已完整写出；不扩大格式或三角化精度承诺，需求保持受限可用。
+
 - **FR-DIAG-001 第 58 切片**：严重级别检索在限额前按 `DiagnosticId` 升序排序；`report_ids_by_severity` 继承相同语义。`axiom_diagnostics_test` 覆盖限额、重复 issue、空报告/空结果、非法参数、源报告不污染及重试。需求保持受限可用；下一步继续补齐 BOOL/HEAL/IO 重量级流程的阶段、实体和数值证据。
 
 - **FR-OPS-001 第 62 功能包（待统一验收）**：第 62 包实现折线导轨固定方向平移扫掠，复用凸/凹及带孔轮廓剖分；共享折点截面、仅首尾端盖、真实闭壳面边体与邻接、全路径 bbox 及质量积分。新增 192 组两点/多折点/共线中间点、绕向/孔序/反向/倾斜平面模型集及分段解析体积/面积/质心/惯性、Strict/网格、退化与失败不污染/回滚重试回归。实现与回归就绪，本轮未运行构建或测试，待调度器在 build-agent 独立完整验收；FR-OPS-001 保持进行中。每段须沿截面法向严格同向推进；不支持回退/切向/闭合导轨或旋转截面，圆弧/样条真实扫掠、精确旋转及带孔旋转/放样仍待实现，无显式轮廓仍为占位。
