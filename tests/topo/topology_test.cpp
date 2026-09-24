@@ -14,6 +14,7 @@
 
 #include "axiom/diag/error_codes.h"
 #include "axiom/sdk/kernel.h"
+#include "../../src/axiom/internal/core/kernel_state.h"
 
 namespace {
 
@@ -57,6 +58,53 @@ int main() {
     static_assert(!std::is_move_assignable_v<axiom::TopologyTransaction>);
     static_assert(std::is_nothrow_destructible_v<axiom::TopologyTransaction>);
     axiom::Kernel kernel;
+
+    // NFR-REL-001: a body rejected for an incomplete shell must not consume an entity ID.
+    // Inject the damaged shell at the store boundary because normal topology creation
+    // prevents this state; the transaction must still reject it without side effects.
+    {
+        auto state = std::make_shared<axiom::detail::KernelState>(axiom::KernelConfig{});
+        const axiom::ShellId damaged_shell{state->allocate_id()};
+        state->shells.emplace(damaged_shell.value, axiom::detail::ShellRecord{});
+        axiom::TopologyService topology{state};
+        axiom::DiagnosticService diagnostics{state};
+        auto txn = topology.begin_transaction();
+        const auto next_id = state->next_id;
+        const std::array<axiom::ShellId, 1> damaged_input{damaged_shell};
+        const auto rejected = txn.create_body(damaged_input);
+        const auto report = diagnostics.get(rejected.diagnostic_id);
+        if (rejected.status != axiom::StatusCode::InvalidTopology || rejected.value ||
+            !report.value || !has_issue_code(*report.value, axiom::diag_codes::kTopoShellNotClosed) ||
+            state->next_id != next_id || !state->bodies.empty() ||
+            txn.created_body_count().value != std::optional<std::uint64_t>{0} ||
+            txn.write_operation_count().value != std::optional<std::uint64_t>{0}) {
+            std::cerr << "failed body creation consumed an ID or changed transaction state\n";
+            return 1;
+        }
+        const auto path = std::filesystem::temp_directory_path() / "axiom_topo_body_bbox_failure.json";
+        if (diagnostics.export_report_json(rejected.diagnostic_id, path.string()).status != axiom::StatusCode::Ok) {
+            return 1;
+        }
+        std::ifstream input(path);
+        const std::string json((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+        input.close();
+        std::filesystem::remove(path);
+        if (json.find(axiom::diag_codes::kTopoShellNotClosed) == std::string::npos) return 1;
+
+        const auto missing = txn.create_body(std::array<axiom::ShellId, 1>{axiom::ShellId{next_id + 1}});
+        if (missing.status != axiom::StatusCode::InvalidInput || state->next_id != next_id ||
+            txn.write_operation_count().value != std::optional<std::uint64_t>{0}) return 1;
+        const auto vertex = txn.create_vertex({1.0, 2.0, 3.0});
+        if (vertex.status != axiom::StatusCode::Ok || !vertex.value || vertex.value->value != next_id ||
+            txn.rollback().status != axiom::StatusCode::Ok ||
+            topology.query().has_vertex(*vertex.value).value != std::optional<bool>{false} ||
+            state->shells.count(damaged_shell.value) != 1 || !state->bodies.empty()) return 1;
+        auto retry = topology.begin_transaction();
+        const auto committed = retry.create_vertex({4.0, 5.0, 6.0});
+        if (committed.status != axiom::StatusCode::Ok || !committed.value ||
+            retry.commit().status != axiom::StatusCode::Ok ||
+            topology.query().has_vertex(*committed.value).value != std::optional<bool>{true}) return 1;
+    }
 
     // Non-finite vertex coordinates must fail before mutating topology or transaction tracking.
     {

@@ -413,7 +413,6 @@ TopologyTransaction::create_body(std::span<const ShellId> shells) {
         *state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
         "创建体失败：壳列表包含重复引用", "创建体失败");
   }
-  const auto id = BodyId{state_->allocate_id()};
   detail::BodyRecord record;
   record.kind = detail::BodyKind::Generic;
   record.rep_kind = RepKind::ExactBRep;
@@ -450,6 +449,7 @@ TopologyTransaction::create_body(std::span<const ShellId> shells) {
         "创建体失败：无法从输入壳推导有效包围盒，拓扑引用可能不完整",
         "创建体失败");
   }
+  const auto id = BodyId{state_->allocate_id()};
   state_->bodies.emplace(id.value, record);
   created_bodies_.push_back(id.value);
   rebuild_topology_indices(*state_);
