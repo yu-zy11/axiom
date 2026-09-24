@@ -18,6 +18,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import threading
 import time
 from datetime import UTC, datetime
 from dataclasses import dataclass
@@ -62,8 +63,14 @@ def run(
     stdin: str | None = None,
     timeout: int | None = None,
     capture: bool = False,
+    stream: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a command without a shell and enforce an optional timeout."""
+    """Run a command without a shell and enforce an optional timeout.
+
+    When ``stream`` is enabled, captured stdout and stderr are also forwarded to
+    this process in real time while remaining available to callers for logging
+    and error reports.
+    """
     try:
         with subprocess.Popen(
             list(command), cwd=cwd, text=True, start_new_session=True,
@@ -71,6 +78,60 @@ def run(
             stdout=subprocess.PIPE if capture else None,
             stderr=subprocess.PIPE if capture else None,
         ) as process:
+            if capture and stream:
+                if process.stdin is not None:
+                    try:
+                        process.stdin.write(stdin or "")
+                        process.stdin.close()
+                    except BrokenPipeError:
+                        pass
+
+                stdout_chunks: list[str] = []
+                stderr_chunks: list[str] = []
+
+                def forward(source: Any, destination: Any, chunks: list[str]) -> None:
+                    for line in iter(source.readline, ""):
+                        chunks.append(line)
+                        destination.write(line)
+                        destination.flush()
+                    source.close()
+
+                readers = [
+                    threading.Thread(
+                        target=forward,
+                        args=(process.stdout, sys.stdout, stdout_chunks),
+                        daemon=True,
+                    ),
+                    threading.Thread(
+                        target=forward,
+                        args=(process.stderr, sys.stderr, stderr_chunks),
+                        daemon=True,
+                    ),
+                ]
+                for reader in readers:
+                    reader.start()
+                try:
+                    process.wait(timeout=timeout)
+                except subprocess.TimeoutExpired as exc:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait()
+                    for reader in readers:
+                        reader.join()
+                    output = "".join(stdout_chunks + stderr_chunks)
+                    raise RunnerError(
+                        f"command timed out after {timeout}s: {shlex.join(command)}\n{output[-4000:]}"
+                    ) from exc
+                for reader in readers:
+                    reader.join()
+                return subprocess.CompletedProcess(
+                    list(command),
+                    process.returncode,
+                    "".join(stdout_chunks),
+                    "".join(stderr_chunks),
+                )
             try:
                 stdout, stderr = process.communicate(stdin, timeout=timeout)
             except subprocess.TimeoutExpired as exc:
@@ -331,7 +392,7 @@ def relevant_tests(module: str, config: dict[str, Any]) -> list[str]:
 
 
 def execute_gate(command: Sequence[str], log_file: Path) -> None:
-    result = run(command, capture=True)
+    result = run(command, capture=True, stream=True)
     output = (result.stdout or "") + (result.stderr or "")
     log_file.parent.mkdir(parents=True, exist_ok=True)
     with log_file.open("a", encoding="utf-8") as stream:
@@ -464,6 +525,7 @@ def main() -> int:
                     stdin=prompt,
                     timeout=int(config["agent_timeout_seconds"]),
                     capture=True,
+                    stream=True,
                 )
                 output = (result.stdout or "") + (result.stderr or "")
                 LOG_DIR.mkdir(parents=True, exist_ok=True)

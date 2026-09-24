@@ -278,6 +278,45 @@ int main() {
         std::cerr << "unexpected ellipse closest_parameter normalization\n";
         return 1;
     }
+    // Ellipse closest_parameter must minimize Euclidean distance, rather than
+    // returning the polar angle of the scaled query coordinates.  A point
+    // displaced along the ellipse normal has the known closest parameter t0.
+    {
+        const double t0 = 0.8;
+        const axiom::Point3 on_ellipse{2.0 * std::cos(t0), 3.0 * std::sin(t0), 0.0};
+        axiom::Vec3 normal{std::cos(t0) / 2.0, std::sin(t0) / 3.0, 0.0};
+        const double normal_length = std::hypot(normal.x, normal.y);
+        normal.x /= normal_length;
+        normal.y /= normal_length;
+        const axiom::Point3 query{on_ellipse.x + 0.25 * normal.x,
+                                  on_ellipse.y + 0.25 * normal.y, 0.0};
+        const auto closest_t = kernel.curve_service().closest_parameter(*ellipse.value, query);
+        const auto closest_p = kernel.curve_service().closest_point(*ellipse.value, query);
+        if (!closest_t.value || !closest_p.value || !approx(*closest_t.value, t0, 1e-7) ||
+            !approx(closest_p.value->x, on_ellipse.x, 1e-7) ||
+            !approx(closest_p.value->y, on_ellipse.y, 1e-7)) {
+            std::cerr << "ellipse closest point did not minimize Euclidean distance\n";
+            return 1;
+        }
+        const auto count_before = kernel.geometry_count();
+        const auto cache_before = kernel.cache_entry_count();
+        const auto failed = kernel.curve_service().closest_parameter(
+            *ellipse.value, {std::numeric_limits<double>::infinity(), 0.0, 0.0});
+        const auto code = kernel.diagnostics().has_issue_code(
+            failed.diagnostic_id, "AXM-CORE-E-0002");
+        if (failed.status != axiom::StatusCode::InvalidInput || failed.value ||
+            !code.value || !*code.value || kernel.geometry_count().value != count_before.value ||
+            kernel.cache_entry_count().value != cache_before.value) {
+            std::cerr << "invalid ellipse closest query must fail without pollution\n";
+            return 1;
+        }
+        const auto seam = kernel.curve_service().closest_parameter(*ellipse.value, {2.25, 0.0, 0.0});
+        if (!seam.value || *seam.value < 0.0 || *seam.value >= 2.0 * std::acos(-1.0) ||
+            !approx(*seam.value, 0.0, 1e-10)) {
+            std::cerr << "ellipse closest parameter must remain normalized at seam\n";
+            return 1;
+        }
+    }
 
     auto tilted_ellipse =
         kernel.curves().make_ellipse({0.0, 0.0, 0.0}, {0.0, 2.0, 0.0}, {0.0, 0.0, 3.0});

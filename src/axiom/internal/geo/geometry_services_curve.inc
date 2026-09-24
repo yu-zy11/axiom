@@ -413,15 +413,6 @@ Result<Scalar> CurveService::closest_parameter(CurveId curve_id,
     return ok_result<Scalar>(normalize_angle_0_2pi(std::atan2(pv, pu)),
                              state_->create_diagnostic("曲线最近参数已求解"));
   }
-  case detail::CurveKind::Ellipse: {
-    const auto rel = detail::subtract(point, curve.origin);
-    const auto pu = detail::dot(rel, curve.axis_u) /
-                    std::max(detail::dot(curve.axis_u, curve.axis_u), 1e-12);
-    const auto pv = detail::dot(rel, curve.axis_v) /
-                    std::max(detail::dot(curve.axis_v, curve.axis_v), 1e-12);
-    return ok_result<Scalar>(normalize_angle_0_2pi(std::atan2(pv, pu)),
-                             state_->create_diagnostic("曲线最近参数已求解"));
-  }
   default:
     break;
   }
@@ -429,6 +420,7 @@ Result<Scalar> CurveService::closest_parameter(CurveId curve_id,
   if (curve.kind == detail::CurveKind::Bezier ||
       curve.kind == detail::CurveKind::BSpline ||
       curve.kind == detail::CurveKind::Nurbs ||
+      curve.kind == detail::CurveKind::Ellipse ||
       curve.kind == detail::CurveKind::Parabola ||
       curve.kind == detail::CurveKind::Hyperbola ||
       curve.kind == detail::CurveKind::CompositePolyline) {
@@ -496,7 +488,10 @@ Result<Scalar> CurveService::closest_parameter(CurveId curve_id,
         break;
       }
     }
-    return ok_result<Scalar>(std::clamp(t, domain.min, domain.max),
+    const auto result_t = curve.kind == detail::CurveKind::Ellipse
+                              ? normalize_angle_0_2pi(t)
+                              : std::clamp(t, domain.min, domain.max);
+    return ok_result<Scalar>(result_t,
                              state_->create_diagnostic("曲线最近参数已求解"));
   }
 
