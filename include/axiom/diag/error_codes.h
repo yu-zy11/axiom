@@ -41,6 +41,7 @@ inline constexpr std::string_view kTopoDanglingVertex = "AXM-TOPO-E-0020";
 inline constexpr std::string_view kTopoOrphanLoop = "AXM-TOPO-E-0021";
 inline constexpr std::string_view kTopoOrphanFace = "AXM-TOPO-E-0022";
 inline constexpr std::string_view kTopoLoopRepeatedVertex = "AXM-TOPO-E-0023";
+inline constexpr std::string_view kTopoFaceSharedBoundaryVertex = "AXM-TOPO-E-0024";
 
 inline constexpr std::string_view kBoolInvalidInput = "AXM-BOOL-E-0001";
 inline constexpr std::string_view kBoolIntersectionFailure = "AXM-BOOL-E-0003";

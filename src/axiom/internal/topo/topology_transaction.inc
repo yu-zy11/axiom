@@ -321,6 +321,14 @@ TopologyTransaction::create_face(SurfaceId surface_id, LoopId outer_loop,
       }
     }
   }
+  if (const auto shared = face_cross_loop_shared_vertex(*state_, outer_loop,
+                                                        inner_loops)) {
+    return detail::failed_result<FaceId>(
+        *state_, StatusCode::InvalidTopology,
+        diag_codes::kTopoFaceSharedBoundaryVertex,
+        "创建面失败：不同边界环共用同一拓扑顶点", "创建面失败",
+        {(*shared)[0], (*shared)[1], (*shared)[2]});
+  }
   const auto id = FaceId{state_->allocate_id()};
   detail::FaceRecord face_record;
   face_record.surface_id = surface_id;

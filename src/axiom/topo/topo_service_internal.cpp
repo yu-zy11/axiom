@@ -284,6 +284,32 @@ bool valid_face_bound_loop_size(const detail::KernelState &state,
          e0->second.curve_id.value == e1->second.curve_id.value;
 }
 
+std::optional<std::array<std::uint64_t, 3>>
+face_cross_loop_shared_vertex(const detail::KernelState &state, LoopId outer_loop,
+                              std::span<const LoopId> inner_loops) {
+  std::unordered_map<std::uint64_t, LoopId> vertex_loops;
+  for (std::size_t i = 0; i <= inner_loops.size(); ++i) {
+    const auto loop_id = i == 0 ? outer_loop : inner_loops[i - 1];
+    const auto loop_it = state.loops.find(loop_id.value);
+    if (loop_it == state.loops.end()) {
+      continue;  // The caller validates loop handles first.
+    }
+    for (const auto coedge_id : loop_it->second.coedges) {
+      const auto vertices = oriented_vertices(state, coedge_id);
+      if (!vertices.has_value()) {
+        continue;  // The caller validates loop records first.
+      }
+      const auto vertex_value = (*vertices)[0].value;
+      const auto [it, inserted] = vertex_loops.emplace(vertex_value, loop_id);
+      if (!inserted && it->second.value != loop_id.value) {
+        return std::array<std::uint64_t, 3>{it->second.value, loop_id.value,
+                                            vertex_value};
+      }
+    }
+  }
+  return std::nullopt;
+}
+
 bool face_record_references_loop(const detail::FaceRecord &face,
                                  std::uint64_t loop_value) {
   if (face.outer_loop.value == loop_value) {

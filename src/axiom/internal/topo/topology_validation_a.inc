@@ -1290,6 +1290,14 @@ Result<void> TopologyValidationService::validate_face(FaceId face_id) const {
       }
     }
   }
+  if (const auto shared = face_cross_loop_shared_vertex(
+          *state_, face_it->second.outer_loop, face_it->second.inner_loops)) {
+    return detail::failed_void(
+        *state_, StatusCode::InvalidTopology,
+        diag_codes::kTopoFaceSharedBoundaryVertex,
+        "面验证失败：不同边界环共用同一拓扑顶点", "面验证失败",
+        {face_id.value, (*shared)[0], (*shared)[1], (*shared)[2]});
+  }
 
   // Planar faces without PCurve trim: (1) outer 3D winding must align with Surface normal
   // (Newell vs plane normal). (2) With holes, outer/inner signed areas in plane basis must

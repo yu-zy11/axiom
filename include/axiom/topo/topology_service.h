@@ -127,6 +127,7 @@ public:
     Result<LoopId> create_loop(std::span<const CoedgeId> coedges);
     /// 已绑定面的外/内环至少三条共边；同曲线双弧环除外。边数不足分别返回 AXM-TOPO-E-0003/0004。
     /// 同一面各环不得复用 EdgeId；失败返回 InvalidTopology / AXM-TOPO-E-0014，不写入模型。
+    /// 不同边界环不得共用 VertexId；失败返回 InvalidTopology / AXM-TOPO-E-0024，不分配 FaceId。
     Result<FaceId> create_face(SurfaceId surface_id, LoopId outer_loop, std::span<const LoopId> inner_loops);
     Result<ShellId> create_shell(std::span<const FaceId> faces);
     Result<BodyId> create_body(std::span<const ShellId> shells);

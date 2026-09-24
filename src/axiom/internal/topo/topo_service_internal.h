@@ -79,6 +79,12 @@ bool validate_loop_id(const detail::KernelState &state, LoopId loop_id,
 bool valid_face_bound_loop_size(const detail::KernelState &state,
                                 const detail::LoopRecord &loop);
 
+// Returns the two loop IDs and shared start vertex ID when distinct face
+// boundaries touch at a topological vertex.
+std::optional<std::array<std::uint64_t, 3>>
+face_cross_loop_shared_vertex(const detail::KernelState &state, LoopId outer_loop,
+                              std::span<const LoopId> inner_loops);
+
 bool face_record_references_loop(const detail::FaceRecord &face,
                                  std::uint64_t loop_value);
 

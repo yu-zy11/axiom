@@ -4366,6 +4366,99 @@ int main() {
         }
     }
 
+    // FR-TOPO-001: distinct face boundaries may not touch at a VertexId,
+    // even when they share no EdgeId.
+    {
+        auto state = std::make_shared<axiom::detail::KernelState>(axiom::KernelConfig{});
+        axiom::TopologyService topo{state};
+        axiom::DiagnosticService diagnostics{state};
+        axiom::SurfaceFactory surfaces{state};
+        axiom::CurveFactory curves{state};
+        const auto plane = surfaces.make_plane({0, 0, 0}, {0, 0, 1});
+        if (!plane.value) return 1;
+        auto txn = topo.begin_transaction();
+        const auto vertex = [&](axiom::Point3 point) { return txn.create_vertex(point).value; };
+        const auto a = vertex({0, 0, 0}), b = vertex({10, 0, 0}), c = vertex({0, 10, 0});
+        const auto d = vertex({1, 1, 0}), e = vertex({1, 2, 0}), f = vertex({2, 1, 0});
+        const auto g = vertex({3, 1, 0}), h = vertex({3, 2, 0}), i = vertex({4, 1, 0});
+        if (!a || !b || !c || !d || !e || !f || !g || !h || !i) return 1;
+        const auto triangle = [&](std::array<axiom::VertexId, 3> ids,
+                                  std::array<axiom::Point3, 3> points) -> std::optional<axiom::LoopId> {
+            std::array<axiom::CoedgeId, 3> coedges;
+            for (std::size_t n = 0; n < 3; ++n) {
+                const auto& p = points[n];
+                const auto& q = points[(n + 1) % 3];
+                const auto curve = curves.make_line(p, {q.x-p.x, q.y-p.y, q.z-p.z});
+                if (!curve.value) return {};
+                const auto edge = txn.create_edge(*curve.value, ids[n], ids[(n + 1) % 3]);
+                if (!edge.value) return {};
+                const auto coedge = txn.create_coedge(*edge.value, false);
+                if (!coedge.value) return {};
+                coedges[n] = *coedge.value;
+            }
+            return txn.create_loop(coedges).value;
+        };
+        const auto outer = triangle({*a, *b, *c}, {{{0, 0, 0}, {10, 0, 0}, {0, 10, 0}}});
+        const auto hole = triangle({*d, *e, *f}, {{{1, 1, 0}, {1, 2, 0}, {2, 1, 0}}});
+        const auto other = triangle({*g, *h, *i}, {{{3, 1, 0}, {3, 2, 0}, {4, 1, 0}}});
+        const auto touches_outer = triangle({*a, *d, *f}, {{{0, 0, 0}, {1, 1, 0}, {2, 1, 0}}});
+        const auto touches_hole = triangle({*d, *g, *i}, {{{1, 1, 0}, {3, 1, 0}, {4, 1, 0}}});
+        if (!outer || !hole || !other || !touches_outer || !touches_hole) return 1;
+        const auto count_before = state->next_id;
+        const auto writes_before = txn.write_operation_count().value;
+        for (const auto& rejected_input : {
+                 std::array<axiom::LoopId, 2>{*touches_outer, *other},
+                 std::array<axiom::LoopId, 2>{*hole, *touches_hole}}) {
+            const auto rejected = txn.create_face(*plane.value, *outer, rejected_input);
+            const auto report = diagnostics.get(rejected.diagnostic_id);
+            const auto expected_vertex = rejected_input[0].value == touches_outer->value ? a->value : d->value;
+            const auto expected_first_loop = rejected_input[0].value == touches_outer->value ? outer->value : hole->value;
+            const auto expected_second_loop = rejected_input[0].value == touches_outer->value ? touches_outer->value : touches_hole->value;
+            if (rejected.status != axiom::StatusCode::InvalidTopology || rejected.value ||
+                !report.value || !issue_links_entities(*report.value,
+                    axiom::diag_codes::kTopoFaceSharedBoundaryVertex,
+                    {expected_first_loop, expected_second_loop, expected_vertex}) ||
+                state->next_id != count_before || !state->faces.empty() ||
+                txn.write_operation_count().value != writes_before ||
+                txn.created_face_count().value != std::optional<std::uint64_t>{0}) {
+                std::cerr << "shared boundary vertex rejection polluted face transaction\n";
+                return 1;
+            }
+            const auto path = std::filesystem::temp_directory_path() / "axiom_topo_shared_boundary_vertex.json";
+            if (diagnostics.export_report_json(rejected.diagnostic_id, path.string()).status != axiom::StatusCode::Ok) return 1;
+            std::ifstream input(path);
+            const std::string json((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+            input.close();
+            std::filesystem::remove(path);
+            if (json.find(axiom::diag_codes::kTopoFaceSharedBoundaryVertex) == std::string::npos ||
+                json.find("related_entities") == std::string::npos) return 1;
+        }
+        const auto good = txn.create_face(*plane.value, *outer,
+            std::array<axiom::LoopId, 2>{*hole, *other});
+        if (!good.value || topo.validate().validate_face(*good.value).status != axiom::StatusCode::Ok) return 1;
+        // Inject a previously valid but now corrupted face boundary to exercise
+        // the read-only validator without changing the transaction write count.
+        state->faces.at(good.value->value).inner_loops[1] = *touches_hole;
+        state->loop_to_faces.erase(other->value);
+        state->loop_to_faces[touches_hole->value] = {good.value->value};
+        const auto writes_before_validation = txn.write_operation_count().value;
+        const auto invalid = topo.validate().validate_face(*good.value);
+        const auto invalid_report = diagnostics.get(invalid.diagnostic_id);
+        if (invalid.status != axiom::StatusCode::InvalidTopology || !invalid_report.value ||
+            !issue_links_entities(*invalid_report.value,
+                axiom::diag_codes::kTopoFaceSharedBoundaryVertex,
+                {good.value->value, hole->value, touches_hole->value, d->value}) ||
+            txn.write_operation_count().value != writes_before_validation) {
+            std::cerr << "face validator missed shared boundary vertex or changed transaction\n";
+            return 1;
+        }
+        if (txn.rollback().status != axiom::StatusCode::Ok ||
+            topo.query().has_face(*good.value).value != std::optional<bool>{false}) {
+            std::cerr << "valid disjoint face or rollback failed after vertex collision\n";
+            return 1;
+        }
+    }
+
     // ---- Stage 2+: PCurve trim -> underlying surface + Trimmed materialization (nested face surface) ----
     {
         auto plane = kernel.surfaces().make_plane({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0});
