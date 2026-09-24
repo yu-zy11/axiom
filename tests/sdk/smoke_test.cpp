@@ -1,6 +1,7 @@
 #include <iostream>
 #include <filesystem>
 #include <array>
+#include <cmath>
 #include <string>
 
 #include "axiom/diag/error_codes.h"
@@ -44,6 +45,24 @@ public:
 }  // namespace
 
 int main() {
+    {
+        axiom::Kernel feature_kernel;
+        axiom::ProfileRef triangle {"scaled_triangle", {{0,0,0}, {4,0,0}, {0,3,0}}};
+        const auto solid = feature_kernel.sweeps().extrude_scaled(triangle, {0,0,2}, 3, {0,0,0}, 0.5);
+        if (!solid.value || solid.status != axiom::StatusCode::Ok) {
+            std::cerr << "scaled extrusion facade failed\n";
+            return 1;
+        }
+        const auto faces = feature_kernel.topology().query().faces_of_body(*solid.value);
+        const auto edges = feature_kernel.topology().query().edges_of_body(*solid.value);
+        const auto mass = feature_kernel.query().mass_properties(*solid.value);
+        if (!faces.value || faces.value->size() != 8 || !edges.value || edges.value->size() != 12 ||
+            !mass.value || std::abs(mass.value->volume - 10.5) > 1e-9 ||
+            feature_kernel.validate().validate_all(*solid.value, axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok) {
+            std::cerr << "scaled extrusion topology/mass/validation failed\n";
+            return 1;
+        }
+    }
     axiom::Kernel kernel;
 
     auto box = kernel.primitives().box({0.0, 0.0, 0.0}, 10.0, 20.0, 30.0);

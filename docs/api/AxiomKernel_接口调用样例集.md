@@ -230,6 +230,20 @@ if (rail.value) {
 
 孔之间必须分离且不嵌套，不能接触外环；失败不留下部分实体。`revolve/loft` 尚不接受带孔截面。
 
+### 等比变截面拉伸（第 65 包待统一验收）
+
+```cpp
+// 孔与外环一起绕平面内的 (4,3,0) 缩放：顶部尺寸减半，法向高度 3。
+auto tapered = kernel.sweeps().extrude_scaled(plate, {0,0,1}, 3, {4,3,0}, 0.5);
+if (!tapered.value) { handle_error(tapered); return; }
+auto valid = kernel.validate().validate_all(*tapered.value, ValidationMode::Strict);
+auto faces = kernel.topology().query().faces_of_body(*tapered.value); // 32 个真实平面三角面
+auto edges = kernel.topology().query().edges_of_body(*tapered.value); // 48 条边
+auto mass = kernel.query().mass_properties(*tapered.value); // (48−4)×3×(1+0.5+0.25)/3 = 77
+```
+
+末端比例大于 1 表示扩张，等于 1 与普通显式轮廓拉伸一致；缩放中心可以在截面材料之外，但必须位于截面平面。反向通过方向向量表达，距离仍为正；不接受零/负比例、尖顶、离面中心或数值退化。各截面保持等比相似，不等同于逐壁恒角拔模。
+
 ## 6.2 旋转
 
 ```cpp

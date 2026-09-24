@@ -182,7 +182,7 @@
 | 错误码 | 严重级别 | 含义 |
 |---|---|---|
 | `AXM-CORE-E-0001` | Error | 输入对象为空或句柄无效 |
-| `AXM-CORE-E-0002` | Error | 参数越界（含 `TopologyTransaction::create_vertex` 拒绝任一坐标为 NaN/±Inf；返回 `InvalidInput`，不写入拓扑或事务计数；带孔拉伸/线段扫掠的越界、相交/接触/嵌套、非共面/退化环及数值物化失败同样返回该码，失败不分配模型 ID；旋转/放样尚不支持非空内环时也返回该码） |
+| `AXM-CORE-E-0002` | Error | 参数越界（含 `TopologyTransaction::create_vertex` 拒绝任一坐标为 NaN/±Inf；返回 `InvalidInput`，不写入拓扑或事务计数；带孔拉伸/线段扫掠的越界、相交/接触/嵌套、非共面/退化环及数值物化失败同样返回该码，失败不分配模型 ID；旋转/放样尚不支持非空内环时也返回该码；第 65 包 `extrude_scaled` 缺失显式轮廓、零/负/非有限比例、离面或非有限中心、无效距离/方向、缩放截面数值退化沿用该码，失败不污染模型） |
 | `AXM-CORE-E-0003` | Error | 当前对象不存在 |
 | `AXM-CORE-E-0004` | Error | 不支持的操作模式 |
 | `AXM-CORE-E-0005` | Fatal | 内部状态损坏 |

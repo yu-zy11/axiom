@@ -1616,7 +1616,7 @@ inline bool triangulate_extrude_region(const std::vector<Point3>& outer,
            std::abs(cap_area - expected_area) <= area_tol * points.size();
 }
 
-/// 简单平面多边形（可凹、可带孔）沿 axis 拉伸：三角端盖 + 平面侧壁，生成真实闭合棱柱 BRep。
+/// 简单平面多边形（可凹、可带孔）直线拉伸/等比变截面拉伸或折线平移扫掠：三角端盖 + 平面侧壁。
 /// 所有可失败检查在对象分配前完成，禁止失败时留下部分拓扑。
 inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRecord& record) {
     if (record.kind != BodyKind::Sweep || record.rep_kind != RepKind::ExactBRep || !record.bbox.is_valid ||
@@ -1690,10 +1690,17 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
     }
     const int n = static_cast<int>(base.size());
     const int last = static_cast<int>((offsets.size() - 1) * base.size());
+    const Scalar end_scale = record.extrude_end_scale;
+    if (!std::isfinite(end_scale) || end_scale <= 0.0 ||
+        (end_scale != 1.0 && !record.sweep_station_offsets.empty())) return false;
     std::vector<Point3> pos;
     pos.reserve(base.size() * offsets.size());
-    for (const auto& offset : offsets) {
-        for (const auto& p : base) pos.push_back(add_point_vec(p, offset));
+    for (std::size_t k = 0; k < offsets.size(); ++k) {
+        for (const auto& p : base) {
+            const auto section_point = k == 0 || end_scale == 1.0 ? p :
+                add_point_vec(record.extrude_scale_center, scale(subtract(p, record.extrude_scale_center), end_scale));
+            pos.push_back(add_point_vec(section_point, offsets[k]));
+        }
     }
 
     std::vector<std::array<int, 3>> tris;
@@ -1716,7 +1723,7 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
     for (const auto& p : pos) {
         if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) return false;
     }
-    if (!record.sweep_station_offsets.empty()) {
+    if (!record.sweep_station_offsets.empty() || end_scale != 1.0) {
         // Check the actual rounded coordinates too: translated rings must retain
         // their order, even when the profile is only planar within tolerance.
         Scalar previous_max = -std::numeric_limits<Scalar>::infinity();
@@ -1730,6 +1737,35 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
             }
             if (low <= previous_max) return false;
             previous_max = high;
+        }
+    }
+    if (end_scale != 1.0) {
+        // In exact arithmetic a positive homothety preserves the entire planar
+        // region. Recheck rounded end coordinates to reject collapsed gaps/edges
+        // at extreme scales or world offsets, before allocating model objects.
+        const auto end_ring = [&](const std::vector<Point3>& ring) {
+            std::vector<Point3> result;
+            for (const auto& p : ring) result.push_back(add_point_vec(
+                add_point_vec(record.extrude_scale_center,
+                              scale(subtract(p, record.extrude_scale_center), end_scale)), offsets.back()));
+            return result;
+        };
+        auto outer = end_ring(poly_in);
+        std::vector<std::array<int, 3>> end_caps;
+        if (record.extrude_holes_xyz.empty()) {
+            if (!triangulate_extrude_profile(outer, n_unit, end_caps)) return false;
+        } else {
+            std::vector<std::vector<Point3>> holes;
+            for (const auto& ring : record.extrude_holes_xyz) holes.push_back(end_ring(ring));
+            std::vector<Point3> end_base;
+            std::vector<std::pair<int, int>> end_boundary;
+            if (!triangulate_extrude_region(outer, holes, n_unit, plane_tol, end_base, end_boundary, end_caps)) return false;
+        }
+        // The start triangulation is reused at the end: every cap triangle must
+        // retain its orientation, even if rounding changes an admissible diagonal.
+        for (const auto& cap : caps) {
+            if (dot(n_unit, cross(subtract(pos[last + cap[1]], pos[last + cap[0]]),
+                                  subtract(pos[last + cap[2]], pos[last + cap[0]]))) <= 1e-14) return false;
         }
     }
     for (const auto& t : tris) {
@@ -1841,7 +1877,12 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
     record.sweep_inertia_about_centroid = in_tmp;
     record.a = vol_chk;
     record.extrude_poly_cap_area = vol_chk / (align * h);
-    record.extrude_lateral_area = area_tmp - 2 * record.extrude_poly_cap_area;
+    if (end_scale != 1.0) {
+        record.extrude_poly_cap_area = 0.0;
+        for (const auto& cap : caps) record.extrude_poly_cap_area += 0.5 * norm(
+            cross(subtract(pos[cap[1]], pos[cap[0]]), subtract(pos[cap[2]], pos[cap[0]])));
+    }
+    record.extrude_lateral_area = area_tmp - (1 + end_scale * end_scale) * record.extrude_poly_cap_area;
     record.extrude_mass_centroid = cm_tmp;
     return true;
 }

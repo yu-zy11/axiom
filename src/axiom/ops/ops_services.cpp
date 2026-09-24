@@ -334,6 +334,50 @@ Result<BodyId> SweepService::extrude(const ProfileRef& profile, const Vec3& dire
     return ok_result(body, state_->create_diagnostic("已完成拉伸"));
 }
 
+Result<BodyId> SweepService::extrude_scaled(const ProfileRef& profile, const Vec3& direction, Scalar distance,
+                                          const Point3& center, Scalar end_scale) {
+    const auto length = std::hypot(direction.x, direction.y, direction.z);
+    if (profile.label.empty() || profile.polygon_xyz.size() < 3 ||
+        !std::isfinite(length) || length <= 1e-14 || !std::isfinite(distance) || distance <= 0.0 ||
+        !std::isfinite(end_scale) || end_scale <= 0.0 ||
+        !std::isfinite(center.x) || !std::isfinite(center.y) || !std::isfinite(center.z)) {
+        return detail::invalid_input_result<BodyId>(
+            *state_, diag_codes::kCoreParameterOutOfRange,
+            "变截面拉伸失败：须有显式轮廓、有限缩放中心、有效方向及有限正距离和正比例", "变截面拉伸失败");
+    }
+    detail::BodyRecord record;
+    record.kind = detail::BodyKind::Sweep;
+    record.rep_kind = RepKind::ExactBRep;
+    record.label = "extrude:scaled:" + profile.label;
+    record.axis = detail::scale(direction, 1.0 / length);
+    record.b = distance;
+    record.extrude_profile_xyz = profile.polygon_xyz;
+    record.extrude_holes_xyz = profile.holes_xyz;
+    record.extrude_end_scale = end_scale;
+    record.extrude_scale_center = center;
+    const auto normal = detail::newell_normal_unnormalized_poly(profile.polygon_xyz);
+    const auto normal_length = detail::norm(normal);
+    const auto plane_tol = std::max(Scalar(1e-7), state_->config.tolerance.linear * Scalar(100.0));
+    const auto center_offset = detail::dot(detail::scale(normal, 1.0 / std::max(normal_length, Scalar(1e-14))),
+                                           detail::subtract(center, profile.polygon_xyz.front()));
+    if (!std::isfinite(normal_length) || normal_length <= 1e-14 ||
+        !std::isfinite(center_offset) || std::abs(center_offset) > plane_tol) {
+        return detail::invalid_input_result<BodyId>(
+            *state_, diag_codes::kCoreParameterOutOfRange,
+            "变截面拉伸失败：轮廓退化或缩放中心不在轮廓平面内", "变截面拉伸失败");
+    }
+    // The shared materializer checks both sections and integrates the actual closed
+    // polyhedron before allocating any geometry, topology or model ID.
+    record.bbox = detail::make_bbox(profile.polygon_xyz.front(), profile.polygon_xyz.front());
+    const auto body = make_body(state_, std::move(record), "已完成等比变截面拉伸");
+    if (body.value == 0) {
+        return detail::invalid_input_result<BodyId>(
+            *state_, diag_codes::kCoreParameterOutOfRange,
+            "变截面拉伸失败：轮廓、方向或缩放后的截面无法形成有效闭壳", "变截面拉伸失败");
+    }
+    return ok_result(body, state_->create_diagnostic("已完成等比变截面拉伸"));
+}
+
 Result<BodyId> SweepService::revolve(const ProfileRef& profile, const Axis3& axis, Scalar angle) {
     if (!profile.holes_xyz.empty()) {
         return detail::invalid_input_result<BodyId>(

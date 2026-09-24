@@ -543,6 +543,8 @@ public:
 class SweepService {
 public:
   Result<BodyId> extrude(const ProfileRef&, const Vec3& direction, Scalar distance);
+  Result<BodyId> extrude_scaled(const ProfileRef&, const Vec3& direction, Scalar distance,
+                                const Point3& center, Scalar end_scale);
   Result<BodyId> revolve(const ProfileRef&, const Axis3&, Scalar angle);
   Result<BodyId> sweep(const ProfileRef&, CurveId rail);
   Result<BodyId> loft(std::span<const ProfileRef> profiles);
@@ -551,6 +553,12 @@ public:
 ```
 
 显式 `ProfileRef::polygon_xyz` 拉伸支持有限坐标、共面且简单的多边形，包括凸轮廓和 L/U 形等凹轮廓（首尾隐式闭合，不重复首点）。方向按单位化后乘正距离使用，须不平行于轮廓平面并形成非退化体积。端盖采用耳切剖分，侧壁为平面三角片；无孔时 n 个轮廓顶点生成 2n 个顶点、6n−6 条边和 4n−4 个面，保留真实凹口，支持双绕向、不同起点、反向和斜向拉伸。自交或非相邻边接触、共线转角/重复顶点、非平面、数值退化或非有限参数在创建实体前返回 `InvalidInput` / `AXM-CORE-E-0002`，不退回 bbox 壳。投影边界使用随轮廓尺度增长的浮点容差，接近退化的轮廓保守拒绝。公开拓扑查询、质量属性、Strict 验证及 `brep_to_mesh` 的 `owned_topo_welded` 路径共同构成验收链路。无显式轮廓的历史占位路径仍存在。
+
+第 65 包新增 `extrude_scaled`（实现及回归就绪，待统一验收）：显式凸/凹多边形及分离孔洞的等比变截面直线拉伸。截面点按 `p(t)=center+[1+t(end_scale−1)]·(p−center)+t·unit(direction)·distance`（`0≤t≤1`）变化；缩放中心须有限且在轮廓平面内（采用现有共面容差），可在材料区域外。距离和末端比例须有限且为正，方向须横穿轮廓平面。支持收缩、扩张、等截面、独立环绕向/起点/孔序、反向斜拉和倾斜平面；`end_scale=1` 与显式 `extrude` 几何一致。外环与孔采用同一缩放中心和比例，不能独立指定孔壁斜度；这不是一般恒角拔模或任意截面放样。
+
+末端边仍与起始边平行，因此侧壁为真实平面，三角 Face 是平面分割，不是曲面的网格近似；两端盖及内外侧壁组成 `ExactBRep` 闭壳。n 个总环顶点、h 个孔生成 `V=2n`、`F=4n+4h−4`、`E=3F/2`；体积为 `A·H·(1+s+s²)/3`（H 为法向高度），面积、质心和完整惯性来自实际闭壳积分。公开拓扑/邻接、面面积和边长查询、Strict 验证及焊接网格转换均有回归。零/负比例、尖顶闭合、切向、非法轮廓、缩放中心离面以及舍入后塌缩/退化均在分配前以 `InvalidInput / AXM-CORE-E-0002` 拒绝；无显式轮廓也拒绝。失败允许新增诊断，但不写模型/几何/模型 ID/活动事务计数/几何与网格缓存。
+
+防自交依赖正比例等比截面及严格法向推进，另复查末端环合法性、复用端盖三角形方向和实际截面不交叠；未扩大既有 Sweep Strict 网格 SAT 范围。沿用保守浮点剖分，近退化或极端尺度可拒绝，不承诺工业容差或大轮廓性能。
 
 第 61 包新增 `ProfileRef::holes_xyz`（末尾可选 `std::vector<std::vector<Point3>>` 字段，已有聚合初始化仍有效）。外环与各孔可独立选择绕向、起点；孔必须与外环共面、严格位于外环内且彼此分离，不允许接触、相交、重合或嵌套。外环和孔均可为凹多边形。带孔端盖通过边界约束的非交叉平面图剖分，内外侧壁均物化为平面三角面；总计 n 个环顶点、h 个孔生成 2n 个顶点、6n+6h−6 条边、4n+4h−4 个面，欧拉特征为 2−2h。剖分不增加几何顶点，保留真实贯通孔，不是曲面或网格近似；端盖可能由多个共面 Face 组成。质量属性（含质心惯性张量）由闭壳三角面积分给出。边界验证、端盖数量/面积核对、非有限/坍塌三角片及质量积分检查均在实体分配前完成；复用 `InvalidInput / AXM-CORE-E-0002`。无外环却提供孔也拒绝。线段扫掠继承相同语义；`revolve/loft` 当前明确拒绝非空 `holes_xyz`，不会静默填孔。带孔平面图构造为保守浮点算法，近退化输入可拒绝，最坏时间为三次量级，不承诺任意大轮廓的性能或工业容差完备性。
 

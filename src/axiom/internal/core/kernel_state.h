@@ -167,6 +167,9 @@ struct BodyRecord {
     /// 多边形 `extrude`：轮廓副本，供 **平面多边形 + 非退化拉伸方向** 的棱柱 BRep 物化（见 `try_materialize_sweep_extrude_prism_body`）。
     std::vector<Point3> extrude_profile_xyz;
     std::vector<std::vector<Point3>> extrude_holes_xyz;
+    /// Single straight extrusion: homothetic end section, about a center in the profile plane.
+    Scalar extrude_end_scale {1.0};
+    Point3 extrude_scale_center {};
     /// Fixed-orientation polyline sweep: station displacements relative to the rail start.
     /// Empty for a single extrusion; otherwise starts at zero and is strictly monotone through the profile plane.
     std::vector<Vec3> sweep_station_offsets;

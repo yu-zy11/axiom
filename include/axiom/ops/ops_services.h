@@ -33,6 +33,12 @@ public:
     /// Simple planar polygons (including concave profiles and disjoint holes) produce a triangulated closed prism.
     /// Requires positive finite distance and a direction transverse to the profile plane.
     Result<BodyId> extrude(const ProfileRef& profile, const Vec3& direction, Scalar distance);
+    /// Explicit planar polygon, optionally with holes: straight extrusion with uniform section scaling.
+    /// At t in [0,1], p becomes center + (1+t*(end_scale-1))*(p-center) + t*unit(direction)*distance.
+    /// The finite center must lie in the profile plane; distance and end_scale must be finite and positive.
+    /// Positive scales preserve concavities/holes; collapsed apexes and numerically degenerate sections are rejected.
+    Result<BodyId> extrude_scaled(const ProfileRef& profile, const Vec3& direction, Scalar distance,
+                                 const Point3& center, Scalar end_scale);
     Result<BodyId> revolve(const ProfileRef& profile, const Axis3& axis, Scalar angle);
     /// Explicit polygons: fixed-orientation translation along a line segment or CompositePolyline.
     /// The profile stays in world space; station offsets are relative to the rail start.
