@@ -415,11 +415,29 @@ Result<BodyId> SweepService::sweep(const ProfileRef& profile, CurveId rail) {
             *state_, diag_codes::kCoreInvalidHandle,
             "扫描失败：轮廓为空或导轨曲线不存在", "扫描失败");
     }
+    const auto& curve = state_->curves.at(rail.value);
+    if (!profile.polygon_xyz.empty()) {
+        // 有界直线导轨上的平移扫掠就是棱柱拉伸：轮廓保留世界坐标，
+        // 导轨只提供末端相对起点的位移，不移动或旋转输入截面。
+        if (curve.kind != detail::CurveKind::LineSegment || curve.poles.size() != 2) {
+            return detail::invalid_input_result<BodyId>(
+                *state_, diag_codes::kCoreParameterOutOfRange,
+                "扫描失败：显式 polygon 轮廓当前仅支持有界线段导轨", "扫描失败");
+        }
+        const auto displacement = detail::subtract(curve.poles.back(), curve.poles.front());
+        const auto length = std::hypot(displacement.x, displacement.y, displacement.z);
+        if (!std::isfinite(length) || length <= 0.0) {
+            return detail::invalid_input_result<BodyId>(
+                *state_, diag_codes::kCoreParameterOutOfRange,
+                "扫描失败：导轨位移必须有限且非退化", "扫描失败");
+        }
+        // 复用轮廓检查、真实面/边物化及失败前不分配实体的同一链路。
+        return extrude(profile, detail::scale(displacement, 1.0 / length), length);
+    }
     detail::BodyRecord record;
     record.kind = detail::BodyKind::Sweep;
     record.rep_kind = RepKind::ExactBRep;
     record.label = "sweep:" + profile.label;
-    const auto& curve = state_->curves.at(rail.value);
     auto bbox = curve_bbox_for_query(curve);
     if (bbox.is_valid) {
         bbox = offset_bbox(bbox, 0.5);

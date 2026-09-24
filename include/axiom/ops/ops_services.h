@@ -32,6 +32,8 @@ public:
 
     Result<BodyId> extrude(const ProfileRef& profile, const Vec3& direction, Scalar distance);
     Result<BodyId> revolve(const ProfileRef& profile, const Axis3& axis, Scalar angle);
+    /// Explicit polygons: translate the world-space profile by a line segment's end minus start.
+    /// Uses the extrusion prism path (same profile restrictions); other rail kinds return InvalidInput.
     Result<BodyId> sweep(const ProfileRef& profile, CurveId rail);
     Result<BodyId> loft(std::span<const ProfileRef> profiles);
     Result<BodyId> thicken(FaceId face_id, Scalar distance);

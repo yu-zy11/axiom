@@ -687,6 +687,118 @@ int main() {
         return 1;
     }
 
+    // Linear sweep: the rail supplies only displacement; the world-space profile
+    // stays at its input location. Exercise both windings, rail signs and planes.
+    for (const bool yz_plane : {false, true}) {
+        for (const bool clockwise : {false, true}) {
+            for (const double sign : {-1.0, 1.0}) {
+                axiom::ProfileRef sweep_profile {"linear_sweep",
+                    {{10, 20, 30}, {12, 20, 30}, {10, 23, 30}}};
+                axiom::Vec3 delta {2 * sign, -sign, 4 * sign};
+                axiom::Point3 expected_centroid {10 + 2.0 / 3.0 + sign, 21 - sign / 2, 30 + 2 * sign};
+                if (yz_plane) {
+                    for (auto& p : sweep_profile.polygon_xyz) p = {p.z, p.x, p.y};
+                    delta = {delta.z, delta.x, delta.y};
+                    expected_centroid = {expected_centroid.z, expected_centroid.x, expected_centroid.y};
+                }
+                if (clockwise) std::reverse(sweep_profile.polygon_xyz.begin(), sweep_profile.polygon_xyz.end());
+                const auto source_points = sweep_profile.polygon_xyz;
+                const auto rail = kernel.curves().make_line_segment({100, 200, 300},
+                    {100 + delta.x, 200 + delta.y, 300 + delta.z});
+                if (!rail.value) return 1;
+                const auto swept = kernel.sweeps().sweep(sweep_profile, *rail.value);
+                if (swept.status != axiom::StatusCode::Ok || !swept.value) return 1;
+                const auto valid = kernel.validate().validate_all(*swept.value, axiom::ValidationMode::Strict);
+                const auto query = kernel.topology().query();
+                const auto owned = query.has_body(*swept.value);
+                const auto shells = query.shells_of_body(*swept.value);
+                const auto faces = query.faces_of_body(*swept.value);
+                const auto edges = query.edges_of_body(*swept.value);
+                const auto vertices = query.vertices_of_body(*swept.value);
+                const auto mass = kernel.query().mass_properties(*swept.value);
+                const double expected_area = 6 + 2 * std::sqrt(17.0) + 3 * std::sqrt(20.0) + std::sqrt(224.0);
+                if (valid.status != axiom::StatusCode::Ok || !owned.value || !*owned.value ||
+                    !shells.value || shells.value->size() != 1 || !faces.value || faces.value->size() != 8 ||
+                    !edges.value || edges.value->size() != 12 || !vertices.value || vertices.value->size() != 6 ||
+                    !mass.value || std::abs(mass.value->volume - 12) > 1e-8 ||
+                    std::abs(mass.value->area - expected_area) > 1e-8 ||
+                    std::abs(mass.value->centroid.x - expected_centroid.x) > 1e-8 ||
+                    std::abs(mass.value->centroid.y - expected_centroid.y) > 1e-8 ||
+                    std::abs(mass.value->centroid.z - expected_centroid.z) > 1e-8) {
+                    std::cerr << "linear sweep must create the actual oblique triangular prism\n";
+                    return 1;
+                }
+                double topology_area = 0;
+                for (const auto face : *faces.value) {
+                    const auto area = query.planar_face_area(face);
+                    if (!area.value || *area.value <= 0) return 1;
+                    topology_area += *area.value;
+                }
+                for (const auto edge : *edges.value) {
+                    const auto coedges = query.coedge_count_of_edge(edge);
+                    if (!coedges.value || *coedges.value != 2) return 1;
+                }
+                if (std::abs(topology_area - expected_area) > 1e-8) {
+                    std::cerr << "linear sweep faces must match analytic prism surface area\n";
+                    return 1;
+                }
+                const auto bbox = query.bbox_of_body_from_topology(*swept.value);
+                axiom::Point3 lo = source_points.front();
+                axiom::Point3 hi = lo;
+                for (const auto& p : source_points) {
+                    for (const auto& q : {p, axiom::Point3 {p.x + delta.x, p.y + delta.y, p.z + delta.z}}) {
+                        lo = {std::min(lo.x, q.x), std::min(lo.y, q.y), std::min(lo.z, q.z)};
+                        hi = {std::max(hi.x, q.x), std::max(hi.y, q.y), std::max(hi.z, q.z)};
+                    }
+                }
+                if (!bbox.value || !bbox.value->is_valid ||
+                    std::abs(bbox.value->min.x - lo.x) > 1e-8 || std::abs(bbox.value->max.x - hi.x) > 1e-8 ||
+                    std::abs(bbox.value->min.y - lo.y) > 1e-8 || std::abs(bbox.value->max.y - hi.y) > 1e-8 ||
+                    std::abs(bbox.value->min.z - lo.z) > 1e-8 || std::abs(bbox.value->max.z - hi.z) > 1e-8) return 1;
+            }
+        }
+    }
+    const auto sweep_rail = kernel.curves().make_line_segment({0, 0, 0}, {0, 0, 3});
+    const auto parallel_rail = kernel.curves().make_line_segment({0, 0, 0}, {3, 0, 0});
+    const auto curved_rail = kernel.curves().make_circle({0, 0, 0}, {0, 0, 1}, 3);
+    const auto unbounded_rail = kernel.curves().make_line({0, 0, 0}, {0, 0, 1});
+    const auto huge = std::numeric_limits<double>::max();
+    const auto overflow_rail = kernel.curves().make_line_segment({0, 0, -huge}, {0, 0, huge});
+    if (!sweep_rail.value || !parallel_rail.value || !curved_rail.value ||
+        !unbounded_rail.value || !overflow_rail.value) return 1;
+    const auto sweep_objects_before = kernel.object_count_total();
+    const auto sweep_bodies_before = kernel.body_count();
+    const auto sweep_next_before = kernel.next_object_id();
+    if (!sweep_objects_before.value || !sweep_bodies_before.value || !sweep_next_before.value) return 1;
+    const auto rejected_sweep = [&](const axiom::ProfileRef& profile, axiom::CurveId rail, std::string_view code) {
+        const auto result = kernel.sweeps().sweep(profile, rail);
+        const auto diagnostic = kernel.diagnostics().get(result.diagnostic_id);
+        const auto objects = kernel.object_count_total();
+        const auto bodies = kernel.body_count();
+        const auto next = kernel.next_object_id();
+        return result.status == axiom::StatusCode::InvalidInput && !result.value &&
+            diagnostic.value && has_issue_code(*diagnostic.value, code) &&
+            objects.value && *objects.value == *sweep_objects_before.value &&
+            bodies.value && *bodies.value == *sweep_bodies_before.value &&
+            next.value && *next.value == *sweep_next_before.value;
+    };
+    for (const auto& points : invalid_extrude_profiles) {
+        if (!rejected_sweep({"invalid", points}, *sweep_rail.value, axiom::diag_codes::kCoreParameterOutOfRange)) return 1;
+    }
+    for (const auto rail : {*parallel_rail.value, *curved_rail.value, *unbounded_rail.value, *overflow_rail.value}) {
+        if (!rejected_sweep(rect, rail, axiom::diag_codes::kCoreParameterOutOfRange)) return 1;
+    }
+    if (!rejected_sweep({"short", {{0, 0, 0}, {1, 0, 0}}}, *sweep_rail.value,
+                         axiom::diag_codes::kCoreParameterOutOfRange) ||
+        !rejected_sweep({"nan", {{0, 0, 0}, {1, 0, 0}, {0, std::numeric_limits<double>::quiet_NaN(), 0}}},
+                         *sweep_rail.value, axiom::diag_codes::kCoreParameterOutOfRange) ||
+        !rejected_sweep({"", rect.polygon_xyz}, *sweep_rail.value, axiom::diag_codes::kCoreInvalidHandle) ||
+        !rejected_sweep(rect, {}, axiom::diag_codes::kCoreInvalidHandle)) return 1;
+    const auto sweep_retry = kernel.sweeps().sweep(rect, *sweep_rail.value);
+    if (!sweep_retry.value ||
+        kernel.validate().validate_all(*sweep_retry.value, axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok ||
+        kernel.validate().validate_all(*prism.value, axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok) return 1;
+
     auto box_edges = kernel.topology().query().edges_of_body(*box_a.value);
     if (box_edges.status != axiom::StatusCode::Ok || !box_edges.value.has_value() ||
         box_edges.value->empty()) {

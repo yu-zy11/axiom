@@ -382,7 +382,7 @@ struct PluginCurveDesc {
 struct ProfileRef {
   std::string label;
   /// Optional planar polygon profile in world coordinates (closedness implicit: last connects to first).
-  /// Extrude supports finite, planar, strictly convex polygons with non-degenerate volume;
+  /// Extrude and line-segment sweep support finite, planar, strictly convex polygons with non-degenerate volume;
   /// unsupported profiles return InvalidInput instead of a bbox replacement shell.
   std::vector<Point3> polygon_xyz;
 };
