@@ -288,6 +288,89 @@ int main() {
         return 1;
     }
 
+    const auto body_count_before_gltf_failures = kernel.body_count();
+    const auto mesh_count_before_gltf_failures = kernel.mesh_count();
+    const auto missing_gltf_path = tmp / ("axiom_io_missing_import_" + uniq + ".gltf");
+    const auto malformed_gltf_path = tmp / ("axiom_io_malformed_import_" + uniq + ".gltf");
+    const auto degenerate_gltf_path = tmp / ("axiom_io_degenerate_import_" + uniq + ".gltf");
+    const auto out_of_range_gltf_path = tmp / ("axiom_io_out_of_range_import_" + uniq + ".gltf");
+    const auto valid_gltf_path = tmp / ("axiom_io_valid_import_" + uniq + ".gltf");
+    const auto write_triangle_gltf = [](const std::filesystem::path& path, std::string_view encoded_buffer) {
+        std::ofstream out {path};
+        out << "{\"buffers\":[{\"uri\":\"data:application/octet-stream;base64," << encoded_buffer
+            << "\"}],\"bufferViews\":[{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36,\"target\":34962},"
+               "{\"buffer\":0,\"byteOffset\":36,\"byteLength\":12,\"target\":34963}],"
+               "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3},"
+               "{\"bufferView\":1,\"componentType\":5125,\"count\":3}]}";
+    };
+    {
+        std::ofstream malformed {malformed_gltf_path};
+        malformed << "{\"asset\":{\"version\":\"2.0\"}}";
+    }
+    write_triangle_gltf(degenerate_gltf_path,
+                        "AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAACAAAA");
+    write_triangle_gltf(out_of_range_gltf_path,
+                        "AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAEAAAADAAAA");
+    write_triangle_gltf(valid_gltf_path,
+                        "AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAEAAAACAAAA");
+    const auto check_gltf_failure = [&](const axiom::Result<axiom::BodyId>& result,
+                                        axiom::StatusCode status, std::string_view code,
+                                        std::string_view stage) {
+        const auto report = kernel.diagnostics().get(result.diagnostic_id);
+        const auto* issue = report.value ? find_issue(*report.value, code) : nullptr;
+        return result.status == status && !result.value.has_value() && issue != nullptr &&
+               issue->severity == axiom::IssueSeverity::Error && issue->stage == stage &&
+               issue->related_entities.empty();
+    };
+    const auto empty_gltf = kernel.io().import_gltf("", axiom::ImportOptions {});
+    const auto missing_gltf = kernel.io().import_gltf(missing_gltf_path.string(), axiom::ImportOptions {});
+    const auto directory_gltf = kernel.io().import_gltf(tmp.string(), axiom::ImportOptions {});
+    const auto malformed_gltf = kernel.io().import_gltf(malformed_gltf_path.string(), axiom::ImportOptions {});
+    const auto degenerate_gltf = kernel.io().import_gltf(degenerate_gltf_path.string(), axiom::ImportOptions {});
+    const auto out_of_range_gltf = kernel.io().import_gltf(out_of_range_gltf_path.string(), axiom::ImportOptions {});
+    if (!check_gltf_failure(empty_gltf, axiom::StatusCode::InvalidInput,
+                            axiom::diag_codes::kIoImportFailure, "io.import.gltf.input") ||
+        !check_gltf_failure(missing_gltf, axiom::StatusCode::OperationFailed,
+                            axiom::diag_codes::kIoImportFailure, "io.import.gltf.path") ||
+        !check_gltf_failure(directory_gltf, axiom::StatusCode::OperationFailed,
+                            axiom::diag_codes::kIoImportFailure, "io.import.gltf.open") ||
+        !check_gltf_failure(malformed_gltf, axiom::StatusCode::OperationFailed,
+                            axiom::diag_codes::kIoImportFailure, "io.import.gltf.parse") ||
+        !check_gltf_failure(out_of_range_gltf, axiom::StatusCode::InvalidInput,
+                            axiom::diag_codes::kIoImportFailure, "io.import.gltf.validation") ||
+        !check_gltf_failure(degenerate_gltf, axiom::StatusCode::DegenerateGeometry,
+                            axiom::diag_codes::kValDegenerateGeometry, "io.import.gltf.validation")) {
+        std::cerr << "glTF import failure is missing stable root-cause stage evidence\n";
+        return 1;
+    }
+    const auto gltf_failure_json = tmp / ("axiom_io_gltf_import_failure_" + uniq + ".json");
+    const auto exported_gltf_failure = kernel.diagnostics().export_report_json(
+        degenerate_gltf.diagnostic_id, gltf_failure_json.string());
+    std::ifstream gltf_failure_json_in {gltf_failure_json, std::ios::binary};
+    const std::string gltf_failure_json_text {
+        (std::istreambuf_iterator<char>(gltf_failure_json_in)), std::istreambuf_iterator<char>()};
+    const auto staged_gltf_failures = kernel.diagnostics().find_by_issue_stage_prefix("io.import.gltf.", 10);
+    const auto body_count_after_gltf_failures = kernel.body_count();
+    const auto mesh_count_after_gltf_failures = kernel.mesh_count();
+    const auto valid_gltf = kernel.io().import_gltf(valid_gltf_path.string(), axiom::ImportOptions {});
+    std::filesystem::remove(gltf_failure_json);
+    std::filesystem::remove(malformed_gltf_path);
+    std::filesystem::remove(degenerate_gltf_path);
+    std::filesystem::remove(out_of_range_gltf_path);
+    std::filesystem::remove(valid_gltf_path);
+    if (exported_gltf_failure.status != axiom::StatusCode::Ok ||
+        gltf_failure_json_text.find("\"stage\":\"io.import.gltf.validation\"") == std::string::npos ||
+        !staged_gltf_failures.value || staged_gltf_failures.value->size() != 6 ||
+        !body_count_before_gltf_failures.value || !body_count_after_gltf_failures.value ||
+        *body_count_before_gltf_failures.value != *body_count_after_gltf_failures.value ||
+        !mesh_count_before_gltf_failures.value || !mesh_count_after_gltf_failures.value ||
+        *mesh_count_before_gltf_failures.value != *mesh_count_after_gltf_failures.value ||
+        valid_gltf.status != axiom::StatusCode::Ok || !valid_gltf.value.has_value() ||
+        std::filesystem::exists(missing_gltf_path)) {
+        std::cerr << "glTF import failure lookup, JSON evidence, isolation, or retry is unexpected\n";
+        return 1;
+    }
+
     const auto body_count_before_step_failures = kernel.body_count();
     const auto check_step_failure = [&](const axiom::Result<void>& result, axiom::StatusCode expected_status,
                                         std::string_view expected_stage) {

@@ -382,37 +382,52 @@ Result<BodyId> IOService::import_stl(std::string_view path, const ImportOptions&
 }
 
 Result<BodyId> IOService::import_gltf(std::string_view path, const ImportOptions& options) {
+    const auto fail_before_import = [this](StatusCode status, std::string_view code, std::string message,
+                                           std::string_view stage) {
+        auto issue = detail::make_error_issue(code, std::move(message));
+        issue.stage = std::string(stage);
+        return error_result<BodyId>(status, state_->create_diagnostic("glTF 导入失败", {std::move(issue)}));
+    };
     if (path.empty()) {
-        return detail::invalid_input_result<BodyId>(*state_, diag_codes::kIoImportFailure, "glTF 导入失败：输入路径为空",
-                                                    "glTF 导入失败");
+        return fail_before_import(StatusCode::InvalidInput, diag_codes::kIoImportFailure,
+                                  "glTF 导入失败：输入路径为空", "io.import.gltf.input");
     }
     if (!std::filesystem::exists(path)) {
-        return detail::failed_result<BodyId>(*state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
-                                             "glTF 导入失败：输入文件不存在", "glTF 导入失败");
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                  "glTF 导入失败：输入文件不存在", "io.import.gltf.path");
+    }
+    std::error_code file_type_error;
+    if (!std::filesystem::is_regular_file(path, file_type_error) || file_type_error) {
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                  "glTF 导入失败：输入路径不是可读取的普通文件", "io.import.gltf.open");
     }
     std::ifstream in {std::string(path)};
     if (!in) {
-        return detail::failed_result<BodyId>(*state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
-                                             "glTF 导入失败：无法打开输入文件", "glTF 导入失败");
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                  "glTF 导入失败：无法打开输入文件", "io.import.gltf.open");
     }
     std::string json_text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (in.bad()) {
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                  "glTF 导入失败：读取输入文件失败", "io.import.gltf.read");
+    }
     detail::MeshRecord mesh;
     const auto parse_err = parse_gltf_embedded_minimal(json_text, mesh);
     if (parse_err.has_value()) {
-        return detail::failed_result<BodyId>(*state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
-                                             *parse_err, "glTF 导入失败");
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                  *parse_err, "io.import.gltf.parse");
     }
     if (mesh.vertices.empty() || mesh.indices.empty() || (mesh.indices.size() % 3) != 0) {
-        return detail::invalid_input_result<BodyId>(*state_, diag_codes::kIoImportFailure, "glTF 导入失败：网格数据无效",
-                                                    "glTF 导入失败");
+        return fail_before_import(StatusCode::InvalidInput, diag_codes::kIoImportFailure,
+                                  "glTF 导入失败：网格数据无效", "io.import.gltf.validation");
     }
     if (detail::has_out_of_range_indices(mesh.vertices, mesh.indices)) {
-        return detail::invalid_input_result<BodyId>(*state_, diag_codes::kIoImportFailure, "glTF 导入失败：三角形索引越界",
-                                                    "glTF 导入失败");
+        return fail_before_import(StatusCode::InvalidInput, diag_codes::kIoImportFailure,
+                                  "glTF 导入失败：三角形索引越界", "io.import.gltf.validation");
     }
     if (detail::has_degenerate_triangles(mesh.vertices, mesh.indices)) {
-        return detail::failed_result<BodyId>(*state_, StatusCode::DegenerateGeometry, diag_codes::kValDegenerateGeometry,
-                                           "glTF 导入失败：存在退化三角形", "glTF 导入失败");
+        return fail_before_import(StatusCode::DegenerateGeometry, diag_codes::kValDegenerateGeometry,
+                                  "glTF 导入失败：存在退化三角形", "io.import.gltf.validation");
     }
 
     const auto body_id = BodyId {state_->allocate_id()};
