@@ -51,6 +51,7 @@ public:
     Result<DiagnosticId> latest_id() const;
     Result<DiagnosticId> earliest_id() const;
     Result<std::vector<DiagnosticId>> find_with_min_issue_count(std::uint64_t min_issues, std::uint64_t max_results) const;
+    /// 任一 issue 的严重级别匹配时命中；按 DiagnosticId 升序限额返回。`max_results==0` 时参数非法。
     Result<std::vector<DiagnosticId>> find_with_severity(IssueSeverity severity, std::uint64_t max_results) const;
     Result<std::vector<DiagnosticId>> find_summary_contains(std::string_view token, std::uint64_t max_results) const;
     Result<std::vector<std::string>> summaries_recent(std::uint64_t max_results) const;

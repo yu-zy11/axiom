@@ -12,6 +12,8 @@
 
 ### 2.1 `diag + ops`
 
+- **FR-DIAG-001 第 58 切片**：严重级别检索在限额前按 `DiagnosticId` 升序排序；`report_ids_by_severity` 继承相同语义。`axiom_diagnostics_test` 覆盖限额、重复 issue、空报告/空结果、非法参数、源报告不污染及重试。需求保持受限可用；下一步继续补齐 BOOL/HEAL/IO 重量级流程的阶段、实体和数值证据。
+
 - **FR-OPS-001 第 53 切片**：显式多边形拉伸在物化前验证有限坐标、共面性、严格凸性、非退化体积与拉伸方向；凹形、自交、共线/重复顶点、非平面或平行输入以 `AXM-CORE-E-0002` 拒绝，不再静默退回 bbox 壳。修复顺时针轮廓的三角面朝向，使两种绕向都能形成真实棱柱。`axiom_ops_heal_test` 覆盖成功、失败、退化、错误码与失败不污染；其他特征和无显式轮廓拉伸仍为受限/占位能力。
 
 - **NFR-DIA-001 第 50 切片**：3MF 导入在物化前按根因绑定 `io.import.3mf.input/path/open/read/parse/validation`；目录输入结构化拒绝，非法坐标与超范围索引返回解析或验证失败，不再泄漏数值转换异常或静默截断索引。`axiom_io_workflow_test` 覆盖正常、退化、路径/ZIP/XML/数值失败、阶段检索、JSON、Body/Mesh 不污染及成功重试；`axiom_io_dataset_test` 验证往返。复用现有 IO/VAL 错误码，需求保持受限可用；其他 BOOL/HEAL/IO 失败出口仍待闭合。

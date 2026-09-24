@@ -400,10 +400,13 @@ Result<std::vector<DiagnosticId>> DiagnosticService::find_with_severity(IssueSev
     if (max_results == 0) return detail::invalid_input_result<std::vector<DiagnosticId>>(*state_, diag_codes::kCoreParameterOutOfRange, "诊断检索失败：数量上限非法", "诊断检索失败");
     std::vector<DiagnosticId> out;
     for (const auto& [id, report] : state_->diagnostics) {
-        if (out.size() >= max_results) break;
         bool matched = false;
         for (const auto& issue : report.issues) if (issue.severity == severity) { matched = true; break; }
         if (matched) out.push_back(DiagnosticId{id});
+    }
+    std::sort(out.begin(), out.end(), [](DiagnosticId a, DiagnosticId b) { return a.value < b.value; });
+    if (out.size() > max_results) {
+        out.resize(static_cast<std::size_t>(max_results));
     }
     return ok_result(std::move(out), state_->create_diagnostic("已按严重级别检索诊断"));
 }

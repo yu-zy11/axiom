@@ -467,9 +467,65 @@ bool check_stage_search_limit_order() {
     return matches(diagnostics.find_by_issue_stage_prefix("bool.", 2), {ids[0], ids[2]});
 }
 
+bool check_severity_search_limit_order() {
+    axiom::Kernel kernel;
+    auto& diagnostics = kernel.diagnostics();
+    const std::array<axiom::IssueSeverity, 8> severities {
+        axiom::IssueSeverity::Warning, axiom::IssueSeverity::Error,
+        axiom::IssueSeverity::Warning, axiom::IssueSeverity::Info,
+        axiom::IssueSeverity::Warning, axiom::IssueSeverity::Error,
+        axiom::IssueSeverity::Info, axiom::IssueSeverity::Warning
+    };
+    std::array<axiom::DiagnosticId, severities.size()> ids {};
+    for (std::size_t i = 0; i < severities.size(); ++i) {
+        axiom::Issue issue;
+        issue.code = std::string(axiom::diag_codes::kBoolInvalidInput);
+        issue.severity = severities[i];
+        issue.stage = "diag.severity_search";
+        issue.related_entities = {i + 1};
+        std::vector<axiom::Issue> issues {issue};
+        if (i == 0) issues.push_back(issue); // Repeated matching issues identify one report.
+        if (i == 6) issues.clear(); // An empty report does not match Info.
+        const auto report = diagnostics.create_report("severity search source", issues);
+        if (report.status != axiom::StatusCode::Ok || !report.value) return false;
+        ids[i] = *report.value;
+    }
+    const auto matches = [](const auto& result, std::initializer_list<axiom::DiagnosticId> expected) {
+        if (result.status != axiom::StatusCode::Ok || !result.value ||
+            result.value->size() != expected.size()) return false;
+        return std::equal(result.value->begin(), result.value->end(), expected.begin(),
+                          [](axiom::DiagnosticId a, axiom::DiagnosticId b) { return a.value == b.value; });
+    };
+    if (!matches(diagnostics.find_with_severity(axiom::IssueSeverity::Warning, 1), {ids[0]}) ||
+        !matches(diagnostics.find_with_severity(axiom::IssueSeverity::Warning, 3), {ids[0], ids[2], ids[4]}) ||
+        !matches(diagnostics.find_with_severity(axiom::IssueSeverity::Warning, 10),
+                 {ids[0], ids[2], ids[4], ids[7]}) ||
+        !matches(diagnostics.report_ids_by_severity(axiom::IssueSeverity::Warning, 2), {ids[0], ids[2]}) ||
+        !matches(diagnostics.find_with_severity(axiom::IssueSeverity::Fatal, 1), {}) ||
+        !matches(diagnostics.find_with_severity(axiom::IssueSeverity::Info, 10), {ids[3]})) return false;
+
+    const auto invalid = diagnostics.find_with_severity(axiom::IssueSeverity::Warning, 0);
+    const auto failure = diagnostics.get(invalid.diagnostic_id);
+    if (invalid.status != axiom::StatusCode::InvalidInput || invalid.value || !failure.value ||
+        !has_issue_code(*failure.value, axiom::diag_codes::kCoreParameterOutOfRange)) return false;
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+        const auto source = diagnostics.get(ids[i]);
+        if (!source.value || source.value->summary != "severity search source" ||
+            source.value->issues.size() != (i == 0 ? 2U : (i == 6 ? 0U : 1U))) return false;
+        if (i != 6 && (source.value->issues[0].severity != severities[i] ||
+                       source.value->issues[0].stage != "diag.severity_search" ||
+                       source.value->issues[0].related_entities != std::vector<std::uint64_t>({i + 1}))) return false;
+    }
+    return matches(diagnostics.find_with_severity(axiom::IssueSeverity::Warning, 2), {ids[0], ids[2]});
+}
+
 }  // namespace
 
 int main() {
+    if (!check_severity_search_limit_order()) {
+        std::cerr << "severity search order, limit or source isolation regression\n";
+        return 1;
+    }
     if (!check_related_entity_search_limit_order()) {
         std::cerr << "related entity search order, limit or source isolation regression\n";
         return 1;
