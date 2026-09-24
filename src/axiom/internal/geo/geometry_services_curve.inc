@@ -394,16 +394,22 @@ Result<Scalar> CurveService::closest_parameter(CurveId curve_id,
     }
     const auto a = curve.poles.front();
     const auto b = curve.poles.back();
-    const auto ab = detail::subtract(b, a);
-    const auto denom = detail::dot(ab, ab);
-    if (denom <= kEpsilon) {
+    // Keep the projection finite when a valid segment's squared length exceeds
+    // the range of Scalar. The factory has already rejected short segments.
+    const long double dx = static_cast<long double>(b.x) - a.x;
+    const long double dy = static_cast<long double>(b.y) - a.y;
+    const long double dz = static_cast<long double>(b.z) - a.z;
+    const auto denom = dx * dx + dy * dy + dz * dz;
+    if (!(denom > 0.0L)) {
       return detail::failed_result<Scalar>(
           *state_, StatusCode::OperationFailed, diag_codes::kGeoParameterSolveFailure,
           "曲线最近参数求解失败：线段退化", "曲线最近参数求解失败");
     }
-    const auto ap = detail::subtract(point, a);
-    const auto tproj = detail::dot(ap, ab) / denom;
-    return ok_result<Scalar>(std::clamp(tproj, 0.0, 1.0),
+    const long double qx = static_cast<long double>(point.x) - a.x;
+    const long double qy = static_cast<long double>(point.y) - a.y;
+    const long double qz = static_cast<long double>(point.z) - a.z;
+    const auto tproj = (qx * dx + qy * dy + qz * dz) / denom;
+    return ok_result<Scalar>(static_cast<Scalar>(std::clamp(tproj, 0.0L, 1.0L)),
                              state_->create_diagnostic("曲线最近参数已求解"));
   }
   case detail::CurveKind::Circle: {

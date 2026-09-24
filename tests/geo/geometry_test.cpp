@@ -609,6 +609,66 @@ int main() {
         }
     }
 
+    // A finite segment can have a squared length outside double range.
+    {
+        const auto segment = kernel.curves().make_line_segment(
+            {0.0, 0.0, 0.0}, {3e155, 0.0, 0.0});
+        if (segment.status != axiom::StatusCode::Ok || !segment.value) {
+            std::cerr << "failed to create large finite segment\n";
+            return 1;
+        }
+        const auto interior = kernel.curve_service().closest_parameter(
+            *segment.value, {1e155, 2e155, 0.0});
+        const auto closest = kernel.curve_service().closest_point(
+            *segment.value, {1e155, 2e155, 0.0});
+        const auto before = kernel.curve_service().closest_parameter(
+            *segment.value, {-1e155, 0.0, 0.0});
+        const auto after = kernel.curve_service().closest_parameter(
+            *segment.value, {4e155, 0.0, 0.0});
+        if (interior.status != axiom::StatusCode::Ok || !interior.value ||
+            !approx(*interior.value, 1.0 / 3.0, 1e-12) ||
+            closest.status != axiom::StatusCode::Ok || !closest.value ||
+            std::abs(closest.value->x / 1e155 - 1.0) > 1e-12 ||
+            !approx(closest.value->y, 0.0) ||
+            before.status != axiom::StatusCode::Ok || !before.value ||
+            !approx(*before.value, 0.0) ||
+            after.status != axiom::StatusCode::Ok || !after.value ||
+            !approx(*after.value, 1.0)) {
+            std::cerr << "large finite segment projection is incorrect\n";
+            return 1;
+        }
+
+        const auto count_before = kernel.geometry_count();
+        const auto cache_before = kernel.cache_entry_count();
+        const auto invalid = kernel.curve_service().closest_parameter(
+            *segment.value, {std::numeric_limits<double>::infinity(), 0.0, 0.0});
+        const auto missing = kernel.curve_service().closest_parameter(
+            axiom::CurveId{}, {1.0, 0.0, 0.0});
+        const auto degenerate = kernel.curves().make_line_segment(
+            {1.0, 2.0, 3.0}, {1.0, 2.0, 3.0});
+        const auto invalid_code = kernel.diagnostics().has_issue_code(
+            invalid.diagnostic_id, "AXM-CORE-E-0002");
+        const auto missing_code = kernel.diagnostics().has_issue_code(
+            missing.diagnostic_id, "AXM-GEO-E-0006");
+        const auto degenerate_code = kernel.diagnostics().has_issue_code(
+            degenerate.diagnostic_id, "AXM-GEO-E-0001");
+        const auto retry = kernel.curve_service().closest_parameter(
+            *segment.value, {1e155, 2e155, 0.0});
+        if (invalid.status != axiom::StatusCode::InvalidInput || invalid.value ||
+            missing.status != axiom::StatusCode::InvalidInput || missing.value ||
+            degenerate.status != axiom::StatusCode::InvalidInput || degenerate.value ||
+            !invalid_code.value || !*invalid_code.value ||
+            !missing_code.value || !*missing_code.value ||
+            !degenerate_code.value || !*degenerate_code.value ||
+            retry.status != axiom::StatusCode::Ok || !retry.value ||
+            !approx(*retry.value, 1.0 / 3.0, 1e-12) ||
+            kernel.geometry_count().value != count_before.value ||
+            kernel.cache_entry_count().value != cache_before.value) {
+            std::cerr << "failed segment query or creation polluted geometry or cache\n";
+            return 1;
+        }
+    }
+
     // ---- Missing curve type required by docs: composite curve (chain of existing curves) ----
     {
         auto a = kernel.curves().make_line_segment({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
