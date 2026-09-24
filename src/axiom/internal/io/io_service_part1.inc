@@ -314,37 +314,52 @@ Result<BodyId> IOService::import_axmjson(std::string_view path, const ImportOpti
 }
 
 Result<BodyId> IOService::import_stl(std::string_view path, const ImportOptions& options) {
+    const auto fail_before_import = [this](StatusCode status, std::string_view code, std::string message,
+                                           std::string_view stage) {
+        auto issue = detail::make_error_issue(code, std::move(message));
+        issue.stage = std::string(stage);
+        return error_result<BodyId>(status, state_->create_diagnostic("STL 导入失败", {std::move(issue)}));
+    };
     if (path.empty()) {
-        return detail::invalid_input_result<BodyId>(*state_, diag_codes::kIoImportFailure, "STL 导入失败：输入路径为空",
-                                                    "STL 导入失败");
+        return fail_before_import(StatusCode::InvalidInput, diag_codes::kIoImportFailure,
+                                  "STL 导入失败：输入路径为空", "io.import.stl.input");
     }
     if (!std::filesystem::exists(path)) {
-        return detail::failed_result<BodyId>(*state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
-                                             "STL 导入失败：输入文件不存在", "STL 导入失败");
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                  "STL 导入失败：输入文件不存在", "io.import.stl.path");
+    }
+    std::error_code file_type_error;
+    if (!std::filesystem::is_regular_file(path, file_type_error) || file_type_error) {
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                  "STL 导入失败：输入路径不是可读取的普通文件", "io.import.stl.open");
     }
     std::ifstream in {std::string(path), std::ios::binary};
     if (!in) {
-        return detail::failed_result<BodyId>(*state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
-                                             "STL 导入失败：无法打开输入文件", "STL 导入失败");
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                  "STL 导入失败：无法打开输入文件", "io.import.stl.open");
     }
     std::vector<std::uint8_t> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (in.bad()) {
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                  "STL 导入失败：读取输入文件失败", "io.import.stl.read");
+    }
     detail::MeshRecord mesh;
     const auto parse_err = parse_stl_bytes(data, mesh);
     if (parse_err.has_value()) {
-        return detail::failed_result<BodyId>(*state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
-                                             *parse_err, "STL 导入失败");
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                  *parse_err, "io.import.stl.parse");
     }
     if (mesh.vertices.empty() || mesh.indices.empty() || (mesh.indices.size() % 3) != 0) {
-        return detail::invalid_input_result<BodyId>(*state_, diag_codes::kIoImportFailure, "STL 导入失败：网格数据无效",
-                                                    "STL 导入失败");
+        return fail_before_import(StatusCode::InvalidInput, diag_codes::kIoImportFailure,
+                                  "STL 导入失败：网格数据无效", "io.import.stl.validation");
     }
     if (detail::has_out_of_range_indices(mesh.vertices, mesh.indices)) {
-        return detail::invalid_input_result<BodyId>(*state_, diag_codes::kIoImportFailure, "STL 导入失败：三角形索引越界",
-                                                    "STL 导入失败");
+        return fail_before_import(StatusCode::InvalidInput, diag_codes::kIoImportFailure,
+                                  "STL 导入失败：三角形索引越界", "io.import.stl.validation");
     }
     if (detail::has_degenerate_triangles(mesh.vertices, mesh.indices)) {
-        return detail::failed_result<BodyId>(*state_, StatusCode::DegenerateGeometry, diag_codes::kValDegenerateGeometry,
-                                           "STL 导入失败：存在退化三角形", "STL 导入失败");
+        return fail_before_import(StatusCode::DegenerateGeometry, diag_codes::kValDegenerateGeometry,
+                                  "STL 导入失败：存在退化三角形", "io.import.stl.validation");
     }
 
     const auto body_id = BodyId {state_->allocate_id()};
@@ -367,37 +382,52 @@ Result<BodyId> IOService::import_stl(std::string_view path, const ImportOptions&
 }
 
 Result<BodyId> IOService::import_gltf(std::string_view path, const ImportOptions& options) {
+    const auto fail_before_import = [this](StatusCode status, std::string_view code, std::string message,
+                                           std::string_view stage) {
+        auto issue = detail::make_error_issue(code, std::move(message));
+        issue.stage = std::string(stage);
+        return error_result<BodyId>(status, state_->create_diagnostic("glTF 导入失败", {std::move(issue)}));
+    };
     if (path.empty()) {
-        return detail::invalid_input_result<BodyId>(*state_, diag_codes::kIoImportFailure, "glTF 导入失败：输入路径为空",
-                                                    "glTF 导入失败");
+        return fail_before_import(StatusCode::InvalidInput, diag_codes::kIoImportFailure,
+                                  "glTF 导入失败：输入路径为空", "io.import.gltf.input");
     }
     if (!std::filesystem::exists(path)) {
-        return detail::failed_result<BodyId>(*state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
-                                             "glTF 导入失败：输入文件不存在", "glTF 导入失败");
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                  "glTF 导入失败：输入文件不存在", "io.import.gltf.path");
+    }
+    std::error_code file_type_error;
+    if (!std::filesystem::is_regular_file(path, file_type_error) || file_type_error) {
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                  "glTF 导入失败：输入路径不是可读取的普通文件", "io.import.gltf.open");
     }
     std::ifstream in {std::string(path)};
     if (!in) {
-        return detail::failed_result<BodyId>(*state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
-                                             "glTF 导入失败：无法打开输入文件", "glTF 导入失败");
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                  "glTF 导入失败：无法打开输入文件", "io.import.gltf.open");
     }
     std::string json_text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (in.bad()) {
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                  "glTF 导入失败：读取输入文件失败", "io.import.gltf.read");
+    }
     detail::MeshRecord mesh;
     const auto parse_err = parse_gltf_embedded_minimal(json_text, mesh);
     if (parse_err.has_value()) {
-        return detail::failed_result<BodyId>(*state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
-                                             *parse_err, "glTF 导入失败");
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                  *parse_err, "io.import.gltf.parse");
     }
     if (mesh.vertices.empty() || mesh.indices.empty() || (mesh.indices.size() % 3) != 0) {
-        return detail::invalid_input_result<BodyId>(*state_, diag_codes::kIoImportFailure, "glTF 导入失败：网格数据无效",
-                                                    "glTF 导入失败");
+        return fail_before_import(StatusCode::InvalidInput, diag_codes::kIoImportFailure,
+                                  "glTF 导入失败：网格数据无效", "io.import.gltf.validation");
     }
     if (detail::has_out_of_range_indices(mesh.vertices, mesh.indices)) {
-        return detail::invalid_input_result<BodyId>(*state_, diag_codes::kIoImportFailure, "glTF 导入失败：三角形索引越界",
-                                                    "glTF 导入失败");
+        return fail_before_import(StatusCode::InvalidInput, diag_codes::kIoImportFailure,
+                                  "glTF 导入失败：三角形索引越界", "io.import.gltf.validation");
     }
     if (detail::has_degenerate_triangles(mesh.vertices, mesh.indices)) {
-        return detail::failed_result<BodyId>(*state_, StatusCode::DegenerateGeometry, diag_codes::kValDegenerateGeometry,
-                                           "glTF 导入失败：存在退化三角形", "glTF 导入失败");
+        return fail_before_import(StatusCode::DegenerateGeometry, diag_codes::kValDegenerateGeometry,
+                                  "glTF 导入失败：存在退化三角形", "io.import.gltf.validation");
     }
 
     const auto body_id = BodyId {state_->allocate_id()};
@@ -505,29 +535,40 @@ Result<BodyId> IOService::import_brep(std::string_view path, const ImportOptions
 }
 
 Result<BodyId> IOService::import_obj(std::string_view path, const ImportOptions& options) {
+    const auto fail_before_import = [this](StatusCode status, std::string_view code, std::string message,
+                                           std::string_view stage) {
+        auto issue = detail::make_error_issue(code, std::move(message));
+        issue.stage = std::string(stage);
+        return error_result<BodyId>(status, state_->create_diagnostic("OBJ 导入失败", {std::move(issue)}));
+    };
     if (path.empty()) {
-        return detail::invalid_input_result<BodyId>(*state_, diag_codes::kIoImportFailure, "OBJ 导入失败：输入路径为空",
-                                                    "OBJ 导入失败");
+        return fail_before_import(StatusCode::InvalidInput, diag_codes::kIoImportFailure,
+                                  "OBJ 导入失败：输入路径为空", "io.import.obj.input");
     }
     if (!std::filesystem::exists(path)) {
-        return detail::failed_result<BodyId>(*state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
-                                             "OBJ 导入失败：输入文件不存在", "OBJ 导入失败");
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                  "OBJ 导入失败：输入文件不存在", "io.import.obj.path");
+    }
+    std::error_code file_type_error;
+    if (!std::filesystem::is_regular_file(path, file_type_error) || file_type_error) {
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                  "OBJ 导入失败：输入路径不是可读取的普通文件", "io.import.obj.open");
     }
     std::ifstream in {std::string(path)};
     if (!in) {
-        return detail::failed_result<BodyId>(*state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
-                                             "OBJ 导入失败：无法打开输入文件", "OBJ 导入失败");
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                  "OBJ 导入失败：无法打开输入文件", "io.import.obj.open");
     }
     std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     detail::MeshRecord mesh;
     const auto err = parse_obj_text_to_mesh(text, mesh);
     if (err.has_value()) {
-        return detail::failed_result<BodyId>(*state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure, *err,
-                                             "OBJ 导入失败");
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure, *err,
+                                  "io.import.obj.parse");
     }
     if (detail::has_degenerate_triangles(mesh.vertices, mesh.indices)) {
-        return detail::failed_result<BodyId>(*state_, StatusCode::DegenerateGeometry, diag_codes::kValDegenerateGeometry,
-                                             "OBJ 导入失败：存在退化三角形", "OBJ 导入失败");
+        return fail_before_import(StatusCode::DegenerateGeometry, diag_codes::kValDegenerateGeometry,
+                                  "OBJ 导入失败：存在退化三角形", "io.import.obj.validation");
     }
     mesh.label = "obj_import";
     mesh.tessellation_strategy = "io_import_obj";
@@ -553,39 +594,68 @@ Result<BodyId> IOService::import_obj(std::string_view path, const ImportOptions&
 }
 
 Result<BodyId> IOService::import_3mf(std::string_view path, const ImportOptions& options) {
+    const auto fail_before_import = [this](StatusCode status, std::string_view code, std::string message,
+                                           std::string_view stage) {
+        auto issue = detail::make_error_issue(code, std::move(message));
+        issue.stage = std::string(stage);
+        return error_result<BodyId>(status, state_->create_diagnostic("3MF 导入失败", {std::move(issue)}));
+    };
     if (path.empty()) {
-        return detail::invalid_input_result<BodyId>(*state_, diag_codes::kIoImportFailure, "3MF 导入失败：输入路径为空",
-                                                    "3MF 导入失败");
+        return fail_before_import(StatusCode::InvalidInput, diag_codes::kIoImportFailure,
+                                  "3MF 导入失败：输入路径为空", "io.import.3mf.input");
     }
     if (!std::filesystem::exists(path)) {
-        return detail::failed_result<BodyId>(*state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
-                                             "3MF 导入失败：输入文件不存在", "3MF 导入失败");
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                  "3MF 导入失败：输入文件不存在", "io.import.3mf.path");
+    }
+    std::error_code file_type_error;
+    if (!std::filesystem::is_regular_file(path, file_type_error) || file_type_error) {
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                  "3MF 导入失败：输入路径不是可读取的普通文件", "io.import.3mf.open");
     }
     std::ifstream in {std::string(path), std::ios::binary};
     if (!in) {
-        return detail::failed_result<BodyId>(*state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
-                                             "3MF 导入失败：无法打开输入文件", "3MF 导入失败");
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                  "3MF 导入失败：无法打开输入文件", "io.import.3mf.open");
     }
     std::vector<std::uint8_t> zip_data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (in.bad()) {
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                  "3MF 导入失败：读取输入文件失败", "io.import.3mf.read");
+    }
     std::vector<std::pair<std::string, std::vector<std::uint8_t>>> files;
     if (!zip_parse_stored_locals(zip_data, files)) {
-        return detail::failed_result<BodyId>(*state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
-                                             "3MF 导入失败：ZIP 解析失败或非 STORE 压缩包", "3MF 导入失败");
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                  "3MF 导入失败：ZIP 解析失败或非 STORE 压缩包", "io.import.3mf.parse");
     }
     std::string model_xml;
     if (!extract_3mf_model_xml(files, model_xml)) {
-        return detail::failed_result<BodyId>(*state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
-                                             "3MF 导入失败：未找到 3dmodel.model", "3MF 导入失败");
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                  "3MF 导入失败：未找到 3dmodel.model", "io.import.3mf.parse");
     }
     detail::MeshRecord mesh;
-    const auto perr = parse_3mf_model_xml_to_mesh(model_xml, mesh);
-    if (perr.has_value()) {
-        return detail::failed_result<BodyId>(*state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure, *perr,
-                                             "3MF 导入失败");
+    try {
+        const auto perr = parse_3mf_model_xml_to_mesh(model_xml, mesh);
+        if (perr.has_value()) {
+            return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                      *perr, "io.import.3mf.parse");
+        }
+    } catch (const std::invalid_argument&) {
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                  "3MF 解析失败：网格数值非法", "io.import.3mf.parse");
+    } catch (const std::out_of_range&) {
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                  "3MF 解析失败：网格数值超出范围", "io.import.3mf.parse");
+    }
+    for (const auto& vertex : mesh.vertices) {
+        if (!std::isfinite(vertex.x) || !std::isfinite(vertex.y) || !std::isfinite(vertex.z)) {
+            return fail_before_import(StatusCode::InvalidInput, diag_codes::kIoImportFailure,
+                                      "3MF 导入失败：顶点坐标非有限值", "io.import.3mf.validation");
+        }
     }
     if (detail::has_degenerate_triangles(mesh.vertices, mesh.indices)) {
-        return detail::failed_result<BodyId>(*state_, StatusCode::DegenerateGeometry, diag_codes::kValDegenerateGeometry,
-                                             "3MF 导入失败：存在退化三角形", "3MF 导入失败");
+        return fail_before_import(StatusCode::DegenerateGeometry, diag_codes::kValDegenerateGeometry,
+                                  "3MF 导入失败：存在退化三角形", "io.import.3mf.validation");
     }
     mesh.label = "3mf_import";
     mesh.tessellation_strategy = "io_import_3mf";

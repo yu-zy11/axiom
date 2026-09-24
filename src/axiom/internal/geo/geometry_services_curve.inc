@@ -81,7 +81,7 @@ Result<Scalar> PCurveService::closest_parameter(PCurveId pcurve_id,
   }
   const auto &pc = it->second;
   const auto domain = pcurve_domain(pc);
-  const auto t = std::clamp(approximate_pcurve_parameter(pc, point), domain.min,
+  const auto t = std::clamp(closest_pcurve_parameter(pc, point), domain.min,
                             domain.max);
   return ok_result(t, state_->create_diagnostic("参数曲线最近参数已求解"));
 }
@@ -394,16 +394,22 @@ Result<Scalar> CurveService::closest_parameter(CurveId curve_id,
     }
     const auto a = curve.poles.front();
     const auto b = curve.poles.back();
-    const auto ab = detail::subtract(b, a);
-    const auto denom = detail::dot(ab, ab);
-    if (denom <= kEpsilon) {
+    // Keep the projection finite when a valid segment's squared length exceeds
+    // the range of Scalar. The factory has already rejected short segments.
+    const long double dx = static_cast<long double>(b.x) - a.x;
+    const long double dy = static_cast<long double>(b.y) - a.y;
+    const long double dz = static_cast<long double>(b.z) - a.z;
+    const auto denom = dx * dx + dy * dy + dz * dz;
+    if (!(denom > 0.0L)) {
       return detail::failed_result<Scalar>(
           *state_, StatusCode::OperationFailed, diag_codes::kGeoParameterSolveFailure,
           "曲线最近参数求解失败：线段退化", "曲线最近参数求解失败");
     }
-    const auto ap = detail::subtract(point, a);
-    const auto tproj = detail::dot(ap, ab) / denom;
-    return ok_result<Scalar>(std::clamp(tproj, 0.0, 1.0),
+    const long double qx = static_cast<long double>(point.x) - a.x;
+    const long double qy = static_cast<long double>(point.y) - a.y;
+    const long double qz = static_cast<long double>(point.z) - a.z;
+    const auto tproj = (qx * dx + qy * dy + qz * dz) / denom;
+    return ok_result<Scalar>(static_cast<Scalar>(std::clamp(tproj, 0.0L, 1.0L)),
                              state_->create_diagnostic("曲线最近参数已求解"));
   }
   case detail::CurveKind::Circle: {
@@ -413,13 +419,35 @@ Result<Scalar> CurveService::closest_parameter(CurveId curve_id,
     return ok_result<Scalar>(normalize_angle_0_2pi(std::atan2(pv, pu)),
                              state_->create_diagnostic("曲线最近参数已求解"));
   }
-  case detail::CurveKind::Ellipse: {
-    const auto rel = detail::subtract(point, curve.origin);
-    const auto pu = detail::dot(rel, curve.axis_u) /
-                    std::max(detail::dot(curve.axis_u, curve.axis_u), 1e-12);
-    const auto pv = detail::dot(rel, curve.axis_v) /
-                    std::max(detail::dot(curve.axis_v, curve.axis_v), 1e-12);
-    return ok_result<Scalar>(normalize_angle_0_2pi(std::atan2(pv, pu)),
+  case detail::CurveKind::CompositePolyline: {
+    Scalar best_t = 0.0;
+    long double best_distance = std::numeric_limits<long double>::max();
+    for (std::size_t i = 0; i + 1 < curve.poles.size(); ++i) {
+      const auto &a = curve.poles[i];
+      const auto &b = curve.poles[i + 1];
+      // Finite double coordinates can overflow a double squared distance.
+      const long double dx = static_cast<long double>(b.x) - a.x;
+      const long double dy = static_cast<long double>(b.y) - a.y;
+      const long double dz = static_cast<long double>(b.z) - a.z;
+      const long double qx = static_cast<long double>(point.x) - a.x;
+      const long double qy = static_cast<long double>(point.y) - a.y;
+      const long double qz = static_cast<long double>(point.z) - a.z;
+      const auto length_squared = dx * dx + dy * dy + dz * dz;
+      const auto local = length_squared > 0.0L
+                             ? std::clamp((qx * dx + qy * dy + qz * dz) /
+                                              length_squared,
+                                          0.0L, 1.0L)
+                             : 0.0L;
+      const auto rx = qx - local * dx;
+      const auto ry = qy - local * dy;
+      const auto rz = qz - local * dz;
+      const auto distance = rx * rx + ry * ry + rz * rz;
+      if (distance < best_distance) {
+        best_distance = distance;
+        best_t = static_cast<Scalar>(i) + static_cast<Scalar>(local);
+      }
+    }
+    return ok_result<Scalar>(best_t,
                              state_->create_diagnostic("曲线最近参数已求解"));
   }
   default:
@@ -429,9 +457,9 @@ Result<Scalar> CurveService::closest_parameter(CurveId curve_id,
   if (curve.kind == detail::CurveKind::Bezier ||
       curve.kind == detail::CurveKind::BSpline ||
       curve.kind == detail::CurveKind::Nurbs ||
+      curve.kind == detail::CurveKind::Ellipse ||
       curve.kind == detail::CurveKind::Parabola ||
-      curve.kind == detail::CurveKind::Hyperbola ||
-      curve.kind == detail::CurveKind::CompositePolyline) {
+      curve.kind == detail::CurveKind::Hyperbola) {
     const auto domain = curve_domain(curve);
     Scalar t = std::clamp(approximate_curve_parameter(curve, point),
                           domain.min, domain.max);
@@ -496,7 +524,10 @@ Result<Scalar> CurveService::closest_parameter(CurveId curve_id,
         break;
       }
     }
-    return ok_result<Scalar>(std::clamp(t, domain.min, domain.max),
+    const auto result_t = curve.kind == detail::CurveKind::Ellipse
+                              ? normalize_angle_0_2pi(t)
+                              : std::clamp(t, domain.min, domain.max);
+    return ok_result<Scalar>(result_t,
                              state_->create_diagnostic("曲线最近参数已求解"));
   }
 

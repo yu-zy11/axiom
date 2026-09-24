@@ -28,6 +28,74 @@ const axiom::Issue* find_issue(const axiom::DiagnosticReport& report, std::strin
     return nullptr;
 }
 
+bool check_single_report_export_failures() {
+    axiom::Kernel kernel;
+    auto& diagnostics = kernel.diagnostics();
+    axiom::Issue issue;
+    issue.code = std::string(axiom::diag_codes::kBoolInvalidInput);
+    issue.severity = axiom::IssueSeverity::Error;
+    issue.message = "single export evidence";
+    issue.stage = "bool.input";
+    issue.related_entities = {71, 72};
+    const std::array<axiom::Issue, 1> issues {issue};
+    const auto source = diagnostics.create_report("single export source", issues);
+    const auto empty = diagnostics.create_report("", {});
+    if (!source.value || !empty.value) return false;
+
+    const auto directory = std::filesystem::temp_directory_path() / "axiom_diag_single_export_slice";
+    std::filesystem::create_directories(directory);
+    struct Cleanup {
+        std::filesystem::path path;
+        ~Cleanup() { std::filesystem::remove_all(path); }
+    } cleanup {directory};
+    const auto txt_path = directory / "report.txt";
+    const auto json_path = directory / "report.json";
+    const auto empty_txt_path = directory / "empty.txt";
+    const auto empty_json_path = directory / "empty.json";
+    const auto read = [](const std::filesystem::path& path) {
+        std::ifstream in(path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    };
+    if (diagnostics.export_report(*source.value, txt_path.string()).status != axiom::StatusCode::Ok ||
+        diagnostics.export_report_json(*source.value, json_path.string()).status != axiom::StatusCode::Ok ||
+        read(txt_path).find("Stage:bool.input | RelatedEntities: 71 72") == std::string::npos ||
+        read(json_path).find("\"stage\":\"bool.input\",\"related_entities\":[71,72]") == std::string::npos) return false;
+    if (diagnostics.export_report(*empty.value, empty_txt_path.string()).status != axiom::StatusCode::Ok ||
+        diagnostics.export_report_json(*empty.value, empty_json_path.string()).status != axiom::StatusCode::Ok ||
+        read(empty_txt_path) != "DiagnosticId: " + std::to_string(empty.value->value) + "\nSummary: \n" ||
+        read(empty_json_path) != "{\"id\":" + std::to_string(empty.value->value) +
+                                 ",\"summary\":\"\",\"issues\":[]}") return false;
+
+    const auto source_before = diagnostics.get(*source.value);
+    if (!source_before.value) return false;
+    const auto invalid_txt = diagnostics.export_report(axiom::DiagnosticId {}, txt_path.string());
+    const auto empty_json = diagnostics.export_report_json(*source.value, "");
+    const auto open_txt = diagnostics.export_report(*source.value, directory.string());
+    const auto open_json = diagnostics.export_report_json(*source.value, directory.string());
+    for (const auto* result : {&invalid_txt, &empty_json, &open_txt, &open_json}) {
+        const auto failure = diagnostics.get(result->diagnostic_id);
+        if (!failure.value) return false;
+    }
+    if (invalid_txt.status != axiom::StatusCode::InvalidInput ||
+        empty_json.status != axiom::StatusCode::InvalidInput ||
+        open_txt.status != axiom::StatusCode::OperationFailed ||
+        open_json.status != axiom::StatusCode::OperationFailed) return false;
+#if defined(__linux__)
+    const auto write_txt = diagnostics.export_report(*source.value, "/dev/full");
+    const auto write_json = diagnostics.export_report_json(*source.value, "/dev/full");
+    for (const auto* result : {&write_txt, &write_json}) {
+        const auto failure = diagnostics.get(result->diagnostic_id);
+        if (result->status != axiom::StatusCode::OperationFailed || !failure.value ||
+            !has_issue_code(*failure.value, axiom::diag_codes::kIoExportFailure)) return false;
+    }
+#endif
+    const auto source_after = diagnostics.get(*source.value);
+    if (!source_after.value || source_after.value->summary != source_before.value->summary ||
+        source_after.value->issues.size() != source_before.value->issues.size()) return false;
+    return diagnostics.export_report(*source.value, txt_path.string()).status == axiom::StatusCode::Ok &&
+           diagnostics.export_report_json(*source.value, json_path.string()).status == axiom::StatusCode::Ok;
+}
+
 bool check_batch_json_export() {
     axiom::Kernel kernel;
     auto& diagnostics = kernel.diagnostics();
@@ -250,9 +318,230 @@ bool check_grouped_stage_export_failures() {
     return diagnostics.export_grouped_by_stage_json(json_path.string()).status == axiom::StatusCode::Ok;
 }
 
+bool check_code_prefix_search_limit_order() {
+    axiom::Kernel kernel;
+    auto& diagnostics = kernel.diagnostics();
+    const std::array<std::string_view, 8> codes {
+        "AXM-BOOL-E-0001", "AXM-IO-E-0005", "AXM-BOOL-W-0001", "",
+        "AXM-BOOL-E-0002", "AXM-HEAL-E-0001", "AXM-BOOL-D-0001", "AXM-BOOL-E-0003"
+    };
+    std::array<axiom::DiagnosticId, codes.size()> ids {};
+    for (std::size_t i = 0; i < codes.size(); ++i) {
+        std::vector<axiom::Issue> issues;
+        if (!codes[i].empty()) {
+            axiom::Issue issue;
+            issue.code = codes[i];
+            issue.stage = "diag.code_search";
+            issue.related_entities = {i + 1};
+            issues.push_back(issue);
+            if (i == 0) issues.push_back(issue); // A report matches once despite repeated issues.
+        }
+        const auto report = diagnostics.create_report("code prefix source", issues);
+        if (report.status != axiom::StatusCode::Ok || !report.value) return false;
+        ids[i] = *report.value;
+    }
+    const auto matches = [](const auto& result, std::initializer_list<axiom::DiagnosticId> expected) {
+        if (result.status != axiom::StatusCode::Ok || !result.value ||
+            result.value->size() != expected.size()) return false;
+        return std::equal(result.value->begin(), result.value->end(), expected.begin(),
+                          [](axiom::DiagnosticId a, axiom::DiagnosticId b) { return a.value == b.value; });
+    };
+    if (!matches(diagnostics.find_by_issue_code_prefix("AXM-BOOL", 2), {ids[0], ids[2]}) ||
+        !matches(diagnostics.find_by_issue_code_prefix("AXM-BOOL", 10),
+                 {ids[0], ids[2], ids[4], ids[6], ids[7]}) ||
+        !matches(diagnostics.find_by_issue_code_prefix("AXM-BOOL-E", 3), {ids[0], ids[4], ids[7]}) ||
+        !matches(diagnostics.find_by_issue_code_prefix("AXM-MISSING", 1), {})) return false;
+
+    for (const auto& result : {
+             diagnostics.find_by_issue_code_prefix("", 2),
+             diagnostics.find_by_issue_code_prefix("AXM-BOOL", 0)}) {
+        const auto failure = diagnostics.get(result.diagnostic_id);
+        if (result.status != axiom::StatusCode::InvalidInput || result.value || !failure.value ||
+            !has_issue_code(*failure.value, axiom::diag_codes::kCoreParameterOutOfRange)) return false;
+    }
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+        const auto source = diagnostics.get(ids[i]);
+        if (!source.value || source.value->summary != "code prefix source" ||
+            source.value->issues.size() != (i == 0 ? 2U : (codes[i].empty() ? 0U : 1U))) return false;
+        if (!codes[i].empty() &&
+            (source.value->issues[0].code != codes[i] ||
+             source.value->issues[0].related_entities != std::vector<std::uint64_t>({i + 1}))) return false;
+    }
+    return matches(diagnostics.find_by_issue_code_prefix("AXM-BOOL", 2), {ids[0], ids[2]});
+}
+
+bool check_related_entity_search_limit_order() {
+    axiom::Kernel kernel;
+    auto& diagnostics = kernel.diagnostics();
+    constexpr std::uint64_t target = 42;
+    const std::array<bool, 8> related {true, false, true, false, true, false, false, true};
+    std::array<axiom::DiagnosticId, related.size()> ids {};
+    for (std::size_t i = 0; i < related.size(); ++i) {
+        axiom::Issue issue;
+        issue.code = std::string(axiom::diag_codes::kBoolInvalidInput);
+        issue.stage = "diag.entity_search";
+        issue.related_entities = {related[i] ? target : target + 1};
+        std::vector<axiom::Issue> issues {issue};
+        if (i == 0) issues.push_back(issue); // Repeated matches identify one report.
+        if (i == 6) issues.clear(); // An empty report does not match.
+        const auto report = diagnostics.create_report("entity search source", issues);
+        if (report.status != axiom::StatusCode::Ok || !report.value) return false;
+        ids[i] = *report.value;
+    }
+    const auto matches = [](const auto& result, std::initializer_list<axiom::DiagnosticId> expected) {
+        if (result.status != axiom::StatusCode::Ok || !result.value ||
+            result.value->size() != expected.size()) return false;
+        return std::equal(result.value->begin(), result.value->end(), expected.begin(),
+                          [](axiom::DiagnosticId a, axiom::DiagnosticId b) { return a.value == b.value; });
+    };
+    if (!matches(diagnostics.find_by_related_entity(target, 1), {ids[0]}) ||
+        !matches(diagnostics.find_by_related_entity(target, 3), {ids[0], ids[2], ids[4]}) ||
+        !matches(diagnostics.find_by_related_entity(target, 10), {ids[0], ids[2], ids[4], ids[7]}) ||
+        !matches(diagnostics.find_by_related_entity(target + 2, 1), {}) ||
+        !matches(diagnostics.report_ids_by_entity(target, 2), {ids[0], ids[2]})) return false;
+
+    for (const auto& result : {diagnostics.find_by_related_entity(0, 2),
+                               diagnostics.find_by_related_entity(target, 0)}) {
+        const auto failure = diagnostics.get(result.diagnostic_id);
+        if (result.status != axiom::StatusCode::InvalidInput || result.value || !failure.value ||
+            !has_issue_code(*failure.value, axiom::diag_codes::kCoreParameterOutOfRange)) return false;
+    }
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+        const auto source = diagnostics.get(ids[i]);
+        if (!source.value || source.value->summary != "entity search source" ||
+            source.value->issues.size() != (i == 0 ? 2U : (i == 6 ? 0U : 1U))) return false;
+        if (i != 6 && (source.value->issues[0].stage != "diag.entity_search" ||
+                       source.value->issues[0].related_entities !=
+                           std::vector<std::uint64_t>({related[i] ? target : target + 1}))) return false;
+    }
+    return matches(diagnostics.find_by_related_entity(target, 2), {ids[0], ids[2]});
+}
+
+bool check_stage_search_limit_order() {
+    axiom::Kernel kernel;
+    auto& diagnostics = kernel.diagnostics();
+    const std::array<std::string_view, 8> stages {
+        "bool.input", "io.open", "bool.input", "bool.prep",
+        "bool.input", "bool.prep", "heal.validate", "bool.input"
+    };
+    std::array<axiom::DiagnosticId, stages.size()> ids {};
+    for (std::size_t i = 0; i < stages.size(); ++i) {
+        axiom::Issue issue;
+        issue.code = std::string(axiom::diag_codes::kBoolInvalidInput);
+        issue.severity = axiom::IssueSeverity::Error;
+        issue.stage = stages[i];
+        issue.related_entities = {i + 1};
+        std::vector<axiom::Issue> issues {issue};
+        if (i == 0) issues.push_back(issue); // Multiple matching issues still identify one report.
+        const auto report = diagnostics.create_report("stage search source", issues);
+        if (report.status != axiom::StatusCode::Ok || !report.value) return false;
+        ids[i] = *report.value;
+    }
+    const auto matches = [](const auto& result, std::initializer_list<axiom::DiagnosticId> expected) {
+        if (result.status != axiom::StatusCode::Ok || !result.value ||
+            result.value->size() != expected.size()) return false;
+        return std::equal(result.value->begin(), result.value->end(), expected.begin(),
+                          [](axiom::DiagnosticId a, axiom::DiagnosticId b) { return a.value == b.value; });
+    };
+    if (!matches(diagnostics.find_by_issue_stage("bool.input", 2), {ids[0], ids[2]}) ||
+        !matches(diagnostics.find_by_issue_stage("bool.input", 10), {ids[0], ids[2], ids[4], ids[7]}) ||
+        !matches(diagnostics.find_by_issue_stage_prefix("bool.", 3), {ids[0], ids[2], ids[3]}) ||
+        !matches(diagnostics.find_by_issue_stage_prefix("bool.input", 10),
+                 {ids[0], ids[2], ids[4], ids[7]}) ||
+        !matches(diagnostics.find_by_issue_stage("missing", 1), {})) return false;
+
+    for (const auto& result : {
+             diagnostics.find_by_issue_stage("", 2), diagnostics.find_by_issue_stage("bool.input", 0),
+             diagnostics.find_by_issue_stage_prefix("", 2), diagnostics.find_by_issue_stage_prefix("bool.", 0)}) {
+        const auto failure = diagnostics.get(result.diagnostic_id);
+        if (result.status != axiom::StatusCode::InvalidInput || result.value || !failure.value ||
+            !has_issue_code(*failure.value, axiom::diag_codes::kCoreParameterOutOfRange)) return false;
+    }
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+        const auto source = diagnostics.get(ids[i]);
+        if (!source.value || source.value->summary != "stage search source" ||
+            source.value->issues.size() != (i == 0 ? 2U : 1U) ||
+            source.value->issues[0].stage != stages[i] ||
+            source.value->issues[0].related_entities != std::vector<std::uint64_t>({i + 1})) return false;
+    }
+    return matches(diagnostics.find_by_issue_stage_prefix("bool.", 2), {ids[0], ids[2]});
+}
+
+bool check_severity_search_limit_order() {
+    axiom::Kernel kernel;
+    auto& diagnostics = kernel.diagnostics();
+    const std::array<axiom::IssueSeverity, 8> severities {
+        axiom::IssueSeverity::Warning, axiom::IssueSeverity::Error,
+        axiom::IssueSeverity::Warning, axiom::IssueSeverity::Info,
+        axiom::IssueSeverity::Warning, axiom::IssueSeverity::Error,
+        axiom::IssueSeverity::Info, axiom::IssueSeverity::Warning
+    };
+    std::array<axiom::DiagnosticId, severities.size()> ids {};
+    for (std::size_t i = 0; i < severities.size(); ++i) {
+        axiom::Issue issue;
+        issue.code = std::string(axiom::diag_codes::kBoolInvalidInput);
+        issue.severity = severities[i];
+        issue.stage = "diag.severity_search";
+        issue.related_entities = {i + 1};
+        std::vector<axiom::Issue> issues {issue};
+        if (i == 0) issues.push_back(issue); // Repeated matching issues identify one report.
+        if (i == 6) issues.clear(); // An empty report does not match Info.
+        const auto report = diagnostics.create_report("severity search source", issues);
+        if (report.status != axiom::StatusCode::Ok || !report.value) return false;
+        ids[i] = *report.value;
+    }
+    const auto matches = [](const auto& result, std::initializer_list<axiom::DiagnosticId> expected) {
+        if (result.status != axiom::StatusCode::Ok || !result.value ||
+            result.value->size() != expected.size()) return false;
+        return std::equal(result.value->begin(), result.value->end(), expected.begin(),
+                          [](axiom::DiagnosticId a, axiom::DiagnosticId b) { return a.value == b.value; });
+    };
+    if (!matches(diagnostics.find_with_severity(axiom::IssueSeverity::Warning, 1), {ids[0]}) ||
+        !matches(diagnostics.find_with_severity(axiom::IssueSeverity::Warning, 3), {ids[0], ids[2], ids[4]}) ||
+        !matches(diagnostics.find_with_severity(axiom::IssueSeverity::Warning, 10),
+                 {ids[0], ids[2], ids[4], ids[7]}) ||
+        !matches(diagnostics.report_ids_by_severity(axiom::IssueSeverity::Warning, 2), {ids[0], ids[2]}) ||
+        !matches(diagnostics.find_with_severity(axiom::IssueSeverity::Fatal, 1), {}) ||
+        !matches(diagnostics.find_with_severity(axiom::IssueSeverity::Info, 10), {ids[3]})) return false;
+
+    const auto invalid = diagnostics.find_with_severity(axiom::IssueSeverity::Warning, 0);
+    const auto failure = diagnostics.get(invalid.diagnostic_id);
+    if (invalid.status != axiom::StatusCode::InvalidInput || invalid.value || !failure.value ||
+        !has_issue_code(*failure.value, axiom::diag_codes::kCoreParameterOutOfRange)) return false;
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+        const auto source = diagnostics.get(ids[i]);
+        if (!source.value || source.value->summary != "severity search source" ||
+            source.value->issues.size() != (i == 0 ? 2U : (i == 6 ? 0U : 1U))) return false;
+        if (i != 6 && (source.value->issues[0].severity != severities[i] ||
+                       source.value->issues[0].stage != "diag.severity_search" ||
+                       source.value->issues[0].related_entities != std::vector<std::uint64_t>({i + 1}))) return false;
+    }
+    return matches(diagnostics.find_with_severity(axiom::IssueSeverity::Warning, 2), {ids[0], ids[2]});
+}
+
 }  // namespace
 
 int main() {
+    if (!check_severity_search_limit_order()) {
+        std::cerr << "severity search order, limit or source isolation regression\n";
+        return 1;
+    }
+    if (!check_related_entity_search_limit_order()) {
+        std::cerr << "related entity search order, limit or source isolation regression\n";
+        return 1;
+    }
+    if (!check_code_prefix_search_limit_order()) {
+        std::cerr << "issue code prefix search order, limit or source isolation regression\n";
+        return 1;
+    }
+    if (!check_stage_search_limit_order()) {
+        std::cerr << "stage search order, limit or source isolation regression\n";
+        return 1;
+    }
+    if (!check_single_report_export_failures()) {
+        std::cerr << "single report export failure handling regression\n";
+        return 1;
+    }
     if (!check_grouped_stage_export_failures()) {
         std::cerr << "grouped stage export failure handling or source isolation regression\n";
         return 1;

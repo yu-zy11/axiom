@@ -2,6 +2,11 @@ TopologyTransaction::TopologyTransaction(
     std::shared_ptr<detail::KernelState> state)
     : state_(std::move(state)),
       transaction_state_(std::make_shared<detail::TopologyTransactionState>()) {
+  if (!state_->active_topology_transaction.expired()) {
+    active_ = false;
+    return;
+  }
+  state_->active_topology_transaction = transaction_state_;
 }
 
 TopologyTransaction::TopologyTransaction(TopologyTransaction&& other)
@@ -41,6 +46,10 @@ TopologyTransaction::~TopologyTransaction() noexcept {
     return;
   }
   if (txn_write_ops_ == 0) {
+    if (const auto owner = state_->active_topology_transaction.lock();
+        owner.get() == transaction_state_.get()) {
+      state_->active_topology_transaction.reset();
+    }
     active_ = false;
     return;
   }
@@ -164,6 +173,28 @@ TopologyTransaction::create_loop(std::span<const CoedgeId> coedges) {
         *state_, StatusCode::InvalidTopology, diag_codes::kTopoLoopDuplicateEdge,
         "创建环失败：定向边序列包含重复引用", "创建环失败");
   }
+  {
+    std::unordered_map<std::uint64_t, CoedgeId> first_coedge_by_vertex;
+    first_coedge_by_vertex.reserve(coedges.size());
+    for (const auto coedge_id : coedges) {
+      const auto oriented = oriented_vertices(*state_, coedge_id);
+      if (!oriented.has_value()) {
+        continue;
+      }
+      const auto [it, inserted] = first_coedge_by_vertex.emplace(
+          (*oriented)[0].value, coedge_id);
+      if (!inserted) {
+        return error_result<LoopId>(
+            StatusCode::InvalidTopology,
+            detail::error_diag(
+                *state_, "创建环失败", diag_codes::kTopoLoopRepeatedVertex,
+                "创建环失败：环在闭合终点之外重复经过同一顶点",
+                std::vector<std::uint64_t>{(*oriented)[0].value,
+                                           it->second.value,
+                                           coedge_id.value}));
+      }
+    }
+  }
   detail::LoopRecord loop{
       std::vector<CoedgeId>(coedges.begin(), coedges.end())};
   std::string reason;
@@ -171,6 +202,8 @@ TopologyTransaction::create_loop(std::span<const CoedgeId> coedges) {
     std::string_view fail_code = diag_codes::kTopoLoopNotClosed;
     if (reason == "环包含重复边引用" || reason == "环包含重复定向边引用") {
       fail_code = diag_codes::kTopoLoopDuplicateEdge;
+    } else if (reason == "环在闭合终点之外重复经过同一顶点") {
+      fail_code = diag_codes::kTopoLoopRepeatedVertex;
     }
     return detail::failed_result<LoopId>(*state_, StatusCode::InvalidTopology, fail_code,
                                          "创建环失败：" + reason, "创建环失败");
@@ -230,6 +263,22 @@ TopologyTransaction::create_face(SurfaceId surface_id, LoopId outer_loop,
           "创建面失败：内环非法，" + reason, "创建面失败");
     }
   }
+  if (!valid_face_bound_loop_size(*state_, state_->loops.at(outer_loop.value))) {
+    return detail::failed_result<FaceId>(
+        *state_, StatusCode::InvalidTopology,
+        diag_codes::kTopoFaceOuterLoopInvalid,
+        "创建面失败：外环边数不足（仅同曲线双弧环允许两条共边）",
+        "创建面失败", {outer_loop.value});
+  }
+  for (const auto loop_id : inner_loops) {
+    if (!valid_face_bound_loop_size(*state_, state_->loops.at(loop_id.value))) {
+      return detail::failed_result<FaceId>(
+          *state_, StatusCode::InvalidTopology,
+          diag_codes::kTopoFaceInnerLoopInvalid,
+          "创建面失败：内环边数不足（仅同曲线双弧环允许两条共边）",
+          "创建面失败", {loop_id.value});
+    }
+  }
   // 7.2: each LoopId may belong to at most one Face (outer or inner lists).
   const auto outer_used = state_->loop_to_faces.find(outer_loop.value);
   if (outer_used != state_->loop_to_faces.end() &&
@@ -272,6 +321,36 @@ TopologyTransaction::create_face(SurfaceId surface_id, LoopId outer_loop,
       }
     }
   }
+  if (const auto shared = face_cross_loop_shared_vertex(*state_, outer_loop,
+                                                        inner_loops)) {
+    return detail::failed_result<FaceId>(
+        *state_, StatusCode::InvalidTopology,
+        diag_codes::kTopoFaceSharedBoundaryVertex,
+        "创建面失败：不同边界环共用同一拓扑顶点", "创建面失败",
+        {(*shared)[0], (*shared)[1], (*shared)[2]});
+  }
+  if (const auto coincident = face_cross_loop_coincident_vertices(
+          *state_, outer_loop, inner_loops)) {
+    return detail::failed_result<FaceId>(
+        *state_, StatusCode::InvalidTopology,
+        diag_codes::kTopoFaceCoincidentBoundaryVertices,
+        "创建面失败：不同边界环的独立顶点坐标重合", "创建面失败",
+        {(*coincident)[0], (*coincident)[1], (*coincident)[2],
+         (*coincident)[3]});
+  }
+  if (const auto crossing = face_cross_loop_straight_edge_intersection(
+          *state_, outer_loop, inner_loops)) {
+    return detail::failed_result<FaceId>(
+        *state_, StatusCode::InvalidTopology,
+        crossing->endpoint_touch
+            ? diag_codes::kTopoFaceCrossLoopStraightEdgeEndpointTouch
+            : diag_codes::kTopoFaceCrossLoopStraightEdgeIntersection,
+        crossing->endpoint_touch
+            ? "创建面失败：不同边界环的直线边段在端点相接"
+            : "创建面失败：不同边界环的直线边段在内部相交",
+        "创建面失败", {crossing->entities[0], crossing->entities[1],
+                         crossing->entities[2], crossing->entities[3]});
+  }
   const auto id = FaceId{state_->allocate_id()};
   detail::FaceRecord face_record;
   face_record.surface_id = surface_id;
@@ -313,6 +392,20 @@ TopologyTransaction::create_shell(std::span<const FaceId> faces) {
       return detail::failed_result<ShellId>(
           *state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
           "创建壳失败：包含非法面拓扑", "创建壳失败");
+    }
+    if (!detail::has_surface(*state_, face_it->second.surface_id)) {
+      return detail::failed_result<ShellId>(
+          *state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
+          "创建壳失败：成员面引用的曲面不存在", "创建壳失败",
+          {face_id.value, face_it->second.surface_id.value});
+    }
+    for (const auto inner_loop : face_it->second.inner_loops) {
+      if (!validate_loop_id(*state_, inner_loop, reason)) {
+        return detail::failed_result<ShellId>(
+            *state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
+            "创建壳失败：面内环无效，" + reason, "创建壳失败",
+            {face_id.value, inner_loop.value});
+      }
     }
   }
   const auto id = ShellId{state_->allocate_id()};
@@ -364,7 +457,18 @@ TopologyTransaction::create_body(std::span<const ShellId> shells) {
         *state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
         "创建体失败：壳列表包含重复引用", "创建体失败");
   }
-  const auto id = BodyId{state_->allocate_id()};
+  for (const auto shell_id : shells) {
+    for (const auto face_id : state_->shells.at(shell_id.value).faces) {
+      const auto face_it = state_->faces.find(face_id.value);
+      if (face_it != state_->faces.end() &&
+          !detail::has_surface(*state_, face_it->second.surface_id)) {
+        return detail::failed_result<BodyId>(
+            *state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
+            "创建体失败：成员面引用的曲面不存在", "创建体失败",
+            {shell_id.value, face_id.value, face_it->second.surface_id.value});
+      }
+    }
+  }
   detail::BodyRecord record;
   record.kind = detail::BodyKind::Generic;
   record.rep_kind = RepKind::ExactBRep;
@@ -401,6 +505,7 @@ TopologyTransaction::create_body(std::span<const ShellId> shells) {
         "创建体失败：无法从输入壳推导有效包围盒，拓扑引用可能不完整",
         "创建体失败");
   }
+  const auto id = BodyId{state_->allocate_id()};
   state_->bodies.emplace(id.value, record);
   created_bodies_.push_back(id.value);
   rebuild_topology_indices(*state_);
@@ -604,6 +709,10 @@ Result<VersionId> TopologyTransaction::commit() {
         *state_, StatusCode::OperationFailed, diag_codes::kTxCommitFailure,
         "事务提交失败：事务已关闭", "事务提交失败");
   }
+  if (const auto owner = state_->active_topology_transaction.lock();
+      owner.get() == transaction_state_.get()) {
+    state_->active_topology_transaction.reset();
+  }
   active_ = false;
   const VersionId assigned = state_->next_version;
   state_->topology_commit_success_count += 1;
@@ -747,6 +856,10 @@ Result<void> TopologyTransaction::rollback() {
   txn_coedge_pcurve_binds_ = 0;
   txn_coedge_pcurve_clears_ = 0;
   txn_write_ops_ = 0;
+  if (const auto owner = state_->active_topology_transaction.lock();
+      owner.get() == transaction_state_.get()) {
+    state_->active_topology_transaction.reset();
+  }
   active_ = false;
   return ok_void(state_->create_diagnostic("事务已回滚"));
 }

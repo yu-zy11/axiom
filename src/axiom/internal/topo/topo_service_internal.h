@@ -76,6 +76,31 @@ bool validate_loop_record(const detail::KernelState &state,
 
 bool validate_loop_id(const detail::KernelState &state, LoopId loop_id,
                       std::string &reason);
+bool valid_face_bound_loop_size(const detail::KernelState &state,
+                                const detail::LoopRecord &loop);
+
+// Returns the two loop IDs and shared start vertex ID when distinct face
+// boundaries touch at a topological vertex.
+std::optional<std::array<std::uint64_t, 3>>
+face_cross_loop_shared_vertex(const detail::KernelState &state, LoopId outer_loop,
+                              std::span<const LoopId> inner_loops);
+
+// Returns two loop IDs and their distinct vertex IDs when boundary vertices
+// occupy exactly the same finite 3D point.
+std::optional<std::array<std::uint64_t, 4>>
+face_cross_loop_coincident_vertices(const detail::KernelState &state,
+                                    LoopId outer_loop,
+                                    std::span<const LoopId> inner_loops);
+
+// Reports a nonparallel 3D intersection of straight boundary segments.
+struct FaceStraightEdgeIntersection {
+  std::array<std::uint64_t, 4> entities;  // Two loops, then two edges.
+  bool endpoint_touch{false};
+};
+std::optional<FaceStraightEdgeIntersection>
+face_cross_loop_straight_edge_intersection(
+    const detail::KernelState &state, LoopId outer_loop,
+    std::span<const LoopId> inner_loops);
 
 bool face_record_references_loop(const detail::FaceRecord &face,
                                  std::uint64_t loop_value);

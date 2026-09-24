@@ -58,6 +58,106 @@ int main() {
         }
     }
 
+    // A short UV branch must be searched even when a fixed whole-domain grid
+    // would miss it; repeated poles are valid zero-length segments.
+    {
+        std::vector<axiom::Point2> long_poly(130, {100.0, 0.0});
+        long_poly[1] = {0.0, 0.0};
+        long_poly[2] = {0.0, 0.0};
+        const auto long_pc = kernel.pcurves().make_polyline(long_poly);
+        if (long_pc.status != axiom::StatusCode::Ok || !long_pc.value) {
+            std::cerr << "failed to create pcurve with narrow branch\n";
+            return 1;
+        }
+        const std::array<axiom::Point2, 3> repeated {{{2.0, 3.0}, {2.0, 3.0}, {2.0, 3.0}}};
+        const auto constant_pc = kernel.pcurves().make_polyline(repeated);
+        if (constant_pc.status != axiom::StatusCode::Ok || !constant_pc.value) {
+            std::cerr << "failed to create constant pcurve\n";
+            return 1;
+        }
+        const auto count_before = kernel.geometry_count();
+        const auto cache_before = kernel.cache_entry_count();
+        const auto tip = kernel.pcurve_service().closest_parameter(*long_pc.value, {0.0, 0.0});
+        const auto interior = kernel.pcurve_service().closest_parameter(*long_pc.value, {75.0, 10.0});
+        const auto closest = kernel.pcurve_service().closest_point(*long_pc.value, {75.0, 10.0});
+        const auto end = kernel.pcurve_service().closest_parameter(*long_pc.value, {200.0, 0.0});
+        const auto constant_t = kernel.pcurve_service().closest_parameter(*constant_pc.value, {9.0, 3.0});
+        if (!tip.value || !approx(*tip.value, 1.0, 1e-12) ||
+            !interior.value || !approx(*interior.value, 0.25, 1e-12) ||
+            !closest.value || !approx(closest.value->x, 75.0, 1e-12) ||
+            !approx(closest.value->y, 0.0, 1e-12) ||
+            !end.value || !approx(*end.value, 0.0, 1e-12) ||
+            !constant_t.value || !approx(*constant_t.value, 0.0, 1e-12)) {
+            std::cerr << "pcurve segment projection returned wrong nearest point\n";
+            return 1;
+        }
+        const auto invalid = kernel.pcurve_service().closest_parameter(
+            *long_pc.value, {std::numeric_limits<double>::quiet_NaN(), 0.0});
+        const auto missing = kernel.pcurve_service().closest_parameter(
+            axiom::PCurveId{}, {0.0, 0.0});
+        const auto invalid_code = kernel.diagnostics().has_issue_code(
+            invalid.diagnostic_id, "AXM-CORE-E-0002");
+        const auto missing_code = kernel.diagnostics().has_issue_code(
+            missing.diagnostic_id, "AXM-CORE-E-0001");
+        const auto retry = kernel.pcurve_service().closest_parameter(*long_pc.value, {0.0, 0.0});
+        if (invalid.status != axiom::StatusCode::InvalidInput || invalid.value ||
+            missing.status != axiom::StatusCode::InvalidInput || missing.value ||
+            !invalid_code.value || !*invalid_code.value ||
+            !missing_code.value || !*missing_code.value ||
+            !retry.value || !approx(*retry.value, 1.0, 1e-12) ||
+            kernel.geometry_count().value != count_before.value ||
+            kernel.cache_entry_count().value != cache_before.value) {
+            std::cerr << "failed pcurve closest query polluted geometry or cache\n";
+            return 1;
+        }
+    }
+
+    // Finite UV coordinates may have squared distances outside Scalar range.
+    {
+        const std::array<axiom::Point2, 4> poles {{{0.0, 0.0}, {0.0, 0.0},
+                                                   {1e155, 0.0}, {1e155, 1e155}}};
+        const auto pc = kernel.pcurves().make_polyline(poles);
+        if (!pc.value) {
+            std::cerr << "failed to create large-coordinate pcurve\n";
+            return 1;
+        }
+        const auto interior = kernel.pcurve_service().closest_parameter(*pc.value, {5e154, 2e154});
+        const auto nearest = kernel.pcurve_service().closest_point(*pc.value, {5e154, 2e154});
+        const auto before = kernel.pcurve_service().closest_parameter(*pc.value, {-1e155, 0.0});
+        const auto after = kernel.pcurve_service().closest_parameter(*pc.value, {1e155, 2e155});
+        const auto repeated = kernel.pcurve_service().closest_parameter(*pc.value, {0.0, 0.0});
+        if (!interior.value || !approx(*interior.value, 1.5, 1e-12) ||
+            !nearest.value || std::abs(nearest.value->x / 1e155 - 0.5) > 1e-12 ||
+            !approx(nearest.value->y, 0.0) ||
+            !before.value || !approx(*before.value, 0.0) ||
+            !after.value || !approx(*after.value, 3.0) ||
+            !repeated.value || !approx(*repeated.value, 0.0)) {
+            std::cerr << "large-coordinate pcurve projection failed\n";
+            return 1;
+        }
+        const auto count_before = kernel.geometry_count();
+        const auto cache_before = kernel.cache_entry_count();
+        const auto invalid = kernel.pcurve_service().closest_parameter(
+            *pc.value, {std::numeric_limits<double>::infinity(), 0.0});
+        const auto missing = kernel.pcurve_service().closest_parameter(
+            axiom::PCurveId{}, {0.0, 0.0});
+        const auto invalid_code = kernel.diagnostics().has_issue_code(
+            invalid.diagnostic_id, "AXM-CORE-E-0002");
+        const auto missing_code = kernel.diagnostics().has_issue_code(
+            missing.diagnostic_id, "AXM-CORE-E-0001");
+        const auto retry = kernel.pcurve_service().closest_parameter(*pc.value, {5e154, 2e154});
+        if (invalid.status != axiom::StatusCode::InvalidInput || invalid.value ||
+            missing.status != axiom::StatusCode::InvalidInput || missing.value ||
+            !invalid_code.value || !*invalid_code.value ||
+            !missing_code.value || !*missing_code.value ||
+            !retry.value || !approx(*retry.value, 1.5, 1e-12) ||
+            kernel.geometry_count().value != count_before.value ||
+            kernel.cache_entry_count().value != cache_before.value) {
+            std::cerr << "failed large-coordinate pcurve query polluted geometry or cache\n";
+            return 1;
+        }
+    }
+
     auto line = kernel.curves().make_line({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
     if (line.status != axiom::StatusCode::Ok || !line.value.has_value()) {
         std::cerr << "failed to create line\n";
@@ -278,6 +378,45 @@ int main() {
         std::cerr << "unexpected ellipse closest_parameter normalization\n";
         return 1;
     }
+    // Ellipse closest_parameter must minimize Euclidean distance, rather than
+    // returning the polar angle of the scaled query coordinates.  A point
+    // displaced along the ellipse normal has the known closest parameter t0.
+    {
+        const double t0 = 0.8;
+        const axiom::Point3 on_ellipse{2.0 * std::cos(t0), 3.0 * std::sin(t0), 0.0};
+        axiom::Vec3 normal{std::cos(t0) / 2.0, std::sin(t0) / 3.0, 0.0};
+        const double normal_length = std::hypot(normal.x, normal.y);
+        normal.x /= normal_length;
+        normal.y /= normal_length;
+        const axiom::Point3 query{on_ellipse.x + 0.25 * normal.x,
+                                  on_ellipse.y + 0.25 * normal.y, 0.0};
+        const auto closest_t = kernel.curve_service().closest_parameter(*ellipse.value, query);
+        const auto closest_p = kernel.curve_service().closest_point(*ellipse.value, query);
+        if (!closest_t.value || !closest_p.value || !approx(*closest_t.value, t0, 1e-7) ||
+            !approx(closest_p.value->x, on_ellipse.x, 1e-7) ||
+            !approx(closest_p.value->y, on_ellipse.y, 1e-7)) {
+            std::cerr << "ellipse closest point did not minimize Euclidean distance\n";
+            return 1;
+        }
+        const auto count_before = kernel.geometry_count();
+        const auto cache_before = kernel.cache_entry_count();
+        const auto failed = kernel.curve_service().closest_parameter(
+            *ellipse.value, {std::numeric_limits<double>::infinity(), 0.0, 0.0});
+        const auto code = kernel.diagnostics().has_issue_code(
+            failed.diagnostic_id, "AXM-CORE-E-0002");
+        if (failed.status != axiom::StatusCode::InvalidInput || failed.value ||
+            !code.value || !*code.value || kernel.geometry_count().value != count_before.value ||
+            kernel.cache_entry_count().value != cache_before.value) {
+            std::cerr << "invalid ellipse closest query must fail without pollution\n";
+            return 1;
+        }
+        const auto seam = kernel.curve_service().closest_parameter(*ellipse.value, {2.25, 0.0, 0.0});
+        if (!seam.value || *seam.value < 0.0 || *seam.value >= 2.0 * std::acos(-1.0) ||
+            !approx(*seam.value, 0.0, 1e-10)) {
+            std::cerr << "ellipse closest parameter must remain normalized at seam\n";
+            return 1;
+        }
+    }
 
     auto tilted_ellipse =
         kernel.curves().make_ellipse({0.0, 0.0, 0.0}, {0.0, 2.0, 0.0}, {0.0, 0.0, 3.0});
@@ -454,6 +593,124 @@ int main() {
             ce.status != axiom::StatusCode::Ok || !ce.value.has_value() ||
             !approx(ce.value->point.y, 1.0)) {
             std::cerr << "unexpected composite polyline behavior\n";
+            return 1;
+        }
+    }
+
+    // Every 3D polyline segment participates in the nearest-point search,
+    // including a narrow branch and zero-length segments.
+    {
+        std::vector<axiom::Point3> poles(130, {100.0, 0.0, 0.0});
+        poles[1] = {0.0, 0.0, 0.0};
+        poles[2] = {0.0, 0.0, 0.0};
+        const auto polyline = kernel.curves().make_composite_polyline(poles);
+        const std::array<axiom::Point3, 3> repeated {{{2.0, 3.0, 4.0}, {2.0, 3.0, 4.0}, {2.0, 3.0, 4.0}}};
+        const auto constant = kernel.curves().make_composite_polyline(repeated);
+        if (!polyline.value || !constant.value) {
+            std::cerr << "failed to create 3D closest-point polylines\n";
+            return 1;
+        }
+        const auto tip = kernel.curve_service().closest_parameter(*polyline.value, {0.0, 0.0, 0.0});
+        const auto interior = kernel.curve_service().closest_parameter(*polyline.value, {75.0, 10.0, 5.0});
+        const auto closest = kernel.curve_service().closest_point(*polyline.value, {75.0, 10.0, 5.0});
+        const auto end = kernel.curve_service().closest_parameter(*polyline.value, {200.0, 0.0, 0.0});
+        const auto constant_t = kernel.curve_service().closest_parameter(*constant.value, {9.0, 3.0, 4.0});
+        const std::array<axiom::Point3, 2> large_poles {{{-1e200, 0.0, 0.0}, {1e200, 0.0, 0.0}}};
+        const auto large = kernel.curves().make_composite_polyline(large_poles);
+        if (!large.value) {
+            std::cerr << "failed to create large-coordinate polyline\n";
+            return 1;
+        }
+        const auto large_t = kernel.curve_service().closest_parameter(*large.value, {0.0, 0.0, 0.0});
+        if (!tip.value || !approx(*tip.value, 1.0, 1e-12) ||
+            !interior.value || !approx(*interior.value, 0.25, 1e-12) ||
+            !closest.value || !approx(closest.value->x, 75.0, 1e-12) ||
+            !approx(closest.value->y, 0.0, 1e-12) || !approx(closest.value->z, 0.0, 1e-12) ||
+            !end.value || !approx(*end.value, 0.0, 1e-12) ||
+            !constant_t.value || !approx(*constant_t.value, 0.0, 1e-12) ||
+            !large_t.value || !approx(*large_t.value, 0.5, 1e-12)) {
+            std::cerr << "3D polyline segment projection returned wrong nearest point\n";
+            return 1;
+        }
+        const auto count_before = kernel.geometry_count();
+        const auto cache_before = kernel.cache_entry_count();
+        const auto invalid = kernel.curve_service().closest_parameter(
+            *polyline.value, {std::numeric_limits<double>::quiet_NaN(), 0.0, 0.0});
+        const auto missing = kernel.curve_service().closest_parameter(
+            axiom::CurveId{}, {0.0, 0.0, 0.0});
+        const auto invalid_code = kernel.diagnostics().has_issue_code(
+            invalid.diagnostic_id, "AXM-CORE-E-0002");
+        const auto missing_code = kernel.diagnostics().has_issue_code(
+            missing.diagnostic_id, "AXM-GEO-E-0006");
+        const auto retry = kernel.curve_service().closest_parameter(*polyline.value, {0.0, 0.0, 0.0});
+        if (invalid.status != axiom::StatusCode::InvalidInput || invalid.value ||
+            missing.status != axiom::StatusCode::InvalidInput || missing.value ||
+            !invalid_code.value || !*invalid_code.value ||
+            !missing_code.value || !*missing_code.value ||
+            !retry.value || !approx(*retry.value, 1.0, 1e-12) ||
+            kernel.geometry_count().value != count_before.value ||
+            kernel.cache_entry_count().value != cache_before.value) {
+            std::cerr << "failed 3D polyline closest query polluted geometry or cache\n";
+            return 1;
+        }
+    }
+
+    // A finite segment can have a squared length outside double range.
+    {
+        const auto segment = kernel.curves().make_line_segment(
+            {0.0, 0.0, 0.0}, {3e155, 0.0, 0.0});
+        if (segment.status != axiom::StatusCode::Ok || !segment.value) {
+            std::cerr << "failed to create large finite segment\n";
+            return 1;
+        }
+        const auto interior = kernel.curve_service().closest_parameter(
+            *segment.value, {1e155, 2e155, 0.0});
+        const auto closest = kernel.curve_service().closest_point(
+            *segment.value, {1e155, 2e155, 0.0});
+        const auto before = kernel.curve_service().closest_parameter(
+            *segment.value, {-1e155, 0.0, 0.0});
+        const auto after = kernel.curve_service().closest_parameter(
+            *segment.value, {4e155, 0.0, 0.0});
+        if (interior.status != axiom::StatusCode::Ok || !interior.value ||
+            !approx(*interior.value, 1.0 / 3.0, 1e-12) ||
+            closest.status != axiom::StatusCode::Ok || !closest.value ||
+            std::abs(closest.value->x / 1e155 - 1.0) > 1e-12 ||
+            !approx(closest.value->y, 0.0) ||
+            before.status != axiom::StatusCode::Ok || !before.value ||
+            !approx(*before.value, 0.0) ||
+            after.status != axiom::StatusCode::Ok || !after.value ||
+            !approx(*after.value, 1.0)) {
+            std::cerr << "large finite segment projection is incorrect\n";
+            return 1;
+        }
+
+        const auto count_before = kernel.geometry_count();
+        const auto cache_before = kernel.cache_entry_count();
+        const auto invalid = kernel.curve_service().closest_parameter(
+            *segment.value, {std::numeric_limits<double>::infinity(), 0.0, 0.0});
+        const auto missing = kernel.curve_service().closest_parameter(
+            axiom::CurveId{}, {1.0, 0.0, 0.0});
+        const auto degenerate = kernel.curves().make_line_segment(
+            {1.0, 2.0, 3.0}, {1.0, 2.0, 3.0});
+        const auto invalid_code = kernel.diagnostics().has_issue_code(
+            invalid.diagnostic_id, "AXM-CORE-E-0002");
+        const auto missing_code = kernel.diagnostics().has_issue_code(
+            missing.diagnostic_id, "AXM-GEO-E-0006");
+        const auto degenerate_code = kernel.diagnostics().has_issue_code(
+            degenerate.diagnostic_id, "AXM-GEO-E-0001");
+        const auto retry = kernel.curve_service().closest_parameter(
+            *segment.value, {1e155, 2e155, 0.0});
+        if (invalid.status != axiom::StatusCode::InvalidInput || invalid.value ||
+            missing.status != axiom::StatusCode::InvalidInput || missing.value ||
+            degenerate.status != axiom::StatusCode::InvalidInput || degenerate.value ||
+            !invalid_code.value || !*invalid_code.value ||
+            !missing_code.value || !*missing_code.value ||
+            !degenerate_code.value || !*degenerate_code.value ||
+            retry.status != axiom::StatusCode::Ok || !retry.value ||
+            !approx(*retry.value, 1.0 / 3.0, 1e-12) ||
+            kernel.geometry_count().value != count_before.value ||
+            kernel.cache_entry_count().value != cache_before.value) {
+            std::cerr << "failed segment query or creation polluted geometry or cache\n";
             return 1;
         }
     }
@@ -1103,6 +1360,25 @@ int main() {
     if (invalid_ellipse.status != axiom::StatusCode::InvalidInput) {
         std::cerr << "expected invalid input for collinear ellipse axes\n";
         return 1;
+    }
+    {
+        // Finite inputs can overflow while deriving the ellipse normal.
+        const auto count_before = kernel.geometry_count();
+        const auto cache_before = kernel.cache_entry_count();
+        for (const double axis_length : {1e100, 1e200}) {
+            const auto overflow = kernel.curves().make_ellipse(
+                {0.0, 0.0, 0.0}, {axis_length, 0.0, 0.0}, {0.0, axis_length, 0.0});
+            const auto code = kernel.diagnostics().has_issue_code(
+                overflow.diagnostic_id, "AXM-GEO-E-0001");
+            const auto still_valid = kernel.curve_service().eval(*ellipse.value, 0.0, 1);
+            if (overflow.status != axiom::StatusCode::InvalidInput || overflow.value ||
+                !code.value || !*code.value || kernel.geometry_count().value != count_before.value ||
+                kernel.cache_entry_count().value != cache_before.value ||
+                !still_valid.value || !approx(still_valid.value->point.x, 2.0)) {
+                std::cerr << "overflowing ellipse axes must fail without pollution\n";
+                return 1;
+            }
+        }
     }
     {
         axiom::BSplineCurveDesc bad_knot_count;

@@ -382,7 +382,8 @@ struct PluginCurveDesc {
 struct ProfileRef {
   std::string label;
   /// Optional planar polygon profile in world coordinates (closedness implicit: last connects to first).
-  /// When provided, `sweeps().extrude(...)` can materialize a real prism shell (Stage-2 minimal).
+  /// Extrude supports finite, planar, strictly convex polygons with non-degenerate volume;
+  /// unsupported profiles return InvalidInput instead of a bbox replacement shell.
   std::vector<Point3> polygon_xyz;
 };
 

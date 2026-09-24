@@ -175,7 +175,9 @@ Result<BodyId> PrimitiveService::torus(const Point3& center, const Vec3& axis, S
 SweepService::SweepService(std::shared_ptr<detail::KernelState> state) : state_(std::move(state)) {}
 
 Result<BodyId> SweepService::extrude(const ProfileRef& profile, const Vec3& direction, Scalar distance) {
-    if (profile.label.empty() || distance <= 0.0 || !valid_axis(direction)) {
+    if (profile.label.empty() || !std::isfinite(distance) || distance <= 0.0 ||
+        !std::isfinite(direction.x) || !std::isfinite(direction.y) || !std::isfinite(direction.z) ||
+        !valid_axis(direction)) {
         return detail::invalid_input_result<BodyId>(
             *state_, diag_codes::kCoreParameterOutOfRange,
             "拉伸失败：轮廓不能为空，方向必须有效且距离必须大于 0", "拉伸失败");
@@ -193,6 +195,49 @@ Result<BodyId> SweepService::extrude(const ProfileRef& profile, const Vec3& dire
                 *state_, diag_codes::kCoreParameterOutOfRange,
                 "拉伸失败：polygon 轮廓点数不足（至少 3 个点）", "拉伸失败");
         }
+        const auto reject_profile = [&](const char* message) {
+            return detail::invalid_input_result<BodyId>(
+                *state_, diag_codes::kCoreParameterOutOfRange, message, "拉伸失败");
+        };
+        const auto& poly = profile.polygon_xyz;
+        for (const auto& p : poly) {
+            if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) {
+                return reject_profile("拉伸失败：polygon 轮廓坐标必须为有限值");
+            }
+        }
+        const auto raw_normal = detail::newell_normal_unnormalized_poly(poly);
+        const auto normal_length = detail::norm(raw_normal);
+        if (!std::isfinite(normal_length) || normal_length <= 1e-14) {
+            return reject_profile("拉伸失败：polygon 轮廓面积退化");
+        }
+        const auto normal = detail::scale(raw_normal, 1.0 / normal_length);
+        const auto plane_tol = std::max(Scalar(1e-7), state_->config.tolerance.linear * Scalar(100.0));
+        for (const auto& p : poly) {
+            const auto offset = detail::subtract(p, poly.front());
+            if (std::abs(detail::dot(normal, offset)) > plane_tol) {
+                return reject_profile("拉伸失败：polygon 轮廓不共面");
+            }
+        }
+        const auto alignment = std::abs(detail::dot(normal, dir));
+        const auto volume = normal_length * 0.5 * alignment * distance;
+        if (!std::isfinite(volume) || alignment < 1e-6 || !(volume > 1e-18)) {
+            return reject_profile("拉伸失败：polygon 轮廓与拉伸方向无法形成有效体积");
+        }
+        // 物化路径使用扇形三角化；只有严格凸、无共线相邻边的轮廓才适用。
+        for (std::size_t i = 0; i < poly.size(); ++i) {
+            const auto edge = detail::subtract(poly[(i + 1) % poly.size()], poly[i]);
+            const auto next = detail::subtract(poly[(i + 2) % poly.size()], poly[(i + 1) % poly.size()]);
+            const auto turn = detail::dot(detail::cross(edge, next), normal);
+            if (!std::isfinite(turn) || turn <= 1e-14) {
+                return reject_profile("拉伸失败：polygon 轮廓存在退化边或非凸转角");
+            }
+            for (std::size_t j = 0; j < poly.size(); ++j) {
+                const auto side = detail::dot(detail::cross(edge, detail::subtract(poly[j], poly[i])), normal);
+                if (!std::isfinite(side) || side < -1e-14) {
+                    return reject_profile("拉伸失败：polygon 轮廓非凸或自交");
+                }
+            }
+        }
         BoundingBox bbox {};
         auto extend = [&](const Point3& p) {
             if (!bbox.is_valid) {
@@ -208,9 +253,14 @@ Result<BodyId> SweepService::extrude(const ProfileRef& profile, const Vec3& dire
             bbox.max.y = std::max(bbox.max.y, p.y);
             bbox.max.z = std::max(bbox.max.z, p.z);
         };
+        const auto displacement = detail::scale(dir, distance);
         for (const auto& p : profile.polygon_xyz) {
+            const auto top = detail::add_point_vec(p, displacement);
+            if (!std::isfinite(top.x) || !std::isfinite(top.y) || !std::isfinite(top.z)) {
+                return reject_profile("拉伸失败：polygon 拉伸坐标超出有限范围");
+            }
             extend(p);
-            extend(detail::add_point_vec(p, detail::scale(dir, distance)));
+            extend(top);
         }
         if (!bbox.is_valid) {
             return detail::invalid_input_result<BodyId>(
@@ -286,7 +336,13 @@ Result<BodyId> SweepService::extrude(const ProfileRef& profile, const Vec3& dire
         const auto maxz = std::max(p0.z, p1.z) + 0.5;
         record.bbox = detail::make_bbox({minx, miny, minz}, {maxx, maxy, maxz});
     }
-    return ok_result(make_body(state_, record, "已完成拉伸"), state_->create_diagnostic("已完成拉伸"));
+    const auto body = make_body(state_, record, "已完成拉伸");
+    if (body.value == 0) {
+        return detail::invalid_input_result<BodyId>(
+            *state_, diag_codes::kCoreParameterOutOfRange,
+            "拉伸失败：polygon 轮廓无法物化为有效棱柱", "拉伸失败");
+    }
+    return ok_result(body, state_->create_diagnostic("已完成拉伸"));
 }
 
 Result<BodyId> SweepService::revolve(const ProfileRef& profile, const Axis3& axis, Scalar angle) {

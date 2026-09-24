@@ -171,6 +171,8 @@ Result<void> TopologyValidationService::validate_loop(LoopId loop_id) const {
     std::string_view code = diag_codes::kTopoLoopNotClosed;
     if (reason == "环包含重复边引用" || reason == "环包含重复定向边引用") {
       code = diag_codes::kTopoLoopDuplicateEdge;
+    } else if (reason == "环在闭合终点之外重复经过同一顶点") {
+      code = diag_codes::kTopoLoopRepeatedVertex;
     }
     return detail::failed_void(*state_, StatusCode::InvalidTopology, code,
                                "环验证失败：" + reason, "环验证失败");
@@ -181,37 +183,16 @@ Result<void> TopologyValidationService::validate_loop(LoopId loop_id) const {
                                diag_codes::kTopoLoopNotClosed,
                                "环验证失败：目标环不存在", "环验证失败");
   }
-  // 已绑定拓扑面（loop_to_faces 有非空条目）的边界环：默认至少三条共边。
-  // 例外：两条共边且共用同一条空间曲线（典型为圆/柱/球上的闭合双弧 digon），保留 trim repair 等用例。
+  // 已绑定面的边界环至少三条共边；共用同一空间曲线的双弧环除外。
   {
     const auto ltf_bound = state_->loop_to_faces.find(loop_id.value);
     if (ltf_bound != state_->loop_to_faces.end() &&
         !ltf_bound->second.empty() &&
-        loop_it->second.coedges.size() < 3) {
-      bool allow_two_coedge_digon = false;
-      if (loop_it->second.coedges.size() == 2) {
-        const auto c0_it =
-            state_->coedges.find(loop_it->second.coedges[0].value);
-        const auto c1_it =
-            state_->coedges.find(loop_it->second.coedges[1].value);
-        if (c0_it != state_->coedges.end() && c1_it != state_->coedges.end()) {
-          const auto e0_it =
-              state_->edges.find(c0_it->second.edge_id.value);
-          const auto e1_it =
-              state_->edges.find(c1_it->second.edge_id.value);
-          if (e0_it != state_->edges.end() && e1_it != state_->edges.end() &&
-              e0_it->second.curve_id.value != 0 &&
-              e0_it->second.curve_id.value == e1_it->second.curve_id.value) {
-            allow_two_coedge_digon = true;
-          }
-        }
-      }
-      if (!allow_two_coedge_digon) {
+        !valid_face_bound_loop_size(*state_, loop_it->second)) {
         return detail::failed_void(
             *state_, StatusCode::InvalidTopology, diag_codes::kTopoLoopNotClosed,
             "环验证失败：已绑定面的边界环至少需要三条共边", "环验证失败",
             {loop_id.value});
-      }
     }
   }
   // coedge_to_loop 必须与环成员一致（索引损坏或跨环复用定向边时给出可诊断失败）。
@@ -1308,6 +1289,37 @@ Result<void> TopologyValidationService::validate_face(FaceId face_id) const {
         return inner_edges;
       }
     }
+  }
+  if (const auto shared = face_cross_loop_shared_vertex(
+          *state_, face_it->second.outer_loop, face_it->second.inner_loops)) {
+    return detail::failed_void(
+        *state_, StatusCode::InvalidTopology,
+        diag_codes::kTopoFaceSharedBoundaryVertex,
+        "面验证失败：不同边界环共用同一拓扑顶点", "面验证失败",
+        {face_id.value, (*shared)[0], (*shared)[1], (*shared)[2]});
+  }
+  if (const auto coincident = face_cross_loop_coincident_vertices(
+          *state_, face_it->second.outer_loop, face_it->second.inner_loops)) {
+    return detail::failed_void(
+        *state_, StatusCode::InvalidTopology,
+        diag_codes::kTopoFaceCoincidentBoundaryVertices,
+        "面验证失败：不同边界环的独立顶点坐标重合", "面验证失败",
+        {face_id.value, (*coincident)[0], (*coincident)[1],
+         (*coincident)[2], (*coincident)[3]});
+  }
+  if (const auto crossing = face_cross_loop_straight_edge_intersection(
+          *state_, face_it->second.outer_loop, face_it->second.inner_loops)) {
+    return detail::failed_void(
+        *state_, StatusCode::InvalidTopology,
+        crossing->endpoint_touch
+            ? diag_codes::kTopoFaceCrossLoopStraightEdgeEndpointTouch
+            : diag_codes::kTopoFaceCrossLoopStraightEdgeIntersection,
+        crossing->endpoint_touch
+            ? "面验证失败：不同边界环的直线边段在端点相接"
+            : "面验证失败：不同边界环的直线边段在内部相交",
+        "面验证失败", {face_id.value, crossing->entities[0],
+                       crossing->entities[1], crossing->entities[2],
+                       crossing->entities[3]});
   }
 
   // Planar faces without PCurve trim: (1) outer 3D winding must align with Surface normal

@@ -223,6 +223,8 @@ bool validate_loop_record(const detail::KernelState &state,
 
   std::optional<VertexId> first_start;
   std::optional<VertexId> previous_end;
+  std::unordered_set<std::uint64_t> visited_vertices;
+  visited_vertices.reserve(loop.coedges.size());
   for (const auto coedge_id : loop.coedges) {
     const auto oriented = oriented_vertices(state, coedge_id);
     if (!oriented.has_value()) {
@@ -231,6 +233,10 @@ bool validate_loop_record(const detail::KernelState &state,
     }
     if (!first_start.has_value()) {
       first_start = (*oriented)[0];
+    }
+    if (!visited_vertices.insert((*oriented)[0].value).second) {
+      reason = "环在闭合终点之外重复经过同一顶点";
+      return false;
     }
     if (previous_end.has_value() &&
         previous_end->value != (*oriented)[0].value) {
@@ -256,6 +262,180 @@ bool validate_loop_id(const detail::KernelState &state, LoopId loop_id,
     return false;
   }
   return validate_loop_record(state, loop_it->second, reason);
+}
+
+bool valid_face_bound_loop_size(const detail::KernelState &state,
+                                const detail::LoopRecord &loop) {
+  if (loop.coedges.size() >= 3) {
+    return true;
+  }
+  if (loop.coedges.size() != 2) {
+    return false;
+  }
+  const auto c0 = state.coedges.find(loop.coedges[0].value);
+  const auto c1 = state.coedges.find(loop.coedges[1].value);
+  if (c0 == state.coedges.end() || c1 == state.coedges.end()) {
+    return false;
+  }
+  const auto e0 = state.edges.find(c0->second.edge_id.value);
+  const auto e1 = state.edges.find(c1->second.edge_id.value);
+  return e0 != state.edges.end() && e1 != state.edges.end() &&
+         e0->second.curve_id.value != 0 &&
+         e0->second.curve_id.value == e1->second.curve_id.value;
+}
+
+std::optional<std::array<std::uint64_t, 3>>
+face_cross_loop_shared_vertex(const detail::KernelState &state, LoopId outer_loop,
+                              std::span<const LoopId> inner_loops) {
+  std::unordered_map<std::uint64_t, LoopId> vertex_loops;
+  for (std::size_t i = 0; i <= inner_loops.size(); ++i) {
+    const auto loop_id = i == 0 ? outer_loop : inner_loops[i - 1];
+    const auto loop_it = state.loops.find(loop_id.value);
+    if (loop_it == state.loops.end()) {
+      continue;  // The caller validates loop handles first.
+    }
+    for (const auto coedge_id : loop_it->second.coedges) {
+      const auto vertices = oriented_vertices(state, coedge_id);
+      if (!vertices.has_value()) {
+        continue;  // The caller validates loop records first.
+      }
+      const auto vertex_value = (*vertices)[0].value;
+      const auto [it, inserted] = vertex_loops.emplace(vertex_value, loop_id);
+      if (!inserted && it->second.value != loop_id.value) {
+        return std::array<std::uint64_t, 3>{it->second.value, loop_id.value,
+                                            vertex_value};
+      }
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<std::array<std::uint64_t, 4>>
+face_cross_loop_coincident_vertices(const detail::KernelState &state,
+                                    LoopId outer_loop,
+                                    std::span<const LoopId> inner_loops) {
+  struct BoundaryVertex {
+    LoopId loop;
+    VertexId vertex;
+    Point3 point;
+  };
+  std::vector<BoundaryVertex> seen;
+  for (std::size_t i = 0; i <= inner_loops.size(); ++i) {
+    const auto loop_id = i == 0 ? outer_loop : inner_loops[i - 1];
+    const auto loop_it = state.loops.find(loop_id.value);
+    if (loop_it == state.loops.end()) {
+      continue;
+    }
+    for (const auto coedge_id : loop_it->second.coedges) {
+      const auto oriented = oriented_vertices(state, coedge_id);
+      if (!oriented) {
+        continue;
+      }
+      const auto vertex = (*oriented)[0];
+      const auto vertex_it = state.vertices.find(vertex.value);
+      if (vertex_it == state.vertices.end()) {
+        continue;
+      }
+      const auto &point = vertex_it->second.point;
+      if (!std::isfinite(point.x) || !std::isfinite(point.y) ||
+          !std::isfinite(point.z)) {
+        continue;
+      }
+      for (const auto &prior : seen) {
+        if (prior.loop.value != loop_id.value &&
+            prior.vertex.value != vertex.value &&
+            prior.point.x == point.x && prior.point.y == point.y &&
+            prior.point.z == point.z) {
+          return std::array<std::uint64_t, 4>{prior.loop.value, loop_id.value,
+                                              prior.vertex.value, vertex.value};
+        }
+      }
+      seen.push_back({loop_id, vertex, point});
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<FaceStraightEdgeIntersection>
+face_cross_loop_straight_edge_intersection(
+    const detail::KernelState &state, LoopId outer_loop,
+    std::span<const LoopId> inner_loops) {
+  struct Segment {
+    LoopId loop;
+    EdgeId edge;
+    std::array<long double, 3> start;
+    std::array<long double, 3> end;
+  };
+  std::vector<Segment> seen;
+  const auto subtract = [](const auto &a, const auto &b) {
+    return std::array<long double, 3>{a[0] - b[0], a[1] - b[1],
+                                      a[2] - b[2]};
+  };
+  const auto cross = [](const auto &a, const auto &b) {
+    return std::array<long double, 3>{a[1] * b[2] - a[2] * b[1],
+                                      a[2] * b[0] - a[0] * b[2],
+                                      a[0] * b[1] - a[1] * b[0]};
+  };
+  const auto dot = [](const auto &a, const auto &b) {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  };
+  for (std::size_t i = 0; i <= inner_loops.size(); ++i) {
+    const auto loop_id = i == 0 ? outer_loop : inner_loops[i - 1];
+    const auto loop_it = state.loops.find(loop_id.value);
+    if (loop_it == state.loops.end()) continue;
+    for (const auto coedge_id : loop_it->second.coedges) {
+      const auto coedge_it = state.coedges.find(coedge_id.value);
+      if (coedge_it == state.coedges.end()) continue;
+      const auto edge_id = coedge_it->second.edge_id;
+      const auto edge_it = state.edges.find(edge_id.value);
+      if (edge_it == state.edges.end()) continue;
+      const auto curve_it = state.curves.find(edge_it->second.curve_id.value);
+      if (curve_it == state.curves.end() ||
+          (curve_it->second.kind != detail::CurveKind::Line &&
+           curve_it->second.kind != detail::CurveKind::LineSegment)) continue;
+      const auto v0 = state.vertices.find(edge_it->second.v0.value);
+      const auto v1 = state.vertices.find(edge_it->second.v1.value);
+      if (v0 == state.vertices.end() || v1 == state.vertices.end()) continue;
+      const auto &a = v0->second.point;
+      const auto &b = v1->second.point;
+      if (!std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(a.z) ||
+          !std::isfinite(b.x) || !std::isfinite(b.y) || !std::isfinite(b.z))
+        continue;
+      const Segment current{loop_id, edge_id, {a.x, a.y, a.z},
+                            {b.x, b.y, b.z}};
+      const auto r = subtract(current.end, current.start);
+      for (const auto &prior : seen) {
+        if (prior.loop.value == loop_id.value) continue;
+        const auto s = subtract(prior.end, prior.start);
+        const auto w = subtract(prior.start, current.start);
+        const auto n = cross(r, s);
+        const auto n2 = dot(n, n);
+        if (n2 == 0.0L) continue;  // Parallel or collinear: separate rule.
+        const long double t = dot(cross(w, s), n) / n2;
+        const long double u = dot(cross(w, r), n) / n2;
+        if (t < 0.0L || t > 1.0L || u < 0.0L || u > 1.0L)
+          continue;
+        bool same_point = true;
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+          const long double tr = t * r[axis];
+          const long double us = u * s[axis];
+          const long double roundoff =
+              32.0L * std::numeric_limits<long double>::epsilon() *
+              (std::abs(tr) + std::abs(w[axis]) + std::abs(us));
+          if (std::abs(tr - w[axis] - us) > roundoff)
+            same_point = false;
+        }
+        if (same_point) {
+          return FaceStraightEdgeIntersection{
+              {prior.loop.value, loop_id.value, prior.edge.value,
+               edge_id.value},
+              t == 0.0L || t == 1.0L || u == 0.0L || u == 1.0L};
+        }
+      }
+      seen.push_back(current);
+    }
+  }
+  return std::nullopt;
 }
 
 bool face_record_references_loop(const detail::FaceRecord &face,

@@ -13,10 +13,10 @@ struct KernelState;
 struct TopologyTransactionState;
 }
 
-/// 拓扑事务隔离/并发语义占位：当前内核为单写入者 + 快照回滚，不等价于数据库 SERIALIZABLE，但可用于宿主侧协议对齐。
+/// 拓扑事务隔离/并发语义：当前内核实例强制单活动写事务 + 快照回滚，不等价于数据库 SERIALIZABLE，但可用于宿主侧协议对齐。
 enum class TopologyIsolationLevel : std::uint8_t {
   Unspecified = 0,
-  /// 单活动事务、修改前快照、回滚恢复（工程上接近「串行化」使用方式，但无跨进程锁）。
+  /// 单活动写事务、修改前快照、回滚恢复（工程上接近「串行化」使用方式，但无跨进程锁）。
   SnapshotSerializable = 1,
 };
 
@@ -67,6 +67,9 @@ public:
     Result<bool> is_shell_orphan(ShellId shell_id) const;
     Result<bool> is_body_derived(BodyId body_id) const;
     Result<BoundingBox> bbox_of_face(FaceId face_id) const;
+    /// 平面、直线边面片的真实边界面积（外环减内环），单位为模型长度单位的平方。
+    /// 不支持曲边/非平面面；无效面返回失败且无数值。每次从当前拓扑重算，不缓存。
+    Result<Scalar> planar_face_area(FaceId face_id) const;
     Result<BoundingBox> bbox_of_shell(ShellId shell_id) const;
     Result<BoundingBox> bbox_of_body_from_topology(BodyId body_id) const;
     Result<std::vector<FaceId>> faces_of_body(BodyId body_id) const;
@@ -107,6 +110,7 @@ private:
 
 class TopologyTransaction {
 public:
+    /// 同一内核已有活动事务时，新事务以关闭状态返回；其写入/提交/回滚均失败且不污染模型。
     explicit TopologyTransaction(std::shared_ptr<detail::KernelState> state);
     /// 事务为唯一所有权对象：可移动构造，但不可复制或移动赋值。
     /// 移动后源对象保持可析构、可查询的关闭状态，不能再提交或回滚。
@@ -124,8 +128,11 @@ public:
     Result<void> set_coedge_pcurve(CoedgeId coedge_id, PCurveId pcurve_id);
     /// 按定向端点 ID 首尾闭合；单共边不豁免。未闭合返回 InvalidTopology / AXM-TOPO-E-0002，不写入环或事务计数。
     Result<LoopId> create_loop(std::span<const CoedgeId> coedges);
+    /// 已绑定面的外/内环至少三条共边；同曲线双弧环除外。边数不足分别返回 AXM-TOPO-E-0003/0004。
     /// 同一面各环不得复用 EdgeId；失败返回 InvalidTopology / AXM-TOPO-E-0014，不写入模型。
+    /// 不同边界环不得共用 VertexId；失败返回 InvalidTopology / AXM-TOPO-E-0024，不分配 FaceId。
     Result<FaceId> create_face(SurfaceId surface_id, LoopId outer_loop, std::span<const LoopId> inner_loops);
+    /// 成员面须引用存在的曲面，外环及所有内环须有效；受损引用返回 InvalidTopology / AXM-TOPO-E-0005，不分配 ShellId 或修改事务写计数。
     Result<ShellId> create_shell(std::span<const FaceId> faces);
     Result<BodyId> create_body(std::span<const ShellId> shells);
     Result<void> delete_face(FaceId face_id);

@@ -300,6 +300,10 @@ public:
 ```
 
 `CurveService::closest_parameter/closest_point` 对 BSpline/NURBS 会在全域粗采样之外逐个覆盖非空结点分段，再进行阻尼局部细化；因此合法的极窄分段（包括满重数断点隔开的分支与常值退化分段）不会仅因宽度小于全域采样步长而被跳过。返回值仍是数值搜索结果，不构成任意曲线全局最优或工业精度保证。非有限查询点返回 `InvalidInput` / `AXM-CORE-E-0002`，不修改几何或求值缓存。
+线段最近参数使用解析投影与 `[0,1]` 钳制；投影的差值、点积和长度平方使用扩展精度中间量，使端点及查询点均有限但长度平方超出 `Scalar` 范围时仍可返回有限参数。无效句柄返回 `InvalidInput` / `AXM-GEO-E-0006`；退化线段在创建时返回 `InvalidInput` / `AXM-GEO-E-0001`，失败不修改几何或求值缓存。
+椭圆不再直接把查询点的缩放极角当作最近参数：该极角仅作为初值，随后按三维欧氏距离进行阻尼细化，并将周期缝结果归一到 `[0, 2pi)`。该语义已覆盖解析可知最近点、周期缝、非有限输入与失败不污染；仍不宣称任意退化椭圆的全局最优保证。
+`CurveFactory::make_ellipse` 在创建前检查轴向量长度与派生法向长度是否有限；即使输入坐标本身有限，轴长或叉积溢出仍返回 `InvalidInput` / `AXM-GEO-E-0001`，不写入几何对象或求值缓存。
+`PCurveService::closest_parameter/closest_point` 对现有 UV 折线逐段投影并比较欧氏距离，零长度段使用其端点，多个等距最近点取参数最小者。投影和距离比较使用扩展精度中间量，支持有限坐标的距离平方超出 `Scalar` 范围的情况。非有限查询点返回 `InvalidInput` / `AXM-CORE-E-0002`，无效句柄返回 `InvalidInput` / `AXM-CORE-E-0001`；这些失败不修改几何或缓存。该合同仅覆盖当前的折线 PCurve。
 
 #### `SurfaceEvaluator`
 
@@ -346,12 +350,16 @@ public:
   Result<std::vector<EdgeId>> edges_of_loop(LoopId) const;
   Result<std::vector<LoopId>> loops_of_face(FaceId) const;
   Result<SurfaceId> surface_of_face(FaceId) const;
+  // 平面直线边面片面积；模型长度单位的平方，外环减内环。
+  Result<Scalar> planar_face_area(FaceId) const;
   Result<std::vector<FaceId>> faces_of_shell(ShellId) const;
   Result<std::vector<ShellId>> shells_of_body(BodyId) const;
   /// 累计只读查询次数（嵌套调用只计最外层一次）；与 `TopologyTransaction::write_operation_count` 互补。
   Result<std::uint64_t> query_operation_count() const;
 };
 ```
+
+`planar_face_area` 从当前拓扑顶点和曲面法向计算边界面积，不使用 bbox 或三角网格。顶点到平面的距离须不超过内核线性容差；曲面必须为 Plane，边曲线必须为 Line/LineSegment。曲面或曲边不支持时返回 `NotImplemented / AXM-CORE-E-0004`；拓扑不完整、非共面或面积超出数值范围时返回 `InvalidTopology / AXM-TOPO-E-0003`（内环为 `E-0004`）；无效或已删除面返回 `InvalidInput / AXM-CORE-E-0001`，这些失败均无面积值。无内环时仅计外环；每次查询从当前模型重算，事务修改即时可见，回滚后恢复原面积。
 
 ### 6.2 拓扑事务接口
 
@@ -373,10 +381,14 @@ public:
   Result<EdgeId> create_edge(CurveId, VertexId, VertexId);
   // validate_edge 要求两个拓扑端点在引用的 3D Curve 上（采用内核线性容差）；不一致返回 InvalidTopology / AXM-TOPO-E-0008。
   Result<CoedgeId> create_coedge(EdgeId, bool reversed);
-  // 按定向端点 ID 首尾闭合，单共边不豁免；未闭合返回 InvalidTopology / AXM-TOPO-E-0002，失败不写入环或事务计数。
+  // 按定向端点 ID 首尾闭合，单共边不豁免；未闭合返回 AXM-TOPO-E-0002，闭合前重复经过顶点返回 AXM-TOPO-E-0023，失败不写入环或事务计数。
   Result<LoopId> create_loop(std::span<const CoedgeId>);
+  // 建面时外/内环至少三条共边（同曲线双弧环除外）；不足分别返回 AXM-TOPO-E-0003/0004。
   // 外环/内环及内环之间不得复用 EdgeId；返回 InvalidTopology / AXM-TOPO-E-0014，失败不分配面或改变索引、事务写计数。
+  // 不同边界环不得共用 VertexId；返回 InvalidTopology / AXM-TOPO-E-0024，关联冲突环与顶点，失败不分配面。
+  // 不同边界环的非平行直线边不得在三维空间端点相接；返回 InvalidTopology / AXM-TOPO-E-0027，失败不分配面。
   Result<FaceId> create_face(SurfaceId, LoopId outer_loop, std::span<const LoopId> inner_loops);
+  // 成员面须引用存在的曲面，外环和所有内环须有效；受损引用返回 InvalidTopology / AXM-TOPO-E-0005，失败不分配壳 ID。
   Result<ShellId> create_shell(std::span<const FaceId>);
   Result<BodyId> create_body(std::span<const ShellId>);
 
@@ -390,6 +402,8 @@ public:
   Result<TopologyIsolationLevel> effective_isolation_level() const;
 };
 ```
+
+同一内核实例仅允许一个活动拓扑写事务；已有所有者时，`begin_transaction()` 返回可查询但已关闭的事务对象，其写入、提交与回滚均失败且不修改模型。所有者提交、回滚或离开作用域后释放写槽。该约束不等价于跨进程数据库 SERIALIZABLE。
 
 > 说明：`TopologyTransaction` 的完整签名见 `include/axiom/topo/topology_service.h`；事务具有唯一所有权，只能移动构造，不能复制或移动赋值。移动后的源对象处于可安全查询的关闭状态，写入、提交和回滚均被拒绝，事务权限仅由目标对象持有。活动事务若未显式提交或回滚便离开作用域，`noexcept` 析构会自动回滚成功写入；空事务析构是纯 no-op，已关闭事务与移动后的源对象析构不改变模型。另含 `set_coedge_pcurve`、删除壳/体、以及 trim 桥接审计读数 `coedge_pcurve_bind_count()` / `coedge_pcurve_clear_count()` 等。`write_operation_count()` 统计本事务内每次**成功**的写操作（创建/删除实体、`replace_surface`、每次 `set_coedge_pcurve` 含清除）；回滚或 `clear_tracking_records()` 归零。`clear_tracking_records()` 仅在提交或回滚后允许调用，可重复清理且不改变模型；活动事务（含空事务）返回 `OperationFailed` / `AXM-TX-E-0006`，保留创建记录、修改快照与计数。`effective_isolation_level()` 当前实现返回 `SnapshotSerializable`（单事务 + 快照回滚的工程占位，见头文件注释）。
 
@@ -524,6 +538,8 @@ public:
   Result<BodyId> thicken(FaceId, Scalar distance);
 };
 ```
+
+显式 `ProfileRef::polygon_xyz` 拉伸当前只支持有限坐标、共面且严格凸的轮廓（首尾隐式闭合，不重复首点），拉伸方向须与轮廓法向不平行并形成非退化体积。合格轮廓按两种绕向生成三角剖分棱柱壳；凹形、自交、共线/重复顶点、非平面或平行拉伸在创建实体前返回 `InvalidInput` / `AXM-CORE-E-0002`，不退回 bbox 壳。无显式轮廓的历史占位路径仍存在。
 
 ### 8.2 布尔操作接口
 
@@ -736,8 +752,16 @@ public:
   Result<void> export_reports_json(std::span<const DiagnosticId>, std::string_view path) const;
   Result<void> export_grouped_by_stage_txt(std::string_view path) const;
   Result<void> export_grouped_by_stage_json(std::string_view path) const;
+  Result<std::vector<DiagnosticId>> find_by_issue_code_prefix(std::string_view prefix, std::uint64_t max_results) const;
+  Result<std::vector<DiagnosticId>> find_by_related_entity(std::uint64_t entity_id, std::uint64_t max_results) const;
+  Result<std::vector<DiagnosticId>> find_by_issue_stage(std::string_view stage, std::uint64_t max_results) const;
+  Result<std::vector<DiagnosticId>> find_by_issue_stage_prefix(std::string_view prefix, std::uint64_t max_results) const;
 };
 ```
+
+问题码前缀、阶段精确与阶段前缀检索均按 `DiagnosticId` 升序返回最早的前 `max_results` 个匹配报告，单报告的多个匹配 issue 只返回一次。空问题码前缀、空阶段/阶段前缀或零上限返回 `InvalidInput` / `AXM-CORE-E-0002`，源报告保持不变。
+
+相关实体检索同样先按 `DiagnosticId` 升序排序，再返回前 `max_results` 个匹配报告；同一报告内多个 issue 关联实体时只返回一次。实体 ID 为零或上限为零返回 `InvalidInput` / `AXM-CORE-E-0002`，源报告保持不变。`report_ids_by_entity` 使用相同的检索语义。
 
 `export_reports_json` 顶层为 `{"diagnostics":[...]}`，每项与单报告 JSON 一致，包含 `id/summary/issues` 及问题的 `code/severity/message/stage/related_entities`；字符串控制字节转义后保留。按输入顺序导出，重复 ID 重复输出，无问题报告输出空 `issues`。
 

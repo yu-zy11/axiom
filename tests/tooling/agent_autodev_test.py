@@ -7,6 +7,7 @@ import argparse
 import copy
 from contextlib import ExitStack
 import importlib.util
+import json
 import sys
 import tempfile
 import time
@@ -66,6 +67,9 @@ class AgentAutodevTest(unittest.TestCase):
         self.assertIn(".axiom-agent/result.json", prompt)
         self.assertIn("FR-GEO-001", prompt)
         self.assertIn("唯一目标", prompt)
+        self.assertIn("不修改 .gitignore", prompt)
+        self.assertIn("docs/plan/AxiomKernel_Agent自动开发进度.md", prompt)
+        self.assertIn("台账由调度器在验收通过后追加", prompt)
 
     def test_select_target_rotates_within_the_active_tier(self) -> None:
         requirements = [
@@ -95,6 +99,76 @@ class AgentAutodevTest(unittest.TestCase):
             agent_autodev.select_target(requirements, {}, config),
             agent_autodev.Requirement("FR-OPS-001", "进行中"),
         )
+
+    def test_unlocked_tier_can_advance_without_falsifying_earlier_status(self) -> None:
+        requirements = [
+            agent_autodev.Requirement("FR-GEO-001", "受限可用"),
+            agent_autodev.Requirement("FR-TOPO-001", "受限可用"),
+            agent_autodev.Requirement("FR-OPS-001", "进行中"),
+            agent_autodev.Requirement("FR-BOOL-001", "未开始"),
+        ]
+        config = {"requirement_tiers": [
+            ["FR-GEO-001", "FR-TOPO-001"], ["FR-OPS-001"], ["FR-BOOL-001"],
+        ], "unlocked_tiers": 2}
+        state = {"requirement_cycles": {"FR-GEO-001": 3, "FR-TOPO-001": 3}}
+        self.assertEqual(agent_autodev.select_target(requirements, state, config), requirements[2])
+        self.assertEqual(requirements[0].status, "受限可用")
+        state["requirement_cycles"]["FR-OPS-001"] = 4
+        self.assertEqual(agent_autodev.select_target(requirements, state, config), requirements[0])
+
+    def test_prompt_scopes_context_to_target_and_saved_next_step(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            matrix = Path(directory) / "matrix.md"
+            matrix.write_text("| FR-GEO-001 | geometry | 受限可用 | evidence | next |\n"
+                              "| FR-OPS-001 | ops | 进行中 | other | later |\n")
+            with patch.object(agent_autodev, "TRACEABILITY", matrix):
+                prompt = agent_autodev.build_prompt(
+                    52, agent_autodev.Requirement("FR-GEO-001", "受限可用"),
+                    next_step="继续最近点精度回归",
+                )
+        self.assertIn("geometry | 受限可用", prompt)
+        self.assertIn("继续最近点精度回归", prompt)
+        self.assertNotIn("other | later", prompt)
+
+    def test_weighted_rotation_gives_feature_work_more_slices(self) -> None:
+        requirements = [
+            agent_autodev.Requirement("FR-GEO-001", "受限可用"),
+            agent_autodev.Requirement("FR-OPS-001", "进行中"),
+        ]
+        config = {"requirement_tiers": [["FR-GEO-001"], ["FR-OPS-001"]],
+                  "unlocked_tiers": 2, "requirement_weights": {"FR-OPS-001": 3}}
+        state = {"requirement_cycles": {"FR-GEO-001": 12}, "focus_cycles": {}}
+        choices = []
+        for _ in range(24):
+            selected = agent_autodev.select_target(requirements, state, config)
+            choices.append(selected.requirement_id)
+            counts = state["focus_cycles"]
+            counts[selected.requirement_id] = counts.get(selected.requirement_id, 0) + 1
+        self.assertGreater(choices.count("FR-OPS-001"), choices.count("FR-GEO-001"))
+        self.assertGreaterEqual(choices.count("FR-GEO-001"), 5)
+        self.assertEqual(requirements[0].status, "受限可用")
+
+    def test_feature_brief_names_deliverable_and_entrypoints(self) -> None:
+        brief = {"goal": "物化一个可验证体", "entrypoints": ["src/axiom/ops/ops_services.cpp"]}
+        prompt = agent_autodev.build_prompt(
+            53, agent_autodev.Requirement("FR-OPS-001", "进行中"), task_brief=brief)
+        self.assertIn("物化一个可验证体", prompt)
+        self.assertIn("src/axiom/ops/ops_services.cpp", prompt)
+        self.assertIn("避免只交付输入校验", prompt)
+        self.assertIn("独立完整构建", prompt)
+
+    def test_invalid_weight_or_brief_is_rejected(self) -> None:
+        config = agent_autodev.load_config(agent_autodev.DEFAULT_CONFIG)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            for change in (
+                {"requirement_weights": {"FR-OPS-001": 0}},
+                {"task_briefs": {"FR-OPS-001": {"goal": "", "entrypoints": []}}},
+            ):
+                broken = dict(config, **change)
+                path.write_text(json.dumps(broken), encoding="utf-8")
+                with self.assertRaises(agent_autodev.RunnerError):
+                    agent_autodev.load_config(path)
 
     def test_timeout_stops_child_before_retry(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -136,7 +210,8 @@ class AgentAutodevTest(unittest.TestCase):
 
 class RepairLoopTest(unittest.TestCase):
     def run_loop(self, *, failures=(), reports=None, limit=0, commit_fail=False,
-                 resume=False, mismatch=False):
+                 resume=False, mismatch=False, resume_gates=False,
+                 interrupted_agent=False, stop_after_seconds=0):
         config = agent_autodev.load_config(agent_autodev.DEFAULT_CONFIG)
         config["max_consecutive_failures"] = limit
         config["retry_delay_seconds"] = 0
@@ -151,12 +226,19 @@ class RepairLoopTest(unittest.TestCase):
                 "requirement_id": "FR-GEO-001"})
         args = argparse.Namespace(config=agent_autodev.DEFAULT_CONFIG, agent_command=None,
                                   allow_dirty=False, no_commit=False, resume_failed=resume,
-                                  max_cycles=2, dry_run=False)
+                                  max_cycles=2, dry_run=False,
+                                  stop_after_seconds=stop_after_seconds)
         geo = dict(status="completed_slice", requirement_id="FR-GEO-001", module="Geo",
                    summary="fix", tests=[], remaining="next")
         topo = dict(geo, requirement_id="FR-TOPO-001", module="Topo")
+        if resume_gates:
+            state.pop("last_error", None)
+            state["pending"].update(phase="gates", report=geo, full_gate=True)
+        if interrupted_agent:
+            state.pop("last_error", None)
         outcomes = list(failures) + [None, None]
-        default_reports = [geo] * (len(failures) + 1) + [topo]
+        default_reports = ([topo] if resume_gates else
+                           [geo] * (len(failures) + 1) + [topo])
         prompts = []
         checkpoints = []
         with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
@@ -189,6 +271,9 @@ class RepairLoopTest(unittest.TestCase):
             stack.enter_context(patch.object(agent_autodev, "PROGRESS_LEDGER", ledger))
             stack.enter_context(patch.object(agent_autodev, "REPORT_PATH", Path(directory) / "report.json"))
             stack.enter_context(patch.object(agent_autodev.time, "sleep"))
+            if stop_after_seconds:
+                stack.enter_context(patch.object(agent_autodev.time, "monotonic",
+                    side_effect=[0] * 8 + [stop_after_seconds + 1] * 10))
             result = agent_autodev.main()
             return result, state, prompts, ledger.read_text(), replacements, checkpoints
 
@@ -205,6 +290,10 @@ class RepairLoopTest(unittest.TestCase):
         self.assertIn("唯一目标是 **FR-TOPO-001", prompts[5])
         self.assertNotIn("last_error", state)
         self.assertNotIn("pending", state)
+        self.assertEqual(state["next_steps"]["FR-GEO-001"], "next")
+        self.assertEqual(state["focus_cycles"], {"FR-GEO-001": 1, "FR-TOPO-001": 1})
+        self.assertGreaterEqual(state["history"][0]["run_seconds"], 0)
+        self.assertGreaterEqual(state["history"][0]["gate_seconds"], 0)
         self.assertTrue(all(s["successful_cycles"] == 0 for s in snapshots[:8]))
 
     def test_explicit_failure_limit_still_supported_without_commit(self):
@@ -238,9 +327,31 @@ class RepairLoopTest(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn("previous performance gate failed", prompts[0])
 
+    def test_resume_validated_report_skips_agent_and_reruns_gates(self):
+        result, state, prompts, _, calls, snapshots = self.run_loop(
+            resume=True, resume_gates=True)
+        self.assertEqual(result, 0)
+        self.assertEqual(state["successful_cycles"], 2)
+        self.assertEqual(len(prompts), 1)
+        self.assertEqual(calls["verify_slice"].call_count, 2)
+        self.assertTrue(calls["verify_slice"].call_args_list[0].kwargs["force_full"])
+        self.assertTrue(any(s.get("pending", {}).get("phase") == "gates" for s in snapshots))
+
+    def test_soft_deadline_stops_between_accepted_slices(self):
+        result, state, prompts, _, calls, _ = self.run_loop(stop_after_seconds=1)
+        self.assertEqual(result, 0)
+        self.assertEqual(state["successful_cycles"], 1)
+        self.assertEqual(len(prompts), 1)
+        self.assertEqual(calls["commit_slice"].call_count, 1)
+        self.assertNotIn("pending", state)
+
     def test_resume_rejects_unrelated_file_changes(self):
         with self.assertRaisesRegex(agent_autodev.RunnerError, "changed since checkpoint"):
             self.run_loop(resume=True, mismatch=True)
+
+    def test_resume_rejects_unreported_agent_edits(self):
+        with self.assertRaisesRegex(agent_autodev.RunnerError, "without a validated report"):
+            self.run_loop(resume=True, interrupted_agent=True)
 
     def test_shipped_config_is_complete_and_retries_without_limit(self):
         config = agent_autodev.load_config(agent_autodev.DEFAULT_CONFIG)

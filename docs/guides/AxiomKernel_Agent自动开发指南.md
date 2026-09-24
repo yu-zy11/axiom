@@ -12,7 +12,7 @@
 
 每轮执行以下闭环：
 
-1. 从需求追踪矩阵读取未完成的 FR/NFR，按配置的阶段梯队和已交付轮次自动分配下一目标。
+1. 从需求追踪矩阵读取未完成的 FR/NFR，在已解锁的阶段梯队中按已交付轮次自动分配下一目标；需求状态不会因解锁而提升。
 2. Agent 只为被分配的需求选择一个依赖已具备的小切片，修改代码、测试和必要文档。
 3. Agent 写出结构化结果，但不能自行提交、推送或清理工作树。
 4. 调度器独立运行文档检查、配置、构建和模块测试；每若干轮运行完整测试。
@@ -54,6 +54,8 @@ python3 scripts/agent_autodev.py \
 
 `--max-cycles 0` 表示连续模式，不表示绕过验收。默认失败会转入修复循环，重试等待从 10 秒递增到最多 60 秒。显式设置非零失败上限、启动检查失败、外部定时停止或项目完成仍会结束运行。
 
+指定时限运行时，推荐 `python3 -u scripts/agent_autodev.py --stop-after-seconds 7200 --max-cycles 0`；恢复已有检查点时追加 `--resume-failed`。到时会完成当前切片或保存失败检查点，再在轮次边界停止；因此实际退出可能晚于时限。若需要外部硬截止，可继续使用 `.axiom-agent/timed_run.py`，但它可能中断 Agent 或门禁。配置的 `max_consecutive_failures` 设为 `0` 才会在门禁失败后持续修复直至时限；`--resume-failed` 会核对 HEAD 与文件指纹。`--allow-dirty --no-commit` 仍只用于单轮调试。
+
 ## 4. 配置
 
 `automation/agent_autodev.json` 定义：
@@ -67,12 +69,16 @@ python3 scripts/agent_autodev.py \
 | `retry_delay_seconds` | 每次失败的等待增量，默认 10 秒，上限 60 秒，避免快速空转 |
 | `agent_timeout_seconds` | 单轮 Agent 最长执行时间 |
 | `protected_branches` | 禁止直接自动提交的分支 |
-| `requirement_tiers` | 需求阶段梯队；先完成前一梯队，并在梯队内按已验收轮次数轮转 |
+| `requirement_tiers` | 需求阶段梯队；未解锁层不参与轮转，前层全满足后自动进入下一层 |
+| `unlocked_tiers` | 允许参与轮转的前几层，默认 1；当前设为 2，使已有 Geo/Topo 基础上的 Ops/Query 切片进入轮转，仍不改变需求完成度或放行后续未解锁层 |
+| `requirement_weights` | 已解锁需求的交付权重；使用启用后累计的 `focus_cycles / 权重` 轮转，默认权重 1。当前 Ops 为 5、Query 为 2，确保功能开发占较多轮次，同时基础层仍定期推进 |
+| `task_briefs` | 功能需求的长期交付方向与优先入口文件；Agent 仍需根据当前代码和回归选择一个真实可验收的小切片，不能把 brief 当成完成证明 |
 | `module_tests` | Agent 报告模块到必跑 `ctest` 的映射 |
 
 调度状态、Agent 报告和门禁日志位于 `.axiom-agent/`，该目录不会提交。要从头建立新的调度历史，可在工作树干净且没有运行中的 Agent 时删除该目录。
 
 仓库内的 `docs/plan/AxiomKernel_Agent自动开发进度.md` 是调度器维护的已验收切片台账，会随每个成功 commit 自动更新；需求完成度仍必须由实现与测试证据支撑，不能仅凭台账行数提升。
+Agent 不得修改该台账；发现历史遗留内容时应在报告中说明，由调度器核对并处理。
 
 ## 5. 接纳与停机规则
 
@@ -96,10 +102,12 @@ python3 scripts/agent_autodev.py \
 ## 6. 运行监控与恢复
 
 - 查看 `.axiom-agent/state.json` 获取成功轮次、最近提交和最后错误。
+- `state.json` 的 `next_steps` 保留各需求最近一次报告的下一验收点；提示词只提供目标需求的矩阵条目和该下一步，引导 Agent 按需阅读相关文档。
+- `state.json` 的 `history` 记录已接受切片的 Agent、门禁和本次运行耗时；`focus_cycles` 记录启用加权轮转后的验收次数。比较前后速度时以相同模块和相近构建负载为准，不能仅用总轮次数代替功能验收。
 - 查看 `.axiom-agent/logs/cycle-NNNN-gates.log` 获取调度器实际执行的门禁输出。
 - 门禁失败自动保存错误历史、当前需求、HEAD 和改动文件指纹。恢复命令：`python3 scripts/agent_autodev.py --resume-failed --max-cycles 0`。若文件或 HEAD 已被其他操作改变，恢复会拒绝启动，需先核对现场。
 - Agent 输出保存在 `.axiom-agent/logs/cycle-NNNN-attempt-NNNN-agent.log`；失败信息和对应门禁日志会用于下一轮修复。
-- 强制终止期间的未完成改动可能晚于最近检查点，需核对后才能恢复；不要用 `--allow-dirty` 混入其他修改。
+- Agent 已交付报告但门禁被中断时，调度器保存报告和工作树指纹；`--resume-failed` 核对后直接重跑独立门禁，无须再调用 Agent。若中断发生在 Agent 修改文件期间且尚无有效报告，必须人工核对现场；不要用 `--allow-dirty` 混入其他修改。
 - `--no-commit` 仅用于调试单轮，脚本会在该轮后停止。
 - `--allow-dirty` 必须与 `--no-commit` 同时使用，只适用于人工监督调试，防止把既有改动混入自动提交。
 - Agent 不得修改调度脚本及其配置；调度器会在门禁前拒绝这类变更，防止运行中的质量规则被自行放宽。
@@ -110,4 +118,4 @@ python3 scripts/agent_autodev.py \
 
 ## 8. 调度器回归验证
 
-运行 `python3 tests/tooling/agent_autodev_test.py`。覆盖超过三次门禁失败后修复成功并继续下一需求、blocked 转入修复、完整测试复验、提交失败不重复台账、显式失败上限、恢复错误上下文及拒绝混入其他文件修改。
+运行 `python3 tests/tooling/agent_autodev_test.py`。覆盖已解锁梯队与功能权重轮转、任务 brief、超过三次门禁失败后修复成功并继续下一需求、blocked 转入修复、完整测试复验、提交失败不重复台账、门禁断点恢复、轮次边界限时停机、显式失败上限及拒绝混入其他文件修改。

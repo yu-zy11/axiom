@@ -100,21 +100,27 @@ Result<CurveId> CurveFactory::make_ellipse(const Point3 &center,
         *state_, diag_codes::kGeoCurveCreationInvalid,
         "椭圆创建失败：输入包含非法数值", "椭圆创建失败");
   }
-  if (detail::norm(axis_u) <= kEpsilon || detail::norm(axis_v) <= kEpsilon) {
+  const auto axis_u_length = detail::norm(axis_u);
+  const auto axis_v_length = detail::norm(axis_v);
+  if (!finite_scalar(axis_u_length) || !finite_scalar(axis_v_length) ||
+      axis_u_length <= kEpsilon || axis_v_length <= kEpsilon) {
     return detail::invalid_input_result<CurveId>(
         *state_, diag_codes::kGeoCurveCreationInvalid,
-        "椭圆创建失败：长短轴向量都必须非零", "椭圆创建失败");
+        "椭圆创建失败：长短轴向量长度必须有限且非零", "椭圆创建失败");
   }
-  if (detail::norm(detail::cross(axis_u, axis_v)) <= kEpsilon) {
+  const auto normal = detail::cross(axis_u, axis_v);
+  const auto normal_length = detail::norm(normal);
+  if (!finite_vec(normal) || !finite_scalar(normal_length) ||
+      normal_length <= kEpsilon) {
     return detail::invalid_input_result<CurveId>(
         *state_, diag_codes::kGeoCurveCreationInvalid,
-        "椭圆创建失败：长短轴向量不能共线", "椭圆创建失败");
+        "椭圆创建失败：轴向量不能共线且法向长度必须有限", "椭圆创建失败");
   }
   const auto id = CurveId{state_->allocate_id()};
   state_->curves.emplace(
       id.value,
       make_curve_record(detail::CurveKind::Ellipse, center, {1.0, 0.0, 0.0},
-                        1.0, detail::normalize(detail::cross(axis_u, axis_v)),
+                        1.0, detail::scale(normal, 1.0 / normal_length),
                         axis_u, axis_v));
   return ok_result(id, state_->create_diagnostic("已创建椭圆"));
 }

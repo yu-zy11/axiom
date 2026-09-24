@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <iostream>
 
@@ -59,6 +61,98 @@ int main() {
         !bspline_surface.value.has_value() || !nurbs_surface.value.has_value()) {
         std::cerr << "failed to create geometry for query/eval test\n";
         return 1;
+    }
+
+    // Ops materializes a box as planar faces; Topo measures current boundary geometry.
+    const auto box = kernel.primitives().box({1.0, 2.0, 3.0}, 2.0, 3.0, 4.0);
+    if (!box.value) return 1;
+    const auto faces = kernel.topology().query().faces_of_body(*box.value);
+    if (!faces.value || faces.value->size() != 6) return 1;
+    std::array<double, 6> areas{};
+    for (std::size_t i = 0; i < areas.size(); ++i) {
+        const auto measured = kernel.topology().query().planar_face_area((*faces.value)[i]);
+        if (measured.status != axiom::StatusCode::Ok || !measured.value) return 1;
+        areas[i] = *measured.value;
+    }
+    std::sort(areas.begin(), areas.end());
+    if (areas != std::array<double, 6>{6.0, 6.0, 8.0, 8.0, 12.0, 12.0}) {
+        std::cerr << "unexpected planar face area in squared model units\n";
+        return 1;
+    }
+    const auto face = faces.value->front();
+    const auto original = kernel.topology().query().planar_face_area(face);
+    const auto missing = kernel.topology().query().planar_face_area(axiom::FaceId{});
+    const auto missing_report = kernel.diagnostics().get(missing.diagnostic_id);
+    if (!original.value || missing.status != axiom::StatusCode::InvalidInput || missing.value ||
+        !missing_report.value || !has_issue_code(*missing_report.value, axiom::diag_codes::kCoreInvalidHandle) ||
+        kernel.topology().query().planar_face_area(face).value != original.value) return 1;
+
+    {
+        auto txn = kernel.topology().begin_transaction();
+        if (txn.replace_surface(face, *sphere.value).status != axiom::StatusCode::Ok) return 1;
+        const auto curved = kernel.topology().query().planar_face_area(face);
+        const auto curved_report = kernel.diagnostics().get(curved.diagnostic_id);
+        if (curved.status != axiom::StatusCode::NotImplemented || curved.value ||
+            !curved_report.value || !has_issue_code(*curved_report.value, axiom::diag_codes::kCoreOperationUnsupported) ||
+            txn.rollback().status != axiom::StatusCode::Ok ||
+            kernel.topology().query().planar_face_area(face).value != original.value) return 1;
+    }
+    const auto displaced_plane = kernel.surfaces().make_plane({100.0, 100.0, 100.0}, {1.0, 1.0, 1.0});
+    if (!displaced_plane.value) return 1;
+    {
+        auto txn = kernel.topology().begin_transaction();
+        if (txn.replace_surface(face, *displaced_plane.value).status != axiom::StatusCode::Ok) return 1;
+        const auto nonplanar = kernel.topology().query().planar_face_area(face);
+        if (nonplanar.status != axiom::StatusCode::InvalidTopology || nonplanar.value ||
+            txn.rollback().status != axiom::StatusCode::Ok ||
+            kernel.topology().query().planar_face_area(face).value != original.value) return 1;
+    }
+    {
+        auto txn = kernel.topology().begin_transaction();
+        if (txn.delete_face(face).status != axiom::StatusCode::Ok) return 1;
+        const auto deleted = kernel.topology().query().planar_face_area(face);
+        if (deleted.status != axiom::StatusCode::InvalidInput || deleted.value ||
+            txn.rollback().status != axiom::StatusCode::Ok ||
+            kernel.topology().query().planar_face_area(face).value != original.value) return 1;
+    }
+    const auto hole_plane = kernel.surfaces().make_plane({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0});
+    if (!hole_plane.value) return 1;
+    {
+        auto txn = kernel.topology().begin_transaction();
+        const auto make_square_loop = [&](const std::array<axiom::Point3, 4>& points) {
+            std::array<axiom::VertexId, 4> vertices{};
+            std::array<axiom::CoedgeId, 4> coedges{};
+            for (std::size_t i = 0; i < 4; ++i) {
+                const auto vertex = txn.create_vertex(points[i]);
+                if (!vertex.value) return axiom::LoopId{};
+                vertices[i] = *vertex.value;
+            }
+            for (std::size_t i = 0; i < 4; ++i) {
+                const auto next = (i + 1) % 4;
+                const auto curve = kernel.curves().make_line_segment(points[i], points[next]);
+                if (!curve.value) return axiom::LoopId{};
+                const auto edge = txn.create_edge(*curve.value, vertices[i], vertices[next]);
+                if (!edge.value) return axiom::LoopId{};
+                const auto coedge = txn.create_coedge(*edge.value, false);
+                if (!coedge.value) return axiom::LoopId{};
+                coedges[i] = *coedge.value;
+            }
+            const auto loop = txn.create_loop(coedges);
+            return loop.value.value_or(axiom::LoopId{});
+        };
+        const auto outer = make_square_loop({{{0.0, 0.0, 0.0}, {4.0, 0.0, 0.0},
+                                             {4.0, 4.0, 0.0}, {0.0, 4.0, 0.0}}});
+        const auto inner = make_square_loop({{{1.0, 1.0, 0.0}, {1.0, 2.0, 0.0},
+                                             {2.0, 2.0, 0.0}, {2.0, 1.0, 0.0}}});
+        if (!outer.value || !inner.value) return 1;
+        const auto holed_face = txn.create_face(*hole_plane.value, outer, std::array{inner});
+        if (!holed_face.value || txn.commit().status != axiom::StatusCode::Ok) return 1;
+        const auto holed_area = kernel.topology().query().planar_face_area(*holed_face.value);
+        if (holed_area.status != axiom::StatusCode::Ok || !holed_area.value ||
+            !approx(*holed_area.value, 15.0)) {
+            std::cerr << "unexpected planar face area with an inner loop\n";
+            return 1;
+        }
     }
 
     auto line_t = kernel.curve_service().closest_parameter(*line.value, {2.5, 3.0, 0.0});

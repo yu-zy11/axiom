@@ -211,7 +211,7 @@
 
 | 错误码 | 严重级别 | 含义 |
 |---|---|---|
-| `AXM-GEO-E-0001` | Error | 曲线创建参数非法（含显式 BSpline/NURBS 结点逆序、零长度有效参数域、结点重数超过 degree + 1） |
+| `AXM-GEO-E-0001` | Error | 曲线创建参数非法（含椭圆轴长或派生法向长度溢出，以及显式 BSpline/NURBS 结点逆序、零长度有效参数域、结点重数超过 degree + 1） |
 | `AXM-GEO-E-0002` | Error | 曲面创建参数非法（包括 BSpline/NURBS 任一轴结点非有限、逆序、零有效域或重数超过 `degree + 1`） |
 | `AXM-GEO-E-0003` | Error | 几何对象退化 |
 | `AXM-GEO-E-0004` | Error | 参数超出定义域 |
@@ -228,9 +228,9 @@
 |---|---|---|
 | `AXM-TOPO-E-0001` | Error | 边缺少合法端点 |
 | `AXM-TOPO-E-0002` | Error | 环未闭合（含单共边的定向首尾顶点 ID 不同；坐标重合不等于拓扑闭合） |
-| `AXM-TOPO-E-0003` | Error | 面外环非法（含：外环已被其他面引用时 `create_face` 拒绝） |
-| `AXM-TOPO-E-0004` | Error | 面内环非法（含：内环已被其他面引用时 `create_face` 拒绝） |
-| `AXM-TOPO-E-0005` | Error | 壳未封闭（含：`validate_indices_consistency` 发现体记录中 `shells` 列表含重复壳 id） |
+| `AXM-TOPO-E-0003` | Error | 面外环非法（含：外环已被其他面引用，或已闭合外环不足三条共边且不满足同曲线双弧例外时 `create_face` 拒绝） |
+| `AXM-TOPO-E-0004` | Error | 面内环非法（含：内环已被其他面引用，或已闭合内环不足三条共边且不满足同曲线双弧例外时 `create_face` 拒绝） |
+| `AXM-TOPO-E-0005` | Error | 壳未封闭或成员面拓扑受损（含：`create_shell` 拒绝不存在的面曲面引用、无效外环/内环；曲面失败关联面与曲面 ID，内环失败关联面与环 ID；`create_body` 拒绝壳成员面不存在的曲面引用并关联壳、面与曲面 ID；`validate_indices_consistency` 发现体记录中 `shells` 列表含重复壳 id） |
 | `AXM-TOPO-E-0006` | Error | 非法悬挂边（含：`validate_edge` 与 `validate_indices_consistency` 反向索引发现边无共边引用） |
 | `AXM-TOPO-E-0007` | Error | 拓扑关系不一致（含：`edge_to_coedges` 重复定向边、`face_to_shells`/`shell_to_bodies` 反向列表重复条目、`loop_to_faces` 重复面或同一环对应多面等索引自洽性失败） |
 | `AXM-TOPO-E-0008` | Error | 参数曲线与空间曲线不一致（含 `validate_edge` 检测拓扑端点不在引用 3D Curve 上，关联 `edge/curve/vertex`；`validate_face_trim_consistency`：PCurve 绑定不完整、PCurve 控制点不足、边/曲线/顶点缺失时带 `face/loop/coedge/edge/pcurve` 等；**全量 trim 数据**下 `SurfaceService::closest_uv` 失败亦归此类；**全量 trim** 下 PCurve 定义域非法导致无法完成内点采样一致性校验；端点/曲面与 3D 边不一致时常含 `face/loop/coedge/edge/pcurve`；`validate_indices_consistency` 发现边记录引用不存在顶点时 `related_entities` 含 `edge` 与端点 id） |
@@ -248,6 +248,11 @@
 | `AXM-TOPO-E-0020` | Error | 顶点未作为任何边的端点（悬挂顶点；`validate_vertex` 与 `validate_indices_consistency`） |
 | `AXM-TOPO-E-0021` | Error | 环未被任何面引用（孤立环，例如删除面后残留） |
 | `AXM-TOPO-E-0022` | Error | 面未被任何壳引用（孤立面；`face_to_shells` 无条目或为空；`validate_indices_consistency`） |
+| `AXM-TOPO-E-0023` | Error | 环在闭合终点之外重复经过同一顶点，形成自接触的非简单边界；`create_loop` 在写入前拒绝并关联重复顶点与两条冲突定向边 |
+| `AXM-TOPO-E-0024` | Error | 同一面中不同边界环共用同一拓扑顶点；`create_face` 在写入前拒绝，`validate_face` 检出存量缺陷，关联冲突环与顶点 ID |
+| `AXM-TOPO-E-0025` | Error | 同一面中不同边界环的独立顶点具有完全相同的有限三维坐标；`create_face` 在写入前拒绝，`validate_face` 检出存量缺陷，关联两个环与两个顶点 ID。仅覆盖顶点坐标精确重合，不代表完整几何自交检测 |
+| `AXM-TOPO-E-0026` | Error | 同一面中不同边界环的直线或线段边在三维空间内部相交；`create_face` 在写入前拒绝，`validate_face` 检出存量缺陷，关联两个环与两条边 ID。仅覆盖直线边段的非平行内部交点，不代表曲线求交、端点触碰或共线重叠检测 |
+| `AXM-TOPO-E-0027` | Error | 同一面中不同边界环的非平行直线或线段边在三维空间端点相接（至少一条边的端点落在另一条边上）；`create_face` 在写入前拒绝，`validate_face` 检出存量缺陷，关联两个环与两条边 ID。共线重叠、曲线求交及容差邻近相接仍待覆盖 |
 
 ## 7.5 `BOOL` 布尔模块错误码
 
@@ -338,7 +343,7 @@
 | `AXM-IO-E-0001` | Error | 文件不存在（如 `IOService::validate_import_path` 校验时目标路径不存在） |
 | `AXM-IO-E-0002` | Error | 文件格式无法识别 |
 | `AXM-IO-E-0003` | Error | 文件内容损坏 |
-| `AXM-IO-E-0004` | Error | 导入解析失败；STEP 早期失败按根因绑定 `io.import.step.input/path/open` |
+| `AXM-IO-E-0004` | Error | 导入失败；STEP 早期失败绑定 `io.import.step.input/path/open`；OBJ 物化前失败绑定 `io.import.obj.input/path/open/parse`；STL、glTF 与 3MF 物化前失败分别绑定 `io.import.stl.*`、`io.import.gltf.*`、`io.import.3mf.*` 的 `input/path/open/read/parse/validation` 阶段。OBJ/STL/glTF/3MF 退化三角形复用 `AXM-VAL-E-0002` 与各自的 `.validation` 阶段。3MF 非有限顶点在 `.validation` 阶段复用本码，非法数值及索引溢出在 `.parse` 阶段复用本码；物化前无模型实体可关联。 |
 | `AXM-IO-E-0005` | Error | 导出失败 |
 | `AXM-IO-E-0006` | Error | 严格网格导出 QA 失败（越界索引、退化三角形或检查不可用；`Issue.stage=io.export.mesh_strict_qa`，关联输入 Body） |
 | `AXM-IO-E-0007` | Warning | 导入后存在未映射属性 |

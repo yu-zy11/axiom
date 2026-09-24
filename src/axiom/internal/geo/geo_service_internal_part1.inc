@@ -76,37 +76,29 @@ Point2 evaluate_pcurve_point(const detail::PCurveRecord &pc, Scalar t) {
   return lerp_point2(pc.poles[seg], pc.poles[seg + 1], local_t);
 }
 
-Scalar approximate_pcurve_parameter(const detail::PCurveRecord &pc,
-                                   const Point2 &point) {
-  const auto domain = pcurve_domain(pc);
-  const int samples = 64;
-  Scalar best_t = domain.min;
-  Scalar best_distance = std::numeric_limits<Scalar>::max();
-  for (int i = 0; i <= samples; ++i) {
-    const auto alpha = static_cast<Scalar>(i) / static_cast<Scalar>(samples);
-    const auto t = domain.min + (domain.max - domain.min) * alpha;
-    const auto sample = evaluate_pcurve_point(pc, t);
-    const auto d = norm2(subtract2(point, sample));
-    if (d < best_distance) {
-      best_distance = d;
-      best_t = t;
-    }
-  }
-  const auto radius = (domain.max - domain.min) * 0.125;
-  for (int iter = 0; iter < kClosestParamRefineIters; ++iter) {
-    const auto step = radius / static_cast<Scalar>(1u << iter);
-    const auto left_t = std::clamp(best_t - step, domain.min, domain.max);
-    const auto right_t = std::clamp(best_t + step, domain.min, domain.max);
-    const auto dl = norm2(subtract2(point, evaluate_pcurve_point(pc, left_t)));
-    const auto dr = norm2(subtract2(point, evaluate_pcurve_point(pc, right_t)));
-    if (dl < best_distance || dr < best_distance) {
-      if (dl <= dr) {
-        best_t = left_t;
-        best_distance = dl;
-      } else {
-        best_t = right_t;
-        best_distance = dr;
-      }
+Scalar closest_pcurve_parameter(const detail::PCurveRecord &pc,
+                                const Point2 &point) {
+  Scalar best_t = 0.0;
+  long double best_distance = std::numeric_limits<long double>::max();
+  for (std::size_t i = 0; i + 1 < pc.poles.size(); ++i) {
+    const auto &a = pc.poles[i];
+    const auto &b = pc.poles[i + 1];
+    // Finite Scalar coordinates can overflow Scalar squared distances.
+    const long double dx = static_cast<long double>(b.x) - a.x;
+    const long double dy = static_cast<long double>(b.y) - a.y;
+    const long double qx = static_cast<long double>(point.x) - a.x;
+    const long double qy = static_cast<long double>(point.y) - a.y;
+    const auto length_squared = dx * dx + dy * dy;
+    const auto local = length_squared > 0.0L
+                           ? std::clamp((qx * dx + qy * dy) / length_squared,
+                                        0.0L, 1.0L)
+                           : 0.0L;
+    const auto rx = qx - local * dx;
+    const auto ry = qy - local * dy;
+    const auto distance = rx * rx + ry * ry;
+    if (distance < best_distance) {
+      best_distance = distance;
+      best_t = static_cast<Scalar>(i) + static_cast<Scalar>(local);
     }
   }
   return best_t;

@@ -148,6 +148,338 @@ int main() {
         return 1;
     }
 
+    const auto body_count_before_obj_import_failures = kernel.body_count();
+    const auto mesh_count_before_obj_import_failures = kernel.mesh_count();
+    const auto missing_obj_path = tmp / ("axiom_io_missing_import_" + uniq + ".obj");
+    const auto malformed_obj_path = tmp / ("axiom_io_malformed_import_" + uniq + ".obj");
+    const auto degenerate_obj_path = tmp / ("axiom_io_degenerate_import_" + uniq + ".obj");
+    const auto valid_obj_path = tmp / ("axiom_io_valid_import_" + uniq + ".obj");
+    {
+        std::ofstream malformed {malformed_obj_path};
+        malformed << "v 0 0 0\nf 1 2 3\n";
+        std::ofstream degenerate {degenerate_obj_path};
+        degenerate << "v 0 0 0\nv 1 0 0\nv 2 0 0\nf 1 2 3\n";
+        std::ofstream valid {valid_obj_path};
+        valid << "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+    }
+    const auto check_obj_import_failure = [&](const axiom::Result<axiom::BodyId>& result,
+                                              axiom::StatusCode expected_status, std::string_view expected_code,
+                                              std::string_view expected_stage) {
+        const auto report = kernel.diagnostics().get(result.diagnostic_id);
+        const auto* issue = report.value ? find_issue(*report.value, expected_code) : nullptr;
+        return result.status == expected_status && !result.value.has_value() && issue != nullptr &&
+               issue->severity == axiom::IssueSeverity::Error && issue->stage == expected_stage &&
+               issue->related_entities.empty();
+    };
+    const auto empty_obj_import = kernel.io().import_obj("", axiom::ImportOptions {});
+    const auto missing_obj_import = kernel.io().import_obj(missing_obj_path.string(), axiom::ImportOptions {});
+    const auto directory_obj_import = kernel.io().import_obj(tmp.string(), axiom::ImportOptions {});
+    const auto malformed_obj_import = kernel.io().import_obj(malformed_obj_path.string(), axiom::ImportOptions {});
+    const auto degenerate_obj_import = kernel.io().import_obj(degenerate_obj_path.string(), axiom::ImportOptions {});
+    if (!check_obj_import_failure(empty_obj_import, axiom::StatusCode::InvalidInput,
+                                  axiom::diag_codes::kIoImportFailure, "io.import.obj.input") ||
+        !check_obj_import_failure(missing_obj_import, axiom::StatusCode::OperationFailed,
+                                  axiom::diag_codes::kIoImportFailure, "io.import.obj.path") ||
+        !check_obj_import_failure(directory_obj_import, axiom::StatusCode::OperationFailed,
+                                  axiom::diag_codes::kIoImportFailure, "io.import.obj.open") ||
+        !check_obj_import_failure(malformed_obj_import, axiom::StatusCode::OperationFailed,
+                                  axiom::diag_codes::kIoImportFailure, "io.import.obj.parse") ||
+        !check_obj_import_failure(degenerate_obj_import, axiom::StatusCode::DegenerateGeometry,
+                                  axiom::diag_codes::kValDegenerateGeometry, "io.import.obj.validation")) {
+        std::cerr << "OBJ import failure is missing stable root-cause stage evidence\n";
+        return 1;
+    }
+    const auto obj_failure_json = tmp / ("axiom_io_obj_import_failure_" + uniq + ".json");
+    const auto exported_obj_failure = kernel.diagnostics().export_report_json(
+        degenerate_obj_import.diagnostic_id, obj_failure_json.string());
+    std::ifstream obj_failure_json_in {obj_failure_json, std::ios::binary};
+    const std::string obj_failure_json_text {
+        (std::istreambuf_iterator<char>(obj_failure_json_in)), std::istreambuf_iterator<char>()};
+    const auto staged_obj_import_failures = kernel.diagnostics().find_by_issue_stage_prefix("io.import.obj.", 10);
+    const auto body_count_after_obj_import_failures = kernel.body_count();
+    const auto mesh_count_after_obj_import_failures = kernel.mesh_count();
+    const auto valid_obj_import = kernel.io().import_obj(valid_obj_path.string(), axiom::ImportOptions {});
+    std::filesystem::remove(obj_failure_json);
+    std::filesystem::remove(malformed_obj_path);
+    std::filesystem::remove(degenerate_obj_path);
+    std::filesystem::remove(valid_obj_path);
+    if (exported_obj_failure.status != axiom::StatusCode::Ok ||
+        obj_failure_json_text.find("\"stage\":\"io.import.obj.validation\"") == std::string::npos ||
+        !staged_obj_import_failures.value || staged_obj_import_failures.value->size() != 5 ||
+        !body_count_before_obj_import_failures.value || !body_count_after_obj_import_failures.value ||
+        *body_count_before_obj_import_failures.value != *body_count_after_obj_import_failures.value ||
+        !mesh_count_before_obj_import_failures.value || !mesh_count_after_obj_import_failures.value ||
+        *mesh_count_before_obj_import_failures.value != *mesh_count_after_obj_import_failures.value ||
+        valid_obj_import.status != axiom::StatusCode::Ok || !valid_obj_import.value.has_value() ||
+        std::filesystem::exists(missing_obj_path)) {
+        std::cerr << "OBJ import failure lookup, JSON evidence, isolation, or retry is unexpected\n";
+        return 1;
+    }
+
+    const auto body_count_before_stl_failures = kernel.body_count();
+    const auto mesh_count_before_stl_failures = kernel.mesh_count();
+    const auto missing_stl_path = tmp / ("axiom_io_missing_import_" + uniq + ".stl");
+    const auto malformed_stl_path = tmp / ("axiom_io_malformed_import_" + uniq + ".stl");
+    const auto degenerate_stl_path = tmp / ("axiom_io_degenerate_import_" + uniq + ".stl");
+    const auto valid_stl_path = tmp / ("axiom_io_valid_import_" + uniq + ".stl");
+    {
+        std::ofstream malformed {malformed_stl_path};
+        malformed << "solid broken\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\n";
+        std::ofstream degenerate {degenerate_stl_path};
+        degenerate << "solid degenerate\nfacet normal 0 0 1\nouter loop\n"
+                      "vertex 0 0 0\nvertex 1 0 0\nvertex 2 0 0\n"
+                      "endloop\nendfacet\nendsolid degenerate\n";
+        std::ofstream valid {valid_stl_path};
+        valid << "solid valid\nfacet normal 0 0 1\nouter loop\n"
+                 "vertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\n"
+                 "endloop\nendfacet\nendsolid valid\n";
+    }
+    const auto check_stl_failure = [&](const axiom::Result<axiom::BodyId>& result,
+                                       axiom::StatusCode status, std::string_view code,
+                                       std::string_view stage) {
+        const auto report = kernel.diagnostics().get(result.diagnostic_id);
+        const auto* issue = report.value ? find_issue(*report.value, code) : nullptr;
+        return result.status == status && !result.value.has_value() && issue != nullptr &&
+               issue->severity == axiom::IssueSeverity::Error && issue->stage == stage &&
+               issue->related_entities.empty();
+    };
+    const auto empty_stl = kernel.io().import_stl("", axiom::ImportOptions {});
+    const auto missing_stl = kernel.io().import_stl(missing_stl_path.string(), axiom::ImportOptions {});
+    const auto directory_stl = kernel.io().import_stl(tmp.string(), axiom::ImportOptions {});
+    const auto malformed_stl = kernel.io().import_stl(malformed_stl_path.string(), axiom::ImportOptions {});
+    const auto degenerate_stl = kernel.io().import_stl(degenerate_stl_path.string(), axiom::ImportOptions {});
+    if (!check_stl_failure(empty_stl, axiom::StatusCode::InvalidInput,
+                           axiom::diag_codes::kIoImportFailure, "io.import.stl.input") ||
+        !check_stl_failure(missing_stl, axiom::StatusCode::OperationFailed,
+                           axiom::diag_codes::kIoImportFailure, "io.import.stl.path") ||
+        !check_stl_failure(directory_stl, axiom::StatusCode::OperationFailed,
+                           axiom::diag_codes::kIoImportFailure, "io.import.stl.open") ||
+        !check_stl_failure(malformed_stl, axiom::StatusCode::OperationFailed,
+                           axiom::diag_codes::kIoImportFailure, "io.import.stl.parse") ||
+        !check_stl_failure(degenerate_stl, axiom::StatusCode::DegenerateGeometry,
+                           axiom::diag_codes::kValDegenerateGeometry, "io.import.stl.validation")) {
+        std::cerr << "STL import failure is missing stable root-cause stage evidence\n";
+        return 1;
+    }
+    const auto stl_failure_json = tmp / ("axiom_io_stl_import_failure_" + uniq + ".json");
+    const auto exported_stl_failure = kernel.diagnostics().export_report_json(
+        degenerate_stl.diagnostic_id, stl_failure_json.string());
+    std::ifstream stl_failure_json_in {stl_failure_json, std::ios::binary};
+    const std::string stl_failure_json_text {
+        (std::istreambuf_iterator<char>(stl_failure_json_in)), std::istreambuf_iterator<char>()};
+    const auto staged_stl_failures = kernel.diagnostics().find_by_issue_stage_prefix("io.import.stl.", 10);
+    const auto body_count_after_stl_failures = kernel.body_count();
+    const auto mesh_count_after_stl_failures = kernel.mesh_count();
+    const auto valid_stl = kernel.io().import_stl(valid_stl_path.string(), axiom::ImportOptions {});
+    std::filesystem::remove(stl_failure_json);
+    std::filesystem::remove(malformed_stl_path);
+    std::filesystem::remove(degenerate_stl_path);
+    std::filesystem::remove(valid_stl_path);
+    if (exported_stl_failure.status != axiom::StatusCode::Ok ||
+        stl_failure_json_text.find("\"stage\":\"io.import.stl.validation\"") == std::string::npos ||
+        !staged_stl_failures.value || staged_stl_failures.value->size() != 5 ||
+        !body_count_before_stl_failures.value || !body_count_after_stl_failures.value ||
+        *body_count_before_stl_failures.value != *body_count_after_stl_failures.value ||
+        !mesh_count_before_stl_failures.value || !mesh_count_after_stl_failures.value ||
+        *mesh_count_before_stl_failures.value != *mesh_count_after_stl_failures.value ||
+        valid_stl.status != axiom::StatusCode::Ok || !valid_stl.value.has_value() ||
+        std::filesystem::exists(missing_stl_path)) {
+        std::cerr << "STL import failure lookup, JSON evidence, isolation, or retry is unexpected\n";
+        return 1;
+    }
+
+    const auto body_count_before_gltf_failures = kernel.body_count();
+    const auto mesh_count_before_gltf_failures = kernel.mesh_count();
+    const auto missing_gltf_path = tmp / ("axiom_io_missing_import_" + uniq + ".gltf");
+    const auto malformed_gltf_path = tmp / ("axiom_io_malformed_import_" + uniq + ".gltf");
+    const auto degenerate_gltf_path = tmp / ("axiom_io_degenerate_import_" + uniq + ".gltf");
+    const auto out_of_range_gltf_path = tmp / ("axiom_io_out_of_range_import_" + uniq + ".gltf");
+    const auto valid_gltf_path = tmp / ("axiom_io_valid_import_" + uniq + ".gltf");
+    const auto write_triangle_gltf = [](const std::filesystem::path& path, std::string_view encoded_buffer) {
+        std::ofstream out {path};
+        out << "{\"buffers\":[{\"uri\":\"data:application/octet-stream;base64," << encoded_buffer
+            << "\"}],\"bufferViews\":[{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36,\"target\":34962},"
+               "{\"buffer\":0,\"byteOffset\":36,\"byteLength\":12,\"target\":34963}],"
+               "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3},"
+               "{\"bufferView\":1,\"componentType\":5125,\"count\":3}]}";
+    };
+    {
+        std::ofstream malformed {malformed_gltf_path};
+        malformed << "{\"asset\":{\"version\":\"2.0\"}}";
+    }
+    write_triangle_gltf(degenerate_gltf_path,
+                        "AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAACAAAA");
+    write_triangle_gltf(out_of_range_gltf_path,
+                        "AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAEAAAADAAAA");
+    write_triangle_gltf(valid_gltf_path,
+                        "AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAEAAAACAAAA");
+    const auto check_gltf_failure = [&](const axiom::Result<axiom::BodyId>& result,
+                                        axiom::StatusCode status, std::string_view code,
+                                        std::string_view stage) {
+        const auto report = kernel.diagnostics().get(result.diagnostic_id);
+        const auto* issue = report.value ? find_issue(*report.value, code) : nullptr;
+        return result.status == status && !result.value.has_value() && issue != nullptr &&
+               issue->severity == axiom::IssueSeverity::Error && issue->stage == stage &&
+               issue->related_entities.empty();
+    };
+    const auto empty_gltf = kernel.io().import_gltf("", axiom::ImportOptions {});
+    const auto missing_gltf = kernel.io().import_gltf(missing_gltf_path.string(), axiom::ImportOptions {});
+    const auto directory_gltf = kernel.io().import_gltf(tmp.string(), axiom::ImportOptions {});
+    const auto malformed_gltf = kernel.io().import_gltf(malformed_gltf_path.string(), axiom::ImportOptions {});
+    const auto degenerate_gltf = kernel.io().import_gltf(degenerate_gltf_path.string(), axiom::ImportOptions {});
+    const auto out_of_range_gltf = kernel.io().import_gltf(out_of_range_gltf_path.string(), axiom::ImportOptions {});
+    if (!check_gltf_failure(empty_gltf, axiom::StatusCode::InvalidInput,
+                            axiom::diag_codes::kIoImportFailure, "io.import.gltf.input") ||
+        !check_gltf_failure(missing_gltf, axiom::StatusCode::OperationFailed,
+                            axiom::diag_codes::kIoImportFailure, "io.import.gltf.path") ||
+        !check_gltf_failure(directory_gltf, axiom::StatusCode::OperationFailed,
+                            axiom::diag_codes::kIoImportFailure, "io.import.gltf.open") ||
+        !check_gltf_failure(malformed_gltf, axiom::StatusCode::OperationFailed,
+                            axiom::diag_codes::kIoImportFailure, "io.import.gltf.parse") ||
+        !check_gltf_failure(out_of_range_gltf, axiom::StatusCode::InvalidInput,
+                            axiom::diag_codes::kIoImportFailure, "io.import.gltf.validation") ||
+        !check_gltf_failure(degenerate_gltf, axiom::StatusCode::DegenerateGeometry,
+                            axiom::diag_codes::kValDegenerateGeometry, "io.import.gltf.validation")) {
+        std::cerr << "glTF import failure is missing stable root-cause stage evidence\n";
+        return 1;
+    }
+    const auto gltf_failure_json = tmp / ("axiom_io_gltf_import_failure_" + uniq + ".json");
+    const auto exported_gltf_failure = kernel.diagnostics().export_report_json(
+        degenerate_gltf.diagnostic_id, gltf_failure_json.string());
+    std::ifstream gltf_failure_json_in {gltf_failure_json, std::ios::binary};
+    const std::string gltf_failure_json_text {
+        (std::istreambuf_iterator<char>(gltf_failure_json_in)), std::istreambuf_iterator<char>()};
+    const auto staged_gltf_failures = kernel.diagnostics().find_by_issue_stage_prefix("io.import.gltf.", 10);
+    const auto body_count_after_gltf_failures = kernel.body_count();
+    const auto mesh_count_after_gltf_failures = kernel.mesh_count();
+    const auto valid_gltf = kernel.io().import_gltf(valid_gltf_path.string(), axiom::ImportOptions {});
+    std::filesystem::remove(gltf_failure_json);
+    std::filesystem::remove(malformed_gltf_path);
+    std::filesystem::remove(degenerate_gltf_path);
+    std::filesystem::remove(out_of_range_gltf_path);
+    std::filesystem::remove(valid_gltf_path);
+    if (exported_gltf_failure.status != axiom::StatusCode::Ok ||
+        gltf_failure_json_text.find("\"stage\":\"io.import.gltf.validation\"") == std::string::npos ||
+        !staged_gltf_failures.value || staged_gltf_failures.value->size() != 6 ||
+        !body_count_before_gltf_failures.value || !body_count_after_gltf_failures.value ||
+        *body_count_before_gltf_failures.value != *body_count_after_gltf_failures.value ||
+        !mesh_count_before_gltf_failures.value || !mesh_count_after_gltf_failures.value ||
+        *mesh_count_before_gltf_failures.value != *mesh_count_after_gltf_failures.value ||
+        valid_gltf.status != axiom::StatusCode::Ok || !valid_gltf.value.has_value() ||
+        std::filesystem::exists(missing_gltf_path)) {
+        std::cerr << "glTF import failure lookup, JSON evidence, isolation, or retry is unexpected\n";
+        return 1;
+    }
+
+    const auto body_count_before_3mf_failures = kernel.body_count();
+    const auto mesh_count_before_3mf_failures = kernel.mesh_count();
+    const auto missing_3mf_path = tmp / ("axiom_io_missing_import_" + uniq + ".3mf");
+    const auto malformed_3mf_path = tmp / ("axiom_io_malformed_import_" + uniq + ".3mf");
+    const auto no_model_3mf_path = tmp / ("axiom_io_no_model_import_" + uniq + ".3mf");
+    const auto invalid_number_3mf_path = tmp / ("axiom_io_invalid_number_import_" + uniq + ".3mf");
+    const auto bad_index_3mf_path = tmp / ("axiom_io_bad_index_import_" + uniq + ".3mf");
+    const auto overflow_index_3mf_path = tmp / ("axiom_io_overflow_index_import_" + uniq + ".3mf");
+    const auto nonfinite_3mf_path = tmp / ("axiom_io_nonfinite_import_" + uniq + ".3mf");
+    const auto degenerate_3mf_path = tmp / ("axiom_io_degenerate_import_" + uniq + ".3mf");
+    const auto valid_3mf_path = tmp / ("axiom_io_valid_import_" + uniq + ".3mf");
+    const auto write_3mf = [](const std::filesystem::path& path, const std::string& model_xml,
+                              std::string model_path = "3D/3dmodel.model") {
+        const auto archive = axiom::io_internal::build_zip_store_archive(
+            {{std::move(model_path), std::vector<std::uint8_t>(model_xml.begin(), model_xml.end())}});
+        std::ofstream out {path, std::ios::binary};
+        out.write(reinterpret_cast<const char*>(archive.data()), static_cast<std::streamsize>(archive.size()));
+    };
+    const auto triangle_3mf_xml = [](std::string_view first_x, std::string_view indices) {
+        return std::string("<model><vertices><vertex x=\"") + std::string(first_x) +
+               "\" y=\"0\" z=\"0\"/><vertex x=\"1\" y=\"0\" z=\"0\"/>"
+               "<vertex x=\"0\" y=\"1\" z=\"0\"/></vertices><triangles>" +
+               std::string(indices) + "</triangles></model>";
+    };
+    const auto triangle_3mf = [](std::string_view a, std::string_view b, std::string_view c) {
+        return std::string("<triangle v1=\"") + std::string(a) + "\" v2=\"" + std::string(b) +
+               "\" v3=\"" + std::string(c) + "\"/>";
+    };
+    {
+        std::ofstream malformed {malformed_3mf_path, std::ios::binary};
+        malformed << "not a ZIP archive";
+    }
+    write_3mf(no_model_3mf_path, "<model/>", "Other/file.xml");
+    write_3mf(invalid_number_3mf_path, triangle_3mf_xml("bad", triangle_3mf("0", "1", "2")));
+    write_3mf(bad_index_3mf_path, triangle_3mf_xml("0", triangle_3mf("0", "1", "9")));
+    write_3mf(overflow_index_3mf_path, triangle_3mf_xml("0", triangle_3mf("4294967296", "1", "2")));
+    write_3mf(nonfinite_3mf_path, triangle_3mf_xml("nan", triangle_3mf("0", "1", "2")));
+    write_3mf(degenerate_3mf_path, triangle_3mf_xml("0", triangle_3mf("0", "0", "2")));
+    write_3mf(valid_3mf_path, triangle_3mf_xml("0", triangle_3mf("0", "1", "2")));
+    const auto check_3mf_failure = [&](const axiom::Result<axiom::BodyId>& result,
+                                       axiom::StatusCode status, std::string_view code,
+                                       std::string_view stage) {
+        const auto report = kernel.diagnostics().get(result.diagnostic_id);
+        const auto* issue = report.value ? find_issue(*report.value, code) : nullptr;
+        return result.status == status && !result.value.has_value() && issue != nullptr &&
+               issue->severity == axiom::IssueSeverity::Error && issue->stage == stage &&
+               issue->related_entities.empty();
+    };
+    const auto empty_3mf = kernel.io().import_3mf("", axiom::ImportOptions {});
+    const auto missing_3mf = kernel.io().import_3mf(missing_3mf_path.string(), axiom::ImportOptions {});
+    const auto directory_3mf = kernel.io().import_3mf(tmp.string(), axiom::ImportOptions {});
+    const auto malformed_3mf = kernel.io().import_3mf(malformed_3mf_path.string(), axiom::ImportOptions {});
+    const auto no_model_3mf = kernel.io().import_3mf(no_model_3mf_path.string(), axiom::ImportOptions {});
+    const auto invalid_number_3mf = kernel.io().import_3mf(invalid_number_3mf_path.string(), axiom::ImportOptions {});
+    const auto bad_index_3mf = kernel.io().import_3mf(bad_index_3mf_path.string(), axiom::ImportOptions {});
+    const auto overflow_index_3mf = kernel.io().import_3mf(overflow_index_3mf_path.string(), axiom::ImportOptions {});
+    const auto nonfinite_3mf = kernel.io().import_3mf(nonfinite_3mf_path.string(), axiom::ImportOptions {});
+    const auto degenerate_3mf = kernel.io().import_3mf(degenerate_3mf_path.string(), axiom::ImportOptions {});
+    if (!check_3mf_failure(empty_3mf, axiom::StatusCode::InvalidInput,
+                           axiom::diag_codes::kIoImportFailure, "io.import.3mf.input") ||
+        !check_3mf_failure(missing_3mf, axiom::StatusCode::OperationFailed,
+                           axiom::diag_codes::kIoImportFailure, "io.import.3mf.path") ||
+        !check_3mf_failure(directory_3mf, axiom::StatusCode::OperationFailed,
+                           axiom::diag_codes::kIoImportFailure, "io.import.3mf.open") ||
+        !check_3mf_failure(malformed_3mf, axiom::StatusCode::OperationFailed,
+                           axiom::diag_codes::kIoImportFailure, "io.import.3mf.parse") ||
+        !check_3mf_failure(no_model_3mf, axiom::StatusCode::OperationFailed,
+                           axiom::diag_codes::kIoImportFailure, "io.import.3mf.parse") ||
+        !check_3mf_failure(invalid_number_3mf, axiom::StatusCode::OperationFailed,
+                           axiom::diag_codes::kIoImportFailure, "io.import.3mf.parse") ||
+        !check_3mf_failure(bad_index_3mf, axiom::StatusCode::OperationFailed,
+                           axiom::diag_codes::kIoImportFailure, "io.import.3mf.parse") ||
+        !check_3mf_failure(overflow_index_3mf, axiom::StatusCode::OperationFailed,
+                           axiom::diag_codes::kIoImportFailure, "io.import.3mf.parse") ||
+        !check_3mf_failure(nonfinite_3mf, axiom::StatusCode::InvalidInput,
+                           axiom::diag_codes::kIoImportFailure, "io.import.3mf.validation") ||
+        !check_3mf_failure(degenerate_3mf, axiom::StatusCode::DegenerateGeometry,
+                           axiom::diag_codes::kValDegenerateGeometry, "io.import.3mf.validation")) {
+        std::cerr << "3MF import failure is missing stable root-cause stage evidence\n";
+        return 1;
+    }
+    const auto json_3mf_path = tmp / ("axiom_io_3mf_import_failure_" + uniq + ".json");
+    const auto exported_3mf_failure = kernel.diagnostics().export_report_json(
+        degenerate_3mf.diagnostic_id, json_3mf_path.string());
+    std::ifstream json_3mf_in {json_3mf_path, std::ios::binary};
+    const std::string json_3mf_text {
+        (std::istreambuf_iterator<char>(json_3mf_in)), std::istreambuf_iterator<char>()};
+    const auto staged_3mf_failures = kernel.diagnostics().find_by_issue_stage_prefix("io.import.3mf.", 20);
+    const auto body_count_after_3mf_failures = kernel.body_count();
+    const auto mesh_count_after_3mf_failures = kernel.mesh_count();
+    const auto valid_3mf = kernel.io().import_3mf(valid_3mf_path.string(), axiom::ImportOptions {});
+    for (const auto& path : {malformed_3mf_path, no_model_3mf_path, invalid_number_3mf_path,
+                             bad_index_3mf_path, overflow_index_3mf_path, nonfinite_3mf_path,
+                             degenerate_3mf_path, valid_3mf_path, json_3mf_path}) {
+        std::filesystem::remove(path);
+    }
+    if (exported_3mf_failure.status != axiom::StatusCode::Ok ||
+        json_3mf_text.find("\"stage\":\"io.import.3mf.validation\"") == std::string::npos ||
+        !staged_3mf_failures.value || staged_3mf_failures.value->size() != 10 ||
+        !body_count_before_3mf_failures.value || !body_count_after_3mf_failures.value ||
+        *body_count_before_3mf_failures.value != *body_count_after_3mf_failures.value ||
+        !mesh_count_before_3mf_failures.value || !mesh_count_after_3mf_failures.value ||
+        *mesh_count_before_3mf_failures.value != *mesh_count_after_3mf_failures.value ||
+        valid_3mf.status != axiom::StatusCode::Ok || !valid_3mf.value.has_value() ||
+        std::filesystem::exists(missing_3mf_path)) {
+        std::cerr << "3MF import lookup, JSON evidence, isolation, or retry is unexpected\n";
+        return 1;
+    }
+
     const auto body_count_before_step_failures = kernel.body_count();
     const auto check_step_failure = [&](const axiom::Result<void>& result, axiom::StatusCode expected_status,
                                         std::string_view expected_stage) {

@@ -3,6 +3,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -268,6 +269,8 @@ struct KernelState {
     std::uint64_t topology_last_commit_write_operations{0};
     TopologyCommitWriteBreakdown topology_last_commit_write_breakdown{};
     TopologyCommitWriteBreakdown topology_committed_write_breakdown_totals{};
+    /// 当前拓扑写事务的唯一所有权令牌；事务关闭后弱引用自动失效。
+    std::weak_ptr<void> active_topology_transaction;
 
     std::uint64_t allocate_id() {
         return next_id++;
@@ -383,4 +386,3 @@ inline bool has_shell(const KernelState& state, ShellId shell_id) {
 }
 
 }  // namespace axiom::detail
-

@@ -144,6 +144,13 @@ Result<void> DiagnosticService::export_report(DiagnosticId id, std::string_view 
 
     write_diagnostic_report_txt(out, it->second);
 
+    out.close();
+    if (!out) {
+        return detail::failed_void(
+            *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+            "诊断导出失败：文件写入失败", "诊断导出失败");
+    }
+
     return ok_void(id);
 }
 
@@ -166,6 +173,12 @@ Result<void> DiagnosticService::export_report_json(DiagnosticId id, std::string_
             "诊断JSON导出失败：无法打开输出文件", "诊断JSON导出失败");
     }
     write_diagnostic_report_json_object(out, it->second);
+    out.close();
+    if (!out) {
+        return detail::failed_void(
+            *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+            "诊断JSON导出失败：文件写入失败", "诊断JSON导出失败");
+    }
     return ok_void(id);
 }
 
@@ -208,9 +221,6 @@ Result<std::vector<DiagnosticId>> DiagnosticService::find_by_issue_code_prefix(s
     }
     std::vector<DiagnosticId> out;
     for (const auto& [id, report] : state_->diagnostics) {
-        if (out.size() >= max_results) {
-            break;
-        }
         const bool hit = std::any_of(report.issues.begin(), report.issues.end(),
                                      [&code_prefix](const Issue& issue) {
                                          const std::string_view c = issue.code;
@@ -222,6 +232,9 @@ Result<std::vector<DiagnosticId>> DiagnosticService::find_by_issue_code_prefix(s
         }
     }
     std::sort(out.begin(), out.end(), [](DiagnosticId a, DiagnosticId b) { return a.value < b.value; });
+    if (out.size() > max_results) {
+        out.resize(static_cast<std::size_t>(max_results));
+    }
     return ok_result(std::move(out), state_->create_diagnostic("已按问题码前缀检索诊断"));
 }
 
@@ -233,11 +246,7 @@ Result<std::vector<DiagnosticId>> DiagnosticService::find_by_related_entity(
             "诊断检索失败：相关实体ID或数量上限非法", "诊断检索失败");
     }
     std::vector<DiagnosticId> out;
-    out.reserve(static_cast<std::size_t>(max_results));
     for (const auto& [diag_value, report] : state_->diagnostics) {
-        if (out.size() >= max_results) {
-            break;
-        }
         bool matched = false;
         for (const auto& issue : report.issues) {
             if (std::find(issue.related_entities.begin(), issue.related_entities.end(), entity_id) !=
@@ -249,6 +258,10 @@ Result<std::vector<DiagnosticId>> DiagnosticService::find_by_related_entity(
         if (matched) {
             out.push_back(DiagnosticId {diag_value});
         }
+    }
+    std::sort(out.begin(), out.end(), [](DiagnosticId a, DiagnosticId b) { return a.value < b.value; });
+    if (out.size() > max_results) {
+        out.resize(static_cast<std::size_t>(max_results));
     }
     return ok_result(std::move(out), state_->create_diagnostic("已完成按相关实体检索诊断"));
 }
@@ -387,10 +400,13 @@ Result<std::vector<DiagnosticId>> DiagnosticService::find_with_severity(IssueSev
     if (max_results == 0) return detail::invalid_input_result<std::vector<DiagnosticId>>(*state_, diag_codes::kCoreParameterOutOfRange, "诊断检索失败：数量上限非法", "诊断检索失败");
     std::vector<DiagnosticId> out;
     for (const auto& [id, report] : state_->diagnostics) {
-        if (out.size() >= max_results) break;
         bool matched = false;
         for (const auto& issue : report.issues) if (issue.severity == severity) { matched = true; break; }
         if (matched) out.push_back(DiagnosticId{id});
+    }
+    std::sort(out.begin(), out.end(), [](DiagnosticId a, DiagnosticId b) { return a.value < b.value; });
+    if (out.size() > max_results) {
+        out.resize(static_cast<std::size_t>(max_results));
     }
     return ok_result(std::move(out), state_->create_diagnostic("已按严重级别检索诊断"));
 }
@@ -607,9 +623,6 @@ Result<std::vector<DiagnosticId>> DiagnosticService::find_by_issue_stage(std::st
     }
     std::vector<DiagnosticId> out;
     for (const auto& [id, report] : state_->diagnostics) {
-        if (out.size() >= max_results) {
-            break;
-        }
         const bool hit = std::any_of(report.issues.begin(), report.issues.end(),
                                      [&stage](const Issue& issue) { return issue.stage == stage; });
         if (hit) {
@@ -617,6 +630,9 @@ Result<std::vector<DiagnosticId>> DiagnosticService::find_by_issue_stage(std::st
         }
     }
     std::sort(out.begin(), out.end(), [](DiagnosticId a, DiagnosticId b) { return a.value < b.value; });
+    if (out.size() > max_results) {
+        out.resize(static_cast<std::size_t>(max_results));
+    }
     return ok_result(std::move(out), state_->create_diagnostic("已按问题阶段检索诊断"));
 }
 
@@ -629,9 +645,6 @@ Result<std::vector<DiagnosticId>> DiagnosticService::find_by_issue_stage_prefix(
     }
     std::vector<DiagnosticId> out;
     for (const auto& [id, report] : state_->diagnostics) {
-        if (out.size() >= max_results) {
-            break;
-        }
         const bool hit =
             std::any_of(report.issues.begin(), report.issues.end(), [&stage_prefix](const Issue& issue) {
                 const std::string_view st = issue.stage;
@@ -642,6 +655,9 @@ Result<std::vector<DiagnosticId>> DiagnosticService::find_by_issue_stage_prefix(
         }
     }
     std::sort(out.begin(), out.end(), [](DiagnosticId a, DiagnosticId b) { return a.value < b.value; });
+    if (out.size() > max_results) {
+        out.resize(static_cast<std::size_t>(max_results));
+    }
     return ok_result(std::move(out), state_->create_diagnostic("已按问题阶段前缀检索诊断"));
 }
 
