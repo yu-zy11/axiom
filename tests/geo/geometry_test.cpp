@@ -551,6 +551,64 @@ int main() {
         }
     }
 
+    // Every 3D polyline segment participates in the nearest-point search,
+    // including a narrow branch and zero-length segments.
+    {
+        std::vector<axiom::Point3> poles(130, {100.0, 0.0, 0.0});
+        poles[1] = {0.0, 0.0, 0.0};
+        poles[2] = {0.0, 0.0, 0.0};
+        const auto polyline = kernel.curves().make_composite_polyline(poles);
+        const std::array<axiom::Point3, 3> repeated {{{2.0, 3.0, 4.0}, {2.0, 3.0, 4.0}, {2.0, 3.0, 4.0}}};
+        const auto constant = kernel.curves().make_composite_polyline(repeated);
+        if (!polyline.value || !constant.value) {
+            std::cerr << "failed to create 3D closest-point polylines\n";
+            return 1;
+        }
+        const auto tip = kernel.curve_service().closest_parameter(*polyline.value, {0.0, 0.0, 0.0});
+        const auto interior = kernel.curve_service().closest_parameter(*polyline.value, {75.0, 10.0, 5.0});
+        const auto closest = kernel.curve_service().closest_point(*polyline.value, {75.0, 10.0, 5.0});
+        const auto end = kernel.curve_service().closest_parameter(*polyline.value, {200.0, 0.0, 0.0});
+        const auto constant_t = kernel.curve_service().closest_parameter(*constant.value, {9.0, 3.0, 4.0});
+        const std::array<axiom::Point3, 2> large_poles {{{-1e200, 0.0, 0.0}, {1e200, 0.0, 0.0}}};
+        const auto large = kernel.curves().make_composite_polyline(large_poles);
+        if (!large.value) {
+            std::cerr << "failed to create large-coordinate polyline\n";
+            return 1;
+        }
+        const auto large_t = kernel.curve_service().closest_parameter(*large.value, {0.0, 0.0, 0.0});
+        if (!tip.value || !approx(*tip.value, 1.0, 1e-12) ||
+            !interior.value || !approx(*interior.value, 0.25, 1e-12) ||
+            !closest.value || !approx(closest.value->x, 75.0, 1e-12) ||
+            !approx(closest.value->y, 0.0, 1e-12) || !approx(closest.value->z, 0.0, 1e-12) ||
+            !end.value || !approx(*end.value, 0.0, 1e-12) ||
+            !constant_t.value || !approx(*constant_t.value, 0.0, 1e-12) ||
+            !large_t.value || !approx(*large_t.value, 0.5, 1e-12)) {
+            std::cerr << "3D polyline segment projection returned wrong nearest point\n";
+            return 1;
+        }
+        const auto count_before = kernel.geometry_count();
+        const auto cache_before = kernel.cache_entry_count();
+        const auto invalid = kernel.curve_service().closest_parameter(
+            *polyline.value, {std::numeric_limits<double>::quiet_NaN(), 0.0, 0.0});
+        const auto missing = kernel.curve_service().closest_parameter(
+            axiom::CurveId{}, {0.0, 0.0, 0.0});
+        const auto invalid_code = kernel.diagnostics().has_issue_code(
+            invalid.diagnostic_id, "AXM-CORE-E-0002");
+        const auto missing_code = kernel.diagnostics().has_issue_code(
+            missing.diagnostic_id, "AXM-GEO-E-0006");
+        const auto retry = kernel.curve_service().closest_parameter(*polyline.value, {0.0, 0.0, 0.0});
+        if (invalid.status != axiom::StatusCode::InvalidInput || invalid.value ||
+            missing.status != axiom::StatusCode::InvalidInput || missing.value ||
+            !invalid_code.value || !*invalid_code.value ||
+            !missing_code.value || !*missing_code.value ||
+            !retry.value || !approx(*retry.value, 1.0, 1e-12) ||
+            kernel.geometry_count().value != count_before.value ||
+            kernel.cache_entry_count().value != cache_before.value) {
+            std::cerr << "failed 3D polyline closest query polluted geometry or cache\n";
+            return 1;
+        }
+    }
+
     // ---- Missing curve type required by docs: composite curve (chain of existing curves) ----
     {
         auto a = kernel.curves().make_line_segment({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
