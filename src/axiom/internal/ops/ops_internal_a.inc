@@ -24,7 +24,15 @@ BodyId make_body(std::shared_ptr<detail::KernelState> state, detail::BodyRecord 
                            record.kind == detail::BodyKind::BlendResult || record.kind == detail::BodyKind::Sweep;
     bool fresh_primitive_topology = false;
     if (is_derived) {
-        detail::materialize_body_bbox_topology(*state, record);
+        if (record.kind == detail::BodyKind::Sweep && !record.extrude_profile_xyz.empty()) {
+            // Explicit polygon extrusion must never be silently replaced with a bbox shell.
+            // The prism materializer returns false before allocating topology.
+            if (!detail::try_materialize_sweep_extrude_prism_body(*state, record)) {
+                return BodyId {};
+            }
+        } else {
+            detail::materialize_body_bbox_topology(*state, record);
+        }
     } else if (is_primitive_body_kind(record.kind) && record.rep_kind == RepKind::ExactBRep && record.bbox.is_valid &&
                record.shells.empty()) {
         fresh_primitive_topology = true;
@@ -1024,4 +1032,3 @@ std::vector<FaceId> faces_for_body_boolean(const detail::KernelState& state, Bod
     }
     return faces;
 }
-

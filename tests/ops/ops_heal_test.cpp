@@ -1,9 +1,11 @@
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <span>
 #include <string>
 #include <vector>
@@ -621,6 +623,67 @@ int main() {
     auto prism_faces = kernel.topology().query().faces_of_shell(prism_shells.value->front());
     if (prism_faces.status != axiom::StatusCode::Ok || !prism_faces.value.has_value() || prism_faces.value->size() != 12) {
         std::cerr << "polygon rect extrude expected 12 triangulated prism faces\n";
+        return 1;
+    }
+    const auto prism_edges = kernel.topology().query().edges_of_body(*prism.value);
+    const auto prism_vertices = kernel.topology().query().vertices_of_body(*prism.value);
+    const auto prism_owned = kernel.topology().query().has_body(*prism.value);
+    if (!prism_edges.value || prism_edges.value->size() != 18 ||
+        !prism_vertices.value || prism_vertices.value->size() != 8 ||
+        !prism_owned.value || !*prism_owned.value) {
+        std::cerr << "polygon rect extrude expected a queryable prism body with 18 edges and 8 vertices\n";
+        return 1;
+    }
+    const auto objects_before_bad_profile = kernel.object_count_total();
+    const auto bodies_before_bad_profile = kernel.body_count();
+    const auto next_id_before_bad_profile = kernel.next_object_id();
+    if (!objects_before_bad_profile.value || !bodies_before_bad_profile.value ||
+        !next_id_before_bad_profile.value) return 1;
+    const std::vector<std::vector<axiom::Point3>> invalid_extrude_profiles {
+        {{0, 0, 0}, {3, 0, 0}, {1, 0.5, 0}, {3, 2, 0}, {0, 2, 0}}, // concave
+        {{0, 0, 0}, {2, 2, 0}, {0, 2, 0}, {2, 0, 0}}, // self intersecting
+        {{0, 0, 0}, {2, 0, 0}, {2, 1, 0.1}, {0, 1, 0}},  // nonplanar
+        {{0, 0, 0}, {1, 0, 0}, {2, 0, 0}, {2, 1, 0}, {0, 1, 0}}, // collinear corner
+        {{0, 0, 0}, {1, 0, 0}, {2, 0, 0}}, // zero area
+        {{0, 0, 0}, {2, 0, 0}, {2, 1, 0}, {0, 1, 0}, {0, 0, 0}}, // repeated endpoint
+        {{0, 0, 0}, {2, 0, 0}, {2, 1, 0}, {0, std::numeric_limits<double>::infinity(), 0}}
+    };
+    for (const auto& points : invalid_extrude_profiles) {
+        axiom::ProfileRef bad_profile {"invalid", points};
+        const auto rejected = kernel.sweeps().extrude(bad_profile, {0, 0, 1}, 3);
+        const auto diagnostic = kernel.diagnostics().get(rejected.diagnostic_id);
+        const auto objects_after = kernel.object_count_total();
+        const auto bodies_after = kernel.body_count();
+        const auto next_id_after = kernel.next_object_id();
+        if (rejected.status != axiom::StatusCode::InvalidInput || rejected.value ||
+            !diagnostic.value || !has_issue_code(*diagnostic.value, axiom::diag_codes::kCoreParameterOutOfRange) ||
+            !objects_after.value || *objects_after.value != *objects_before_bad_profile.value ||
+            !bodies_after.value || *bodies_after.value != *bodies_before_bad_profile.value ||
+            !next_id_after.value || *next_id_after.value != *next_id_before_bad_profile.value) {
+            std::cerr << "invalid polygon extrusion should fail without materializing topology or body\n";
+            return 1;
+        }
+    }
+    const auto parallel_extrude = kernel.sweeps().extrude(rect, {1, 0, 0}, 3);
+    const auto objects_after_parallel = kernel.object_count_total();
+    if (parallel_extrude.status != axiom::StatusCode::InvalidInput ||
+        !objects_after_parallel.value || *objects_after_parallel.value != *objects_before_bad_profile.value) {
+        std::cerr << "parallel polygon extrusion should not materialize a bbox shell\n";
+        return 1;
+    }
+    auto reversed_rect = rect;
+    std::reverse(reversed_rect.polygon_xyz.begin(), reversed_rect.polygon_xyz.end());
+    const auto reversed_prism = kernel.sweeps().extrude(reversed_rect, {0, 0, 1}, 3);
+    const auto reversed_valid = reversed_prism.value ?
+        kernel.validate().validate_all(*reversed_prism.value, axiom::ValidationMode::Strict) :
+        axiom::Result<void> {};
+    const auto reversed_faces = reversed_prism.value ?
+        kernel.topology().query().faces_of_body(*reversed_prism.value) :
+        axiom::Result<std::vector<axiom::FaceId>> {};
+    if (reversed_prism.status != axiom::StatusCode::Ok || !reversed_prism.value ||
+        reversed_valid.status != axiom::StatusCode::Ok ||
+        !reversed_faces.value || reversed_faces.value->size() != 12) {
+        std::cerr << "clockwise polygon extrusion should still create a valid triangulated prism\n";
         return 1;
     }
 

@@ -1420,18 +1420,17 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
         tris.push_back({i, j, n + j});
         tris.push_back({i, n + j, n + i});
     }
+    if (dot(n_unit, D) < 0.0) {
+        for (auto& t : tris) {
+            std::swap(t[1], t[2]);
+        }
+    }
 
     Scalar vol_chk = 0.0;
     Point3 cm_tmp {};
     std::array<Scalar, 9> in_tmp {};
     Scalar area_tmp = 0.0;
     polyhedral_mass_properties_from_triangles(pos, tris, vol_chk, cm_tmp, in_tmp, area_tmp);
-    if (vol_chk < 0.0) {
-        for (auto& t : tris) {
-            std::swap(t[1], t[2]);
-        }
-        polyhedral_mass_properties_from_triangles(pos, tris, vol_chk, cm_tmp, in_tmp, area_tmp);
-    }
     if (!(vol_chk > 1e-18)) {
         return false;
     }
@@ -1678,4 +1677,3 @@ inline void materialize_body_bbox_topology(KernelState& state, BodyRecord& recor
 }
 
 }  // namespace axiom::detail
-
