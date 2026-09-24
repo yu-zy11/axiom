@@ -28,7 +28,8 @@ public:
     Result<std::uint64_t> count_by_severity(IssueSeverity severity) const;
     Result<DiagnosticStats> stats() const;
     Result<std::vector<DiagnosticId>> find_by_issue_code(std::string_view code, std::uint64_t max_results) const;
-    /// 任一 issue 的 `code` 以 `code_prefix` 开头时命中；`code_prefix` 为空或 `max_results==0` 时参数非法。
+    /// 任一 issue 的 `code` 以 `code_prefix` 开头时命中；按 DiagnosticId 升序限额返回。
+    /// `code_prefix` 为空或 `max_results==0` 时参数非法。
     Result<std::vector<DiagnosticId>> find_by_issue_code_prefix(std::string_view code_prefix,
                                                                 std::uint64_t max_results) const;
     Result<std::vector<DiagnosticId>> find_by_related_entity(std::uint64_t entity_id, std::uint64_t max_results) const;

@@ -12,6 +12,8 @@
 
 ### 2.1 `diag + ops`
 
+- **FR-DIAG-001 第 44 切片**：问题码前缀检索先确定匹配报告并按 `DiagnosticId` 升序排序，再应用 `max_results`；空报告/空结果、重复匹配 issue、限额、非法参数、源报告不污染与重试进入 `axiom_diagnostics_test`。需求保持受限可用；后续继续补齐高风险流程的阶段、实体和数值证据。
+
 - **NFR-DIA-001 第 40 切片**：STL 导入的物化前输入/路径/打开/读取/解析/网格验证失败分别绑定 `io.import.stl.input/path/open/read/parse/validation`；非普通文件在读取前拒绝。`axiom_io_workflow_test` 覆盖稳定错误码、阶段检索、JSON、Body/Mesh 不污染及失败后重试。复用现有 IO/VAL 错误码，需求仍为受限可用；其他 BOOL/HEAL/IO 失败出口仍待闭合。
 
 - **FR-DIAG-001 第 39 切片**：阶段精确与前缀检索先按 `DiagnosticId` 升序确定匹配集合，再应用 `max_results`，避免无序存储遍历使限额结果不稳定。`axiom_diagnostics_test` 覆盖匹配/空结果、限额、非法参数、源报告不污染及拒绝后重试。复用现有错误码；需求保持受限可用，全部高风险流程的阶段、实体和数值证据仍待补齐。

@@ -221,9 +221,6 @@ Result<std::vector<DiagnosticId>> DiagnosticService::find_by_issue_code_prefix(s
     }
     std::vector<DiagnosticId> out;
     for (const auto& [id, report] : state_->diagnostics) {
-        if (out.size() >= max_results) {
-            break;
-        }
         const bool hit = std::any_of(report.issues.begin(), report.issues.end(),
                                      [&code_prefix](const Issue& issue) {
                                          const std::string_view c = issue.code;
@@ -235,6 +232,9 @@ Result<std::vector<DiagnosticId>> DiagnosticService::find_by_issue_code_prefix(s
         }
     }
     std::sort(out.begin(), out.end(), [](DiagnosticId a, DiagnosticId b) { return a.value < b.value; });
+    if (out.size() > max_results) {
+        out.resize(static_cast<std::size_t>(max_results));
+    }
     return ok_result(std::move(out), state_->create_diagnostic("已按问题码前缀检索诊断"));
 }
 

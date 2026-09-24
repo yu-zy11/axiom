@@ -318,6 +318,58 @@ bool check_grouped_stage_export_failures() {
     return diagnostics.export_grouped_by_stage_json(json_path.string()).status == axiom::StatusCode::Ok;
 }
 
+bool check_code_prefix_search_limit_order() {
+    axiom::Kernel kernel;
+    auto& diagnostics = kernel.diagnostics();
+    const std::array<std::string_view, 8> codes {
+        "AXM-BOOL-E-0001", "AXM-IO-E-0005", "AXM-BOOL-W-0001", "",
+        "AXM-BOOL-E-0002", "AXM-HEAL-E-0001", "AXM-BOOL-D-0001", "AXM-BOOL-E-0003"
+    };
+    std::array<axiom::DiagnosticId, codes.size()> ids {};
+    for (std::size_t i = 0; i < codes.size(); ++i) {
+        std::vector<axiom::Issue> issues;
+        if (!codes[i].empty()) {
+            axiom::Issue issue;
+            issue.code = codes[i];
+            issue.stage = "diag.code_search";
+            issue.related_entities = {i + 1};
+            issues.push_back(issue);
+            if (i == 0) issues.push_back(issue); // A report matches once despite repeated issues.
+        }
+        const auto report = diagnostics.create_report("code prefix source", issues);
+        if (report.status != axiom::StatusCode::Ok || !report.value) return false;
+        ids[i] = *report.value;
+    }
+    const auto matches = [](const auto& result, std::initializer_list<axiom::DiagnosticId> expected) {
+        if (result.status != axiom::StatusCode::Ok || !result.value ||
+            result.value->size() != expected.size()) return false;
+        return std::equal(result.value->begin(), result.value->end(), expected.begin(),
+                          [](axiom::DiagnosticId a, axiom::DiagnosticId b) { return a.value == b.value; });
+    };
+    if (!matches(diagnostics.find_by_issue_code_prefix("AXM-BOOL", 2), {ids[0], ids[2]}) ||
+        !matches(diagnostics.find_by_issue_code_prefix("AXM-BOOL", 10),
+                 {ids[0], ids[2], ids[4], ids[6], ids[7]}) ||
+        !matches(diagnostics.find_by_issue_code_prefix("AXM-BOOL-E", 3), {ids[0], ids[4], ids[7]}) ||
+        !matches(diagnostics.find_by_issue_code_prefix("AXM-MISSING", 1), {})) return false;
+
+    for (const auto& result : {
+             diagnostics.find_by_issue_code_prefix("", 2),
+             diagnostics.find_by_issue_code_prefix("AXM-BOOL", 0)}) {
+        const auto failure = diagnostics.get(result.diagnostic_id);
+        if (result.status != axiom::StatusCode::InvalidInput || result.value || !failure.value ||
+            !has_issue_code(*failure.value, axiom::diag_codes::kCoreParameterOutOfRange)) return false;
+    }
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+        const auto source = diagnostics.get(ids[i]);
+        if (!source.value || source.value->summary != "code prefix source" ||
+            source.value->issues.size() != (i == 0 ? 2U : (codes[i].empty() ? 0U : 1U))) return false;
+        if (!codes[i].empty() &&
+            (source.value->issues[0].code != codes[i] ||
+             source.value->issues[0].related_entities != std::vector<std::uint64_t>({i + 1}))) return false;
+    }
+    return matches(diagnostics.find_by_issue_code_prefix("AXM-BOOL", 2), {ids[0], ids[2]});
+}
+
 bool check_stage_search_limit_order() {
     axiom::Kernel kernel;
     auto& diagnostics = kernel.diagnostics();
@@ -371,6 +423,10 @@ bool check_stage_search_limit_order() {
 }  // namespace
 
 int main() {
+    if (!check_code_prefix_search_limit_order()) {
+        std::cerr << "issue code prefix search order, limit or source isolation regression\n";
+        return 1;
+    }
     if (!check_stage_search_limit_order()) {
         std::cerr << "stage search order, limit or source isolation regression\n";
         return 1;
