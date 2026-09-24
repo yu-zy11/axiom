@@ -370,6 +370,53 @@ bool check_code_prefix_search_limit_order() {
     return matches(diagnostics.find_by_issue_code_prefix("AXM-BOOL", 2), {ids[0], ids[2]});
 }
 
+bool check_related_entity_search_limit_order() {
+    axiom::Kernel kernel;
+    auto& diagnostics = kernel.diagnostics();
+    constexpr std::uint64_t target = 42;
+    const std::array<bool, 8> related {true, false, true, false, true, false, false, true};
+    std::array<axiom::DiagnosticId, related.size()> ids {};
+    for (std::size_t i = 0; i < related.size(); ++i) {
+        axiom::Issue issue;
+        issue.code = std::string(axiom::diag_codes::kBoolInvalidInput);
+        issue.stage = "diag.entity_search";
+        issue.related_entities = {related[i] ? target : target + 1};
+        std::vector<axiom::Issue> issues {issue};
+        if (i == 0) issues.push_back(issue); // Repeated matches identify one report.
+        if (i == 6) issues.clear(); // An empty report does not match.
+        const auto report = diagnostics.create_report("entity search source", issues);
+        if (report.status != axiom::StatusCode::Ok || !report.value) return false;
+        ids[i] = *report.value;
+    }
+    const auto matches = [](const auto& result, std::initializer_list<axiom::DiagnosticId> expected) {
+        if (result.status != axiom::StatusCode::Ok || !result.value ||
+            result.value->size() != expected.size()) return false;
+        return std::equal(result.value->begin(), result.value->end(), expected.begin(),
+                          [](axiom::DiagnosticId a, axiom::DiagnosticId b) { return a.value == b.value; });
+    };
+    if (!matches(diagnostics.find_by_related_entity(target, 1), {ids[0]}) ||
+        !matches(diagnostics.find_by_related_entity(target, 3), {ids[0], ids[2], ids[4]}) ||
+        !matches(diagnostics.find_by_related_entity(target, 10), {ids[0], ids[2], ids[4], ids[7]}) ||
+        !matches(diagnostics.find_by_related_entity(target + 2, 1), {}) ||
+        !matches(diagnostics.report_ids_by_entity(target, 2), {ids[0], ids[2]})) return false;
+
+    for (const auto& result : {diagnostics.find_by_related_entity(0, 2),
+                               diagnostics.find_by_related_entity(target, 0)}) {
+        const auto failure = diagnostics.get(result.diagnostic_id);
+        if (result.status != axiom::StatusCode::InvalidInput || result.value || !failure.value ||
+            !has_issue_code(*failure.value, axiom::diag_codes::kCoreParameterOutOfRange)) return false;
+    }
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+        const auto source = diagnostics.get(ids[i]);
+        if (!source.value || source.value->summary != "entity search source" ||
+            source.value->issues.size() != (i == 0 ? 2U : (i == 6 ? 0U : 1U))) return false;
+        if (i != 6 && (source.value->issues[0].stage != "diag.entity_search" ||
+                       source.value->issues[0].related_entities !=
+                           std::vector<std::uint64_t>({related[i] ? target : target + 1}))) return false;
+    }
+    return matches(diagnostics.find_by_related_entity(target, 2), {ids[0], ids[2]});
+}
+
 bool check_stage_search_limit_order() {
     axiom::Kernel kernel;
     auto& diagnostics = kernel.diagnostics();
@@ -423,6 +470,10 @@ bool check_stage_search_limit_order() {
 }  // namespace
 
 int main() {
+    if (!check_related_entity_search_limit_order()) {
+        std::cerr << "related entity search order, limit or source isolation regression\n";
+        return 1;
+    }
     if (!check_code_prefix_search_limit_order()) {
         std::cerr << "issue code prefix search order, limit or source isolation regression\n";
         return 1;

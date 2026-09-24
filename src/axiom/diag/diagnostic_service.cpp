@@ -246,11 +246,7 @@ Result<std::vector<DiagnosticId>> DiagnosticService::find_by_related_entity(
             "诊断检索失败：相关实体ID或数量上限非法", "诊断检索失败");
     }
     std::vector<DiagnosticId> out;
-    out.reserve(static_cast<std::size_t>(max_results));
     for (const auto& [diag_value, report] : state_->diagnostics) {
-        if (out.size() >= max_results) {
-            break;
-        }
         bool matched = false;
         for (const auto& issue : report.issues) {
             if (std::find(issue.related_entities.begin(), issue.related_entities.end(), entity_id) !=
@@ -262,6 +258,10 @@ Result<std::vector<DiagnosticId>> DiagnosticService::find_by_related_entity(
         if (matched) {
             out.push_back(DiagnosticId {diag_value});
         }
+    }
+    std::sort(out.begin(), out.end(), [](DiagnosticId a, DiagnosticId b) { return a.value < b.value; });
+    if (out.size() > max_results) {
+        out.resize(static_cast<std::size_t>(max_results));
     }
     return ok_result(std::move(out), state_->create_diagnostic("已完成按相关实体检索诊断"));
 }

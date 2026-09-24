@@ -745,12 +745,15 @@ public:
   Result<void> export_grouped_by_stage_txt(std::string_view path) const;
   Result<void> export_grouped_by_stage_json(std::string_view path) const;
   Result<std::vector<DiagnosticId>> find_by_issue_code_prefix(std::string_view prefix, std::uint64_t max_results) const;
+  Result<std::vector<DiagnosticId>> find_by_related_entity(std::uint64_t entity_id, std::uint64_t max_results) const;
   Result<std::vector<DiagnosticId>> find_by_issue_stage(std::string_view stage, std::uint64_t max_results) const;
   Result<std::vector<DiagnosticId>> find_by_issue_stage_prefix(std::string_view prefix, std::uint64_t max_results) const;
 };
 ```
 
 问题码前缀、阶段精确与阶段前缀检索均按 `DiagnosticId` 升序返回最早的前 `max_results` 个匹配报告，单报告的多个匹配 issue 只返回一次。空问题码前缀、空阶段/阶段前缀或零上限返回 `InvalidInput` / `AXM-CORE-E-0002`，源报告保持不变。
+
+相关实体检索同样先按 `DiagnosticId` 升序排序，再返回前 `max_results` 个匹配报告；同一报告内多个 issue 关联实体时只返回一次。实体 ID 为零或上限为零返回 `InvalidInput` / `AXM-CORE-E-0002`，源报告保持不变。`report_ids_by_entity` 使用相同的检索语义。
 
 `export_reports_json` 顶层为 `{"diagnostics":[...]}`，每项与单报告 JSON 一致，包含 `id/summary/issues` 及问题的 `code/severity/message/stage/related_entities`；字符串控制字节转义后保留。按输入顺序导出，重复 ID 重复输出，无问题报告输出空 `issues`。
 

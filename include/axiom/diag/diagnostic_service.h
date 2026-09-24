@@ -32,6 +32,7 @@ public:
     /// `code_prefix` 为空或 `max_results==0` 时参数非法。
     Result<std::vector<DiagnosticId>> find_by_issue_code_prefix(std::string_view code_prefix,
                                                                 std::uint64_t max_results) const;
+    /// 任一 issue 关联该实体时命中；按 DiagnosticId 升序限额返回。实体 ID 为零或上限为零时参数非法。
     Result<std::vector<DiagnosticId>> find_by_related_entity(std::uint64_t entity_id, std::uint64_t max_results) const;
     Result<std::vector<DiagnosticId>> snapshot_recent(std::uint64_t max_results) const;
     Result<void> clear_all();
