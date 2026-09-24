@@ -198,6 +198,21 @@ def load_config(path: Path) -> dict[str, Any]:
     if (type(unlocked_tiers) is not int or not 1 <= unlocked_tiers <= len(config["requirement_tiers"])):
         raise RunnerError("unlocked_tiers must be between 1 and the number of requirement tiers")
     config["unlocked_tiers"] = unlocked_tiers
+    weights = config.get("requirement_weights", {})
+    if (not isinstance(weights, dict) or set(weights) - known_ids
+            or any(type(value) is not int or value < 1 for value in weights.values())):
+        raise RunnerError("requirement_weights must map known IDs to positive integers")
+    config["requirement_weights"] = weights
+    briefs = config.get("task_briefs", {})
+    if not isinstance(briefs, dict) or set(briefs) - known_ids:
+        raise RunnerError("task_briefs must map known requirement IDs to task briefs")
+    for requirement_id, brief in briefs.items():
+        if (not isinstance(brief, dict)
+                or not isinstance(brief.get("goal"), str) or not brief["goal"].strip()
+                or not isinstance(brief.get("entrypoints"), list)
+                or not all(isinstance(item, str) for item in brief["entrypoints"])):
+            raise RunnerError(f"invalid task brief for {requirement_id}")
+    config["task_briefs"] = briefs
     return config
 
 
@@ -221,7 +236,10 @@ def select_target(
 ) -> Requirement | None:
     """Rotate across explicitly unlocked tiers without changing requirement status."""
     by_id = {item.requirement_id: item for item in requirements}
-    counts: dict[str, int] = state.get("requirement_cycles", {})
+    weights: dict[str, int] = config.get("requirement_weights", {})
+    counts: dict[str, int] = state.get(
+        "focus_cycles" if weights else "requirement_cycles", {}
+    )
     tiers = config["requirement_tiers"]
     first_unfinished = next(
         (index for index, tier in enumerate(tiers)
@@ -237,7 +255,9 @@ def select_target(
         if by_id[item].status != "已满足"
     )
     return min(candidates, key=lambda entry: (
-        counts.get(entry[0].requirement_id, 0), entry[1], entry[2]
+        counts.get(entry[0].requirement_id, 0)
+        / weights.get(entry[0].requirement_id, 1),
+        -weights.get(entry[0].requirement_id, 1), entry[1], entry[2]
     ))[0]
 
 
@@ -309,7 +329,7 @@ def save_state(state: dict[str, Any]) -> None:
 
 def build_prompt(
     cycle: int, target: Requirement, previous_failure: str | None = None,
-    next_step: str | None = None,
+    next_step: str | None = None, task_brief: dict[str, Any] | None = None,
 ) -> str:
     target_row = next(
         (line for line in TRACEABILITY.read_text(encoding="utf-8").splitlines()
@@ -318,6 +338,14 @@ def build_prompt(
     target_context = f"需求矩阵条目：{target_row}\n" if target_row else ""
     if next_step:
         target_context += f"上一验收切片留下的下一步：{next_step[:1500]}\n"
+    if task_brief:
+        target_context += f"本轮功能方向：{task_brief['goal']}\n"
+        if task_brief["entrypoints"]:
+            target_context += "优先检查文件：" + ", ".join(task_brief["entrypoints"]) + "\n"
+        target_context += (
+            "先选一个可运行的功能子域，给出用户可观察的成功结果和自动化验收。"
+            "除非直接阻断该功能，避免只交付输入校验、诊断文案或文档。\n"
+        )
     repair = ""
     if previous_failure:
         repair = (
@@ -340,9 +368,11 @@ def build_prompt(
 
 工作规则：
 1. 先检查代码和测试事实，只为本轮目标选择一个依赖已具备、可评审的小切片。
+   优先用文件名检索与局部片段定位；不要反复通读无关文档或输出大段完整文件。
 2. 优先完成近期 Backlog；禁止把占位实现、bbox/mesh 近似或仅有接口声明标记为精确能力。
 3. 实现真实代码，补齐成功、失败、退化和失败不污染的回归测试；遵守模块依赖。
-4. 运行最小相关测试。若修改公共 API、错误码、阶段状态或完成度，同步对应文档。
+4. 本地运行最小相关构建与测试，失败修复后重跑受影响测试；独立完整构建和周期性全套测试由调度器执行。
+   若修改公共 API、错误码、阶段状态或完成度，同步对应文档，避免重复追加历史条目。
 5. 不执行 git commit、git reset、git checkout、git clean、git rebase 或 git push；提交由调度器完成。
 6. 不修改 .gitignore、automation/agent_autodev.json、scripts/agent_autodev.py、
    docs/plan/AxiomKernel_Agent自动开发进度.md 或 .axiom-agent/（仅最终 result.json 例外）。
@@ -530,7 +560,10 @@ def main() -> int:
         print("all traceability-matrix requirements are already satisfied")
         return 0
     if args.dry_run:
-        print(build_prompt(cycle, target, next_step=state.get("next_steps", {}).get(target.requirement_id)))
+        print(build_prompt(
+            cycle, target, next_step=state.get("next_steps", {}).get(target.requirement_id),
+            task_brief=config["task_briefs"].get(target.requirement_id),
+        ))
         return 0
 
     while target_cycle is None or cycle <= target_cycle:
@@ -538,6 +571,7 @@ def main() -> int:
             print("time budget reached between slices; saved state is ready to resume")
             return 0
         previous_failure = state.get("last_error")
+        cycle_started = time.monotonic()
         ledger_before = PROGRESS_LEDGER.read_text(encoding="utf-8")
         while True:
             resume_gates = state.get("pending", {}).get("phase") == "gates"
@@ -559,7 +593,9 @@ def main() -> int:
                     prompt = build_prompt(
                         cycle, target, previous_failure,
                         state.get("next_steps", {}).get(target.requirement_id),
+                        config["task_briefs"].get(target.requirement_id),
                     )
+                    agent_started = time.monotonic()
                     result = run(
                         config["agent_command"],
                         stdin=prompt,
@@ -594,8 +630,10 @@ def main() -> int:
                     state["pending"].update(
                         phase="gates", report=report, full_gate=full_gate,
                         files=workspace_snapshot(),
+                        agent_seconds=round(time.monotonic() - agent_started, 2),
                     )
                     save_state(state)
+                gate_started = time.monotonic()
                 verify_slice(
                     cycle,
                     report,
@@ -611,6 +649,7 @@ def main() -> int:
                     LOG_DIR / f"cycle-{cycle:04d}-gates.log",
                 )
                 commit = commit_slice(report, args.no_commit)
+                gate_seconds = round(time.monotonic() - gate_started, 2)
                 break
             except (RunnerError, json.JSONDecodeError) as exc:
                 if ledger_written:
@@ -620,6 +659,7 @@ def main() -> int:
                 state["pending"].pop("phase", None)
                 state["pending"].pop("report", None)
                 state["pending"].pop("full_gate", None)
+                state["pending"].pop("agent_seconds", None)
                 state["pending"]["files"] = workspace_snapshot()
                 state.setdefault("failures", []).append({
                     "cycle": cycle, "requirement_id": target.requirement_id,
@@ -639,6 +679,7 @@ def main() -> int:
                 print(f"repairing the same slice after {delay}s; gates remain unchanged", file=sys.stderr)
                 time.sleep(delay)
 
+        accepted_agent_seconds = state.get("pending", {}).get("agent_seconds")
         state["successful_cycles"] = int(state["successful_cycles"]) + 1
         state["consecutive_failures"] = 0
         state.pop("last_error", None)
@@ -646,6 +687,10 @@ def main() -> int:
         requirement_cycles = state.setdefault("requirement_cycles", {})
         requirement_cycles[report["requirement_id"]] = (
             int(requirement_cycles.get(report["requirement_id"], 0)) + 1
+        )
+        focus_cycles = state.setdefault("focus_cycles", {})
+        focus_cycles[report["requirement_id"]] = (
+            int(focus_cycles.get(report["requirement_id"], 0)) + 1
         )
         state.setdefault("next_steps", {})[report["requirement_id"]] = report["remaining"]
         state["history"].append(
@@ -656,6 +701,9 @@ def main() -> int:
                 "summary": report["summary"],
                 "commit": commit,
                 "timestamp": int(time.time()),
+                "agent_seconds": accepted_agent_seconds,
+                "gate_seconds": gate_seconds,
+                "run_seconds": round(time.monotonic() - cycle_started, 2),
             }
         )
         save_state(state)

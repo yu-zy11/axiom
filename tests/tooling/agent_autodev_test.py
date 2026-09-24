@@ -7,6 +7,7 @@ import argparse
 import copy
 from contextlib import ExitStack
 import importlib.util
+import json
 import sys
 import tempfile
 import time
@@ -129,6 +130,46 @@ class AgentAutodevTest(unittest.TestCase):
         self.assertIn("继续最近点精度回归", prompt)
         self.assertNotIn("other | later", prompt)
 
+    def test_weighted_rotation_gives_feature_work_more_slices(self) -> None:
+        requirements = [
+            agent_autodev.Requirement("FR-GEO-001", "受限可用"),
+            agent_autodev.Requirement("FR-OPS-001", "进行中"),
+        ]
+        config = {"requirement_tiers": [["FR-GEO-001"], ["FR-OPS-001"]],
+                  "unlocked_tiers": 2, "requirement_weights": {"FR-OPS-001": 3}}
+        state = {"requirement_cycles": {"FR-GEO-001": 12}, "focus_cycles": {}}
+        choices = []
+        for _ in range(24):
+            selected = agent_autodev.select_target(requirements, state, config)
+            choices.append(selected.requirement_id)
+            counts = state["focus_cycles"]
+            counts[selected.requirement_id] = counts.get(selected.requirement_id, 0) + 1
+        self.assertGreater(choices.count("FR-OPS-001"), choices.count("FR-GEO-001"))
+        self.assertGreaterEqual(choices.count("FR-GEO-001"), 5)
+        self.assertEqual(requirements[0].status, "受限可用")
+
+    def test_feature_brief_names_deliverable_and_entrypoints(self) -> None:
+        brief = {"goal": "物化一个可验证体", "entrypoints": ["src/axiom/ops/ops_services.cpp"]}
+        prompt = agent_autodev.build_prompt(
+            53, agent_autodev.Requirement("FR-OPS-001", "进行中"), task_brief=brief)
+        self.assertIn("物化一个可验证体", prompt)
+        self.assertIn("src/axiom/ops/ops_services.cpp", prompt)
+        self.assertIn("避免只交付输入校验", prompt)
+        self.assertIn("独立完整构建", prompt)
+
+    def test_invalid_weight_or_brief_is_rejected(self) -> None:
+        config = agent_autodev.load_config(agent_autodev.DEFAULT_CONFIG)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            for change in (
+                {"requirement_weights": {"FR-OPS-001": 0}},
+                {"task_briefs": {"FR-OPS-001": {"goal": "", "entrypoints": []}}},
+            ):
+                broken = dict(config, **change)
+                path.write_text(json.dumps(broken), encoding="utf-8")
+                with self.assertRaises(agent_autodev.RunnerError):
+                    agent_autodev.load_config(path)
+
     def test_timeout_stops_child_before_retry(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             marker = Path(directory) / "orphan-write"
@@ -232,7 +273,7 @@ class RepairLoopTest(unittest.TestCase):
             stack.enter_context(patch.object(agent_autodev.time, "sleep"))
             if stop_after_seconds:
                 stack.enter_context(patch.object(agent_autodev.time, "monotonic",
-                    side_effect=[0, 0, stop_after_seconds + 1]))
+                    side_effect=[0] * 8 + [stop_after_seconds + 1] * 10))
             result = agent_autodev.main()
             return result, state, prompts, ledger.read_text(), replacements, checkpoints
 
@@ -250,6 +291,9 @@ class RepairLoopTest(unittest.TestCase):
         self.assertNotIn("last_error", state)
         self.assertNotIn("pending", state)
         self.assertEqual(state["next_steps"]["FR-GEO-001"], "next")
+        self.assertEqual(state["focus_cycles"], {"FR-GEO-001": 1, "FR-TOPO-001": 1})
+        self.assertGreaterEqual(state["history"][0]["run_seconds"], 0)
+        self.assertGreaterEqual(state["history"][0]["gate_seconds"], 0)
         self.assertTrue(all(s["successful_cycles"] == 0 for s in snapshots[:8]))
 
     def test_explicit_failure_limit_still_supported_without_commit(self):

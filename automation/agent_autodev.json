@@ -3,6 +3,21 @@
   "build_dir": "build-agent",
   "full_test_interval": 5,
   "unlocked_tiers": 2,
+  "requirement_weights": {"FR-OPS-001": 5, "FR-QUERY-001": 2},
+  "task_briefs": {
+    "FR-OPS-001": {
+      "goal": "推进拉伸、旋转或扫掠的一个真实拓扑物化子域；输出应可由拓扑验证器验收，并通过公开 API 查询到实际面、边和体，不能仅新增 bbox 或统计记录。",
+      "entrypoints": ["src/axiom/ops/ops_services.cpp", "src/axiom/internal/core/topology_materialization.h", "tests/ops/ops_heal_test.cpp"]
+    },
+    "FR-QUERY-001": {
+      "goal": "交付一个可从公开 API 调用的几何或拓扑查询能力，明确结果单位、空结果和修改后失效语义，并以跨模块测试验证返回值。",
+      "entrypoints": ["include/axiom/geo/geometry_services.h", "include/axiom/topo/topology_service.h", "tests/eval/query_eval_test.cpp"]
+    },
+    "FR-BOOL-001": {
+      "goal": "推进真实求交、切分、分类或重建链路的一个可验证子域；成功结果需由拓扑验证器检查，不把 bbox 或 mesh 近似宣称为精确布尔。",
+      "entrypoints": ["src/axiom/ops/ops_services.cpp", "tests/ops/boolean_workflow_test.cpp"]
+    }
+  },
   "max_consecutive_failures": 0,
   "retry_delay_seconds": 10,
   "agent_timeout_seconds": 3600,
