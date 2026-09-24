@@ -212,6 +212,20 @@ auto faces = kernel.topology().query().faces_of_body(*holed.value); // 32 个真
 auto edges = kernel.topology().query().edges_of_body(*holed.value); // 48 条边
 auto mass = kernel.query().mass_properties(*holed.value); // 体积 (48−4)×3 = 132
 // 同一 plate 可传给 sweep(plate, line_segment_id)，孔随截面一起平移。
+// 第 62 包：截面方向不变的折线平移扫掠（待统一验收）。
+// 每段 Z 位移同号；中间折点共享拓扑，孔贯通整条路径。
+std::vector<axiom::Point3> rail_points {{50,60,70}, {54,58,71}, {47,61,73}, {51,60,76}};
+auto rail = kernel.curves().make_composite_polyline(rail_points);
+if (rail.value) {
+    auto swept = kernel.sweeps().sweep(plate, *rail.value);
+    if (swept.value) {
+        auto validation = kernel.validate().validate_all(*swept.value, axiom::ValidationMode::Strict);
+        auto faces = kernel.topology().query().faces_of_body(*swept.value);
+        auto edges = kernel.topology().query().edges_of_body(*swept.value);
+        auto mass = kernel.query().mass_properties(*swept.value);
+    }
+}
+
 ```
 
 孔之间必须分离且不嵌套，不能接触外环；失败不留下部分实体。`revolve/loft` 尚不接受带孔截面。

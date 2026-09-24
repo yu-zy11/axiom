@@ -410,12 +410,12 @@ Result<BodyId> SweepService::sweep(const ProfileRef& profile, CurveId rail) {
     }
     const auto& curve = state_->curves.at(rail.value);
     if (!profile.polygon_xyz.empty() || !profile.holes_xyz.empty()) {
-        // 有界直线导轨上的平移扫掠就是棱柱拉伸：轮廓保留世界坐标，
-        // 导轨只提供末端相对起点的位移，不移动或旋转输入截面。
-        if (curve.kind != detail::CurveKind::LineSegment || curve.poles.size() != 2) {
+        // Keep the profile in world space; the rail supplies translations only.
+        if ((curve.kind != detail::CurveKind::LineSegment && curve.kind != detail::CurveKind::CompositePolyline) ||
+            curve.poles.size() < 2 || profile.polygon_xyz.size() < 3) {
             return detail::invalid_input_result<BodyId>(
                 *state_, diag_codes::kCoreParameterOutOfRange,
-                "扫描失败：显式 polygon 轮廓当前仅支持有界线段导轨", "扫描失败");
+                "扫描失败：显式 polygon 轮廓须有至少三个点，导轨须为有界线段或折线", "扫描失败");
         }
         const auto displacement = detail::subtract(curve.poles.back(), curve.poles.front());
         const auto length = std::hypot(displacement.x, displacement.y, displacement.z);
@@ -424,8 +424,30 @@ Result<BodyId> SweepService::sweep(const ProfileRef& profile, CurveId rail) {
                 *state_, diag_codes::kCoreParameterOutOfRange,
                 "扫描失败：导轨位移必须有限且非退化", "扫描失败");
         }
-        // 复用轮廓检查、真实面/边物化及失败前不分配实体的同一链路。
-        return extrude(profile, detail::scale(displacement, 1.0 / length), length);
+        if (curve.kind == detail::CurveKind::LineSegment) {
+            return extrude(profile, detail::scale(displacement, 1.0 / length), length);
+        }
+        detail::BodyRecord record;
+        record.kind = detail::BodyKind::Sweep;
+        record.rep_kind = RepKind::ExactBRep;
+        record.label = "sweep_polyline:" + profile.label;
+        record.axis = detail::scale(displacement, 1.0 / length);
+        record.b = length;
+        record.extrude_profile_xyz = profile.polygon_xyz;
+        record.extrude_holes_xyz = profile.holes_xyz;
+        for (const auto& p : curve.poles) {
+            record.sweep_station_offsets.push_back(detail::subtract(p, curve.poles.front()));
+        }
+        // The materializer computes the full bounds and all geometric gates before
+        // allocating any entity. make_body must not fall back to a bounding box.
+        record.bbox = detail::make_bbox(profile.polygon_xyz.front(), profile.polygon_xyz.front());
+        const auto body = make_body(state_, std::move(record), "已完成折线平移扫掠");
+        if (body.value == 0) {
+            return detail::invalid_input_result<BodyId>(
+                *state_, diag_codes::kCoreParameterOutOfRange,
+                "扫描失败：轮廓无效或导轨未沿轮廓法向严格单调推进，无法形成有效闭壳", "扫描失败");
+        }
+        return ok_result(body, state_->create_diagnostic("已完成折线平移扫掠"));
     }
     detail::BodyRecord record;
     record.kind = detail::BodyKind::Sweep;

@@ -25,7 +25,7 @@ BodyId make_body(std::shared_ptr<detail::KernelState> state, detail::BodyRecord 
     bool fresh_primitive_topology = false;
     if (is_derived) {
         if (record.kind == detail::BodyKind::Sweep && !record.extrude_profile_xyz.empty()) {
-            // Explicit polygon extrusion must never be silently replaced with a bbox shell.
+            // Explicit polygon extrusion/polyline sweep must never fall back to a bbox shell.
             // The prism materializer returns false before allocating topology.
             if (!detail::try_materialize_sweep_extrude_prism_body(*state, record)) {
                 return BodyId {};
@@ -837,7 +837,8 @@ bool try_sweep_body_mass_properties(const detail::BodyRecord& body, MassProperti
         }
         return true;
     }
-    if (body.label.size() >= 8 && body.label.compare(0, 8, "extrude:") == 0 && body.a > 0.0) {
+    if (((body.label.size() >= 8 && body.label.compare(0, 8, "extrude:") == 0) ||
+         !body.sweep_station_offsets.empty()) && body.a > 0.0) {
         if (body.sweep_polyhedral_mass_valid) {
             props.volume = body.sweep_polyhedral_volume;
             props.area = body.sweep_cached_surface_area;

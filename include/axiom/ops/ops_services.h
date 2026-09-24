@@ -34,8 +34,10 @@ public:
     /// Requires positive finite distance and a direction transverse to the profile plane.
     Result<BodyId> extrude(const ProfileRef& profile, const Vec3& direction, Scalar distance);
     Result<BodyId> revolve(const ProfileRef& profile, const Axis3& axis, Scalar angle);
-    /// Explicit polygons: translate the world-space profile by a line segment's end minus start.
-    /// Uses the extrusion prism path (same profile restrictions); other rail kinds return InvalidInput.
+    /// Explicit polygons: fixed-orientation translation along a line segment or CompositePolyline.
+    /// The profile stays in world space; station offsets are relative to the rail start.
+    /// Each segment must advance strictly in the same profile-normal direction (no tangency/backtracking).
+    /// Supports concave profiles and holes as for extrude; other rail kinds return InvalidInput.
     Result<BodyId> sweep(const ProfileRef& profile, CurveId rail);
     Result<BodyId> loft(std::span<const ProfileRef> profiles);
     Result<BodyId> thicken(FaceId face_id, Scalar distance);

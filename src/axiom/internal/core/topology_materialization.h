@@ -1623,7 +1623,8 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
         !record.shells.empty()) {
         return false;
     }
-    if (record.label.size() < 8 || record.label.compare(0, 8, "extrude:") != 0) {
+    if (record.sweep_station_offsets.empty() &&
+        (record.label.size() < 8 || record.label.compare(0, 8, "extrude:") != 0)) {
         return false;
     }
     const auto& poly_in = record.extrude_profile_xyz;
@@ -1631,7 +1632,7 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
         return false;
     }
     const Scalar h = record.b;
-    if (!(h > 0.0)) {
+    if (!std::isfinite(h) || !(h > 0.0)) {
         return false;
     }
     const Vec3 D = normalize(record.axis);
@@ -1640,16 +1641,16 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
     }
     const auto n_raw = newell_normal_unnormalized_poly(std::span<const Point3>(poly_in.data(), poly_in.size()));
     const auto n_len = norm(n_raw);
-    if (n_len <= 1e-14) {
+    if (!std::isfinite(n_len) || n_len <= 1e-14) {
         return false;
     }
     const auto n_unit = scale(n_raw, 1.0 / n_len);
     const Scalar plane_tol = std::max(Scalar(1e-7), state.config.tolerance.linear * Scalar(100.0));
     const Point3& p0r = poly_in[0];
-    const Scalar d0 = n_unit.x * p0r.x + n_unit.y * p0r.y + n_unit.z * p0r.z;
     for (const auto& pt : poly_in) {
-        const Scalar dd = std::abs(n_unit.x * pt.x + n_unit.y * pt.y + n_unit.z * pt.z - d0);
-        if (dd > plane_tol) {
+        if (!std::isfinite(pt.x) || !std::isfinite(pt.y) || !std::isfinite(pt.z)) return false;
+        const Scalar dd = std::abs(dot(n_unit, subtract(pt, p0r)));
+        if (!std::isfinite(dd) || dd > plane_tol) {
             return false;
         }
     }
@@ -1671,32 +1672,65 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
                                           base, boundary, caps)) {
         return false;
     }
+    // Adjacent stations share one ring. Strict monotonicity separates segment
+    // interiors into disjoint slabs, so no self-intersection SAT is needed here.
+    auto offsets = record.sweep_station_offsets;
+    if (offsets.empty()) offsets = {{0, 0, 0}, scale(D, h)};
+    if (offsets.size() < 2 || norm(offsets.front()) != 0.0 ||
+        base.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()) / offsets.size()) return false;
+    const Scalar sign = dot(n_unit, D) < 0.0 ? -1.0 : 1.0;
+    for (std::size_t k = 1; k < offsets.size(); ++k) {
+        const Vec3 step {offsets[k].x - offsets[k-1].x, offsets[k].y - offsets[k-1].y,
+                         offsets[k].z - offsets[k-1].z};
+        const Scalar length = std::hypot(step.x, step.y, step.z);
+        const Scalar advance = sign * dot(n_unit, step);
+        if (!std::isfinite(length) || !std::isfinite(advance) || length <= 0.0 ||
+            (!record.sweep_station_offsets.empty() && length <= 1e-14) ||
+            advance <= 0.0 || advance / length < 1e-6) return false;
+    }
     const int n = static_cast<int>(base.size());
-    std::vector<Point3> pos(static_cast<std::size_t>(2 * n));
-    for (int i = 0; i < n; ++i) {
-        pos[static_cast<std::size_t>(i)] = base[static_cast<std::size_t>(i)];
-        pos[static_cast<std::size_t>(n + i)] =
-            add_point_vec(base[static_cast<std::size_t>(i)], scale(D, h));
+    const int last = static_cast<int>((offsets.size() - 1) * base.size());
+    std::vector<Point3> pos;
+    pos.reserve(base.size() * offsets.size());
+    for (const auto& offset : offsets) {
+        for (const auto& p : base) pos.push_back(add_point_vec(p, offset));
     }
 
     std::vector<std::array<int, 3>> tris;
-    tris.reserve(2 * (caps.size() + boundary.size()));
+    tris.reserve(2 * (caps.size() + boundary.size() * (offsets.size() - 1)));
     for (const auto& cap : caps) {
         tris.push_back({cap[0], cap[2], cap[1]});
-        tris.push_back({n + cap[0], n + cap[1], n + cap[2]});
+        tris.push_back({last + cap[0], last + cap[1], last + cap[2]});
     }
-    for (const auto& [i, j] : boundary) {
-        tris.push_back({i, j, n + j});
-        tris.push_back({i, n + j, n + i});
-    }
-    if (dot(n_unit, D) < 0.0) {
-        for (auto& t : tris) {
-            std::swap(t[1], t[2]);
+    for (std::size_t k = 0; k + 1 < offsets.size(); ++k) {
+        const int lo = static_cast<int>(k * base.size()), hi = lo + n;
+        for (const auto& [i, j] : boundary) {
+            tris.push_back({lo + i, lo + j, hi + j});
+            tris.push_back({lo + i, hi + j, hi + i});
         }
+    }
+    if (sign < 0.0) {
+        for (auto& t : tris) std::swap(t[1], t[2]);
     }
 
     for (const auto& p : pos) {
         if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) return false;
+    }
+    if (!record.sweep_station_offsets.empty()) {
+        // Check the actual rounded coordinates too: translated rings must retain
+        // their order, even when the profile is only planar within tolerance.
+        Scalar previous_max = -std::numeric_limits<Scalar>::infinity();
+        for (std::size_t k = 0; k < offsets.size(); ++k) {
+            Scalar low = std::numeric_limits<Scalar>::infinity(), high = -low;
+            for (std::size_t i = 0; i < base.size(); ++i) {
+                const Scalar level = sign * dot(n_unit, subtract(pos[k * base.size() + i], poly_in.front()));
+                if (!std::isfinite(level)) return false;
+                low = std::min(low, level);
+                high = std::max(high, level);
+            }
+            if (low <= previous_max) return false;
+            previous_max = high;
+        }
     }
     for (const auto& t : tris) {
         const auto area = norm(cross(subtract(pos[t[1]], pos[t[0]]), subtract(pos[t[2]], pos[t[0]])));
@@ -1722,8 +1756,18 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
         return false;
     }
 
-    std::vector<VertexId> vid(static_cast<std::size_t>(2 * n));
-    for (int i = 0; i < 2 * n; ++i) {
+    // The bounds include every bend, not just the two end sections.
+    record.bbox = make_bbox(pos.front(), pos.front());
+    for (const auto& p : pos) {
+        record.bbox.min.x = std::min(record.bbox.min.x, p.x);
+        record.bbox.min.y = std::min(record.bbox.min.y, p.y);
+        record.bbox.min.z = std::min(record.bbox.min.z, p.z);
+        record.bbox.max.x = std::max(record.bbox.max.x, p.x);
+        record.bbox.max.y = std::max(record.bbox.max.y, p.y);
+        record.bbox.max.z = std::max(record.bbox.max.z, p.z);
+    }
+    std::vector<VertexId> vid(pos.size());
+    for (std::size_t i = 0; i < pos.size(); ++i) {
         vid[static_cast<std::size_t>(i)] = VertexId {state.allocate_id()};
         state.vertices.emplace(vid[static_cast<std::size_t>(i)].value,
                                VertexRecord {pos[static_cast<std::size_t>(i)]});
