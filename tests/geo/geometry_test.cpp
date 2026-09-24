@@ -1144,6 +1144,25 @@ int main() {
         return 1;
     }
     {
+        // Finite inputs can overflow while deriving the ellipse normal.
+        const auto count_before = kernel.geometry_count();
+        const auto cache_before = kernel.cache_entry_count();
+        for (const double axis_length : {1e100, 1e200}) {
+            const auto overflow = kernel.curves().make_ellipse(
+                {0.0, 0.0, 0.0}, {axis_length, 0.0, 0.0}, {0.0, axis_length, 0.0});
+            const auto code = kernel.diagnostics().has_issue_code(
+                overflow.diagnostic_id, "AXM-GEO-E-0001");
+            const auto still_valid = kernel.curve_service().eval(*ellipse.value, 0.0, 1);
+            if (overflow.status != axiom::StatusCode::InvalidInput || overflow.value ||
+                !code.value || !*code.value || kernel.geometry_count().value != count_before.value ||
+                kernel.cache_entry_count().value != cache_before.value ||
+                !still_valid.value || !approx(still_valid.value->point.x, 2.0)) {
+                std::cerr << "overflowing ellipse axes must fail without pollution\n";
+                return 1;
+            }
+        }
+    }
+    {
         axiom::BSplineCurveDesc bad_knot_count;
         bad_knot_count.poles = {{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {1.0, 1.0, 0.0}};
         bad_knot_count.degree = 2;
