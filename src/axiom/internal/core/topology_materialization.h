@@ -1691,11 +1691,19 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
     const int n = static_cast<int>(base.size());
     const int last = static_cast<int>((offsets.size() - 1) * base.size());
     const Scalar end_scale = record.extrude_end_scale;
-    if (!std::isfinite(end_scale) || end_scale <= 0.0 ||
+    const bool apex = end_scale == 0.0;
+    if (!std::isfinite(end_scale) || end_scale < 0.0 ||
+        (apex && !record.extrude_holes_xyz.empty()) ||
         (end_scale != 1.0 && !record.sweep_station_offsets.empty())) return false;
     std::vector<Point3> pos;
     pos.reserve(base.size() * offsets.size());
     for (std::size_t k = 0; k < offsets.size(); ++k) {
+        if (apex && k != 0) {
+            // A cone over a simple polygon has one shared apex. Collapsing an
+            // entire end ring would create zero-length edges and nonmanifold uses.
+            pos.push_back(add_point_vec(record.extrude_scale_center, offsets[k]));
+            continue;
+        }
         for (const auto& p : base) {
             const auto section_point = k == 0 || end_scale == 1.0 ? p :
                 add_point_vec(record.extrude_scale_center, scale(subtract(p, record.extrude_scale_center), end_scale));
@@ -1707,13 +1715,17 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
     tris.reserve(2 * (caps.size() + boundary.size() * (offsets.size() - 1)));
     for (const auto& cap : caps) {
         tris.push_back({cap[0], cap[2], cap[1]});
-        tris.push_back({last + cap[0], last + cap[1], last + cap[2]});
+        if (!apex) tris.push_back({last + cap[0], last + cap[1], last + cap[2]});
     }
     for (std::size_t k = 0; k + 1 < offsets.size(); ++k) {
         const int lo = static_cast<int>(k * base.size()), hi = lo + n;
         for (const auto& [i, j] : boundary) {
-            tris.push_back({lo + i, lo + j, hi + j});
-            tris.push_back({lo + i, hi + j, hi + i});
+            if (apex) {
+                tris.push_back({i, j, n});
+            } else {
+                tris.push_back({lo + i, lo + j, hi + j});
+                tris.push_back({lo + i, hi + j, hi + i});
+            }
         }
     }
     if (sign < 0.0) {
@@ -1724,12 +1736,13 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
         if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) return false;
     }
     if (!record.sweep_station_offsets.empty() || end_scale != 1.0) {
-        // Check the actual rounded coordinates too: translated rings must retain
-        // their order, even when the profile is only planar within tolerance.
+        // Check the actual rounded coordinates too: sections (including a final
+        // apex) must retain their order, even for planarity within tolerance.
         Scalar previous_max = -std::numeric_limits<Scalar>::infinity();
         for (std::size_t k = 0; k < offsets.size(); ++k) {
             Scalar low = std::numeric_limits<Scalar>::infinity(), high = -low;
-            for (std::size_t i = 0; i < base.size(); ++i) {
+            const std::size_t station_size = apex && k != 0 ? 1 : base.size();
+            for (std::size_t i = 0; i < station_size; ++i) {
                 const Scalar level = sign * dot(n_unit, subtract(pos[k * base.size() + i], poly_in.front()));
                 if (!std::isfinite(level)) return false;
                 low = std::min(low, level);
@@ -1739,7 +1752,7 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
             previous_max = high;
         }
     }
-    if (end_scale != 1.0) {
+    if (end_scale != 1.0 && !apex) {
         // In exact arithmetic a positive homothety preserves the entire planar
         // region. Recheck rounded end coordinates to reject collapsed gaps/edges
         // at extreme scales or world offsets, before allocating model objects.

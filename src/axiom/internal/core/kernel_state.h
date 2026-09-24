@@ -168,6 +168,7 @@ struct BodyRecord {
     std::vector<Point3> extrude_profile_xyz;
     std::vector<std::vector<Point3>> extrude_holes_xyz;
     /// Single straight extrusion: homothetic end section, about a center in the profile plane.
+    /// Zero scale is a single shared apex and requires a hole-free profile.
     Scalar extrude_end_scale {1.0};
     Point3 extrude_scale_center {};
     /// Fixed-orientation polyline sweep: station displacements relative to the rail start.

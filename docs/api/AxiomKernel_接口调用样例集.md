@@ -242,7 +242,23 @@ auto edges = kernel.topology().query().edges_of_body(*tapered.value); // 48 条�
 auto mass = kernel.query().mass_properties(*tapered.value); // (48−4)×3×(1+0.5+0.25)/3 = 77
 ```
 
-末端比例大于 1 表示扩张，等于 1 与普通显式轮廓拉伸一致；缩放中心可以在截面材料之外，但必须位于截面平面。反向通过方向向量表达，距离仍为正；不接受零/负比例、尖顶、离面中心或数值退化。各截面保持等比相似，不等同于逐壁恒角拔模。
+末端比例大于 1 表示扩张，等于 1 与普通显式轮廓拉伸一致；缩放中心可以在截面材料之外，但必须位于截面平面。反向通过方向向量表达，距离仍为正；不接受负比例、带孔尖顶、离面中心或数值退化。各截面保持等比相似，不等同于逐壁恒角拔模。
+
+### 无孔尖顶拉伸（第 66 包待统一验收）
+
+```cpp
+ProfileRef base {"pyramid", {{0,0,0}, {4,0,0}, {4,3,0}, {0,3,0}}};
+// 顶点为 (2,1.5,6)，也支持凹轮廓、反向/斜向方向和倾斜平面上的轮廓。
+auto pyramid = kernel.sweeps().extrude_scaled(base, {0,0,1}, 6, {2,1.5,0}, 0);
+if (!pyramid.value) { handle_error(pyramid); return; }
+auto apex_valid = kernel.validate().validate_all(*pyramid.value, ValidationMode::Strict);
+auto apex_vertices = kernel.topology().query().vertices_of_body(*pyramid.value); // 5 个共享顶点
+// 底面分成两个平面三角 Face，另有 4 个三角侧面；共 9 条边，体积为 24。
+auto apex_mass = kernel.query().mass_properties(*pyramid.value);
+auto apex_mesh = kernel.convert().brep_to_mesh(*pyramid.value, {});
+```
+
+仅恰好为零的末端比例进入尖顶路径；很小的正比例仍按独立末端截面处理，数值塌缩则拒绝。带孔轮廓的尖顶会形成非流形顶点，返回 `InvalidInput / AXM-CORE-E-0002`，不分配模型对象。
 
 ## 6.2 旋转
 

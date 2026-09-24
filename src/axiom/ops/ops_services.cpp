@@ -339,11 +339,12 @@ Result<BodyId> SweepService::extrude_scaled(const ProfileRef& profile, const Vec
     const auto length = std::hypot(direction.x, direction.y, direction.z);
     if (profile.label.empty() || profile.polygon_xyz.size() < 3 ||
         !std::isfinite(length) || length <= 1e-14 || !std::isfinite(distance) || distance <= 0.0 ||
-        !std::isfinite(end_scale) || end_scale <= 0.0 ||
+        !std::isfinite(end_scale) || end_scale < 0.0 ||
+        (end_scale == 0.0 && !profile.holes_xyz.empty()) ||
         !std::isfinite(center.x) || !std::isfinite(center.y) || !std::isfinite(center.z)) {
         return detail::invalid_input_result<BodyId>(
             *state_, diag_codes::kCoreParameterOutOfRange,
-            "变截面拉伸失败：须有显式轮廓、有限缩放中心、有效方向及有限正距离和正比例", "变截面拉伸失败");
+            "变截面拉伸失败：须有显式轮廓、有限缩放中心、有效方向、有限正距离和非负比例；尖顶不支持带孔轮廓", "变截面拉伸失败");
     }
     detail::BodyRecord record;
     record.kind = detail::BodyKind::Sweep;
