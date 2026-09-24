@@ -112,6 +112,52 @@ int main() {
         }
     }
 
+    // Finite UV coordinates may have squared distances outside Scalar range.
+    {
+        const std::array<axiom::Point2, 4> poles {{{0.0, 0.0}, {0.0, 0.0},
+                                                   {1e155, 0.0}, {1e155, 1e155}}};
+        const auto pc = kernel.pcurves().make_polyline(poles);
+        if (!pc.value) {
+            std::cerr << "failed to create large-coordinate pcurve\n";
+            return 1;
+        }
+        const auto interior = kernel.pcurve_service().closest_parameter(*pc.value, {5e154, 2e154});
+        const auto nearest = kernel.pcurve_service().closest_point(*pc.value, {5e154, 2e154});
+        const auto before = kernel.pcurve_service().closest_parameter(*pc.value, {-1e155, 0.0});
+        const auto after = kernel.pcurve_service().closest_parameter(*pc.value, {1e155, 2e155});
+        const auto repeated = kernel.pcurve_service().closest_parameter(*pc.value, {0.0, 0.0});
+        if (!interior.value || !approx(*interior.value, 1.5, 1e-12) ||
+            !nearest.value || std::abs(nearest.value->x / 1e155 - 0.5) > 1e-12 ||
+            !approx(nearest.value->y, 0.0) ||
+            !before.value || !approx(*before.value, 0.0) ||
+            !after.value || !approx(*after.value, 3.0) ||
+            !repeated.value || !approx(*repeated.value, 0.0)) {
+            std::cerr << "large-coordinate pcurve projection failed\n";
+            return 1;
+        }
+        const auto count_before = kernel.geometry_count();
+        const auto cache_before = kernel.cache_entry_count();
+        const auto invalid = kernel.pcurve_service().closest_parameter(
+            *pc.value, {std::numeric_limits<double>::infinity(), 0.0});
+        const auto missing = kernel.pcurve_service().closest_parameter(
+            axiom::PCurveId{}, {0.0, 0.0});
+        const auto invalid_code = kernel.diagnostics().has_issue_code(
+            invalid.diagnostic_id, "AXM-CORE-E-0002");
+        const auto missing_code = kernel.diagnostics().has_issue_code(
+            missing.diagnostic_id, "AXM-CORE-E-0001");
+        const auto retry = kernel.pcurve_service().closest_parameter(*pc.value, {5e154, 2e154});
+        if (invalid.status != axiom::StatusCode::InvalidInput || invalid.value ||
+            missing.status != axiom::StatusCode::InvalidInput || missing.value ||
+            !invalid_code.value || !*invalid_code.value ||
+            !missing_code.value || !*missing_code.value ||
+            !retry.value || !approx(*retry.value, 1.5, 1e-12) ||
+            kernel.geometry_count().value != count_before.value ||
+            kernel.cache_entry_count().value != cache_before.value) {
+            std::cerr << "failed large-coordinate pcurve query polluted geometry or cache\n";
+            return 1;
+        }
+    }
+
     auto line = kernel.curves().make_line({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
     if (line.status != axiom::StatusCode::Ok || !line.value.has_value()) {
         std::cerr << "failed to create line\n";

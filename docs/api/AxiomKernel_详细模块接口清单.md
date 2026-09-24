@@ -303,7 +303,7 @@ public:
 线段最近参数使用解析投影与 `[0,1]` 钳制；投影的差值、点积和长度平方使用扩展精度中间量，使端点及查询点均有限但长度平方超出 `Scalar` 范围时仍可返回有限参数。无效句柄返回 `InvalidInput` / `AXM-GEO-E-0006`；退化线段在创建时返回 `InvalidInput` / `AXM-GEO-E-0001`，失败不修改几何或求值缓存。
 椭圆不再直接把查询点的缩放极角当作最近参数：该极角仅作为初值，随后按三维欧氏距离进行阻尼细化，并将周期缝结果归一到 `[0, 2pi)`。该语义已覆盖解析可知最近点、周期缝、非有限输入与失败不污染；仍不宣称任意退化椭圆的全局最优保证。
 `CurveFactory::make_ellipse` 在创建前检查轴向量长度与派生法向长度是否有限；即使输入坐标本身有限，轴长或叉积溢出仍返回 `InvalidInput` / `AXM-GEO-E-0001`，不写入几何对象或求值缓存。
-`PCurveService::closest_parameter/closest_point` 对现有 UV 折线逐段投影并比较欧氏距离，零长度段使用其端点，多个等距最近点取参数最小者。非有限查询点返回 `InvalidInput` / `AXM-CORE-E-0002`，无效句柄返回 `InvalidInput` / `AXM-CORE-E-0001`；这些失败不修改几何或缓存。该合同仅覆盖当前的折线 PCurve。
+`PCurveService::closest_parameter/closest_point` 对现有 UV 折线逐段投影并比较欧氏距离，零长度段使用其端点，多个等距最近点取参数最小者。投影和距离比较使用扩展精度中间量，支持有限坐标的距离平方超出 `Scalar` 范围的情况。非有限查询点返回 `InvalidInput` / `AXM-CORE-E-0002`，无效句柄返回 `InvalidInput` / `AXM-CORE-E-0001`；这些失败不修改几何或缓存。该合同仅覆盖当前的折线 PCurve。
 
 #### `SurfaceEvaluator`
 

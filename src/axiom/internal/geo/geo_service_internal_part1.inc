@@ -79,21 +79,26 @@ Point2 evaluate_pcurve_point(const detail::PCurveRecord &pc, Scalar t) {
 Scalar closest_pcurve_parameter(const detail::PCurveRecord &pc,
                                 const Point2 &point) {
   Scalar best_t = 0.0;
-  Scalar best_distance = std::numeric_limits<Scalar>::max();
+  long double best_distance = std::numeric_limits<long double>::max();
   for (std::size_t i = 0; i + 1 < pc.poles.size(); ++i) {
-    const auto edge = subtract2(pc.poles[i + 1], pc.poles[i]);
-    const auto length_squared = dot2(edge, edge);
-    const auto from_start = subtract2(point, pc.poles[i]);
-    const auto local = length_squared > 0.0
-                           ? std::clamp(dot2(from_start, edge) / length_squared,
-                                        0.0, 1.0)
-                           : 0.0;
-    const auto projected = lerp_point2(pc.poles[i], pc.poles[i + 1], local);
-    const auto delta = subtract2(point, projected);
-    const auto distance = dot2(delta, delta);
+    const auto &a = pc.poles[i];
+    const auto &b = pc.poles[i + 1];
+    // Finite Scalar coordinates can overflow Scalar squared distances.
+    const long double dx = static_cast<long double>(b.x) - a.x;
+    const long double dy = static_cast<long double>(b.y) - a.y;
+    const long double qx = static_cast<long double>(point.x) - a.x;
+    const long double qy = static_cast<long double>(point.y) - a.y;
+    const auto length_squared = dx * dx + dy * dy;
+    const auto local = length_squared > 0.0L
+                           ? std::clamp((qx * dx + qy * dy) / length_squared,
+                                        0.0L, 1.0L)
+                           : 0.0L;
+    const auto rx = qx - local * dx;
+    const auto ry = qy - local * dy;
+    const auto distance = rx * rx + ry * ry;
     if (distance < best_distance) {
       best_distance = distance;
-      best_t = static_cast<Scalar>(i) + local;
+      best_t = static_cast<Scalar>(i) + static_cast<Scalar>(local);
     }
   }
   return best_t;
