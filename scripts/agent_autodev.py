@@ -213,6 +213,11 @@ def load_config(path: Path) -> dict[str, Any]:
                 or not all(isinstance(item, str) for item in brief["entrypoints"])):
             raise RunnerError(f"invalid task brief for {requirement_id}")
     config["task_briefs"] = briefs
+    for key, default in (("full_test_interval", 5), ("build_parallel_jobs", 4)):
+        value = config.get(key, default)
+        if type(value) is not int or value < 1:
+            raise RunnerError(f"{key} must be a positive integer")
+        config[key] = value
     return config
 
 
@@ -255,7 +260,7 @@ def select_target(
         if by_id[item].status != "已满足"
     )
     return min(candidates, key=lambda entry: (
-        counts.get(entry[0].requirement_id, 0)
+        (counts.get(entry[0].requirement_id, 0) + 1)
         / weights.get(entry[0].requirement_id, 1),
         -weights.get(entry[0].requirement_id, 1), entry[1], entry[2]
     ))[0]
@@ -330,6 +335,7 @@ def save_state(state: dict[str, Any]) -> None:
 def build_prompt(
     cycle: int, target: Requirement, previous_failure: str | None = None,
     next_step: str | None = None, task_brief: dict[str, Any] | None = None,
+    build_dir: str = "build-agent", build_parallel_jobs: int = 4,
 ) -> str:
     target_row = next(
         (line for line in TRACEABILITY.read_text(encoding="utf-8").splitlines()
@@ -372,6 +378,11 @@ def build_prompt(
 2. 优先完成近期 Backlog；禁止把占位实现、bbox/mesh 近似或仅有接口声明标记为精确能力。
 3. 实现真实代码，补齐成功、失败、退化和失败不污染的回归测试；遵守模块依赖。
 4. 本地运行最小相关构建与测试，失败修复后重跑受影响测试；独立完整构建和周期性全套测试由调度器执行。
+   与调度器共用构建目录 {shlex.quote(build_dir)}，不要另建 build/ 或清空缓存。
+   配置缺失时运行 cmake -S . -B {shlex.quote(build_dir)} -DAXM_ENABLE_TESTS=ON -DAXM_ENABLE_EXAMPLES=ON；
+   构建使用 cmake --build {shlex.quote(build_dir)} --parallel {build_parallel_jobs} --target <相关测试目标>，
+   测试使用 ctest --test-dir {shlex.quote(build_dir)} -R '<相关测试正则>' --output-on-failure。
+   相关测试通过后交付报告；仅在排查具体跨模块风险时扩大本地测试范围。
    若修改公共 API、错误码、阶段状态或完成度，同步对应文档，避免重复追加历史条目。
 5. 不执行 git commit、git reset、git checkout、git clean、git rebase 或 git push；提交由调度器完成。
 6. 不修改 .gitignore、automation/agent_autodev.json、scripts/agent_autodev.py、
@@ -379,6 +390,7 @@ def build_prompt(
    自动开发进度台账由调度器在验收通过后追加；即使发现未验收的旧记录也不要自行改动，
    应在 result.json 的 remaining 中说明，由调度器处理。
 7. 一轮只完成一个有明确 DoD 的切片，避免大范围重写。
+   同一根因、同一算法或同一接口族的相邻边界应一起实现和回归，避免拆成多轮微小校验。
 8. 遵循现有代码风格，减少不必要的封装与抽象层，集中相关逻辑，避免代码碎片化。
 
 结束前必须写入 .axiom-agent/result.json，格式严格为：
@@ -452,7 +464,7 @@ def execute_gate(command: Sequence[str], log_file: Path) -> None:
 
 def verify_slice(
     cycle: int, report: dict[str, Any], config: dict[str, Any], force_full: bool
-) -> None:
+) -> bool:
     protected_changes = changed_paths() & PROTECTED_AUTOMATION_FILES
     if protected_changes:
         raise RunnerError(
@@ -474,18 +486,31 @@ def verify_slice(
         ],
         log_file,
     )
-    execute_gate(["cmake", "--build", str(build_dir), "--parallel"], log_file)
-    test_names = relevant_tests(report["module"], config)
-    expression = "^(" + "|".join(re.escape(name) for name in test_names) + ")$"
-    execute_gate(
-        ["ctest", "--test-dir", str(build_dir), "-R", expression, "--output-on-failure"],
-        log_file,
-    )
+    execute_gate(["cmake", "--build", str(build_dir), "--parallel",
+                  str(config.get("build_parallel_jobs", 4))], log_file)
+    test_names = set(relevant_tests(report["module"], config))
+    # Include every touched module even when the report names only the primary one.
+    path_modules = {"core": "Core", "math": "Math", "geo": "Geo", "topo": "Topo",
+                    "rep": "Rep", "ops": "Ops", "heal": "Heal", "eval": "Eval",
+                    "io": "IO", "plugin": "Plugin", "sdk": "SDK", "diag": "Diagnostics"}
+    for name in changed_paths():
+        parts = Path(name).parts
+        offset = 2 if parts[:2] in (("src", "axiom"), ("include", "axiom")) else 1
+        if parts[0] in {"src", "include", "tests"}:
+            module = path_modules.get(parts[offset]) if len(parts) > offset else None
+            if module:
+                test_names.update(relevant_tests(module, config))
+            else:
+                force_full = True  # Shared internals, datasets or unclassified code.
+        elif parts[0] in {"cmake", "scripts", "examples"} or name == "CMakeLists.txt":
+            force_full = True
     interval = int(config["full_test_interval"])
-    if force_full or cycle % interval == 0:
-        execute_gate(
-            ["ctest", "--test-dir", str(build_dir), "--output-on-failure"], log_file
-        )
+    full_gate = force_full or cycle % interval == 0
+    command = ["ctest", "--test-dir", str(build_dir), "--output-on-failure", "--no-tests=error"]
+    if not full_gate:
+        command += ["-R", "^(" + "|".join(re.escape(name) for name in sorted(test_names)) + ")$"]
+    execute_gate(command, log_file)
+    return full_gate
 
 
 def commit_slice(report: dict[str, Any], no_commit: bool) -> str:
@@ -563,6 +588,7 @@ def main() -> int:
         print(build_prompt(
             cycle, target, next_step=state.get("next_steps", {}).get(target.requirement_id),
             task_brief=config["task_briefs"].get(target.requirement_id),
+            build_dir=config["build_dir"], build_parallel_jobs=config["build_parallel_jobs"],
         ))
         return 0
 
@@ -594,6 +620,7 @@ def main() -> int:
                         cycle, target, previous_failure,
                         state.get("next_steps", {}).get(target.requirement_id),
                         config["task_briefs"].get(target.requirement_id),
+                        config["build_dir"], config["build_parallel_jobs"],
                     )
                     agent_started = time.monotonic()
                     result = run(
@@ -634,12 +661,13 @@ def main() -> int:
                     )
                     save_state(state)
                 gate_started = time.monotonic()
-                verify_slice(
+                verified_full = verify_slice(
                     cycle,
                     report,
                     config,
                     force_full=full_gate,
                 )
+                full_gate = full_gate or bool(verified_full)
                 if not git_status():
                     raise RunnerError("agent reported success but made no changes")
                 record_progress(cycle, report, full_gate)

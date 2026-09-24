@@ -157,11 +157,66 @@ class AgentAutodevTest(unittest.TestCase):
         self.assertIn("避免只交付输入校验", prompt)
         self.assertIn("独立完整构建", prompt)
 
+    def test_weighted_start_does_not_spend_first_round_on_every_foundation(self):
+        ids = ["FR-GEO-001", "FR-TOPO-001", "NFR-REL-001", "FR-DIAG-001", "NFR-DIA-001"]
+        requirements = [agent_autodev.Requirement(i, "进行中")
+                        for i in ids + ["FR-OPS-001", "FR-QUERY-001"]]
+        config = {"requirement_tiers": [ids, ["FR-OPS-001", "FR-QUERY-001"]],
+                  "unlocked_tiers": 2,
+                  "requirement_weights": {"FR-OPS-001": 5, "FR-QUERY-001": 2}}
+        state = {"focus_cycles": {}}
+        choices = []
+        for _ in range(12):
+            chosen = agent_autodev.select_target(requirements, state, config).requirement_id
+            choices.append(chosen)
+            state["focus_cycles"][chosen] = state["focus_cycles"].get(chosen, 0) + 1
+        self.assertEqual(choices[:3], ["FR-OPS-001", "FR-OPS-001", "FR-QUERY-001"])
+        self.assertEqual(choices.count("FR-OPS-001"), 5)
+        self.assertEqual(choices.count("FR-QUERY-001"), 2)
+        self.assertTrue(all(choices.count(i) == 1 for i in ids))
+
+    def test_prompt_uses_configured_shared_build_directory(self):
+        prompt = agent_autodev.build_prompt(
+            1, agent_autodev.Requirement("FR-OPS-001", "进行中"),
+            build_dir="build custom", build_parallel_jobs=2)
+        self.assertIn("cmake --build 'build custom' --parallel 2", prompt)
+        self.assertIn("ctest --test-dir 'build custom'", prompt)
+
+    def test_gates_cover_changed_modules_without_duplicate_full_run(self):
+        config = agent_autodev.load_config(agent_autodev.DEFAULT_CONFIG)
+        cases = [
+            (1, False, {"src/axiom/topo/topology_service.cpp", "tests/eval/query_eval_test.cpp"}, False),
+            (5, False, {"src/axiom/geo/geometry_services.cpp"}, True),
+            (1, True, {"src/axiom/geo/geometry_services.cpp"}, True),
+            (1, False, {"src/axiom/internal/core/store.h"}, True),
+            (1, False, {"CMakeLists.txt"}, True),
+        ]
+        for cycle, force_full, paths, expected_full in cases:
+            with self.subTest(paths=paths, cycle=cycle, force_full=force_full), \
+                    patch.object(agent_autodev, "changed_paths", return_value=paths), \
+                    patch.object(agent_autodev, "execute_gate") as execute:
+                full = agent_autodev.verify_slice(cycle, {"module": "Topo"}, config, force_full)
+                self.assertEqual(full, expected_full)
+                commands = [call.args[0] for call in execute.call_args_list]
+                tests = [c for c in commands if c[0] == "ctest"]
+                self.assertEqual(len(tests), 1)
+                self.assertIn("--no-tests=error", tests[0])
+                self.assertEqual("-R" not in tests[0], expected_full)
+                if not expected_full:
+                    expression = tests[0][tests[0].index("-R") + 1]
+                    self.assertIn("axiom_topology_test", expression)
+                    self.assertIn("axiom_query_eval_test", expression)
+                build = next(c for c in commands if "--build" in c)
+                self.assertEqual(build[-2:], ["--parallel", "4"])
+
     def test_invalid_weight_or_brief_is_rejected(self) -> None:
         config = agent_autodev.load_config(agent_autodev.DEFAULT_CONFIG)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
             for change in (
+                {"full_test_interval": 0},
+                {"build_parallel_jobs": -1},
+                {"build_parallel_jobs": True},
                 {"requirement_weights": {"FR-OPS-001": 0}},
                 {"task_briefs": {"FR-OPS-001": {"goal": "", "entrypoints": []}}},
             ):

@@ -3,7 +3,7 @@
 > 状态：已接受
 > 责任域：Project
 > 维护者：项目负责人
-> 最后核验：2026-09-22
+> 最后核验：2026-09-24
 > 核验依据：`scripts/agent_autodev.py`、`automation/agent_autodev.json`
 
 ## 1. 目标与边界
@@ -64,6 +64,7 @@ python3 scripts/agent_autodev.py \
 |---|---|
 | `agent_command` | Agent 命令参数数组；提示词由标准输入传入 |
 | `build_dir` | 自动开发专用构建目录 |
+| `build_parallel_jobs` | 构建并发数，正整数，默认 4；提示词与独立门禁使用相同目录和并发数，复用增量编译产物 |
 | `full_test_interval` | 每成功多少轮执行一次完整 `ctest` |
 | `max_consecutive_failures` | 默认 `0`：不限失败次数，持续诊断修复；正整数表示显式停机上限 |
 | `retry_delay_seconds` | 每次失败的等待增量，默认 10 秒，上限 60 秒，避免快速空转 |
@@ -71,11 +72,15 @@ python3 scripts/agent_autodev.py \
 | `protected_branches` | 禁止直接自动提交的分支 |
 | `requirement_tiers` | 需求阶段梯队；未解锁层不参与轮转，前层全满足后自动进入下一层 |
 | `unlocked_tiers` | 允许参与轮转的前几层，默认 1；当前设为 2，使已有 Geo/Topo 基础上的 Ops/Query 切片进入轮转，仍不改变需求完成度或放行后续未解锁层 |
-| `requirement_weights` | 已解锁需求的交付权重；使用启用后累计的 `focus_cycles / 权重` 轮转，默认权重 1。当前 Ops 为 5、Query 为 2，确保功能开发占较多轮次，同时基础层仍定期推进 |
+| `requirement_weights` | 已解锁需求的交付权重；选择 `(focus_cycles + 1) / 权重` 最小的需求，默认权重 1。当前 Ops 为 5、Query 为 2；从第一轮即按下一次交付的权重分配，基础层仍定期推进 |
 | `task_briefs` | 功能需求的长期交付方向与优先入口文件；Agent 仍需根据当前代码和回归选择一个真实可验收的小切片，不能把 brief 当成完成证明 |
 | `module_tests` | Agent 报告模块到必跑 `ctest` 的映射 |
 
 调度状态、Agent 报告和门禁日志位于 `.axiom-agent/`，该目录不会提交。要从头建立新的调度历史，可在工作树干净且没有运行中的 Agent 时删除该目录。
+
+Agent 本地验证与调度器统一使用 `build_dir`，避免 `build/` 和 `build-agent/` 重复编译。Agent 先构建相关测试目标并运行相关测试；调度器仍独立执行完整增量构建。完整验收轮只运行一次全套 `ctest`；普通轮按报告模块与实际变更模块的并集运行测试。修改共享内部代码、未知代码目录、测试数据、构建配置、脚本或示例会升级为完整验收，零测试匹配视为失败。测试保持串行，避免性能基线与其他测试争用资源。
+
+一个切片应覆盖同一根因或接口族的相邻边界，避免每轮只增加一条校验；仍以可运行功能、回归和失败不污染为验收条件。`full_test_interval` 与 `build_parallel_jobs` 必须为正整数。
 
 仓库内的 `docs/plan/AxiomKernel_Agent自动开发进度.md` 是调度器维护的已验收切片台账，会随每个成功 commit 自动更新；需求完成度仍必须由实现与测试证据支撑，不能仅凭台账行数提升。
 Agent 不得修改该台账；发现历史遗留内容时应在报告中说明，由调度器核对并处理。
@@ -118,4 +123,4 @@ Agent 不得修改该台账；发现历史遗留内容时应在报告中说明�
 
 ## 8. 调度器回归验证
 
-运行 `python3 tests/tooling/agent_autodev_test.py`。覆盖已解锁梯队与功能权重轮转、任务 brief、超过三次门禁失败后修复成功并继续下一需求、blocked 转入修复、完整测试复验、提交失败不重复台账、门禁断点恢复、轮次边界限时停机、显式失败上限及拒绝混入其他文件修改。
+运行 `python3 tests/tooling/agent_autodev_test.py`。覆盖已解锁梯队与功能权重轮转（含初始轮次的分配比例）、共用构建目录、跨模块测试合并、完整验收不重复测试、共享代码触发全量、配置校验、任务 brief、超过三次门禁失败后修复成功并继续下一需求、blocked 转入修复、完整测试复验、提交失败不重复台账、门禁断点恢复、轮次边界限时停机、显式失败上限及拒绝混入其他文件修改。
