@@ -194,6 +194,10 @@ def load_config(path: Path) -> dict[str, Any]:
             "requirement_tiers must cover the traceability matrix exactly; "
             f"missing={missing_ids}, unknown={unknown_ids}"
         )
+    unlocked_tiers = config.get("unlocked_tiers", 1)
+    if (type(unlocked_tiers) is not int or not 1 <= unlocked_tiers <= len(config["requirement_tiers"])):
+        raise RunnerError("unlocked_tiers must be between 1 and the number of requirement tiers")
+    config["unlocked_tiers"] = unlocked_tiers
     return config
 
 
@@ -215,18 +219,26 @@ def unfinished_requirements(requirements: Sequence[Requirement]) -> list[Require
 def select_target(
     requirements: Sequence[Requirement], state: dict[str, Any], config: dict[str, Any]
 ) -> Requirement | None:
-    """Select the least-served unfinished requirement from the earliest active tier."""
+    """Rotate across explicitly unlocked tiers without changing requirement status."""
     by_id = {item.requirement_id: item for item in requirements}
     counts: dict[str, int] = state.get("requirement_cycles", {})
-    for tier in config["requirement_tiers"]:
-        candidates = [by_id[item] for item in tier if by_id[item].status != "已满足"]
-        if candidates:
-            order = {requirement_id: index for index, requirement_id in enumerate(tier)}
-            return min(
-                candidates,
-                key=lambda item: (counts.get(item.requirement_id, 0), order[item.requirement_id]),
-            )
-    return None
+    tiers = config["requirement_tiers"]
+    first_unfinished = next(
+        (index for index, tier in enumerate(tiers)
+         if any(by_id[item].status != "已满足" for item in tier)), None
+    )
+    if first_unfinished is None:
+        return None
+    active_count = max(config.get("unlocked_tiers", 1), first_unfinished + 1)
+    candidates = (
+        (by_id[item], tier_index, item_index)
+        for tier_index, tier in enumerate(tiers[:active_count])
+        for item_index, item in enumerate(tier)
+        if by_id[item].status != "已满足"
+    )
+    return min(candidates, key=lambda entry: (
+        counts.get(entry[0].requirement_id, 0), entry[1], entry[2]
+    ))[0]
 
 
 def git_status() -> str:
@@ -296,12 +308,16 @@ def save_state(state: dict[str, Any]) -> None:
 
 
 def build_prompt(
-    cycle: int, target: Requirement, previous_failure: str | None = None
+    cycle: int, target: Requirement, previous_failure: str | None = None,
+    next_step: str | None = None,
 ) -> str:
-    requirements = unfinished_requirements(read_requirements())
-    requirement_summary = "\n".join(
-        f"- {item.requirement_id}: {item.status}" for item in requirements
+    target_row = next(
+        (line for line in TRACEABILITY.read_text(encoding="utf-8").splitlines()
+         if line.startswith(f"| {target.requirement_id} |")), ""
     )
+    target_context = f"需求矩阵条目：{target_row}\n" if target_row else ""
+    if next_step:
+        target_context += f"上一验收切片留下的下一步：{next_step[:1500]}\n"
     repair = ""
     if previous_failure:
         repair = (
@@ -316,9 +332,9 @@ def build_prompt(
         )
     return f"""你是 AxiomKernel 的自动开发代理，正在执行第 {cycle} 个交付切片。
 
-必须遵守仓库根 AGENTS.md，以及 docs/README.md、需求文档、需求追踪矩阵、架构边界、
-当前进度和近期 Backlog。当前未完全满足的需求如下：
-{requirement_summary}
+必须遵守仓库根 AGENTS.md。优先阅读本目标在需求追踪矩阵、当前进度和近期 Backlog
+中的相关条目；其他文档按本切片需要查阅，避免重复扫描无关模块。
+{target_context}
 {repair}
 本轮由调度器分配的唯一目标是 **{target.requirement_id}（{target.status}）**。
 
@@ -468,8 +484,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="print the next prompt only")
     parser.add_argument("--allow-dirty", action="store_true")
     parser.add_argument("--no-commit", action="store_true")
+    parser.add_argument("--stop-after-seconds", type=int, default=0,
+                        help="stop between slices after this many seconds; 0 disables the limit")
     parser.add_argument("--resume-failed", action="store_true",
-                        help="resume the saved failed slice after checking HEAD and file fingerprints")
+                        help="resume a saved slice after checking HEAD and file fingerprints")
     parser.add_argument(
         "--agent-command",
         help="override command, parsed with shlex; prompt is supplied on standard input",
@@ -479,6 +497,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    stop_after_seconds = getattr(args, "stop_after_seconds", 0)
+    if stop_after_seconds < 0:
+        raise RunnerError("--stop-after-seconds must be non-negative")
+    deadline = time.monotonic() + stop_after_seconds if stop_after_seconds else None
     if args.allow_dirty and not args.no_commit:
         raise RunnerError("--allow-dirty requires --no-commit to avoid mixing unrelated changes")
     config = load_config(args.config.resolve())
@@ -487,11 +509,14 @@ def main() -> int:
     state = load_state()
     if args.resume_failed:
         pending = state.get("pending", {})
-        if not state.get("last_error") or not pending:
-            raise RunnerError("no saved failed slice to resume")
+        if not pending:
+            raise RunnerError("no saved slice to resume")
         if (pending.get("head") != checked_output(["git", "rev-parse", "HEAD"])
                 or pending.get("files") != workspace_snapshot()):
-            raise RunnerError("failed worktree changed since checkpoint; review before resuming")
+            raise RunnerError("saved worktree changed since checkpoint; review before resuming")
+        if (not state.get("last_error") and pending.get("files")
+                and pending.get("phase") != "gates"):
+            raise RunnerError("interrupted agent changed the worktree without a validated report")
     ensure_safe_start(config, args.allow_dirty or args.resume_failed)
     cycle = int(state["successful_cycles"]) + 1
     target_cycle = None if args.max_cycles == 0 else cycle + args.max_cycles - 1
@@ -505,55 +530,72 @@ def main() -> int:
         print("all traceability-matrix requirements are already satisfied")
         return 0
     if args.dry_run:
-        print(build_prompt(cycle, target))
+        print(build_prompt(cycle, target, next_step=state.get("next_steps", {}).get(target.requirement_id)))
         return 0
 
     while target_cycle is None or cycle <= target_cycle:
+        if deadline is not None and time.monotonic() >= deadline:
+            print("time budget reached between slices; saved state is ready to resume")
+            return 0
         previous_failure = state.get("last_error")
         ledger_before = PROGRESS_LEDGER.read_text(encoding="utf-8")
         while True:
-            REPORT_PATH.unlink(missing_ok=True)
-            # Keep the same target through repairs, even if the agent edits the matrix.
-            state["pending"] = {
-                "head": checked_output(["git", "rev-parse", "HEAD"]),
-                "requirement_id": target.requirement_id,
-                "files": workspace_snapshot(),
-            }
-            save_state(state)
+            resume_gates = state.get("pending", {}).get("phase") == "gates"
             ledger_written = False
-            prompt = build_prompt(cycle, target, previous_failure)
             try:
-                result = run(
-                    config["agent_command"],
-                    stdin=prompt,
-                    timeout=int(config["agent_timeout_seconds"]),
-                    capture=True,
-                    stream=True,
-                )
-                output = (result.stdout or "") + (result.stderr or "")
-                LOG_DIR.mkdir(parents=True, exist_ok=True)
-                attempt = int(state["consecutive_failures"]) + 1
-                (LOG_DIR / f"cycle-{cycle:04d}-attempt-{attempt:04d}-agent.log").write_text(
-                    output, encoding="utf-8")
-                if result.returncode != 0:
-                    raise RunnerError(f"agent exited with status {result.returncode}\n{output[-4000:]}")
-                report = load_report()
-                if report["requirement_id"] != target.requirement_id:
-                    raise RunnerError(
-                        "agent report does not match assigned requirement: "
-                        f"expected {target.requirement_id}, got {report['requirement_id']}"
+                if resume_gates:
+                    report = state["pending"]["report"]
+                    full_gate = state["pending"]["full_gate"]
+                    print(f"resuming cycle {cycle} at independent gates")
+                else:
+                    REPORT_PATH.unlink(missing_ok=True)
+                    # Keep the same target through repairs, even if the agent edits the matrix.
+                    state["pending"] = {
+                        "head": checked_output(["git", "rev-parse", "HEAD"]),
+                        "requirement_id": target.requirement_id,
+                        "files": workspace_snapshot(),
+                    }
+                    save_state(state)
+                    prompt = build_prompt(
+                        cycle, target, previous_failure,
+                        state.get("next_steps", {}).get(target.requirement_id),
                     )
-                if PROGRESS_LEDGER.read_text(encoding="utf-8") != ledger_before:
-                    raise RunnerError("agent modified the runner-owned progress ledger")
-                if report["status"] == "blocked":
-                    raise RunnerError(f"agent blocked: {report['remaining']}")
-                if report["status"] == "project_complete" and unfinished_requirements(
-                    read_requirements()
-                ):
-                    raise RunnerError("project_complete rejected: traceability matrix is unfinished")
-                full_gate = bool(previous_failure) or report["status"] == "project_complete" or (
-                    cycle % int(config["full_test_interval"]) == 0
-                )
+                    result = run(
+                        config["agent_command"],
+                        stdin=prompt,
+                        timeout=int(config["agent_timeout_seconds"]),
+                        capture=True,
+                        stream=True,
+                    )
+                    output = (result.stdout or "") + (result.stderr or "")
+                    LOG_DIR.mkdir(parents=True, exist_ok=True)
+                    attempt = int(state["consecutive_failures"]) + 1
+                    (LOG_DIR / f"cycle-{cycle:04d}-attempt-{attempt:04d}-agent.log").write_text(
+                        output, encoding="utf-8")
+                    if result.returncode != 0:
+                        raise RunnerError(f"agent exited with status {result.returncode}\n{output[-4000:]}")
+                    report = load_report()
+                    if report["requirement_id"] != target.requirement_id:
+                        raise RunnerError(
+                            "agent report does not match assigned requirement: "
+                            f"expected {target.requirement_id}, got {report['requirement_id']}"
+                        )
+                    if PROGRESS_LEDGER.read_text(encoding="utf-8") != ledger_before:
+                        raise RunnerError("agent modified the runner-owned progress ledger")
+                    if report["status"] == "blocked":
+                        raise RunnerError(f"agent blocked: {report['remaining']}")
+                    if report["status"] == "project_complete" and unfinished_requirements(
+                        read_requirements()
+                    ):
+                        raise RunnerError("project_complete rejected: traceability matrix is unfinished")
+                    full_gate = bool(previous_failure) or report["status"] == "project_complete" or (
+                        cycle % int(config["full_test_interval"]) == 0
+                    )
+                    state["pending"].update(
+                        phase="gates", report=report, full_gate=full_gate,
+                        files=workspace_snapshot(),
+                    )
+                    save_state(state)
                 verify_slice(
                     cycle,
                     report,
@@ -575,6 +617,9 @@ def main() -> int:
                     PROGRESS_LEDGER.write_text(ledger_before, encoding="utf-8")
                 state["consecutive_failures"] = int(state["consecutive_failures"]) + 1
                 state["last_error"] = str(exc)
+                state["pending"].pop("phase", None)
+                state["pending"].pop("report", None)
+                state["pending"].pop("full_gate", None)
                 state["pending"]["files"] = workspace_snapshot()
                 state.setdefault("failures", []).append({
                     "cycle": cycle, "requirement_id": target.requirement_id,
@@ -587,6 +632,9 @@ def main() -> int:
                 if limit and state["consecutive_failures"] >= limit:
                     print("configured failure limit reached", file=sys.stderr)
                     return 1
+                if deadline is not None and time.monotonic() >= deadline:
+                    print("time budget reached after a failed attempt; saved state is ready to resume")
+                    return 0
                 delay = min(60, config["retry_delay_seconds"] * state["consecutive_failures"])
                 print(f"repairing the same slice after {delay}s; gates remain unchanged", file=sys.stderr)
                 time.sleep(delay)
@@ -599,6 +647,7 @@ def main() -> int:
         requirement_cycles[report["requirement_id"]] = (
             int(requirement_cycles.get(report["requirement_id"], 0)) + 1
         )
+        state.setdefault("next_steps", {})[report["requirement_id"]] = report["remaining"]
         state["history"].append(
             {
                 "cycle": cycle,

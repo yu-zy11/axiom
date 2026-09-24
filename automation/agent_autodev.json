@@ -2,6 +2,7 @@
   "agent_command": ["codex", "exec", "--sandbox", "workspace-write", "-"],
   "build_dir": "build-agent",
   "full_test_interval": 5,
+  "unlocked_tiers": 2,
   "max_consecutive_failures": 0,
   "retry_delay_seconds": 10,
   "agent_timeout_seconds": 3600,
