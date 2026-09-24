@@ -457,6 +457,18 @@ TopologyTransaction::create_body(std::span<const ShellId> shells) {
         *state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
         "创建体失败：壳列表包含重复引用", "创建体失败");
   }
+  for (const auto shell_id : shells) {
+    for (const auto face_id : state_->shells.at(shell_id.value).faces) {
+      const auto face_it = state_->faces.find(face_id.value);
+      if (face_it != state_->faces.end() &&
+          !detail::has_surface(*state_, face_it->second.surface_id)) {
+        return detail::failed_result<BodyId>(
+            *state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
+            "创建体失败：成员面引用的曲面不存在", "创建体失败",
+            {shell_id.value, face_id.value, face_it->second.surface_id.value});
+      }
+    }
+  }
   detail::BodyRecord record;
   record.kind = detail::BodyKind::Generic;
   record.rep_kind = RepKind::ExactBRep;

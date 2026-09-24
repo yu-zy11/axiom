@@ -217,6 +217,57 @@ int main() {
         const auto committed = retry.create_shell(std::array{*face.value});
         if (!committed.value || retry.commit().status != axiom::StatusCode::Ok ||
             topology.query().has_shell(*committed.value).value != std::optional<bool>{true}) { std::cerr << "inner shell commit\n"; return 1; }
+
+        // A valid boundary still gives a valid bbox when its face loses its
+        // surface. Body creation must reject the damaged shell before writing.
+        auto body_txn = topology.begin_transaction();
+        const auto body_next_id = state->next_id;
+        const auto shell_to_bodies = state->shell_to_bodies;
+        for (const axiom::SurfaceId invalid_surface :
+             {axiom::SurfaceId{}, axiom::SurfaceId{body_next_id + 1}}) {
+            state->faces.at(face.value->value).surface_id = invalid_surface;
+            const auto invalid_body = body_txn.create_body(std::array{*committed.value});
+            const auto invalid_report = diagnostics.get(invalid_body.diagnostic_id);
+            if (invalid_body.status != axiom::StatusCode::InvalidTopology || invalid_body.value ||
+                !invalid_report.value || !issue_links_entities(*invalid_report.value,
+                    axiom::diag_codes::kTopoShellNotClosed,
+                    {committed.value->value, face.value->value, invalid_surface.value}) ||
+                state->next_id != body_next_id || !state->bodies.empty() ||
+                state->shell_to_bodies != shell_to_bodies ||
+                body_txn.created_body_count().value != std::optional<std::uint64_t>{0} ||
+                body_txn.write_operation_count().value != std::optional<std::uint64_t>{0}) {
+                std::cerr << "damaged shell surface changed body transaction state\n";
+                return 1;
+            }
+            const auto body_path = std::filesystem::temp_directory_path() /
+                "axiom_topo_body_surface_failure.json";
+            if (diagnostics.export_report_json(invalid_body.diagnostic_id, body_path.string()).status !=
+                axiom::StatusCode::Ok) return 1;
+            std::ifstream body_input(body_path);
+            const std::string body_json((std::istreambuf_iterator<char>(body_input)),
+                                        std::istreambuf_iterator<char>());
+            body_input.close();
+            std::filesystem::remove(body_path);
+            if (body_json.find(axiom::diag_codes::kTopoShellNotClosed) == std::string::npos ||
+                body_json.find(std::to_string(invalid_surface.value)) == std::string::npos)
+                return 1;
+        }
+        state->faces.at(face.value->value).surface_id = surface;
+        const auto body = body_txn.create_body(std::array{*committed.value});
+        if (!body.value || body.value->value != body_next_id ||
+            body_txn.rollback().status != axiom::StatusCode::Ok ||
+            topology.query().has_body(*body.value).value != std::optional<bool>{false} ||
+            state->shell_to_bodies != shell_to_bodies) {
+            std::cerr << "body surface repair rollback failed\n";
+            return 1;
+        }
+        auto body_retry = topology.begin_transaction();
+        const auto committed_body = body_retry.create_body(std::array{*committed.value});
+        if (!committed_body.value || body_retry.commit().status != axiom::StatusCode::Ok ||
+            topology.query().has_body(*committed_body.value).value != std::optional<bool>{true}) {
+            std::cerr << "body surface repair commit failed\n";
+            return 1;
+        }
     }
 
     // Non-finite vertex coordinates must fail before mutating topology or transaction tracking.
