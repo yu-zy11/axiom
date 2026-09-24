@@ -377,6 +377,7 @@ public:
   Result<CoedgeId> create_coedge(EdgeId, bool reversed);
   // 按定向端点 ID 首尾闭合，单共边不豁免；未闭合返回 AXM-TOPO-E-0002，闭合前重复经过顶点返回 AXM-TOPO-E-0023，失败不写入环或事务计数。
   Result<LoopId> create_loop(std::span<const CoedgeId>);
+  // 建面时外/内环至少三条共边（同曲线双弧环除外）；不足分别返回 AXM-TOPO-E-0003/0004。
   // 外环/内环及内环之间不得复用 EdgeId；返回 InvalidTopology / AXM-TOPO-E-0014，失败不分配面或改变索引、事务写计数。
   Result<FaceId> create_face(SurfaceId, LoopId outer_loop, std::span<const LoopId> inner_loops);
   Result<ShellId> create_shell(std::span<const FaceId>);

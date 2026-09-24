@@ -228,8 +228,8 @@
 |---|---|---|
 | `AXM-TOPO-E-0001` | Error | 边缺少合法端点 |
 | `AXM-TOPO-E-0002` | Error | 环未闭合（含单共边的定向首尾顶点 ID 不同；坐标重合不等于拓扑闭合） |
-| `AXM-TOPO-E-0003` | Error | 面外环非法（含：外环已被其他面引用时 `create_face` 拒绝） |
-| `AXM-TOPO-E-0004` | Error | 面内环非法（含：内环已被其他面引用时 `create_face` 拒绝） |
+| `AXM-TOPO-E-0003` | Error | 面外环非法（含：外环已被其他面引用，或已闭合外环不足三条共边且不满足同曲线双弧例外时 `create_face` 拒绝） |
+| `AXM-TOPO-E-0004` | Error | 面内环非法（含：内环已被其他面引用，或已闭合内环不足三条共边且不满足同曲线双弧例外时 `create_face` 拒绝） |
 | `AXM-TOPO-E-0005` | Error | 壳未封闭（含：`validate_indices_consistency` 发现体记录中 `shells` 列表含重复壳 id） |
 | `AXM-TOPO-E-0006` | Error | 非法悬挂边（含：`validate_edge` 与 `validate_indices_consistency` 反向索引发现边无共边引用） |
 | `AXM-TOPO-E-0007` | Error | 拓扑关系不一致（含：`edge_to_coedges` 重复定向边、`face_to_shells`/`shell_to_bodies` 反向列表重复条目、`loop_to_faces` 重复面或同一环对应多面等索引自洽性失败） |

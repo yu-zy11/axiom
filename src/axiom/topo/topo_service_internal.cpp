@@ -264,6 +264,26 @@ bool validate_loop_id(const detail::KernelState &state, LoopId loop_id,
   return validate_loop_record(state, loop_it->second, reason);
 }
 
+bool valid_face_bound_loop_size(const detail::KernelState &state,
+                                const detail::LoopRecord &loop) {
+  if (loop.coedges.size() >= 3) {
+    return true;
+  }
+  if (loop.coedges.size() != 2) {
+    return false;
+  }
+  const auto c0 = state.coedges.find(loop.coedges[0].value);
+  const auto c1 = state.coedges.find(loop.coedges[1].value);
+  if (c0 == state.coedges.end() || c1 == state.coedges.end()) {
+    return false;
+  }
+  const auto e0 = state.edges.find(c0->second.edge_id.value);
+  const auto e1 = state.edges.find(c1->second.edge_id.value);
+  return e0 != state.edges.end() && e1 != state.edges.end() &&
+         e0->second.curve_id.value != 0 &&
+         e0->second.curve_id.value == e1->second.curve_id.value;
+}
+
 bool face_record_references_loop(const detail::FaceRecord &face,
                                  std::uint64_t loop_value) {
   if (face.outer_loop.value == loop_value) {

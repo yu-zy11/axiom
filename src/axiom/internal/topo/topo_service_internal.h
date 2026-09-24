@@ -76,6 +76,8 @@ bool validate_loop_record(const detail::KernelState &state,
 
 bool validate_loop_id(const detail::KernelState &state, LoopId loop_id,
                       std::string &reason);
+bool valid_face_bound_loop_size(const detail::KernelState &state,
+                                const detail::LoopRecord &loop);
 
 bool face_record_references_loop(const detail::FaceRecord &face,
                                  std::uint64_t loop_value);

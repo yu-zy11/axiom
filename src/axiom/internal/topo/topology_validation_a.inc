@@ -183,37 +183,16 @@ Result<void> TopologyValidationService::validate_loop(LoopId loop_id) const {
                                diag_codes::kTopoLoopNotClosed,
                                "环验证失败：目标环不存在", "环验证失败");
   }
-  // 已绑定拓扑面（loop_to_faces 有非空条目）的边界环：默认至少三条共边。
-  // 例外：两条共边且共用同一条空间曲线（典型为圆/柱/球上的闭合双弧 digon），保留 trim repair 等用例。
+  // 已绑定面的边界环至少三条共边；共用同一空间曲线的双弧环除外。
   {
     const auto ltf_bound = state_->loop_to_faces.find(loop_id.value);
     if (ltf_bound != state_->loop_to_faces.end() &&
         !ltf_bound->second.empty() &&
-        loop_it->second.coedges.size() < 3) {
-      bool allow_two_coedge_digon = false;
-      if (loop_it->second.coedges.size() == 2) {
-        const auto c0_it =
-            state_->coedges.find(loop_it->second.coedges[0].value);
-        const auto c1_it =
-            state_->coedges.find(loop_it->second.coedges[1].value);
-        if (c0_it != state_->coedges.end() && c1_it != state_->coedges.end()) {
-          const auto e0_it =
-              state_->edges.find(c0_it->second.edge_id.value);
-          const auto e1_it =
-              state_->edges.find(c1_it->second.edge_id.value);
-          if (e0_it != state_->edges.end() && e1_it != state_->edges.end() &&
-              e0_it->second.curve_id.value != 0 &&
-              e0_it->second.curve_id.value == e1_it->second.curve_id.value) {
-            allow_two_coedge_digon = true;
-          }
-        }
-      }
-      if (!allow_two_coedge_digon) {
+        !valid_face_bound_loop_size(*state_, loop_it->second)) {
         return detail::failed_void(
             *state_, StatusCode::InvalidTopology, diag_codes::kTopoLoopNotClosed,
             "环验证失败：已绑定面的边界环至少需要三条共边", "环验证失败",
             {loop_id.value});
-      }
     }
   }
   // coedge_to_loop 必须与环成员一致（索引损坏或跨环复用定向边时给出可诊断失败）。

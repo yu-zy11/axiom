@@ -263,6 +263,22 @@ TopologyTransaction::create_face(SurfaceId surface_id, LoopId outer_loop,
           "创建面失败：内环非法，" + reason, "创建面失败");
     }
   }
+  if (!valid_face_bound_loop_size(*state_, state_->loops.at(outer_loop.value))) {
+    return detail::failed_result<FaceId>(
+        *state_, StatusCode::InvalidTopology,
+        diag_codes::kTopoFaceOuterLoopInvalid,
+        "创建面失败：外环边数不足（仅同曲线双弧环允许两条共边）",
+        "创建面失败", {outer_loop.value});
+  }
+  for (const auto loop_id : inner_loops) {
+    if (!valid_face_bound_loop_size(*state_, state_->loops.at(loop_id.value))) {
+      return detail::failed_result<FaceId>(
+          *state_, StatusCode::InvalidTopology,
+          diag_codes::kTopoFaceInnerLoopInvalid,
+          "创建面失败：内环边数不足（仅同曲线双弧环允许两条共边）",
+          "创建面失败", {loop_id.value});
+    }
+  }
   // 7.2: each LoopId may belong to at most one Face (outer or inner lists).
   const auto outer_used = state_->loop_to_faces.find(outer_loop.value);
   if (outer_used != state_->loop_to_faces.end() &&
