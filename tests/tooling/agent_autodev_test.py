@@ -62,7 +62,7 @@ class AgentAutodevTest(unittest.TestCase):
         prompt = agent_autodev.build_prompt(
             3, agent_autodev.Requirement("FR-GEO-001", "进行中")
         )
-        self.assertIn("第 3 个交付切片", prompt)
+        self.assertIn("第 3 个功能包", prompt)
         self.assertIn("不执行 git commit", prompt)
         self.assertIn(".axiom-agent/result.json", prompt)
         self.assertIn("FR-GEO-001", prompt)
@@ -70,6 +70,9 @@ class AgentAutodevTest(unittest.TestCase):
         self.assertIn("不修改 .gitignore", prompt)
         self.assertIn("docs/plan/AxiomKernel_Agent自动开发进度.md", prompt)
         self.assertIn("台账由调度器在验收通过后追加", prompt)
+        self.assertIn("整包开发完成 → 提交待验收报告 → 调度器统一编译和测试", prompt)
+        self.assertIn("未运行时使用空数组 []", prompt)
+        self.assertIn("才提前运行必要的针对性构建/测试", prompt)
 
     def test_select_target_rotates_within_the_active_tier(self) -> None:
         requirements = [

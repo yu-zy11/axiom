@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Run bounded, verified AxiomKernel development slices with an external agent.
+"""Run bounded, verified AxiomKernel feature packages with an external agent.
 
 The runner deliberately treats repository documents and tests as the control plane:
-the agent chooses one unfinished requirement, implements one reviewable slice, writes
+the agent chooses one unfinished requirement, implements one cohesive feature package, writes
 a machine-readable report, and the runner independently executes quality gates before
 committing. Use ``--max-cycles 0`` for continuous operation.
 """
@@ -349,7 +349,8 @@ def build_prompt(
         if task_brief["entrypoints"]:
             target_context += "优先检查文件：" + ", ".join(task_brief["entrypoints"]) + "\n"
         target_context += (
-            "先选一个可运行的功能子域，给出用户可观察的成功结果和自动化验收。"
+            "先确定一个完整功能包，列出用户可观察的主流程、相关变体与验收场景；"
+            "将同一功能的实现、边界处理和测试集中开发完成后统一验收。"
             "除非直接阻断该功能，避免只交付输入校验、诊断文案或文档。\n"
         )
     repair = ""
@@ -364,7 +365,7 @@ def build_prompt(
             "若相同原因重复出现，换一个有证据支持的诊断方法，不能只重复报告 blocked。"
             "修复可涉及导致门禁失败的相关模块，完成后回到本轮需求，不扩大功能范围。\n"
         )
-    return f"""你是 AxiomKernel 的自动开发代理，正在执行第 {cycle} 个交付切片。
+    return f"""你是 AxiomKernel 的自动开发代理，正在执行第 {cycle} 个功能包。
 
 必须遵守仓库根 AGENTS.md。优先阅读本目标在需求追踪矩阵、当前进度和近期 Backlog
 中的相关条目；其他文档按本切片需要查阅，避免重复扫描无关模块。
@@ -373,24 +374,31 @@ def build_prompt(
 本轮由调度器分配的唯一目标是 **{target.requirement_id}（{target.status}）**。
 
 工作规则：
-1. 先检查代码和测试事实，只为本轮目标选择一个依赖已具备、可评审的小切片。
+1. 先检查代码和测试事实，为本轮目标确定一个依赖已具备、可评审的完整功能包。
+   开始时明确功能范围与验收清单，集中完成同一功能模块内相关能力，再统一编译和测试。
+   例如一个扫掠功能包包含主流程、支持的轮廓/方向变体、拓扑查询、退化拒绝及事务回归。
    优先用文件名检索与局部片段定位；不要反复通读无关文档或输出大段完整文件。
 2. 优先完成近期 Backlog；禁止把占位实现、bbox/mesh 近似或仅有接口声明标记为精确能力。
 3. 实现真实代码，补齐成功、失败、退化和失败不污染的回归测试；遵守模块依赖。
-4. 本地运行最小相关构建与测试，失败修复后重跑受影响测试；独立完整构建和周期性全套测试由调度器执行。
+4. 默认采用“整包开发完成 → 提交待验收报告 → 调度器统一编译和测试”的流程。
+   开发阶段集中编写实现、全部回归用例和必要文档，不在每个小功能或每个文件改完后编译测试。
+   功能包完成后直接写 result.json，由调度器执行一次独立完整构建及适用测试集；
+   不必先自行跑一遍相同验收。completed_slice 表示整包实现就绪，验收通过和提交由调度器判定。
+   只有定位具体编译错误、算法风险或修复失败门禁时，才提前运行必要的针对性构建/测试；
+   说明原因，修复相关问题后集中复验，避免无代码变化时重复运行已通过的命令。
    与调度器共用构建目录 {shlex.quote(build_dir)}，不要另建 build/ 或清空缓存。
    配置缺失时运行 cmake -S . -B {shlex.quote(build_dir)} -DAXM_ENABLE_TESTS=ON -DAXM_ENABLE_EXAMPLES=ON；
    构建使用 cmake --build {shlex.quote(build_dir)} --parallel {build_parallel_jobs} --target <相关测试目标>，
    测试使用 ctest --test-dir {shlex.quote(build_dir)} -R '<相关测试正则>' --output-on-failure。
-   相关测试通过后交付报告；仅在排查具体跨模块风险时扩大本地测试范围。
    若修改公共 API、错误码、阶段状态或完成度，同步对应文档，避免重复追加历史条目。
 5. 不执行 git commit、git reset、git checkout、git clean、git rebase 或 git push；提交由调度器完成。
 6. 不修改 .gitignore、automation/agent_autodev.json、scripts/agent_autodev.py、
    docs/plan/AxiomKernel_Agent自动开发进度.md 或 .axiom-agent/（仅最终 result.json 例外）。
    自动开发进度台账由调度器在验收通过后追加；即使发现未验收的旧记录也不要自行改动，
    应在 result.json 的 remaining 中说明，由调度器处理。
-7. 一轮只完成一个有明确 DoD 的切片，避免大范围重写。
-   同一根因、同一算法或同一接口族的相邻边界应一起实现和回归，避免拆成多轮微小校验。
+7. 一轮完成一个有明确 DoD 的完整功能包；相互依赖的小功能、同一算法或接口族的相关边界合并交付。
+   不因一个小函数、一条校验或一个测试写完就结束本轮；按开头验收清单检查功能包已完整实现。
+   避免将整个 Ops/Geo 大层或无关需求无限合并；确有外部依赖阻塞时报告实际边界和证据。
 8. 遵循现有代码风格，减少不必要的封装与抽象层，集中相关逻辑，避免代码碎片化。
 
 结束前必须写入 .axiom-agent/result.json，格式严格为：
@@ -399,9 +407,11 @@ def build_prompt(
   "requirement_id": "FR-... 或 NFR-...",
   "module": "Core|Math|Geo|Topo|Rep|Ops|Heal|Eval|IO|Plugin|SDK|Diagnostics",
   "summary": "本轮完成内容",
-  "tests": ["实际运行的命令"],
+  "tests": [],
   "remaining": "下一验收点或阻塞原因"
 }}
+
+tests 仅记录实际运行的命令；未运行时使用空数组 []，统一验收由调度器执行，不虚报通过。
 
 只有追踪矩阵全部需求均为“已满足”、完整测试通过且发布门禁满足时，才允许报告
 project_complete；否则必须报告 completed_slice 或 blocked。
