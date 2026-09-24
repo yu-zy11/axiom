@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <map>
+#include <limits>
 #include <span>
 #include <utility>
 #include <vector>
@@ -1358,7 +1360,98 @@ inline void polyhedral_mass_properties_from_triangles(const std::vector<Point3>&
     out_inertia = {ixx, ixy, ixz, ixy, iyy, iyz, ixz, iyz, izz};
 }
 
-/// 平面闭合多边形沿 `record.axis`（单位）拉伸 `record.b`：棱柱三角剖分 + 闭合流形 BRep（**凸**多边形扇形三角化；非平面/退化/拉伸方向平行于面则返回 false）。
+// Validate a simple polygon and clip ears in a local plane frame. The output
+// retains input winding and vertex indices; no kernel objects are allocated.
+inline bool triangulate_extrude_profile(std::span<const Point3> poly, const Vec3& normal,
+                                        std::vector<std::array<int, 3>>& triangles) {
+    triangles.clear();
+    if (poly.size() < 3 || poly.size() > static_cast<std::size_t>(std::numeric_limits<int>::max() / 4)) {
+        return false;
+    }
+    Vec3 u {}, v {};
+    orthonormal_frame_from_axis(normal, u, v);
+    std::vector<std::array<Scalar, 2>> points;
+    Scalar extent = 0.0;
+    for (const auto& p : poly) {
+        const auto offset = subtract(p, poly.front());
+        const Scalar x = dot(offset, u), y = dot(offset, v);
+        if (!std::isfinite(x) || !std::isfinite(y)) return false;
+        points.push_back({x, y});
+        extent = std::max({extent, std::abs(x), std::abs(y)});
+    }
+    const Scalar length_tol = std::max(Scalar(1e-12), 64 * std::numeric_limits<Scalar>::epsilon() * extent);
+    const Scalar area_tol = std::max(Scalar(1e-14), length_tol * extent);
+    const auto turn = [&](int a, int b, int c) {
+        const auto& p = points[static_cast<std::size_t>(a)];
+        const auto& q = points[static_cast<std::size_t>(b)];
+        const auto& r = points[static_cast<std::size_t>(c)];
+        return (static_cast<long double>(q[0]) - p[0]) * (static_cast<long double>(r[1]) - p[1]) -
+               (static_cast<long double>(q[1]) - p[1]) * (static_cast<long double>(r[0]) - p[0]);
+    };
+    const int n = static_cast<int>(poly.size());
+    for (int i = 0; i < n; ++i) {
+        if (std::abs(turn(i, (i + 1) % n, (i + 2) % n)) <= area_tol) return false;
+        for (int j = i + 1; j < n; ++j) {
+            if (std::hypot(points[i][0] - points[j][0], points[i][1] - points[j][1]) <= length_tol) {
+                return false;
+            }
+        }
+    }
+    const auto on_segment = [&](int a, int b, int p) {
+        return std::abs(turn(a, b, p)) <= area_tol &&
+            points[p][0] >= std::min(points[a][0], points[b][0]) - length_tol &&
+            points[p][0] <= std::max(points[a][0], points[b][0]) + length_tol &&
+            points[p][1] >= std::min(points[a][1], points[b][1]) - length_tol &&
+            points[p][1] <= std::max(points[a][1], points[b][1]) + length_tol;
+    };
+    for (int a = 0; a < n; ++a) {
+        const int b = (a + 1) % n;
+        for (int c = a + 1; c < n; ++c) {
+            const int d = (c + 1) % n;
+            if (b == c || d == a) continue;
+            const auto ab_c = turn(a, b, c), ab_d = turn(a, b, d);
+            const auto cd_a = turn(c, d, a), cd_b = turn(c, d, b);
+            const bool crosses_ab = (ab_c > area_tol && ab_d < -area_tol) ||
+                                    (ab_c < -area_tol && ab_d > area_tol);
+            const bool crosses_cd = (cd_a > area_tol && cd_b < -area_tol) ||
+                                    (cd_a < -area_tol && cd_b > area_tol);
+            if ((crosses_ab && crosses_cd) || on_segment(a, b, c) || on_segment(a, b, d) ||
+                on_segment(c, d, a) || on_segment(c, d, b)) return false;
+        }
+    }
+    std::vector<int> ring;
+    for (int i = 0; i < n; ++i) ring.push_back(i);
+    while (ring.size() > 3) {
+        bool clipped = false;
+        for (std::size_t i = 0; i < ring.size(); ++i) {
+            const int a = ring[(i + ring.size() - 1) % ring.size()];
+            const int b = ring[i], c = ring[(i + 1) % ring.size()];
+            if (turn(a, b, c) <= area_tol) continue;
+            bool contains_vertex = false;
+            for (const int p : ring) {
+                if (p == a || p == b || p == c) continue;
+                // Boundary points also block an ear, so a diagonal cannot skip a vertex.
+                if (turn(a, b, p) >= -area_tol && turn(b, c, p) >= -area_tol &&
+                    turn(c, a, p) >= -area_tol) {
+                    contains_vertex = true;
+                    break;
+                }
+            }
+            if (contains_vertex) continue;
+            triangles.push_back({a, b, c});
+            ring.erase(ring.begin() + static_cast<std::ptrdiff_t>(i));
+            clipped = true;
+            break;
+        }
+        if (!clipped) return false;
+    }
+    if (turn(ring[0], ring[1], ring[2]) <= area_tol) return false;
+    triangles.push_back({ring[0], ring[1], ring[2]});
+    return true;
+}
+
+/// 简单平面多边形（可凹、无孔）沿 axis 拉伸：耳切端盖 + 平面侧壁，生成真实闭合棱柱 BRep。
+/// 所有可失败检查在对象分配前完成，禁止失败时留下部分拓扑。
 inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRecord& record) {
     if (record.kind != BodyKind::Sweep || record.rep_kind != RepKind::ExactBRep || !record.bbox.is_valid ||
         !record.shells.empty()) {
@@ -1368,10 +1461,10 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
         return false;
     }
     const auto& poly_in = record.extrude_profile_xyz;
-    const int n = static_cast<int>(poly_in.size());
-    if (n < 3) {
+    if (poly_in.size() < 3 || poly_in.size() > static_cast<std::size_t>(std::numeric_limits<int>::max() / 4)) {
         return false;
     }
+    const int n = static_cast<int>(poly_in.size());
     const Scalar h = record.b;
     if (!(h > 0.0)) {
         return false;
@@ -1407,13 +1500,13 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
             add_point_vec(poly_in[static_cast<std::size_t>(i)], scale(D, h));
     }
 
+    std::vector<std::array<int, 3>> caps;
+    if (!triangulate_extrude_profile(poly_in, n_unit, caps)) return false;
     std::vector<std::array<int, 3>> tris;
     tris.reserve(static_cast<std::size_t>((n - 2) * 2 + n * 2));
-    for (int k = 1; k < n - 1; ++k) {
-        tris.push_back({0, k + 1, k});
-    }
-    for (int k = 1; k < n - 1; ++k) {
-        tris.push_back({n, n + k, n + k + 1});
+    for (const auto& cap : caps) {
+        tris.push_back({cap[0], cap[2], cap[1]});
+        tris.push_back({n + cap[0], n + cap[1], n + cap[2]});
     }
     for (int i = 0; i < n; ++i) {
         const int j = (i + 1) % n;
@@ -1430,8 +1523,18 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
     Point3 cm_tmp {};
     std::array<Scalar, 9> in_tmp {};
     Scalar area_tmp = 0.0;
-    polyhedral_mass_properties_from_triangles(pos, tris, vol_chk, cm_tmp, in_tmp, area_tmp);
-    if (!(vol_chk > 1e-18)) {
+    // Integrate near the profile origin to avoid cancellation for translated profiles.
+    std::vector<Point3> local_pos;
+    local_pos.reserve(pos.size());
+    for (const auto& p : pos) {
+        const auto offset = subtract(p, poly_in.front());
+        local_pos.push_back({offset.x, offset.y, offset.z});
+    }
+    polyhedral_mass_properties_from_triangles(local_pos, tris, vol_chk, cm_tmp, in_tmp, area_tmp);
+    cm_tmp = {cm_tmp.x + poly_in.front().x, cm_tmp.y + poly_in.front().y, cm_tmp.z + poly_in.front().z};
+    if (!(vol_chk > 1e-18) || !std::isfinite(vol_chk) || !std::isfinite(area_tmp) ||
+        !std::isfinite(cm_tmp.x) || !std::isfinite(cm_tmp.y) || !std::isfinite(cm_tmp.z) ||
+        !std::all_of(in_tmp.begin(), in_tmp.end(), [](Scalar x) { return std::isfinite(x); })) {
         return false;
     }
 

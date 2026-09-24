@@ -223,21 +223,8 @@ Result<BodyId> SweepService::extrude(const ProfileRef& profile, const Vec3& dire
         if (!std::isfinite(volume) || alignment < 1e-6 || !(volume > 1e-18)) {
             return reject_profile("拉伸失败：polygon 轮廓与拉伸方向无法形成有效体积");
         }
-        // 物化路径使用扇形三角化；只有严格凸、无共线相邻边的轮廓才适用。
-        for (std::size_t i = 0; i < poly.size(); ++i) {
-            const auto edge = detail::subtract(poly[(i + 1) % poly.size()], poly[i]);
-            const auto next = detail::subtract(poly[(i + 2) % poly.size()], poly[(i + 1) % poly.size()]);
-            const auto turn = detail::dot(detail::cross(edge, next), normal);
-            if (!std::isfinite(turn) || turn <= 1e-14) {
-                return reject_profile("拉伸失败：polygon 轮廓存在退化边或非凸转角");
-            }
-            for (std::size_t j = 0; j < poly.size(); ++j) {
-                const auto side = detail::dot(detail::cross(edge, detail::subtract(poly[j], poly[i])), normal);
-                if (!std::isfinite(side) || side < -1e-14) {
-                    return reject_profile("拉伸失败：polygon 轮廓非凸或自交");
-                }
-            }
-        }
+        // Simplicity and cap triangulation are checked by the prism materializer
+        // before any model IDs are allocated; concave profiles are supported.
         BoundingBox bbox {};
         auto extend = [&](const Point3& p) {
             if (!bbox.is_valid) {
@@ -304,8 +291,8 @@ Result<BodyId> SweepService::extrude(const ProfileRef& profile, const Vec3& dire
                 const auto e1 = detail::subtract(vi, v0p);
                 const auto e2 = detail::subtract(vj, v0p);
                 const auto cp = detail::cross(e1, e2);
-                const auto ta = 0.5 * detail::norm(cp);
-                if (ta <= 1e-30) {
+                const auto ta = 0.5 * detail::dot(cp, n_unit);
+                if (std::abs(ta) <= 1e-30) {
                     continue;
                 }
                 csum.x += (v0p.x + vi.x + vj.x) * ta / 3.0;

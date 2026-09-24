@@ -184,7 +184,9 @@ if (valid.status != StatusCode::Ok) {
 ## 6.1 拉伸
 
 ```cpp
-ProfileRef profile = build_closed_profile(...);
+// 无孔 L 形轮廓；闭合边由末点到首点隐式补齐。
+ProfileRef profile {"L", {{0, 0, 0}, {3, 0, 0}, {3, 1, 0},
+                          {1, 1, 0}, {1, 3, 0}, {0, 3, 0}}};
 
 auto solid = kernel.sweeps().extrude(
   profile,

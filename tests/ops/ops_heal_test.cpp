@@ -640,7 +640,9 @@ int main() {
     if (!objects_before_bad_profile.value || !bodies_before_bad_profile.value ||
         !next_id_before_bad_profile.value) return 1;
     const std::vector<std::vector<axiom::Point3>> invalid_extrude_profiles {
-        {{0, 0, 0}, {3, 0, 0}, {1, 0.5, 0}, {3, 2, 0}, {0, 2, 0}}, // concave
+        {{0, 0, 0}, {4, 0, 0}, {0, 3, 0}, {3, 3, 0}, {1, -1, 0}}, // crossing, nonzero signed area
+        {{0, 0, 0}, {4, 0, 0}, {4, 4, 0}, {2, 0, 0}, {0, 4, 0}}, // vertex on nonadjacent edge
+        {{0, 0, 0}, {4, 0, 0}, {4, 4, 0}, {2, 2, 0}, {0, 4, 0}, {2, 2, 0}}, // repeated interior vertex
         {{0, 0, 0}, {2, 2, 0}, {0, 2, 0}, {2, 0, 0}}, // self intersecting
         {{0, 0, 0}, {2, 0, 0}, {2, 1, 0.1}, {0, 1, 0}},  // nonplanar
         {{0, 0, 0}, {1, 0, 0}, {2, 0, 0}, {2, 1, 0}, {0, 1, 0}}, // collinear corner
@@ -685,6 +687,159 @@ int main() {
         !reversed_faces.value || reversed_faces.value->size() != 12) {
         std::cerr << "clockwise polygon extrusion should still create a valid triangulated prism\n";
         return 1;
+    }
+
+    // Exact concave prism model set: independent rectangle-union area/centroid
+    // oracles catch caps that fill the notch (a fan can still look like a closed shell).
+    const std::vector<axiom::ProfileRef> concave_profiles {
+        {"L", {{0, 0, 0}, {3, 0, 0}, {3, 1, 0}, {1, 1, 0}, {1, 3, 0}, {0, 3, 0}}},
+        {"U", {{0, 0, 0}, {4, 0, 0}, {4, 3, 0}, {3, 3, 0}, {3, 1, 0}, {1, 1, 0}, {1, 3, 0}, {0, 3, 0}}}
+    };
+    for (std::size_t shape = 0; shape < concave_profiles.size(); ++shape) {
+        const double cap_area = shape == 0 ? 5.0 : 8.0;
+        const axiom::Point3 cap_centroid = shape == 0 ? axiom::Point3 {1.1, 1.1, 0} :
+                                                                      axiom::Point3 {2, 1.25, 0};
+        const double x_edge_length = shape == 0 ? 6.0 : 8.0;
+        const double y_edge_length = shape == 0 ? 6.0 : 10.0;
+        for (const bool tilted : {false, true}) {
+            // An orthonormal frame exercises a genuinely oblique profile plane.
+            const auto rotate = [tilted](axiom::Point3 p) -> axiom::Point3 {
+                if (!tilted) return p;
+                return {0.6 * p.x - 0.48 * p.y + 0.64 * p.z,
+                        0.8 * p.x + 0.36 * p.y - 0.48 * p.z, 0.8 * p.y + 0.6 * p.z};
+            };
+            const auto world = [&](axiom::Point3 p) -> axiom::Point3 {
+                const auto q = rotate(p);
+                return {q.x + 10, q.y - 20, q.z + 30};
+            };
+            for (const bool clockwise : {false, true}) {
+                for (const bool shift_start : {false, true}) {
+                    for (const axiom::Point3 delta : {axiom::Point3 {0, 0, 3}, {2, -1, 3}, {-2, 1, -3}}) {
+                        auto profile = concave_profiles[shape];
+                        if (clockwise) std::reverse(profile.polygon_xyz.begin(), profile.polygon_xyz.end());
+                        if (shift_start) std::rotate(profile.polygon_xyz.begin(), profile.polygon_xyz.begin() + 3,
+                                                     profile.polygon_xyz.end());
+                        for (auto& p : profile.polygon_xyz) p = world(p);
+                        const auto d = rotate(delta);
+                        const double length = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+                        const auto body = kernel.sweeps().extrude(profile, {d.x, d.y, d.z}, length);
+                        if (body.status != axiom::StatusCode::Ok || !body.value) {
+                            std::cerr << "concave extrusion model set failed to materialize\n";
+                            return 1;
+                        }
+                        const auto query = kernel.topology().query();
+                        const auto shells = query.shells_of_body(*body.value);
+                        const auto faces = query.faces_of_body(*body.value);
+                        const auto edges = query.edges_of_body(*body.value);
+                        const auto vertices = query.vertices_of_body(*body.value);
+                        const auto owned = query.has_body(*body.value);
+                        const auto mass = kernel.query().mass_properties(*body.value);
+                        const auto expected_cm = world({cap_centroid.x + delta.x / 2,
+                                                       cap_centroid.y + delta.y / 2, delta.z / 2});
+                        const double area = 2 * cap_area + x_edge_length * std::hypot(delta.y, delta.z) +
+                                                         y_edge_length * std::hypot(delta.x, delta.z);
+                        const auto n = profile.polygon_xyz.size();
+                        if (!owned.value || !*owned.value || !shells.value || shells.value->size() != 1 ||
+                            !faces.value || faces.value->size() != 4 * n - 4 ||
+                            !edges.value || edges.value->size() != 6 * n - 6 ||
+                            !vertices.value || vertices.value->size() != 2 * n || !mass.value ||
+                            std::abs(mass.value->volume - 3 * cap_area) > 1e-8 ||
+                            std::abs(mass.value->area - area) > 1e-8 ||
+                            std::abs(mass.value->centroid.x - expected_cm.x) > 1e-8 ||
+                            std::abs(mass.value->centroid.y - expected_cm.y) > 1e-8 ||
+                            std::abs(mass.value->centroid.z - expected_cm.z) > 1e-8 ||
+                            kernel.validate().validate_all(*body.value, axiom::ValidationMode::Strict).status !=
+                                axiom::StatusCode::Ok) {
+                            std::cerr << "concave extrusion must preserve notch, mass and strict topology\n";
+                            return 1;
+                        }
+                        double actual_area = 0;
+                        for (const auto face : *faces.value) {
+                            const auto face_area = query.planar_face_area(face);
+                            const auto owners = query.bodies_of_face(face);
+                            const auto loops = query.loops_of_face(face);
+                            if (!face_area.value || *face_area.value <= 0 || !owners.value || owners.value->size() != 1 ||
+                                owners.value->front().value != body.value->value || !loops.value || loops.value->size() != 1) return 1;
+                            const auto loop_vertices = query.vertices_of_loop(loops.value->front());
+                            if (!loop_vertices.value || loop_vertices.value->size() != 3) return 1;
+                            actual_area += *face_area.value;
+                        }
+                        for (const auto edge : *edges.value) {
+                            const auto coedges = query.coedge_count_of_edge(edge);
+                            const auto endpoints = query.vertices_of_edge(edge);
+                            if (!coedges.value || *coedges.value != 2 || !endpoints.value ||
+                                (*endpoints.value)[0].value == (*endpoints.value)[1].value) return 1;
+                        }
+                        if (std::abs(actual_area - area) > 1e-8) return 1;
+                        const auto mesh = kernel.convert().brep_to_mesh(*body.value, {});
+                        if (mesh.status != axiom::StatusCode::Ok || !mesh.value) return 1;
+                        const auto inspection = kernel.convert().inspect_mesh(*mesh.value);
+                        if (!inspection.value || inspection.value->tessellation_strategy != "owned_topo_welded" ||
+                            inspection.value->triangle_count != faces.value->size() ||
+                            inspection.value->vertex_count != 2 * n || inspection.value->connected_components != 1 ||
+                            inspection.value->has_out_of_range_indices || inspection.value->has_degenerate_triangles) {
+                            std::cerr << "concave extrusion mesh conversion must use the real closed prism\n";
+                            if (inspection.value) {
+                                std::cerr << "profile=" << profile.label << " tilted=" << tilted
+                                          << " clockwise=" << clockwise << " shift_start=" << shift_start
+                                          << " strategy=" << inspection.value->tessellation_strategy
+                                          << " vertices=" << inspection.value->vertex_count
+                                          << " triangles=" << inspection.value->triangle_count
+                                          << " components=" << inspection.value->connected_components << '\n';
+                            }
+                            return 1;
+                        }
+                        if (!tilted && !clockwise && !shift_start && delta.x == 0) {
+                            // Default planar tessellation must weld shared positions; optional
+                            // face-local UVs intentionally retain texture seams at those positions.
+                            axiom::TessellationOptions uv_options;
+                            uv_options.generate_texcoords = true;
+                            const auto uv_mesh = kernel.convert().brep_to_mesh(*body.value, uv_options);
+                            if (uv_mesh.status != axiom::StatusCode::Ok || !uv_mesh.value) return 1;
+                            const auto uv_inspection = kernel.convert().inspect_mesh(*uv_mesh.value);
+                            if (!uv_inspection.value || uv_mesh.value->value == mesh.value->value ||
+                                uv_inspection.value->tessellation_strategy != "owned_topo_welded" ||
+                                uv_inspection.value->triangle_count != faces.value->size() ||
+                                uv_inspection.value->vertex_count <= 2 * n ||
+                                uv_inspection.value->has_out_of_range_indices ||
+                                uv_inspection.value->has_degenerate_triangles) {
+                                std::cerr << "concave prism UV conversion must preserve texture seams\n";
+                                return 1;
+                            }
+                            const auto report_path = std::filesystem::temp_directory_path() /
+                                ("axiom_ops_concave_" + profile.label + "_mesh.json");
+                            for (const bool with_uv : {false, true}) {
+                                const auto mesh_id = with_uv ? *uv_mesh.value : *mesh.value;
+                                if (kernel.convert().export_mesh_report_json(mesh_id, report_path.string()).status !=
+                                    axiom::StatusCode::Ok) return 1;
+                                std::ifstream in {report_path};
+                                const std::string report((std::istreambuf_iterator<char>(in)),
+                                                         std::istreambuf_iterator<char>());
+                                in.close();
+                                std::filesystem::remove(report_path);
+                                const std::string expected = with_uv ? "\"has_texcoords\":true" :
+                                                                      "\"has_texcoords\":false";
+                                if (report.find(expected) == std::string::npos) {
+                                    std::cerr << "planar tessellation must honor generate_texcoords\n";
+                                    return 1;
+                                }
+                            }
+                            const auto cached_mesh = kernel.convert().brep_to_mesh(*body.value, {});
+                            if (!cached_mesh.value || cached_mesh.value->value != mesh.value->value) return 1;
+                        }
+                    }
+                }
+            }
+        }
+        // Line-segment sweep must inherit the same cap materialization, including the notch.
+        const auto rail = kernel.curves().make_line_segment({50, 60, 70}, {50, 60, 73});
+        if (!rail.value) return 1;
+        const auto swept = kernel.sweeps().sweep(concave_profiles[shape], *rail.value);
+        if (!swept.value || kernel.validate().validate_all(*swept.value, axiom::ValidationMode::Strict).status !=
+                                axiom::StatusCode::Ok) return 1;
+        const auto mass = kernel.query().mass_properties(*swept.value);
+        if (!mass.value || std::abs(mass.value->volume - 3 * cap_area) > 1e-8 ||
+            std::abs(mass.value->area - (2 * cap_area + 3 * (x_edge_length + y_edge_length))) > 1e-8) return 1;
     }
 
     // Linear sweep: the rail supplies only displacement; the world-space profile
@@ -797,6 +952,46 @@ int main() {
     const auto sweep_retry = kernel.sweeps().sweep(rect, *sweep_rail.value);
     if (!sweep_retry.value ||
         kernel.validate().validate_all(*sweep_retry.value, axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok ||
+        kernel.validate().validate_all(*prism.value, axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok) return 1;
+
+    const auto concave_objects_before = kernel.object_count_total();
+    const auto concave_bodies_before = kernel.body_count();
+    const auto concave_next_before = kernel.next_object_id();
+    if (!concave_objects_before.value || !concave_bodies_before.value || !concave_next_before.value) return 1;
+    const auto rejects_concave = [&](const axiom::ProfileRef& profile, axiom::Vec3 direction, double distance) {
+        const auto result = kernel.sweeps().extrude(profile, direction, distance);
+        const auto diagnostic = kernel.diagnostics().get(result.diagnostic_id);
+        const auto objects = kernel.object_count_total();
+        const auto bodies = kernel.body_count();
+        const auto next = kernel.next_object_id();
+        return result.status == axiom::StatusCode::InvalidInput && !result.value && diagnostic.value &&
+            has_issue_code(*diagnostic.value, axiom::diag_codes::kCoreParameterOutOfRange) &&
+            objects.value && *objects.value == *concave_objects_before.value &&
+            bodies.value && *bodies.value == *concave_bodies_before.value &&
+            next.value && *next.value == *concave_next_before.value;
+    };
+    for (const auto& points : invalid_extrude_profiles) {
+        for (const bool clockwise : {false, true}) {
+            axiom::ProfileRef invalid {"invalid_concave", points};
+            if (clockwise) std::reverse(invalid.polygon_xyz.begin(), invalid.polygon_xyz.end());
+            if (!rejects_concave(invalid, {0, 0, 1}, 3)) return 1;
+        }
+    }
+    for (const auto direction : {axiom::Vec3 {1, 0, 0}, {0, 0, 0},
+                                {0, 0, std::numeric_limits<double>::quiet_NaN()}}) {
+        if (!rejects_concave(concave_profiles.front(), direction, 3)) return 1;
+    }
+    for (const auto distance : {0.0, -1.0, 1e-20, std::numeric_limits<double>::infinity()}) {
+        if (!rejects_concave(concave_profiles.front(), {0, 0, 1}, distance)) return 1;
+    }
+    // The requested offset rounds away in world coordinates: rejection occurs
+    // in materialization after cap triangulation, still before any ID allocation.
+    auto collapsed_concave = concave_profiles.front();
+    for (auto& p : collapsed_concave.polygon_xyz) p.z = 1e16;
+    if (!rejects_concave(collapsed_concave, {0, 0, 1}, 1)) return 1;
+    const auto concave_retry = kernel.sweeps().extrude(concave_profiles.back(), {0, 0, -1}, 3);
+    if (!concave_retry.value ||
+        kernel.validate().validate_all(*concave_retry.value, axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok ||
         kernel.validate().validate_all(*prism.value, axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok) return 1;
 
     auto box_edges = kernel.topology().query().edges_of_body(*box_a.value);
