@@ -384,6 +384,8 @@
 
 ### 需求 7.7 查询与分析（Query/Eval/Rep）
 
+- **FR-QUERY-001 第 63 功能包（待统一验收）**：实现 `CurveService::length` 全域/区间解析长度（直线有限区间、线段、圆、折线、嵌套复合链）和 `TopologyQueryService::edge_length/loop_length/face_boundary_length` 直线边长度接口族，共享区间/边/环计算，明确模型长度单位、反向/零区间、有限域拒绝、复合链局部参数、不连续连接不补距离、内外环长度相加及溢出语义。`axiom_query_eval_test` 新增解析参考、24 组缩放/倾斜平面/绕向/反向共边的带双孔凹面、盒体跨 Ops/Topo/Eval、退化/不支持/错误码、缓存与事务不污染、删除及回滚回归。实现与回归就绪，未运行构建或测试，交调度器在 build-agent 统一验收；需求保持进行中。曲边拓扑缺少裁剪参数而明确拒绝；曲边面积、样条/椭圆弧长、通用体积/重心/惯性矩与稳定求交仍待后续验收。
+
 - **FR-QUERY-001 第 54 切片**：公开 `TopologyQueryService::planar_face_area` 对平面直线边面片按当前拓扑顶点计算外环减内环的面积，单位为模型长度单位平方；盒体六面的解析面积由 `axiom_query_eval_test` 跨 Ops/Topo 验证。无效或已删除面不返回数值，曲面不支持与非共面拓扑返回结构化失败；替换曲面、删除面及回滚后的查询重算由同一测试验证。仅此受限子域为真实边界计算，不扩大到曲边面积或通用体质量属性。
 - **部分完成**：bbox、点分类、部分距离/近似求交、截面（偏占位）与批量接口雏形；`QueryService::mass_properties` 等已存在，但对多数体仍偏 **bbox 近似**，非工业级物理属性；**基本体**（盒/楔/球/柱/锥/环）已走统一解析路径；**Sweep** 质量口径集中到 `try_sweep_body_mass_properties` 并与查询共用；**布尔**结果体在 `BodyRecord` 中写入 **`has_boolean_op`/`boolean_op`**（`BooleanService::run`）后，`mass_properties` 可区分 **Union/Split** 与 **Subtract/Intersect**：**Intersect**+双盒且结果 bbox≈**AABB 交** 时按交叠长方体解析；**Subtract**+**LhsContainsRhs**+双盒时 **体积差** 与 **质心/惯性差分**（表面积为外+内占位和）；**LhsContainsRhs/RhsContainsLhs** 下取大包络体 **仅 Union/Split**（无 `has_boolean_op` 时保留原兼容启发式）；其余 Disjoint 并集相加、Touching/Overlapping 体积一致性、左体减、Sweep 操作数等规则同前；**Modified** `replace_face` 包围盒不变时继承来源；`axiom_ops_heal_test` 含 **相交体积**、**嵌套减**、面接触并集、包含并集、extrude+盒、`replace_face` 继承
 - **未开始/缺失**：长度/面积/体积/重心/惯性矩的工业级正确性；曲率/厚度分析；稳定的曲线-曲面/曲面-曲面求交

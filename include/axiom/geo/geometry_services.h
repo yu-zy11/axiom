@@ -86,6 +86,12 @@ public:
     Result<Point3> closest_point(CurveId curve_id, const Point3& point) const;
     Result<std::vector<Point3>> closest_points_batch(CurveId curve_id, std::span<const Point3> points) const;
     Result<Range1D> domain(CurveId curve_id) const;
+    /// 解析弧长，单位为模型长度单位；支持 LineSegment/Circle/CompositePolyline/CompositeChain。
+    /// 全域 Line 无有限长度；区间重载支持 Line，端点可反向，有限域外参数不钳制。
+    /// Chain 与 eval 一致：每个子曲线使用局部参数 [0,1]，不计不连续连接处的跳跃距离。
+    /// 支持类型的零区间/常值折线返回 0；不支持类型、非法参数或溢出返回失败且无值。
+    Result<Scalar> length(CurveId curve_id) const;
+    Result<Scalar> length(CurveId curve_id, Scalar t0, Scalar t1) const;
     Result<BoundingBox> bbox(CurveId curve_id) const;
     Result<std::vector<BoundingBox>> bbox_batch(std::span<const CurveId> curve_ids) const;
 

@@ -153,6 +153,8 @@
 | P2 | 进行中 | ops | 布尔非 `bbox` 结果子里程碑 | `axiom_boolean_*` | geo/topo |
 | P2～P3 | 进行中 | eval/rep | 重算指标、Rep 误差预算 | `axiom_query_eval_test`、`axiom_representation_io_test` | ops（部分） |
 
+- **FR-QUERY-001 第 63 功能包（待统一验收）**：实现 `CurveService::length` 全域/区间解析长度（直线有限区间、线段、圆、折线、嵌套复合链）和 `TopologyQueryService::edge_length/loop_length/face_boundary_length` 直线边长度接口族，共享区间/边/环计算，明确模型长度单位、反向/零区间、有限域拒绝、复合链局部参数、不连续连接不补距离、内外环长度相加及溢出语义。`axiom_query_eval_test` 新增解析参考、24 组缩放/倾斜平面/绕向/反向共边的带双孔凹面、盒体跨 Ops/Topo/Eval、退化/不支持/错误码、缓存与事务不污染、删除及回滚回归。实现与回归就绪，未运行构建或测试，交调度器在 build-agent 统一验收；需求保持进行中。曲边拓扑缺少裁剪参数而明确拒绝；曲边面积、样条/椭圆弧长、通用体积/重心/惯性矩与稳定求交仍待后续验收。
+
 ## 4. 下一未闭合批次
 
 1. BOOL 全阶段失败路径诊断绑定与工业数据集雏形。

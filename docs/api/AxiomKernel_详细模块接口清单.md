@@ -295,9 +295,15 @@ public:
   Result<Scalar> closest_parameter(CurveId, const Point3&) const;
   Result<Point3> closest_point(CurveId, const Point3&) const;
   Result<Range1D> domain(CurveId) const;
+  Result<Scalar> length(CurveId) const;
+  Result<Scalar> length(CurveId, Scalar t0, Scalar t1) const;
   Result<BoundingBox> bbox(CurveId) const;
 };
 ```
+
+`CurveService::length`（第 63 包待统一验收）以模型长度单位返回解析弧长；支持 Line 的有限区间、LineSegment、Circle、CompositePolyline 与由这些类型组成的 CompositeChain。不使用 bbox、网格、采样弦长或数值积分；差值、距离和累加使用 `long double` 中间量，最终舍入到 `Scalar`，不承诺任意尺度的精确算术。完整域重载复用区间算法；反向端点返回相同非负长度，零区间和常值/重复点折线返回 0。有界域外参数不钳制，返回 `InvalidInput / AXM-GEO-E-0004`；非有限端点、全域无限直线及结果溢出返回 `InvalidInput / AXM-CORE-E-0002`。不支持的样条、椭圆等返回 `NotImplemented / AXM-CORE-E-0004`，无效句柄返回 `InvalidInput / AXM-CORE-E-0001`，退化直线方向返回 `DegenerateGeometry / AXM-GEO-E-0003`。所有失败均无数值。
+
+复合链严格沿用现有 `eval` 约定：父域 `[0,n]` 每一格映射到对应子曲线的局部 `[0,1]`，**不缩放到子曲线完整域**；例如圆子曲线只贡献一弧度，折线子曲线只贡献首段，嵌套链只遍历其第一格。只检查/累加查询区间实际覆盖的非零子区间；不连续连接处不补直线距离。长度查询不写几何、拓扑、求值缓存或 Eval 失效状态，只新增诊断。
 
 `CurveService::closest_parameter/closest_point` 对 BSpline/NURBS 会在全域粗采样之外逐个覆盖非空结点分段，再进行阻尼局部细化；因此合法的极窄分段（包括满重数断点隔开的分支与常值退化分段）不会仅因宽度小于全域采样步长而被跳过。返回值仍是数值搜索结果，不构成任意曲线全局最优或工业精度保证。非有限查询点返回 `InvalidInput` / `AXM-CORE-E-0002`，不修改几何或求值缓存。
 线段最近参数使用解析投影与 `[0,1]` 钳制；投影的差值、点积和长度平方使用扩展精度中间量，使端点及查询点均有限但长度平方超出 `Scalar` 范围时仍可返回有限参数。无效句柄返回 `InvalidInput` / `AXM-GEO-E-0006`；退化线段在创建时返回 `InvalidInput` / `AXM-GEO-E-0001`，失败不修改几何或求值缓存。
@@ -352,6 +358,9 @@ public:
   Result<SurfaceId> surface_of_face(FaceId) const;
   // 平面直线边面片面积；模型长度单位的平方，外环减内环。
   Result<Scalar> planar_face_area(FaceId) const;
+  Result<Scalar> edge_length(EdgeId) const;
+  Result<Scalar> loop_length(LoopId) const;
+  Result<Scalar> face_boundary_length(FaceId) const;
   Result<std::vector<FaceId>> faces_of_shell(ShellId) const;
   Result<std::vector<ShellId>> shells_of_body(BodyId) const;
   /// 累计只读查询次数（嵌套调用只计最外层一次）；与 `TopologyTransaction::write_operation_count` 互补。
@@ -360,6 +369,8 @@ public:
 ```
 
 `planar_face_area` 从当前拓扑顶点和曲面法向计算边界面积，不使用 bbox 或三角网格。顶点到平面的距离须不超过内核线性容差；曲面必须为 Plane，边曲线必须为 Line/LineSegment。曲面或曲边不支持时返回 `NotImplemented / AXM-CORE-E-0004`；拓扑不完整、非共面或面积超出数值范围时返回 `InvalidTopology / AXM-TOPO-E-0003`（内环为 `E-0004`）；无效或已删除面返回 `InvalidInput / AXM-CORE-E-0001`，这些失败均无面积值。无内环时仅计外环；每次查询从当前模型重算，事务修改即时可见，回滚后恢复原面积。
+
+`edge_length / loop_length / face_boundary_length`（第 63 包待统一验收）组成直线边拓扑长度接口族，单位为模型长度单位。边长取当前两个拓扑端点的三维距离；两端点到 Line/LineSegment 的距离、线段端点越界距离不得超过内核线性容差，不投影或修复原模型。零长度或不一致边返回 `InvalidTopology / AXM-TOPO-E-0008`，缺失边引用返回 `InvalidTopology / AXM-TOPO-E-0006`。Edge 没有曲线裁剪参数，曲边明确返回 `NotImplemented / AXM-CORE-E-0004`，不以端点弦长代替弧长。环查询复用边查询，要求闭合且无重复成员；空/损坏/未闭合环返回 `InvalidTopology / AXM-TOPO-E-0002`。面查询复用环查询，返回**外环加全部内环**的长度，方向无关；支撑曲面类型不参与边界长度计算。缺失/重复面边界环返回 `InvalidTopology / AXM-TOPO-E-0003`（内环 `E-0004`），内层失败原样传播，不返回部分和。无效、已删除或已回滚的目标句柄返回 `InvalidInput / AXM-CORE-E-0001`，累加超出 Scalar 范围返回 `InvalidInput / AXM-CORE-E-0002`。所有失败均无数值；每次查询重算，事务内创建可查询、删除即时不可查询，回滚恢复原结果或使临时句柄失效。查询不修改模型、事务写计数、几何/网格缓存或 Eval 状态，只追加诊断和一次顶层查询审计。
 
 ### 6.2 拓扑事务接口
 

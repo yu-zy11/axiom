@@ -2,6 +2,7 @@
 #include <array>
 #include <cmath>
 #include <iostream>
+#include <limits>
 
 #include "axiom/diag/error_codes.h"
 #include "axiom/sdk/kernel.h"
@@ -21,9 +22,235 @@ bool has_issue_code(const axiom::DiagnosticReport& report, std::string_view code
     return false;
 }
 
+bool length_query_regression() {
+    axiom::Kernel kernel;
+    auto& geo = kernel.curve_service();
+    auto& topo = kernel.topology().query();
+    const auto equal = [](const axiom::Result<axiom::Scalar>& result, double expected) {
+        return result.status == axiom::StatusCode::Ok && result.value &&
+               std::abs(*result.value - expected) <= 1e-12 * std::max(1.0, std::abs(expected));
+    };
+    const auto failed = [&](const axiom::Result<axiom::Scalar>& result, axiom::StatusCode status,
+                            std::string_view code) {
+        const auto report = kernel.diagnostics().get(result.diagnostic_id);
+        return result.status == status && !result.value && report.value && has_issue_code(*report.value, code);
+    };
+    const double pi = std::acos(-1.0);
+    const auto line = kernel.curves().make_line({7, -2, 8}, {0, 0, 5});
+    const auto segment = kernel.curves().make_line_segment({0, 0, 0}, {3, 4, 0});
+    const auto circle = kernel.curves().make_circle({1, 2, 3}, {1, 2, 3}, 2);
+    const auto polyline = kernel.curves().make_composite_polyline(
+        std::array<axiom::Point3, 4>{{{0, 0, 0}, {3, 0, 0}, {3, 0, 0}, {3, 4, 0}}});
+    const auto constant = kernel.curves().make_composite_polyline(
+        std::array<axiom::Point3, 2>{{{1, 2, 3}, {1, 2, 3}}});
+    const auto ellipse = kernel.curves().make_ellipse({0, 0, 0}, {3, 0, 0}, {0, 2, 0});
+    const auto bezier = kernel.curves().make_bezier(
+        std::array<axiom::Point3, 3>{{{0, 0, 0}, {1, 2, 0}, {2, 0, 0}}});
+    if (!line.value || !segment.value || !circle.value || !polyline.value || !constant.value ||
+        !ellipse.value || !bezier.value) return false;
+    if (!equal(geo.length(*line.value, -3, 7), 10) ||
+        !equal(geo.length(*segment.value), 5) || !equal(geo.length(*segment.value, .8, .2), 3) ||
+        !equal(geo.length(*circle.value), 4 * pi) || !equal(geo.length(*circle.value, pi, 0), 2 * pi) ||
+        !equal(geo.length(*polyline.value), 7) || !equal(geo.length(*polyline.value, .5, 2.5), 3.5) ||
+        !equal(geo.length(*polyline.value, 1, 2), 0) || !equal(geo.length(*constant.value), 0) ||
+        !equal(geo.length(*circle.value, 2 * pi, 2 * pi), 0)) return false;
+    // Child domains are deliberately NOT rescaled: circle contributes one radian,
+    // polyline contributes its first segment, nested chain its first child.
+    const auto chain = kernel.curves().make_composite_chain(std::array{*segment.value, *circle.value, *polyline.value});
+    if (!chain.value) return false;
+    const auto nested = kernel.curves().make_composite_chain(std::array{*chain.value, *line.value});
+    const auto unsupported_chain = kernel.curves().make_composite_chain(std::array{*segment.value, *bezier.value});
+    if (!nested.value || !unsupported_chain.value || !equal(geo.length(*chain.value), 10) ||
+        !equal(geo.length(*chain.value, .5, 2.5), 6) || !equal(geo.length(*nested.value), 6) ||
+        !equal(geo.length(*unsupported_chain.value, 0, 1), 5)) return false;
+    const auto big = kernel.curves().make_line_segment({-1e200, 0, 0}, {1e200, 0, 0});
+    const auto overflow = kernel.curves().make_circle({0, 0, 0}, {0, 0, 1}, 1e308);
+    if (!big.value || !overflow.value || !equal(geo.length(*big.value), 2e200) ||
+        !equal(geo.length(*overflow.value, 0, .1), 1e307)) return false;
+    const auto objects_before = kernel.object_count_total();
+    const auto geometry_before = kernel.geometry_count();
+    const auto runtime_before = kernel.runtime_store_counts();
+    const auto invalid_before = kernel.eval_graph().invalid_node_count();
+    if (!objects_before.value || !geometry_before.value || !runtime_before.value || !invalid_before.value) return false;
+    for (const auto id : {*ellipse.value, *bezier.value, *unsupported_chain.value}) {
+        if (!failed(geo.length(id), axiom::StatusCode::NotImplemented, axiom::diag_codes::kCoreOperationUnsupported)) return false;
+    }
+    if (!failed(geo.length({}), axiom::StatusCode::InvalidInput, axiom::diag_codes::kCoreInvalidHandle) ||
+        !failed(geo.length(*line.value), axiom::StatusCode::InvalidInput, axiom::diag_codes::kCoreParameterOutOfRange) ||
+        !failed(geo.length(*overflow.value), axiom::StatusCode::InvalidInput, axiom::diag_codes::kCoreParameterOutOfRange) ||
+        !failed(geo.length(*line.value, -1e308, 1e308), axiom::StatusCode::InvalidInput, axiom::diag_codes::kCoreParameterOutOfRange)) return false;
+    for (const double bad : {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity(),
+                             -std::numeric_limits<double>::infinity()}) {
+        if (!failed(geo.length(*segment.value, bad, 0), axiom::StatusCode::InvalidInput,
+                    axiom::diag_codes::kCoreParameterOutOfRange) ||
+            !failed(geo.length(*segment.value, 0, bad), axiom::StatusCode::InvalidInput,
+                    axiom::diag_codes::kCoreParameterOutOfRange)) return false;
+    }
+    for (const auto id : {*segment.value, *circle.value, *polyline.value, *chain.value}) {
+        if (!failed(geo.length(id, -.1, 0), axiom::StatusCode::InvalidInput, axiom::diag_codes::kGeoParameterOutOfDomain) ||
+            !failed(geo.length(id, 0, 100), axiom::StatusCode::InvalidInput, axiom::diag_codes::kGeoParameterOutOfDomain)) return false;
+    }
+    if (!equal(geo.length(*segment.value), 5) || kernel.object_count_total().value != objects_before.value ||
+        kernel.geometry_count().value != geometry_before.value || kernel.eval_graph().invalid_node_count().value != invalid_before.value)
+        return false;
+    const auto runtime_after = kernel.runtime_store_counts();
+    if (!runtime_after.value || runtime_before.value->curve_eval_cache_entries != runtime_after.value->curve_eval_cache_entries ||
+        runtime_before.value->surface_eval_cache_entries != runtime_after.value->surface_eval_cache_entries ||
+        runtime_before.value->mesh_records != runtime_after.value->mesh_records ||
+        runtime_before.value->tessellation_cache_entries != runtime_after.value->tessellation_cache_entries ||
+        runtime_before.value->face_tessellation_cache_entries != runtime_after.value->face_tessellation_cache_entries ||
+        runtime_before.value->intersection_records != runtime_after.value->intersection_records) return false;
+
+    // Full boundary workflow: concave outer loop + two holes, independent winding,
+    // reversed coedges, two planes and three model-unit scales (24 variants).
+    for (double scale : {0.001, 1.0, 1000.0}) {
+        for (bool tilted : {false, true}) {
+            for (bool reverse_outer : {false, true}) {
+                for (bool reverse_holes : {false, true}) {
+                    const auto point = [&](double x, double y) -> axiom::Point3 {
+                        return tilted ? axiom::Point3{10 + x * scale, 20 + .6 * y * scale, 30 + .8 * y * scale}
+                                      : axiom::Point3{10 + x * scale, 20 + y * scale, 30};
+                    };
+                    const auto plane = kernel.surfaces().make_plane(point(0, 0), tilted ? axiom::Vec3{0, -.8, .6} : axiom::Vec3{0, 0, 1});
+                    if (!plane.value) return false;
+                    auto txn = kernel.topology().begin_transaction();
+                    const auto make_loop = [&](std::vector<axiom::Point3> points, bool reverse) -> axiom::LoopId {
+                        if (reverse) std::reverse(points.begin(), points.end());
+                        std::vector<axiom::VertexId> vertices;
+                        std::vector<axiom::CoedgeId> coedges;
+                        for (const auto& p : points) {
+                            const auto v = txn.create_vertex(p);
+                            if (!v.value) return {};
+                            vertices.push_back(*v.value);
+                        }
+                        for (std::size_t i = 0; i < points.size(); ++i) {
+                            const auto j = (i + 1) % points.size();
+                            const auto c = kernel.curves().make_line_segment(points[j], points[i]);
+                            if (!c.value) return {};
+                            const auto e = txn.create_edge(*c.value, vertices[j], vertices[i]);
+                            const auto curve_length = geo.length(*c.value);
+                            if (!e.value || !curve_length.value || !equal(topo.edge_length(*e.value), *curve_length.value)) return {};
+                            const auto ce = txn.create_coedge(*e.value, true);
+                            if (!ce.value) return {};
+                            coedges.push_back(*ce.value);
+                        }
+                        const auto loop = txn.create_loop(coedges);
+                        return loop.value.value_or(axiom::LoopId{});
+                    };
+                    const auto outer = make_loop({point(0, 0), point(6, 0), point(6, 4), point(3, 4), point(3, 6), point(0, 6)}, reverse_outer);
+                    const auto hole1 = make_loop({point(1, 1), point(2, 1), point(2, 2), point(1, 2)}, reverse_holes);
+                    const auto hole2 = make_loop({point(4, 1), point(5, 1), point(5, 2), point(4, 2)}, !reverse_holes);
+                    if (!outer.value || !hole1.value || !hole2.value) return false;
+                    const auto face = txn.create_face(*plane.value, outer, std::array{hole2, hole1});
+                    if (!face.value) return false;
+                    const auto writes = txn.write_operation_count();
+                    const auto audit = topo.query_operation_count();
+                    if (!equal(topo.face_boundary_length(*face.value), 32 * scale)) return false;
+                    const auto audit_after = topo.query_operation_count();
+                    if (!audit.value || !audit_after.value || *audit_after.value != *audit.value + 1 ||
+                        !equal(topo.loop_length(outer), 24 * scale) || !equal(topo.loop_length(hole1), 4 * scale) ||
+                        !failed(topo.edge_length({}), axiom::StatusCode::InvalidInput, axiom::diag_codes::kCoreInvalidHandle) ||
+                        !failed(topo.loop_length({}), axiom::StatusCode::InvalidInput, axiom::diag_codes::kCoreInvalidHandle) ||
+                        !failed(topo.face_boundary_length({}), axiom::StatusCode::InvalidInput, axiom::diag_codes::kCoreInvalidHandle) ||
+                        txn.write_operation_count().value != writes.value || txn.commit().status != axiom::StatusCode::Ok) return false;
+                    {
+                        auto edit = kernel.topology().begin_transaction();
+                        if (edit.delete_face(*face.value).status != axiom::StatusCode::Ok ||
+                            !failed(topo.face_boundary_length(*face.value), axiom::StatusCode::InvalidInput, axiom::diag_codes::kCoreInvalidHandle) ||
+                            edit.rollback().status != axiom::StatusCode::Ok || !equal(topo.face_boundary_length(*face.value), 32 * scale)) return false;
+                    }
+                }
+            }
+        }
+    }
+    // Public creation permits geometrically inconsistent edges: queries must reject
+    // them without manufacturing a chord for a curved edge or mutating the transaction.
+    auto txn = kernel.topology().begin_transaction();
+    const auto v0 = txn.create_vertex({0, 0, 0});
+    const auto v1 = txn.create_vertex({1.5, 2, 0});
+    const auto v2 = txn.create_vertex({3, 4, 0});
+    const auto off = txn.create_vertex({0, 0, 1});
+    const auto outside = txn.create_vertex({6, 8, 0});
+    const auto coincident = txn.create_vertex({0, 0, 0});
+    if (!v0.value || !v1.value || !v2.value || !off.value || !outside.value || !coincident.value) return false;
+    const auto partial = txn.create_edge(*segment.value, *v2.value, *v1.value);
+    const auto mismatch = txn.create_edge(*segment.value, *v0.value, *off.value);
+    const auto out_of_domain = txn.create_edge(*segment.value, *v0.value, *outside.value);
+    const auto degenerate = txn.create_edge(*segment.value, *v0.value, *coincident.value);
+    const auto curved = txn.create_edge(*circle.value, *v0.value, *v2.value);
+    if (!partial.value || !mismatch.value || !out_of_domain.value || !degenerate.value || !curved.value) return false;
+    const auto straight = kernel.curves().make_line({0, 0, 0}, {3, 4, 0});
+    const auto huge_line = kernel.curves().make_line({0, 0, 0}, {1, 0, 0});
+    const auto huge0 = txn.create_vertex({-1e308, 0, 0});
+    const auto huge1 = txn.create_vertex({1e308, 0, 0});
+    if (!straight.value || !huge_line.value || !huge0.value || !huge1.value) return false;
+    const auto linear = txn.create_edge(*straight.value, *v0.value, *outside.value);
+    const auto huge_edge = txn.create_edge(*huge_line.value, *huge0.value, *huge1.value);
+    if (!linear.value || !huge_edge.value || !equal(topo.edge_length(*linear.value), 10) ||
+        !failed(topo.edge_length(*huge_edge.value), axiom::StatusCode::InvalidInput, axiom::diag_codes::kCoreParameterOutOfRange)) return false;
+    const auto curved_return = txn.create_edge(*circle.value, *v2.value, *v0.value);
+    if (!curved_return.value) return false;
+    const auto ce0 = txn.create_coedge(*curved.value, false);
+    const auto ce1 = txn.create_coedge(*curved_return.value, false);
+    if (!ce0.value || !ce1.value) return false;
+    const auto curved_loop = txn.create_loop(std::array{*ce0.value, *ce1.value});
+    if (!curved_loop.value || !failed(topo.loop_length(*curved_loop.value), axiom::StatusCode::NotImplemented,
+                                     axiom::diag_codes::kCoreOperationUnsupported)) return false;
+    const auto curved_plane = kernel.surfaces().make_plane({1, 2, 3}, {1, 2, 3});
+    if (!curved_plane.value) return false;
+    const auto curved_face = txn.create_face(*curved_plane.value, *curved_loop.value, {});
+    if (!curved_face.value || !failed(topo.face_boundary_length(*curved_face.value), axiom::StatusCode::NotImplemented,
+                                     axiom::diag_codes::kCoreOperationUnsupported)) return false;
+    const auto writes = txn.write_operation_count();
+    const auto objects = kernel.object_count_total();
+    const auto runtime_topo_before = kernel.runtime_store_counts();
+    const auto geometry_topo_before = kernel.geometry_count();
+    const auto invalid_topo_before = kernel.eval_graph().invalid_node_count();
+    if (!equal(topo.edge_length(*partial.value), 2.5) ||
+        !failed(topo.edge_length(*curved.value), axiom::StatusCode::NotImplemented, axiom::diag_codes::kCoreOperationUnsupported)) return false;
+    for (const auto edge : {*mismatch.value, *out_of_domain.value, *degenerate.value}) {
+        if (!failed(topo.edge_length(edge), axiom::StatusCode::InvalidTopology, axiom::diag_codes::kTopoCurveTopologyMismatch)) return false;
+    }
+    const auto runtime_topo_after = kernel.runtime_store_counts();
+    if (!runtime_topo_before.value || !runtime_topo_after.value ||
+        runtime_topo_before.value->curve_eval_cache_entries != runtime_topo_after.value->curve_eval_cache_entries ||
+        runtime_topo_before.value->surface_eval_cache_entries != runtime_topo_after.value->surface_eval_cache_entries ||
+        runtime_topo_before.value->mesh_records != runtime_topo_after.value->mesh_records ||
+        runtime_topo_before.value->tessellation_cache_entries != runtime_topo_after.value->tessellation_cache_entries ||
+        runtime_topo_before.value->face_tessellation_cache_entries != runtime_topo_after.value->face_tessellation_cache_entries ||
+        runtime_topo_before.value->intersection_records != runtime_topo_after.value->intersection_records ||
+        kernel.geometry_count().value != geometry_topo_before.value ||
+        kernel.eval_graph().invalid_node_count().value != invalid_topo_before.value) return false;
+    if (txn.write_operation_count().value != writes.value || kernel.object_count_total().value != objects.value ||
+        !equal(topo.edge_length(*partial.value), 2.5) || txn.rollback().status != axiom::StatusCode::Ok ||
+        !failed(topo.edge_length(*partial.value), axiom::StatusCode::InvalidInput, axiom::diag_codes::kCoreInvalidHandle) ||
+        !failed(topo.loop_length(*curved_loop.value), axiom::StatusCode::InvalidInput, axiom::diag_codes::kCoreInvalidHandle)) return false;
+    // Isolated Eval graph: successful and failed reads preserve the bound node.
+    const auto box = kernel.primitives().box({0, 0, 0}, 2, 3, 4);
+    if (!box.value) return false;
+    const auto node = kernel.eval_graph().register_node(axiom::NodeKind::Geometry,
+        std::string("body:") + std::to_string(box.value->value));
+    const auto faces = topo.faces_of_body(*box.value);
+    if (!node.value || !faces.value || faces.value->size() != 6 ||
+        kernel.eval_graph().recompute(*node.value).status != axiom::StatusCode::Ok) return false;
+    const auto invalid = kernel.eval_graph().is_invalid(*node.value);
+    const auto recomputes = kernel.eval_graph().recompute_count(*node.value);
+    for (const auto face : *faces.value) {
+        if (!topo.face_boundary_length(face).value) return false;
+    }
+    if (!failed(topo.face_boundary_length({}), axiom::StatusCode::InvalidInput, axiom::diag_codes::kCoreInvalidHandle) ||
+        kernel.eval_graph().is_invalid(*node.value).value != invalid.value ||
+        kernel.eval_graph().recompute_count(*node.value).value != recomputes.value) return false;
+    return true;
+}
+
 }  // namespace
 
 int main() {
+    if (!length_query_regression()) {
+        std::cerr << "analytic length query regression failed\n";
+        return 1;
+    }
     axiom::Kernel kernel;
 
     auto line = kernel.curves().make_line({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
@@ -68,6 +295,14 @@ int main() {
     if (!box.value) return 1;
     const auto faces = kernel.topology().query().faces_of_body(*box.value);
     if (!faces.value || faces.value->size() != 6) return 1;
+    std::array<double, 6> perimeters{};
+    for (std::size_t i = 0; i < perimeters.size(); ++i) {
+        const auto measured = kernel.topology().query().face_boundary_length((*faces.value)[i]);
+        if (!measured.value || measured.status != axiom::StatusCode::Ok) return 1;
+        perimeters[i] = *measured.value;
+    }
+    std::sort(perimeters.begin(), perimeters.end());
+    if (perimeters != std::array<double, 6>{10, 10, 12, 12, 14, 14}) return 1;
     std::array<double, 6> areas{};
     for (std::size_t i = 0; i < areas.size(); ++i) {
         const auto measured = kernel.topology().query().planar_face_area((*faces.value)[i]);
@@ -81,6 +316,7 @@ int main() {
     }
     const auto face = faces.value->front();
     const auto original = kernel.topology().query().planar_face_area(face);
+    const auto original_boundary = kernel.topology().query().face_boundary_length(face);
     const auto missing = kernel.topology().query().planar_face_area(axiom::FaceId{});
     const auto missing_report = kernel.diagnostics().get(missing.diagnostic_id);
     if (!original.value || missing.status != axiom::StatusCode::InvalidInput || missing.value ||
@@ -90,6 +326,7 @@ int main() {
     {
         auto txn = kernel.topology().begin_transaction();
         if (txn.replace_surface(face, *sphere.value).status != axiom::StatusCode::Ok) return 1;
+        if (kernel.topology().query().face_boundary_length(face).value != original_boundary.value) return 1;
         const auto curved = kernel.topology().query().planar_face_area(face);
         const auto curved_report = kernel.diagnostics().get(curved.diagnostic_id);
         if (curved.status != axiom::StatusCode::NotImplemented || curved.value ||
@@ -111,10 +348,13 @@ int main() {
         auto txn = kernel.topology().begin_transaction();
         if (txn.delete_face(face).status != axiom::StatusCode::Ok) return 1;
         const auto deleted = kernel.topology().query().planar_face_area(face);
+        const auto deleted_boundary = kernel.topology().query().face_boundary_length(face);
+        if (deleted_boundary.status != axiom::StatusCode::InvalidInput || deleted_boundary.value) return 1;
         if (deleted.status != axiom::StatusCode::InvalidInput || deleted.value ||
             txn.rollback().status != axiom::StatusCode::Ok ||
             kernel.topology().query().planar_face_area(face).value != original.value) return 1;
     }
+    if (kernel.topology().query().face_boundary_length(face).value != original_boundary.value) return 1;
     const auto hole_plane = kernel.surfaces().make_plane({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0});
     if (!hole_plane.value) return 1;
     {

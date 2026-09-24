@@ -667,6 +667,128 @@ Result<BoundingBox> TopologyQueryService::bbox_of_face(FaceId face_id) const {
   return ok_result(bbox, state_->create_diagnostic("已查询面包围盒"));
 }
 
+Result<Scalar> TopologyQueryService::edge_length(EdgeId edge_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
+  const auto edge = state_->edges.find(edge_id.value);
+  if (edge == state_->edges.end()) {
+    return detail::invalid_input_result<Scalar>(
+        *state_, diag_codes::kCoreInvalidHandle, "边长度查询失败：目标边不存在", "边长度查询失败");
+  }
+  const auto curve = state_->curves.find(edge->second.curve_id.value);
+  const auto v0 = state_->vertices.find(edge->second.v0.value);
+  const auto v1 = state_->vertices.find(edge->second.v1.value);
+  if (curve == state_->curves.end() || v0 == state_->vertices.end() || v1 == state_->vertices.end()) {
+    return detail::failed_result<Scalar>(
+        *state_, StatusCode::InvalidTopology, diag_codes::kTopoDanglingEdge,
+        "边长度查询失败：曲线或顶点引用无效", "边长度查询失败");
+  }
+  const auto &c = curve->second;
+  if (c.kind != detail::CurveKind::Line && c.kind != detail::CurveKind::LineSegment) {
+    return detail::failed_result<Scalar>(
+        *state_, StatusCode::NotImplemented, diag_codes::kCoreOperationUnsupported,
+        "边长度查询失败：曲边尚无明确裁剪区间", "边长度查询失败");
+  }
+  const auto invalid_geometry = [&]() {
+    return detail::failed_result<Scalar>(
+        *state_, StatusCode::InvalidTopology, diag_codes::kTopoCurveTopologyMismatch,
+        "边长度查询失败：端点退化或与支撑曲线不一致", "边长度查询失败");
+  };
+  Point3 origin = c.origin;
+  long double dx = c.direction.x, dy = c.direction.y, dz = c.direction.z;
+  if (c.kind == detail::CurveKind::LineSegment) {
+    if (c.poles.size() != 2) return invalid_geometry();
+    origin = c.poles.front();
+    dx = static_cast<long double>(c.poles[1].x) - origin.x;
+    dy = static_cast<long double>(c.poles[1].y) - origin.y;
+    dz = static_cast<long double>(c.poles[1].z) - origin.z;
+  }
+  const auto norm = std::hypot(dx, dy, dz);
+  if (!(norm > 0.0L) || !std::isfinite(norm)) return invalid_geometry();
+  dx /= norm;
+  dy /= norm;
+  dz /= norm;
+  const long double tolerance = state_->config.tolerance.linear;
+  for (const auto &point : {v0->second.point, v1->second.point}) {
+    const long double x = static_cast<long double>(point.x) - origin.x;
+    const long double y = static_cast<long double>(point.y) - origin.y;
+    const long double z = static_cast<long double>(point.z) - origin.z;
+    const auto distance = std::hypot(y * dz - z * dy, z * dx - x * dz, x * dy - y * dx);
+    const auto along = x * dx + y * dy + z * dz;
+    if (!std::isfinite(distance) || !std::isfinite(along) || distance > tolerance ||
+        (c.kind == detail::CurveKind::LineSegment &&
+         (along < -tolerance || along > norm + tolerance))) return invalid_geometry();
+  }
+  const auto &a = v0->second.point;
+  const auto &b = v1->second.point;
+  const auto length = std::hypot(static_cast<long double>(b.x) - a.x,
+                               static_cast<long double>(b.y) - a.y,
+                               static_cast<long double>(b.z) - a.z);
+  if (!(length > 0.0L)) return invalid_geometry();
+  if (!std::isfinite(length) || length > std::numeric_limits<Scalar>::max()) {
+    return detail::invalid_input_result<Scalar>(
+        *state_, diag_codes::kCoreParameterOutOfRange,
+        "边长度查询失败：结果超出数值范围", "边长度查询失败");
+  }
+  return ok_result(static_cast<Scalar>(length), state_->create_diagnostic("已查询直线边长度"));
+}
+
+Result<Scalar> TopologyQueryService::loop_length(LoopId loop_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
+  const auto loop = state_->loops.find(loop_id.value);
+  if (loop == state_->loops.end()) {
+    return detail::invalid_input_result<Scalar>(
+        *state_, diag_codes::kCoreInvalidHandle, "环长度查询失败：目标环不存在", "环长度查询失败");
+  }
+  std::string reason;
+  if (!validate_loop_record(*state_, loop->second, reason)) {
+    return detail::failed_result<Scalar>(
+        *state_, StatusCode::InvalidTopology, diag_codes::kTopoLoopNotClosed,
+        "环长度查询失败：" + reason, "环长度查询失败");
+  }
+  long double total = 0.0L;
+  for (const auto coedge_id : loop->second.coedges) {
+    const auto measured = edge_length(state_->coedges.at(coedge_id.value).edge_id);
+    if (!measured.value) return error_result<Scalar>(measured.status, measured.diagnostic_id);
+    total += *measured.value;
+  }
+  if (!std::isfinite(total) || total > std::numeric_limits<Scalar>::max()) {
+    return detail::invalid_input_result<Scalar>(
+        *state_, diag_codes::kCoreParameterOutOfRange,
+        "环长度查询失败：结果超出数值范围", "环长度查询失败");
+  }
+  return ok_result(static_cast<Scalar>(total), state_->create_diagnostic("已查询环长度"));
+}
+
+Result<Scalar> TopologyQueryService::face_boundary_length(FaceId face_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
+  const auto face = state_->faces.find(face_id.value);
+  if (face == state_->faces.end()) {
+    return detail::invalid_input_result<Scalar>(
+        *state_, diag_codes::kCoreInvalidHandle, "面边界长度查询失败：目标面不存在", "面边界长度查询失败");
+  }
+  std::vector<LoopId> loops{face->second.outer_loop};
+  loops.insert(loops.end(), face->second.inner_loops.begin(), face->second.inner_loops.end());
+  std::unordered_set<std::uint64_t> seen;
+  long double total = 0.0L;
+  for (std::size_t i = 0; i < loops.size(); ++i) {
+    if (!state_->loops.contains(loops[i].value) || !seen.insert(loops[i].value).second) {
+      return detail::failed_result<Scalar>(
+          *state_, StatusCode::InvalidTopology,
+          i == 0 ? diag_codes::kTopoFaceOuterLoopInvalid : diag_codes::kTopoFaceInnerLoopInvalid,
+          "面边界长度查询失败：边界环缺失或重复", "面边界长度查询失败");
+    }
+    const auto measured = loop_length(loops[i]);
+    if (!measured.value) return error_result<Scalar>(measured.status, measured.diagnostic_id);
+    total += *measured.value;
+  }
+  if (!std::isfinite(total) || total > std::numeric_limits<Scalar>::max()) {
+    return detail::invalid_input_result<Scalar>(
+        *state_, diag_codes::kCoreParameterOutOfRange,
+        "面边界长度查询失败：结果超出数值范围", "面边界长度查询失败");
+  }
+  return ok_result(static_cast<Scalar>(total), state_->create_diagnostic("已查询面边界长度"));
+}
+
 Result<Scalar> TopologyQueryService::planar_face_area(FaceId face_id) const {
   TopoQueryAuditScope _topo_query_audit{state_};
   const auto face = state_->faces.find(face_id.value);

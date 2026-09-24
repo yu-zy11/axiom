@@ -588,3 +588,18 @@
 后续如果继续细化，建议再补一份：
 
 `docs/diagnostics/AxiomKernel_用户可读错误文案映射表.md`
+
+
+### FR-QUERY-001 长度查询的现有码复用（第 63 包待统一验收）
+
+- `AXM-CORE-E-0001`：长度查询目标句柄无效（包括删除或回滚后的句柄）。
+- `AXM-CORE-E-0002`：非有限长度参数、请求无限直线全域长度、长度或累计长度超出 Scalar 范围；无数值。
+- `AXM-GEO-E-0004`：有界曲线长度参数超出定义域；不做钳制。
+- `AXM-GEO-E-0003`：长度查询所用直线方向退化；`DegenerateGeometry`。
+- `AXM-CORE-E-0004`：尚不支持的曲线长度类型或缺少裁剪区间的拓扑曲边；`NotImplemented`。
+- `AXM-TOPO-E-0008`：直线边长度查询的端点重合、端点偏离支撑曲线或超出线段范围；`InvalidTopology`。
+- `AXM-TOPO-E-0006`：边引用的曲线/顶点缺失；`InvalidTopology`。
+- `AXM-TOPO-E-0002`：环为空、未闭合或成员关系损坏；`InvalidTopology`。
+- `AXM-TOPO-E-0003/0004`：面外/内环引用缺失或重复；`InvalidTopology`。
+
+边→环→面失败原样传播诊断且不返回部分和；查询只增加诊断和 Topo 查询审计，不修改模型、事务写计数、几何/网格缓存或 Eval 失效状态。

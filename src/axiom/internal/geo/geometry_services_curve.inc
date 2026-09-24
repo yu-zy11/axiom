@@ -712,6 +712,95 @@ Result<Range1D> CurveService::domain(CurveId curve_id) const {
                    state_->create_diagnostic("已返回曲线定义域"));
 }
 
+Result<Scalar> CurveService::length(CurveId curve_id) const {
+  const auto range = domain(curve_id);
+  if (!range.value) return error_result<Scalar>(range.status, range.diagnostic_id);
+  return length(curve_id, range.value->min, range.value->max);
+}
+
+Result<Scalar> CurveService::length(CurveId curve_id, Scalar t0, Scalar t1) const {
+  if (!detail::has_curve(*state_, curve_id)) {
+    return detail::invalid_input_result<Scalar>(
+        *state_, diag_codes::kCoreInvalidHandle,
+        "曲线长度查询失败：目标曲线不存在", "曲线长度查询失败");
+  }
+  if (!std::isfinite(t0) || !std::isfinite(t1)) {
+    return detail::invalid_input_result<Scalar>(
+        *state_, diag_codes::kCoreParameterOutOfRange,
+        "曲线长度查询失败：需要有限参数区间", "曲线长度查询失败");
+  }
+  // Iterate the same local [0,1] child intervals as eval; never approximate
+  // curved geometry by chords, and do not add jumps between chain children.
+  struct Interval { CurveId id; Scalar a; Scalar b; };
+  std::vector<Interval> pending{{curve_id, std::min(t0, t1), std::max(t0, t1)}};
+  long double total = 0.0L;
+  while (!pending.empty()) {
+    const auto interval = pending.back();
+    pending.pop_back();
+    const auto it = state_->curves.find(interval.id.value);
+    if (it == state_->curves.end()) {
+      return detail::invalid_input_result<Scalar>(
+          *state_, diag_codes::kCoreInvalidHandle,
+          "曲线长度查询失败：子曲线不存在", "曲线长度查询失败");
+    }
+    const auto &curve = it->second;
+    const auto range = curve_domain(curve);
+    if (interval.a < range.min || interval.b > range.max) {
+      return detail::invalid_input_result<Scalar>(
+          *state_, diag_codes::kGeoParameterOutOfDomain,
+          "曲线长度查询失败：参数超出定义域", "曲线长度查询失败");
+    }
+    const long double width = static_cast<long double>(interval.b) - interval.a;
+    switch (curve.kind) {
+    case detail::CurveKind::Line: {
+      const long double speed = std::hypot(static_cast<long double>(curve.direction.x),
+                                           curve.direction.y, curve.direction.z);
+      if (!(speed > 0.0L) || !std::isfinite(speed)) {
+        return detail::failed_result<Scalar>(
+            *state_, StatusCode::DegenerateGeometry, diag_codes::kGeoDegenerateGeometry,
+            "曲线长度查询失败：直线方向退化", "曲线长度查询失败");
+      }
+      total += width * speed;
+      break;
+    }
+    case detail::CurveKind::Circle:
+      total += width * curve.radius;
+      break;
+    case detail::CurveKind::LineSegment:
+    case detail::CurveKind::CompositePolyline:
+      for (std::size_t i = 0; i + 1 < curve.poles.size(); ++i) {
+        const long double overlap = std::max(0.0L,
+            std::min(static_cast<long double>(interval.b), static_cast<long double>(i + 1)) -
+            std::max(static_cast<long double>(interval.a), static_cast<long double>(i)));
+        if (overlap == 0.0L) continue;
+        const auto &a = curve.poles[i];
+        const auto &b = curve.poles[i + 1];
+        total += overlap * std::hypot(static_cast<long double>(b.x) - a.x,
+                                      static_cast<long double>(b.y) - a.y,
+                                      static_cast<long double>(b.z) - a.z);
+      }
+      break;
+    case detail::CurveKind::CompositeChain:
+      for (std::size_t i = 0; i < curve.children.size(); ++i) {
+        const auto a = std::max(interval.a, static_cast<Scalar>(i));
+        const auto b = std::min(interval.b, static_cast<Scalar>(i + 1));
+        if (a < b) pending.push_back({curve.children[i], a - static_cast<Scalar>(i), b - static_cast<Scalar>(i)});
+      }
+      break;
+    default:
+      return detail::failed_result<Scalar>(
+          *state_, StatusCode::NotImplemented, diag_codes::kCoreOperationUnsupported,
+          "曲线长度查询失败：该曲线类型尚无解析长度实现", "曲线长度查询失败");
+    }
+    if (!std::isfinite(total) || total > std::numeric_limits<Scalar>::max()) {
+      return detail::invalid_input_result<Scalar>(
+          *state_, diag_codes::kCoreParameterOutOfRange,
+          "曲线长度查询失败：结果超出数值范围", "曲线长度查询失败");
+    }
+  }
+  return ok_result(static_cast<Scalar>(total), state_->create_diagnostic("已查询解析曲线长度"));
+}
+
 Result<BoundingBox> CurveService::bbox(CurveId curve_id) const {
   const auto it = state_->curves.find(curve_id.value);
   if (it == state_->curves.end()) {

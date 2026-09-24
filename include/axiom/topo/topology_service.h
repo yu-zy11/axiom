@@ -70,6 +70,14 @@ public:
     /// 平面、直线边面片的真实边界面积（外环减内环），单位为模型长度单位的平方。
     /// 不支持曲边/非平面面；无效面返回失败且无数值。每次从当前拓扑重算，不缓存。
     Result<Scalar> planar_face_area(FaceId face_id) const;
+    /// 当前 Line/LineSegment 边的端点距离，单位为模型长度单位；端点须位于支撑曲线范围内。
+    /// 曲边缺少裁剪区间，返回 NotImplemented；退化/不一致拓扑返回 InvalidTopology。
+    Result<Scalar> edge_length(EdgeId edge_id) const;
+    /// 按闭合环的 coedge 累加边长，不受方向影响；空环/不闭合环失败且无值。
+    Result<Scalar> loop_length(LoopId loop_id) const;
+    /// 外环加全部内环的边界长度（不是外环减内环）；不要求支撑曲面为平面。
+    /// 每次重算，不写几何/网格缓存；事务内修改即时可见，回滚后恢复。
+    Result<Scalar> face_boundary_length(FaceId face_id) const;
     Result<BoundingBox> bbox_of_shell(ShellId shell_id) const;
     Result<BoundingBox> bbox_of_body_from_topology(BodyId body_id) const;
     Result<std::vector<FaceId>> faces_of_body(BodyId body_id) const;

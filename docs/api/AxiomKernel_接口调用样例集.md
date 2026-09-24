@@ -624,3 +624,27 @@ TEST(Blend, too_large_radius_should_return_stable_error_code) {
 
 1. `docs/api/AxiomKernel_REST与远程调用样例集.md`
 2. `docs/api/AxiomKernel_插件开发样例集.md`
+
+
+### 解析长度查询（FR-QUERY-001，第 63 包待统一验收）
+
+```cpp
+auto segment = kernel.curves().make_line_segment({0, 0, 0}, {3, 4, 0});
+if (segment.value) {
+    auto full = kernel.curve_service().length(*segment.value);       // 5 模型长度单位
+    auto part = kernel.curve_service().length(*segment.value, .8, .2); // 3，方向无关
+}
+auto box = kernel.primitives().box({0, 0, 0}, 2, 3, 4);
+if (box.value) {
+    auto faces = kernel.topology().query().faces_of_body(*box.value);
+    if (faces.value) {
+        for (auto face : *faces.value) {
+            auto boundary = kernel.topology().query().face_boundary_length(face);
+            // 成功值为 10、12、14 各两次；含孔面会加上每个孔的周长。
+            // 失败时无 value，可用 diagnostic_id 检索原因。
+        }
+    }
+}
+```
+
+曲线长度目前支持直线有限区间、线段、圆、折线和复合链；复合链沿用 eval 的子曲线局部 `[0,1]`，不自动取子曲线全域。拓扑长度目前支持直线边，曲边因缺少裁剪参数返回不支持；不以弦长冒充曲边弧长。
