@@ -106,6 +106,83 @@ int main() {
             topology.query().has_vertex(*committed.value).value != std::optional<bool>{true}) return 1;
     }
 
+    // NFR-REL-001: damaged inner loops must be rejected before shell ID allocation.
+    {
+        auto state = std::make_shared<axiom::detail::KernelState>(axiom::KernelConfig{});
+        const axiom::SurfaceId surface{state->allocate_id()};
+        state->surfaces.emplace(surface.value, axiom::detail::SurfaceRecord{});
+        const axiom::CurveId curve{state->allocate_id()};
+        state->curves.emplace(curve.value, axiom::detail::CurveRecord{});
+        axiom::TopologyService topology{state};
+        axiom::DiagnosticService diagnostics{state};
+        auto setup = topology.begin_transaction();
+        const auto v0 = setup.create_vertex({0, 0, 0});
+        const auto v1 = setup.create_vertex({1, 0, 0});
+        const auto v2 = setup.create_vertex({0, 1, 0});
+        if (!v0.value || !v1.value || !v2.value) { std::cerr << "inner shell setup vertices\n"; return 1; }
+        const auto e0 = setup.create_edge(curve, *v0.value, *v1.value);
+        const auto e1 = setup.create_edge(curve, *v1.value, *v2.value);
+        const auto e2 = setup.create_edge(curve, *v2.value, *v0.value);
+        if (!e0.value || !e1.value || !e2.value) { std::cerr << "inner shell setup edges\n"; return 1; }
+        const auto c0 = setup.create_coedge(*e0.value, false);
+        const auto c1 = setup.create_coedge(*e1.value, false);
+        const auto c2 = setup.create_coedge(*e2.value, false);
+        if (!c0.value || !c1.value || !c2.value) { std::cerr << "inner shell setup coedges\n"; return 1; }
+        const auto outer = setup.create_loop(std::array{*c0.value, *c1.value, *c2.value});
+        if (!outer.value) { std::cerr << "inner shell setup loop\n"; return 1; }
+        const auto face = setup.create_face(surface, *outer.value, {});
+        if (!face.value || setup.commit().status != axiom::StatusCode::Ok) { std::cerr << "inner shell setup face\n"; return 1; }
+        const auto edge_to_coedges = state->edge_to_coedges;
+        const auto coedge_to_loop = state->coedge_to_loop;
+        const auto loop_to_faces = state->loop_to_faces;
+        const auto face_to_shells = state->face_to_shells;
+
+        auto txn = topology.begin_transaction();
+        const auto next_id = state->next_id;
+        const axiom::LoopId missing_loop{next_id + 1};
+        state->faces.at(face.value->value).inner_loops = {missing_loop};
+        const auto missing = txn.create_shell(std::array{*face.value});
+        const auto report = diagnostics.get(missing.diagnostic_id);
+        if (missing.status != axiom::StatusCode::InvalidTopology || missing.value ||
+            !report.value || !issue_links_entities(*report.value,
+                axiom::diag_codes::kTopoShellNotClosed, {face.value->value, missing_loop.value}) ||
+            state->next_id != next_id || !state->shells.empty() ||
+            txn.created_shell_count().value != std::optional<std::uint64_t>{0} ||
+            txn.write_operation_count().value != std::optional<std::uint64_t>{0}) { std::cerr << "inner shell missing failure\n"; return 1; }
+        const auto path = std::filesystem::temp_directory_path() / "axiom_topo_shell_inner_failure.json";
+        if (diagnostics.export_report_json(missing.diagnostic_id, path.string()).status != axiom::StatusCode::Ok) { std::cerr << "inner shell json export\n"; return 1; }
+        std::ifstream input(path);
+        const std::string json((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+        input.close();
+        std::filesystem::remove(path);
+        if (json.find(axiom::diag_codes::kTopoShellNotClosed) == std::string::npos ||
+            json.find(std::to_string(missing_loop.value)) == std::string::npos) { std::cerr << "inner shell json content\n"; return 1; }
+
+        const axiom::LoopId empty_loop{state->allocate_id()};
+        state->loops.emplace(empty_loop.value, axiom::detail::LoopRecord{});
+        state->faces.at(face.value->value).inner_loops = {empty_loop};
+        const auto before_invalid = state->next_id;
+        const auto malformed = txn.create_shell(std::array{*face.value});
+        if (malformed.status != axiom::StatusCode::InvalidTopology || malformed.value ||
+            state->next_id != before_invalid || !state->shells.empty() ||
+            txn.write_operation_count().value != std::optional<std::uint64_t>{0}) { std::cerr << "inner shell malformed failure\n"; return 1; }
+        state->faces.at(face.value->value).inner_loops.clear();
+        state->loops.erase(empty_loop.value);
+        const auto shell = txn.create_shell(std::array{*face.value});
+        if (!shell.value || shell.value->value != before_invalid) { std::cerr << "inner shell retry create\n"; return 1; }
+        if (txn.rollback().status != axiom::StatusCode::Ok) { std::cerr << "inner shell rollback call\n"; return 1; }
+        if (topology.query().has_shell(*shell.value).value != std::optional<bool>{false}) { std::cerr << "inner shell rollback store\n"; return 1; }
+        if (state->edge_to_coedges != edge_to_coedges || state->coedge_to_loop != coedge_to_loop ||
+            state->loop_to_faces != loop_to_faces || state->face_to_shells != face_to_shells) {
+            std::cerr << "inner shell rollback indices\n";
+            return 1;
+        }
+        auto retry = topology.begin_transaction();
+        const auto committed = retry.create_shell(std::array{*face.value});
+        if (!committed.value || retry.commit().status != axiom::StatusCode::Ok ||
+            topology.query().has_shell(*committed.value).value != std::optional<bool>{true}) { std::cerr << "inner shell commit\n"; return 1; }
+    }
+
     // Non-finite vertex coordinates must fail before mutating topology or transaction tracking.
     {
         axiom::Kernel vertex_kernel;

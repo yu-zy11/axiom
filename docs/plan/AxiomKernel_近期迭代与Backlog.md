@@ -66,6 +66,8 @@
 
 ### 2.3 `topo`
 
+- **NFR-REL-001 第 43 切片**：`create_shell` 在分配 ShellId 前检查成员面全部内环，拒绝缺失或已损坏的内环，复用 `AXM-TOPO-E-0005` 并关联面和内环。`axiom_topology_test` 覆盖故障注入、诊断 JSON、ID/存储/事务计数不污染，以及修复输入后的重试、回滚与提交。需求保持受限可用，协作式取消和更广泛的 S0/S1 失败注入门禁仍待闭合。
+
 - **FR-TOPO-001 第 42 切片**：`create_face` 在分配面 ID 前拒绝同一面的不同边界环共用 VertexId，`validate_face` 对存量面执行同一规则；使用 `AXM-TOPO-E-0024` 关联两环与冲突顶点。`axiom_topology_test` 覆盖外/内环及内/内环相接、合法双孔面、诊断 JSON、失败不污染和回滚。规则只识别拓扑顶点 ID，几何自交与完整 trim bridge 仍待补齐，需求保持受限可用。
 
 - **NFR-REL-001 第 38 切片**：`create_body` 在包围盒校验成功后才分配 BodyId；受损壳导致的失败保留全局实体 ID、存储和事务计数。`axiom_topology_test` 以受损空壳注入覆盖错误码/JSON、非法句柄、回滚与成功重试。需求保持受限可用，完整取消和失败注入门禁仍待闭合。

@@ -371,6 +371,14 @@ TopologyTransaction::create_shell(std::span<const FaceId> faces) {
           *state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
           "创建壳失败：包含非法面拓扑", "创建壳失败");
     }
+    for (const auto inner_loop : face_it->second.inner_loops) {
+      if (!validate_loop_id(*state_, inner_loop, reason)) {
+        return detail::failed_result<ShellId>(
+            *state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
+            "创建壳失败：面内环无效，" + reason, "创建壳失败",
+            {face_id.value, inner_loop.value});
+      }
+    }
   }
   const auto id = ShellId{state_->allocate_id()};
   detail::ShellRecord shell_record;
