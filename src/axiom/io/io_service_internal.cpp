@@ -823,16 +823,24 @@ std::optional<std::string> parse_3mf_model_xml_to_mesh(std::string_view xml, det
     }
     for (std::sregex_iterator it(s.begin(), s.end(), tri), end; it != end; ++it) {
         const auto& m = *it;
-        mesh.indices.push_back(static_cast<Index>(std::stoul(m[1].str())));
-        mesh.indices.push_back(static_cast<Index>(std::stoul(m[2].str())));
-        mesh.indices.push_back(static_cast<Index>(std::stoul(m[3].str())));
+        for (int i = 1; i <= 3; ++i) {
+            const auto index = std::stoull(m[i].str());
+            if (index > std::numeric_limits<Index>::max()) {
+                return std::string("3MF 解析失败：三角形索引超出范围");
+            }
+            mesh.indices.push_back(static_cast<Index>(index));
+        }
     }
     if (mesh.indices.empty()) {
         for (std::sregex_iterator it(s.begin(), s.end(), tri_loose), end; it != end; ++it) {
             const auto& m = *it;
-            mesh.indices.push_back(static_cast<Index>(std::stoul(m[1].str())));
-            mesh.indices.push_back(static_cast<Index>(std::stoul(m[2].str())));
-            mesh.indices.push_back(static_cast<Index>(std::stoul(m[3].str())));
+            for (int i = 1; i <= 3; ++i) {
+                const auto index = std::stoull(m[i].str());
+                if (index > std::numeric_limits<Index>::max()) {
+                    return std::string("3MF 解析失败：三角形索引超出范围");
+                }
+                mesh.indices.push_back(static_cast<Index>(index));
+            }
         }
     }
     if (mesh.vertices.empty() || mesh.indices.empty() || (mesh.indices.size() % 3) != 0) {

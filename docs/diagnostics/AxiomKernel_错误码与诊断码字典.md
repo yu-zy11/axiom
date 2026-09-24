@@ -341,7 +341,7 @@
 | `AXM-IO-E-0001` | Error | 文件不存在（如 `IOService::validate_import_path` 校验时目标路径不存在） |
 | `AXM-IO-E-0002` | Error | 文件格式无法识别 |
 | `AXM-IO-E-0003` | Error | 文件内容损坏 |
-| `AXM-IO-E-0004` | Error | 导入失败；STEP 早期失败绑定 `io.import.step.input/path/open`；OBJ 物化前失败绑定 `io.import.obj.input/path/open/parse`；STL 与 glTF 物化前失败分别绑定 `io.import.stl.*`、`io.import.gltf.*` 的 `input/path/open/read/parse/validation` 阶段。OBJ/STL/glTF 退化三角形复用 `AXM-VAL-E-0002` 与各自的 `.validation` 阶段。物化前无模型实体可关联。 |
+| `AXM-IO-E-0004` | Error | 导入失败；STEP 早期失败绑定 `io.import.step.input/path/open`；OBJ 物化前失败绑定 `io.import.obj.input/path/open/parse`；STL、glTF 与 3MF 物化前失败分别绑定 `io.import.stl.*`、`io.import.gltf.*`、`io.import.3mf.*` 的 `input/path/open/read/parse/validation` 阶段。OBJ/STL/glTF/3MF 退化三角形复用 `AXM-VAL-E-0002` 与各自的 `.validation` 阶段。3MF 非有限顶点在 `.validation` 阶段复用本码，非法数值及索引溢出在 `.parse` 阶段复用本码；物化前无模型实体可关联。 |
 | `AXM-IO-E-0005` | Error | 导出失败 |
 | `AXM-IO-E-0006` | Error | 严格网格导出 QA 失败（越界索引、退化三角形或检查不可用；`Issue.stage=io.export.mesh_strict_qa`，关联输入 Body） |
 | `AXM-IO-E-0007` | Warning | 导入后存在未映射属性 |

@@ -1,6 +1,7 @@
 #include "axiom/io/io_service.h"
 
 #include <cctype>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
