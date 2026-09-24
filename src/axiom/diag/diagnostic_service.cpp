@@ -620,9 +620,6 @@ Result<std::vector<DiagnosticId>> DiagnosticService::find_by_issue_stage(std::st
     }
     std::vector<DiagnosticId> out;
     for (const auto& [id, report] : state_->diagnostics) {
-        if (out.size() >= max_results) {
-            break;
-        }
         const bool hit = std::any_of(report.issues.begin(), report.issues.end(),
                                      [&stage](const Issue& issue) { return issue.stage == stage; });
         if (hit) {
@@ -630,6 +627,9 @@ Result<std::vector<DiagnosticId>> DiagnosticService::find_by_issue_stage(std::st
         }
     }
     std::sort(out.begin(), out.end(), [](DiagnosticId a, DiagnosticId b) { return a.value < b.value; });
+    if (out.size() > max_results) {
+        out.resize(static_cast<std::size_t>(max_results));
+    }
     return ok_result(std::move(out), state_->create_diagnostic("已按问题阶段检索诊断"));
 }
 
@@ -642,9 +642,6 @@ Result<std::vector<DiagnosticId>> DiagnosticService::find_by_issue_stage_prefix(
     }
     std::vector<DiagnosticId> out;
     for (const auto& [id, report] : state_->diagnostics) {
-        if (out.size() >= max_results) {
-            break;
-        }
         const bool hit =
             std::any_of(report.issues.begin(), report.issues.end(), [&stage_prefix](const Issue& issue) {
                 const std::string_view st = issue.stage;
@@ -655,6 +652,9 @@ Result<std::vector<DiagnosticId>> DiagnosticService::find_by_issue_stage_prefix(
         }
     }
     std::sort(out.begin(), out.end(), [](DiagnosticId a, DiagnosticId b) { return a.value < b.value; });
+    if (out.size() > max_results) {
+        out.resize(static_cast<std::size_t>(max_results));
+    }
     return ok_result(std::move(out), state_->create_diagnostic("已按问题阶段前缀检索诊断"));
 }
 

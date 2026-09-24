@@ -741,8 +741,12 @@ public:
   Result<void> export_reports_json(std::span<const DiagnosticId>, std::string_view path) const;
   Result<void> export_grouped_by_stage_txt(std::string_view path) const;
   Result<void> export_grouped_by_stage_json(std::string_view path) const;
+  Result<std::vector<DiagnosticId>> find_by_issue_stage(std::string_view stage, std::uint64_t max_results) const;
+  Result<std::vector<DiagnosticId>> find_by_issue_stage_prefix(std::string_view prefix, std::uint64_t max_results) const;
 };
 ```
+
+阶段精确检索与阶段前缀检索均按 `DiagnosticId` 升序返回最早的前 `max_results` 个匹配报告，单报告的多个匹配 issue 只返回一次。空阶段/前缀或零上限返回 `InvalidInput` / `AXM-CORE-E-0002`，源报告保持不变。
 
 `export_reports_json` 顶层为 `{"diagnostics":[...]}`，每项与单报告 JSON 一致，包含 `id/summary/issues` 及问题的 `code/severity/message/stage/related_entities`；字符串控制字节转义后保留。按输入顺序导出，重复 ID 重复输出，无问题报告输出空 `issues`。
 

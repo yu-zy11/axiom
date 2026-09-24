@@ -68,9 +68,9 @@ public:
     Result<void> export_all_reports_json(std::string_view path) const;
     /// 全部诊断的文本拼接导出（顺序为 `DiagnosticId` 升序）；条目间以空行分隔。
     Result<void> export_all_reports_txt(std::string_view path) const;
-    /// 任一 issue 的 `stage` **精确等于** `stage` 时命中该诊断报告。
+    /// 任一 issue 的 `stage` **精确等于** `stage` 时命中；按 DiagnosticId 升序返回前 max_results 条。
     Result<std::vector<DiagnosticId>> find_by_issue_stage(std::string_view stage, std::uint64_t max_results) const;
-    /// 任一 issue 的 `stage` 以 `stage_prefix` 开头时命中（如 `bool.` 聚合 BOOL 子阶段）；`stage_prefix` 为空或 `max_results==0` 时参数非法。
+    /// 任一 issue 的 `stage` 以 `stage_prefix` 开头时命中（如 `bool.` 聚合 BOOL 子阶段）；按 DiagnosticId 升序返回前 max_results 条；`stage_prefix` 为空或 `max_results==0` 时参数非法。
     Result<std::vector<DiagnosticId>> find_by_issue_stage_prefix(std::string_view stage_prefix,
                                                                  std::uint64_t max_results) const;
     Result<std::vector<DiagnosticId>> all_ids() const;
