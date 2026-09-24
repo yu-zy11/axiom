@@ -356,7 +356,7 @@ face_cross_loop_coincident_vertices(const detail::KernelState &state,
   return std::nullopt;
 }
 
-std::optional<std::array<std::uint64_t, 4>>
+std::optional<FaceStraightEdgeIntersection>
 face_cross_loop_straight_edge_intersection(
     const detail::KernelState &state, LoopId outer_loop,
     std::span<const LoopId> inner_loops) {
@@ -413,7 +413,7 @@ face_cross_loop_straight_edge_intersection(
         if (n2 == 0.0L) continue;  // Parallel or collinear: separate rule.
         const long double t = dot(cross(w, s), n) / n2;
         const long double u = dot(cross(w, r), n) / n2;
-        if (t <= 0.0L || t >= 1.0L || u <= 0.0L || u >= 1.0L)
+        if (t < 0.0L || t > 1.0L || u < 0.0L || u > 1.0L)
           continue;
         bool same_point = true;
         for (std::size_t axis = 0; axis < 3; ++axis) {
@@ -426,8 +426,10 @@ face_cross_loop_straight_edge_intersection(
             same_point = false;
         }
         if (same_point) {
-          return std::array<std::uint64_t, 4>{prior.loop.value,
-              loop_id.value, prior.edge.value, edge_id.value};
+          return FaceStraightEdgeIntersection{
+              {prior.loop.value, loop_id.value, prior.edge.value,
+               edge_id.value},
+              t == 0.0L || t == 1.0L || u == 0.0L || u == 1.0L};
         }
       }
       seen.push_back(current);

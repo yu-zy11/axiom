@@ -44,6 +44,7 @@ inline constexpr std::string_view kTopoLoopRepeatedVertex = "AXM-TOPO-E-0023";
 inline constexpr std::string_view kTopoFaceSharedBoundaryVertex = "AXM-TOPO-E-0024";
 inline constexpr std::string_view kTopoFaceCoincidentBoundaryVertices = "AXM-TOPO-E-0025";
 inline constexpr std::string_view kTopoFaceCrossLoopStraightEdgeIntersection = "AXM-TOPO-E-0026";
+inline constexpr std::string_view kTopoFaceCrossLoopStraightEdgeEndpointTouch = "AXM-TOPO-E-0027";
 
 inline constexpr std::string_view kBoolInvalidInput = "AXM-BOOL-E-0001";
 inline constexpr std::string_view kBoolIntersectionFailure = "AXM-BOOL-E-0003";

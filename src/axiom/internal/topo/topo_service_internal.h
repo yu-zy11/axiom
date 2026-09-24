@@ -92,9 +92,12 @@ face_cross_loop_coincident_vertices(const detail::KernelState &state,
                                     LoopId outer_loop,
                                     std::span<const LoopId> inner_loops);
 
-// Returns the two loop IDs and edge IDs for a proper 3D intersection of
-// straight boundary segments from different loops.
-std::optional<std::array<std::uint64_t, 4>>
+// Reports a nonparallel 3D intersection of straight boundary segments.
+struct FaceStraightEdgeIntersection {
+  std::array<std::uint64_t, 4> entities;  // Two loops, then two edges.
+  bool endpoint_touch{false};
+};
+std::optional<FaceStraightEdgeIntersection>
 face_cross_loop_straight_edge_intersection(
     const detail::KernelState &state, LoopId outer_loop,
     std::span<const LoopId> inner_loops);

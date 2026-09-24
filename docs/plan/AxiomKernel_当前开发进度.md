@@ -242,6 +242,7 @@
   - **建议测试入口**：`axiom_geometry_test`（增加曲率/导数/退化场景后再逐步收紧）
 
 - **topo（Transaction/Query/Validation/Trim Bridge）**
+  - **第 56 切片一致性增量**：`create_face` 与 `validate_face` 拒绝不同边界环的非平行直线边在端点相接，`AXM-TOPO-E-0027` 关联两环与两边；`axiom_topology_test` 覆盖外/内及内/内相接、合法面、诊断 JSON、失败不污染和回滚。曲线求交、共线重叠、容差邻近相接、完整 trim bridge 与持久命名仍待覆盖，FR-TOPO-001 保持受限可用。
   - **第 52 切片一致性增量**：`create_face` 与 `validate_face` 检查不同边界环的直线/线段边在三维内部相交，`AXM-TOPO-E-0026` 关联两环与两边；`axiom_topology_test` 覆盖外/内及内/内相交、合法面、诊断 JSON、失败不污染和回滚。曲线边、端点触碰、共线重叠与容差邻近相接仍待覆盖，FR-TOPO-001 保持受限可用。
   - **第 47 切片一致性增量**：`create_face` 与 `validate_face` 拒绝跨环独立顶点的有限三维坐标精确重合，`AXM-TOPO-E-0025` 关联两环与两顶点；`axiom_topology_test` 覆盖外/内、内/内、成功、诊断 JSON、失败不污染及回滚。FR-TOPO-001 仍为受限可用，边段相交、容差邻近相接和完整 trim bridge 尚未闭合。
   - **第 42 切片一致性增量**：`create_face` 在分配面 ID 前拒绝不同边界环共用 VertexId，`validate_face` 对存量面执行同一规则；`AXM-TOPO-E-0024` 关联两环与冲突顶点。`axiom_topology_test` 覆盖外/内及内/内环相接、合法双孔面、诊断 JSON、失败不污染和回滚；FR-TOPO-001 仍为受限可用，几何自交及完整 trim bridge 未闭合。

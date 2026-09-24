@@ -1311,10 +1311,15 @@ Result<void> TopologyValidationService::validate_face(FaceId face_id) const {
           *state_, face_it->second.outer_loop, face_it->second.inner_loops)) {
     return detail::failed_void(
         *state_, StatusCode::InvalidTopology,
-        diag_codes::kTopoFaceCrossLoopStraightEdgeIntersection,
-        "面验证失败：不同边界环的直线边段在内部相交", "面验证失败",
-        {face_id.value, (*crossing)[0], (*crossing)[1], (*crossing)[2],
-         (*crossing)[3]});
+        crossing->endpoint_touch
+            ? diag_codes::kTopoFaceCrossLoopStraightEdgeEndpointTouch
+            : diag_codes::kTopoFaceCrossLoopStraightEdgeIntersection,
+        crossing->endpoint_touch
+            ? "面验证失败：不同边界环的直线边段在端点相接"
+            : "面验证失败：不同边界环的直线边段在内部相交",
+        "面验证失败", {face_id.value, crossing->entities[0],
+                       crossing->entities[1], crossing->entities[2],
+                       crossing->entities[3]});
   }
 
   // Planar faces without PCurve trim: (1) outer 3D winding must align with Surface normal

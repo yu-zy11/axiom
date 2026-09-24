@@ -4667,8 +4667,12 @@ int main() {
         const auto skew_to_outer = triangle({{{7, 1, 1e-20}, {9, 3, 1e-20}, {6, 3, 1e-20}}});
         const auto inner_a = triangle({{{2, 2, 0}, {2, 4, 0}, {4, 2, 0}}});
         const auto inner_b = triangle({{{3, 1, 0}, {3, 4, 0}, {5, 1, 0}}});
+        const auto touches_outer = triangle({{{5, 0, 0}, {4, 1, 0}, {6, 1, 0}}});
+        const auto skew_touch_outer = triangle({{{5, 0, 1e-20}, {4, 1, 1e-20}, {6, 1, 1e-20}}});
+        const auto touches_inner = triangle({{{2, 3, 0}, {2.5, 2.5, 0}, {3, 3, 0}}});
         if (!outer || !hole || !disjoint || !crosses_outer || !skew_to_outer ||
-            !inner_a || !inner_b ||
+            !inner_a || !inner_b || !touches_outer || !skew_touch_outer ||
+            !touches_inner ||
             setup.commit().status != axiom::StatusCode::Ok) return 1;
         auto txn = topo.begin_transaction();
         const auto next_id = state->next_id;
@@ -4705,6 +4709,36 @@ int main() {
             if (json.find(axiom::diag_codes::kTopoFaceCrossLoopStraightEdgeIntersection) == std::string::npos ||
                 json.find("related_entities") == std::string::npos) return 1;
         }
+        for (const auto& pair : {
+                 std::array<Triangle, 2>{*outer, *touches_outer},
+                 std::array<Triangle, 2>{*inner_a, *touches_inner}}) {
+            const bool touches_outer_loop = pair[0].loop.value == outer->loop.value;
+            const std::vector<axiom::LoopId> inner = touches_outer_loop
+                ? std::vector<axiom::LoopId>{pair[1].loop}
+                : std::vector<axiom::LoopId>{pair[0].loop, pair[1].loop};
+            const auto rejected = txn.create_face(*plane.value, outer->loop, inner);
+            const auto report = diagnostics.get(rejected.diagnostic_id);
+            if (rejected.status != axiom::StatusCode::InvalidTopology || rejected.value ||
+                !report.value || !issue_links_entities(*report.value,
+                    axiom::diag_codes::kTopoFaceCrossLoopStraightEdgeEndpointTouch,
+                    {pair[0].loop.value, pair[1].loop.value,
+                     pair[0].edges[0].value, pair[1].edges[0].value}) ||
+                state->next_id != next_id || !state->faces.empty() ||
+                txn.created_face_count().value != std::optional<std::uint64_t>{0} ||
+                txn.write_operation_count().value != writes) {
+                std::cerr << "cross-loop straight-edge endpoint touch polluted transaction\n";
+                return 1;
+            }
+            const auto path = std::filesystem::temp_directory_path() / "axiom_topo_cross_loop_touch.json";
+            if (diagnostics.export_report_json(rejected.diagnostic_id, path.string()).status !=
+                axiom::StatusCode::Ok) return 1;
+            std::ifstream input(path);
+            const std::string json((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+            input.close();
+            std::filesystem::remove(path);
+            if (json.find(axiom::diag_codes::kTopoFaceCrossLoopStraightEdgeEndpointTouch) == std::string::npos ||
+                json.find("related_entities") == std::string::npos) return 1;
+        }
         const auto good = txn.create_face(*plane.value, outer->loop,
             std::array<axiom::LoopId, 2>{hole->loop, disjoint->loop});
         if (!good.value || topo.validate().validate_face(*good.value).status != axiom::StatusCode::Ok)
@@ -4725,6 +4759,27 @@ int main() {
             std::cerr << "cross-loop edge validation or rollback failed\n";
             return 1;
         }
+        auto touch_txn = topo.begin_transaction();
+        const auto touch_face = touch_txn.create_face(*plane.value, outer->loop,
+            std::array<axiom::LoopId, 1>{hole->loop});
+        if (!touch_face.value) return 1;
+        state->faces.at(touch_face.value->value).inner_loops[0] = touches_outer->loop;
+        state->loop_to_faces.erase(hole->loop.value);
+        state->loop_to_faces[touches_outer->loop.value] = {touch_face.value->value};
+        const auto touch_writes = touch_txn.write_operation_count().value;
+        const auto invalid_touch = topo.validate().validate_face(*touch_face.value);
+        const auto touch_report = diagnostics.get(invalid_touch.diagnostic_id);
+        if (invalid_touch.status != axiom::StatusCode::InvalidTopology || !touch_report.value ||
+            !issue_links_entities(*touch_report.value,
+                axiom::diag_codes::kTopoFaceCrossLoopStraightEdgeEndpointTouch,
+                {touch_face.value->value, outer->loop.value, touches_outer->loop.value,
+                 outer->edges[0].value, touches_outer->edges[0].value}) ||
+            touch_txn.write_operation_count().value != touch_writes ||
+            touch_txn.rollback().status != axiom::StatusCode::Ok ||
+            topo.query().has_face(*touch_face.value).value != std::optional<bool>{false}) {
+            std::cerr << "cross-loop endpoint touch validation or rollback failed\n";
+            return 1;
+        }
         // Identical XY projections at different Z values are skew in 3D.
         auto skew_txn = topo.begin_transaction();
         const auto skew_face = skew_txn.create_face(*plane.value, outer->loop,
@@ -4732,6 +4787,15 @@ int main() {
         if (!skew_face.value || skew_txn.rollback().status != axiom::StatusCode::Ok ||
             topo.query().has_face(*skew_face.value).value != std::optional<bool>{false}) {
             std::cerr << "3D skew boundaries were treated as crossing\n";
+            return 1;
+        }
+        auto skew_touch_txn = topo.begin_transaction();
+        const auto skew_touch_face = skew_touch_txn.create_face(*plane.value, outer->loop,
+            std::array<axiom::LoopId, 1>{skew_touch_outer->loop});
+        if (!skew_touch_face.value ||
+            skew_touch_txn.rollback().status != axiom::StatusCode::Ok ||
+            topo.query().has_face(*skew_touch_face.value).value != std::optional<bool>{false}) {
+            std::cerr << "3D separated endpoint was treated as touching\n";
             return 1;
         }
     }
