@@ -67,6 +67,9 @@ public:
     Result<bool> is_shell_orphan(ShellId shell_id) const;
     Result<bool> is_body_derived(BodyId body_id) const;
     Result<BoundingBox> bbox_of_face(FaceId face_id) const;
+    /// 平面、直线边面片的真实边界面积（外环减内环），单位为模型长度单位的平方。
+    /// 不支持曲边/非平面面；无效面返回失败且无数值。每次从当前拓扑重算，不缓存。
+    Result<Scalar> planar_face_area(FaceId face_id) const;
     Result<BoundingBox> bbox_of_shell(ShellId shell_id) const;
     Result<BoundingBox> bbox_of_body_from_topology(BodyId body_id) const;
     Result<std::vector<FaceId>> faces_of_body(BodyId body_id) const;

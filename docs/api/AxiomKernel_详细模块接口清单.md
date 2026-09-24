@@ -350,12 +350,16 @@ public:
   Result<std::vector<EdgeId>> edges_of_loop(LoopId) const;
   Result<std::vector<LoopId>> loops_of_face(FaceId) const;
   Result<SurfaceId> surface_of_face(FaceId) const;
+  // 平面直线边面片面积；模型长度单位的平方，外环减内环。
+  Result<Scalar> planar_face_area(FaceId) const;
   Result<std::vector<FaceId>> faces_of_shell(ShellId) const;
   Result<std::vector<ShellId>> shells_of_body(BodyId) const;
   /// 累计只读查询次数（嵌套调用只计最外层一次）；与 `TopologyTransaction::write_operation_count` 互补。
   Result<std::uint64_t> query_operation_count() const;
 };
 ```
+
+`planar_face_area` 从当前拓扑顶点和曲面法向计算边界面积，不使用 bbox 或三角网格。顶点到平面的距离须不超过内核线性容差；曲面必须为 Plane，边曲线必须为 Line/LineSegment。曲面或曲边不支持时返回 `NotImplemented / AXM-CORE-E-0004`；拓扑不完整、非共面或面积超出数值范围时返回 `InvalidTopology / AXM-TOPO-E-0003`（内环为 `E-0004`）；无效或已删除面返回 `InvalidInput / AXM-CORE-E-0001`，这些失败均无面积值。无内环时仅计外环；每次查询从当前模型重算，事务修改即时可见，回滚后恢复原面积。
 
 ### 6.2 拓扑事务接口
 

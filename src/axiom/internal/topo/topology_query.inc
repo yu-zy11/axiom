@@ -667,6 +667,106 @@ Result<BoundingBox> TopologyQueryService::bbox_of_face(FaceId face_id) const {
   return ok_result(bbox, state_->create_diagnostic("已查询面包围盒"));
 }
 
+Result<Scalar> TopologyQueryService::planar_face_area(FaceId face_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
+  const auto face = state_->faces.find(face_id.value);
+  if (face == state_->faces.end()) {
+    return detail::invalid_input_result<Scalar>(
+        *state_, diag_codes::kCoreInvalidHandle, "面面积查询失败：目标面不存在",
+        "面面积查询失败");
+  }
+  const auto surface = state_->surfaces.find(face->second.surface_id.value);
+  if (surface == state_->surfaces.end()) {
+    return detail::failed_result<Scalar>(
+        *state_, StatusCode::InvalidTopology, diag_codes::kTopoFaceOuterLoopInvalid,
+        "面面积查询失败：曲面引用无效", "面面积查询失败");
+  }
+  if (surface->second.kind != detail::SurfaceKind::Plane) {
+    return detail::failed_result<Scalar>(
+        *state_, StatusCode::NotImplemented, diag_codes::kCoreOperationUnsupported,
+        "面面积查询仅支持平面直线边面片", "面面积查询失败");
+  }
+
+  const auto &origin = surface->second.origin;
+  const auto &normal = surface->second.normal;
+  const long double nx = normal.x, ny = normal.y, nz = normal.z;
+  const long double norm = std::sqrt(nx * nx + ny * ny + nz * nz);
+  if (!(norm > 0.0L) || !std::isfinite(norm)) {
+    return detail::failed_result<Scalar>(
+        *state_, StatusCode::InvalidTopology, diag_codes::kTopoFaceOuterLoopInvalid,
+        "面面积查询失败：平面法向无效", "面面积查询失败");
+  }
+
+  long double area = 0.0L;
+  bool has_curved_edge = false;
+  const auto accumulate_loop = [&](LoopId loop_id, bool inner) -> bool {
+    const auto loop = state_->loops.find(loop_id.value);
+    if (loop == state_->loops.end() || loop->second.coedges.size() < 3) return false;
+    std::vector<Point3> points;
+    points.reserve(loop->second.coedges.size());
+    for (const auto coedge_id : loop->second.coedges) {
+      const auto coedge = state_->coedges.find(coedge_id.value);
+      if (coedge == state_->coedges.end()) return false;
+      const auto edge = state_->edges.find(coedge->second.edge_id.value);
+      if (edge == state_->edges.end()) return false;
+      const auto curve = state_->curves.find(edge->second.curve_id.value);
+      if (curve == state_->curves.end()) return false;
+      if (curve->second.kind != detail::CurveKind::Line &&
+          curve->second.kind != detail::CurveKind::LineSegment) {
+        has_curved_edge = true;
+        return false;
+      }
+      const auto vertex_id = coedge->second.reversed ? edge->second.v1 : edge->second.v0;
+      const auto vertex = state_->vertices.find(vertex_id.value);
+      if (vertex == state_->vertices.end()) return false;
+      const auto &p = vertex->second.point;
+      const long double dx = static_cast<long double>(p.x) - origin.x;
+      const long double dy = static_cast<long double>(p.y) - origin.y;
+      const long double dz = static_cast<long double>(p.z) - origin.z;
+      if (std::abs(dx * nx + dy * ny + dz * nz) / norm > state_->config.tolerance.linear)
+        return false;
+      points.push_back(p);
+    }
+    long double projected_twice_area = 0.0L;
+    const auto &base = points.front();
+    for (std::size_t i = 1; i + 1 < points.size(); ++i) {
+      const long double ax = static_cast<long double>(points[i].x) - base.x;
+      const long double ay = static_cast<long double>(points[i].y) - base.y;
+      const long double az = static_cast<long double>(points[i].z) - base.z;
+      const long double bx = static_cast<long double>(points[i + 1].x) - base.x;
+      const long double by = static_cast<long double>(points[i + 1].y) - base.y;
+      const long double bz = static_cast<long double>(points[i + 1].z) - base.z;
+      projected_twice_area += ((ay * bz - az * by) * nx +
+                               (az * bx - ax * bz) * ny +
+                               (ax * by - ay * bx) * nz) / norm;
+    }
+    const long double loop_area = std::abs(projected_twice_area) * 0.5L;
+    area += inner ? -loop_area : loop_area;
+    return true;
+  };
+  if (!accumulate_loop(face->second.outer_loop, false)) {
+    return detail::failed_result<Scalar>(
+        *state_, has_curved_edge ? StatusCode::NotImplemented : StatusCode::InvalidTopology,
+        has_curved_edge ? diag_codes::kCoreOperationUnsupported : diag_codes::kTopoFaceOuterLoopInvalid,
+        "面面积查询失败：外环不完整、非平面或包含曲边", "面面积查询失败");
+  }
+  for (const auto loop_id : face->second.inner_loops) {
+    if (!accumulate_loop(loop_id, true)) {
+      return detail::failed_result<Scalar>(
+          *state_, has_curved_edge ? StatusCode::NotImplemented : StatusCode::InvalidTopology,
+          has_curved_edge ? diag_codes::kCoreOperationUnsupported : diag_codes::kTopoFaceInnerLoopInvalid,
+          "面面积查询失败：内环不完整、非平面或包含曲边", "面面积查询失败");
+    }
+  }
+  if (area < 0.0L || !std::isfinite(area) ||
+      area > std::numeric_limits<Scalar>::max()) {
+    return detail::failed_result<Scalar>(
+        *state_, StatusCode::InvalidTopology, diag_codes::kTopoFaceOuterLoopInvalid,
+        "面面积查询失败：边界面积无效或超出数值范围", "面面积查询失败");
+  }
+  return ok_result(static_cast<Scalar>(area), state_->create_diagnostic("已查询平面面片面积"));
+}
+
 Result<BoundingBox>
 TopologyQueryService::bbox_of_shell(ShellId shell_id) const {
   TopoQueryAuditScope _topo_query_audit{state_};
