@@ -2,6 +2,8 @@
 
 本文档用于记录 `AxiomKernel` 当前阶段的实际开发状态、已完成内容、当前风险和下一阶段执行重点。
 
+> **第 40 切片（NFR-DIA-001）**：STL 导入的物化前输入、路径、打开、读取、解析及网格验证失败绑定 `io.import.stl.*` 根因阶段；非普通文件在读取前结构化拒绝。`axiom_io_workflow_test` 覆盖阶段检索、JSON、Body/Mesh 不污染及成功重试；需求保持受限可用。
+
 > **第 39 切片（FR-DIAG-001）**：阶段精确与前缀检索在应用结果上限前按 `DiagnosticId` 升序排序；`axiom_diagnostics_test` 覆盖限额、空结果、非法参数、源报告不污染及重试。需求保持受限可用。
 
 > **第 35 切片（NFR-DIA-001）**：OBJ 导入的五类物化前失败现在携带 `io.import.obj.input/path/open/parse/validation` 根因阶段；非普通文件在读取前结构化拒绝。`axiom_io_workflow_test` 覆盖检索、JSON、Body/Mesh 不污染和成功重试；需求保持受限可用。

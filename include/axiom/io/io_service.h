@@ -28,6 +28,7 @@ public:
                           const ExportOptions &options);
   Result<BodyId> import_axmjson(std::string_view path,
                                 const ImportOptions &options);
+  /// 物化前失败按根因返回 `io.import.stl.input/path/open/read/parse/validation` 阶段，不写入 Body/Mesh store。
   Result<BodyId> import_stl(std::string_view path, const ImportOptions &options);
   Result<BodyId> import_gltf(std::string_view path, const ImportOptions &options);
   Result<BodyId> import_iges(std::string_view path, const ImportOptions &options);

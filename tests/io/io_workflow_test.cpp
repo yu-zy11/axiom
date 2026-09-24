@@ -216,6 +216,78 @@ int main() {
         return 1;
     }
 
+    const auto body_count_before_stl_failures = kernel.body_count();
+    const auto mesh_count_before_stl_failures = kernel.mesh_count();
+    const auto missing_stl_path = tmp / ("axiom_io_missing_import_" + uniq + ".stl");
+    const auto malformed_stl_path = tmp / ("axiom_io_malformed_import_" + uniq + ".stl");
+    const auto degenerate_stl_path = tmp / ("axiom_io_degenerate_import_" + uniq + ".stl");
+    const auto valid_stl_path = tmp / ("axiom_io_valid_import_" + uniq + ".stl");
+    {
+        std::ofstream malformed {malformed_stl_path};
+        malformed << "solid broken\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\n";
+        std::ofstream degenerate {degenerate_stl_path};
+        degenerate << "solid degenerate\nfacet normal 0 0 1\nouter loop\n"
+                      "vertex 0 0 0\nvertex 1 0 0\nvertex 2 0 0\n"
+                      "endloop\nendfacet\nendsolid degenerate\n";
+        std::ofstream valid {valid_stl_path};
+        valid << "solid valid\nfacet normal 0 0 1\nouter loop\n"
+                 "vertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\n"
+                 "endloop\nendfacet\nendsolid valid\n";
+    }
+    const auto check_stl_failure = [&](const axiom::Result<axiom::BodyId>& result,
+                                       axiom::StatusCode status, std::string_view code,
+                                       std::string_view stage) {
+        const auto report = kernel.diagnostics().get(result.diagnostic_id);
+        const auto* issue = report.value ? find_issue(*report.value, code) : nullptr;
+        return result.status == status && !result.value.has_value() && issue != nullptr &&
+               issue->severity == axiom::IssueSeverity::Error && issue->stage == stage &&
+               issue->related_entities.empty();
+    };
+    const auto empty_stl = kernel.io().import_stl("", axiom::ImportOptions {});
+    const auto missing_stl = kernel.io().import_stl(missing_stl_path.string(), axiom::ImportOptions {});
+    const auto directory_stl = kernel.io().import_stl(tmp.string(), axiom::ImportOptions {});
+    const auto malformed_stl = kernel.io().import_stl(malformed_stl_path.string(), axiom::ImportOptions {});
+    const auto degenerate_stl = kernel.io().import_stl(degenerate_stl_path.string(), axiom::ImportOptions {});
+    if (!check_stl_failure(empty_stl, axiom::StatusCode::InvalidInput,
+                           axiom::diag_codes::kIoImportFailure, "io.import.stl.input") ||
+        !check_stl_failure(missing_stl, axiom::StatusCode::OperationFailed,
+                           axiom::diag_codes::kIoImportFailure, "io.import.stl.path") ||
+        !check_stl_failure(directory_stl, axiom::StatusCode::OperationFailed,
+                           axiom::diag_codes::kIoImportFailure, "io.import.stl.open") ||
+        !check_stl_failure(malformed_stl, axiom::StatusCode::OperationFailed,
+                           axiom::diag_codes::kIoImportFailure, "io.import.stl.parse") ||
+        !check_stl_failure(degenerate_stl, axiom::StatusCode::DegenerateGeometry,
+                           axiom::diag_codes::kValDegenerateGeometry, "io.import.stl.validation")) {
+        std::cerr << "STL import failure is missing stable root-cause stage evidence\n";
+        return 1;
+    }
+    const auto stl_failure_json = tmp / ("axiom_io_stl_import_failure_" + uniq + ".json");
+    const auto exported_stl_failure = kernel.diagnostics().export_report_json(
+        degenerate_stl.diagnostic_id, stl_failure_json.string());
+    std::ifstream stl_failure_json_in {stl_failure_json, std::ios::binary};
+    const std::string stl_failure_json_text {
+        (std::istreambuf_iterator<char>(stl_failure_json_in)), std::istreambuf_iterator<char>()};
+    const auto staged_stl_failures = kernel.diagnostics().find_by_issue_stage_prefix("io.import.stl.", 10);
+    const auto body_count_after_stl_failures = kernel.body_count();
+    const auto mesh_count_after_stl_failures = kernel.mesh_count();
+    const auto valid_stl = kernel.io().import_stl(valid_stl_path.string(), axiom::ImportOptions {});
+    std::filesystem::remove(stl_failure_json);
+    std::filesystem::remove(malformed_stl_path);
+    std::filesystem::remove(degenerate_stl_path);
+    std::filesystem::remove(valid_stl_path);
+    if (exported_stl_failure.status != axiom::StatusCode::Ok ||
+        stl_failure_json_text.find("\"stage\":\"io.import.stl.validation\"") == std::string::npos ||
+        !staged_stl_failures.value || staged_stl_failures.value->size() != 5 ||
+        !body_count_before_stl_failures.value || !body_count_after_stl_failures.value ||
+        *body_count_before_stl_failures.value != *body_count_after_stl_failures.value ||
+        !mesh_count_before_stl_failures.value || !mesh_count_after_stl_failures.value ||
+        *mesh_count_before_stl_failures.value != *mesh_count_after_stl_failures.value ||
+        valid_stl.status != axiom::StatusCode::Ok || !valid_stl.value.has_value() ||
+        std::filesystem::exists(missing_stl_path)) {
+        std::cerr << "STL import failure lookup, JSON evidence, isolation, or retry is unexpected\n";
+        return 1;
+    }
+
     const auto body_count_before_step_failures = kernel.body_count();
     const auto check_step_failure = [&](const axiom::Result<void>& result, axiom::StatusCode expected_status,
                                         std::string_view expected_stage) {

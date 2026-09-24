@@ -12,6 +12,8 @@
 
 ### 2.1 `diag + ops`
 
+- **NFR-DIA-001 第 40 切片**：STL 导入的物化前输入/路径/打开/读取/解析/网格验证失败分别绑定 `io.import.stl.input/path/open/read/parse/validation`；非普通文件在读取前拒绝。`axiom_io_workflow_test` 覆盖稳定错误码、阶段检索、JSON、Body/Mesh 不污染及失败后重试。复用现有 IO/VAL 错误码，需求仍为受限可用；其他 BOOL/HEAL/IO 失败出口仍待闭合。
+
 - **FR-DIAG-001 第 39 切片**：阶段精确与前缀检索先按 `DiagnosticId` 升序确定匹配集合，再应用 `max_results`，避免无序存储遍历使限额结果不稳定。`axiom_diagnostics_test` 覆盖匹配/空结果、限额、非法参数、源报告不污染及拒绝后重试。复用现有错误码；需求保持受限可用，全部高风险流程的阶段、实体和数值证据仍待补齐。
 
 - **NFR-DIA-001 第 35 切片**：OBJ 导入的空路径、缺失文件、非普通文件/打开失败、解析失败与退化三角形分别绑定 `io.import.obj.input/path/open/parse/validation`；非普通文件在读取前拒绝，避免目录读取抛出裸异常。`axiom_io_workflow_test` 覆盖阶段检索、JSON、Body/Mesh 不污染及失败后成功重试。复用现有 IO/VAL 错误码，不扩大 OBJ 格式支持范围，需求仍为受限可用。
