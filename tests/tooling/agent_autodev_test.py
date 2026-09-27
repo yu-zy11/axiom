@@ -8,6 +8,7 @@ import copy
 from contextlib import ExitStack
 import importlib.util
 import json
+import subprocess
 import sys
 import tempfile
 import time
@@ -220,6 +221,11 @@ class AgentAutodevTest(unittest.TestCase):
                 {"full_test_interval": 0},
                 {"build_parallel_jobs": -1},
                 {"build_parallel_jobs": True},
+                {"batch_enabled": "true"},
+                {"batch_min_packages": 0},
+                {"batch_min_code_lines": True},
+                {"batch_max_packages": 2},
+                {"docs_timeout_seconds": -1},
                 {"requirement_weights": {"FR-OPS-001": 0}},
                 {"task_briefs": {"FR-OPS-001": {"goal": "", "entrypoints": []}}},
             ):
@@ -272,6 +278,7 @@ class RepairLoopTest(unittest.TestCase):
                  interrupted_agent=False, stop_after_seconds=0):
         config = agent_autodev.load_config(agent_autodev.DEFAULT_CONFIG)
         config["max_consecutive_failures"] = limit
+        config["batch_enabled"] = False  # Exercise legacy checkpoint compatibility.
         config["retry_delay_seconds"] = 0
         targets = [agent_autodev.Requirement("FR-GEO-001", "进行中"),
                    agent_autodev.Requirement("FR-TOPO-001", "进行中")]
@@ -415,6 +422,182 @@ class RepairLoopTest(unittest.TestCase):
         config = agent_autodev.load_config(agent_autodev.DEFAULT_CONFIG)
         self.assertEqual(config["max_consecutive_failures"], 0)
         self.assertNotIn("--full-auto", config["agent_command"])
+
+
+class BatchLoopTest(unittest.TestCase):
+    def run_batch(self, *, lines=450, docs_fail=False, docs_code_edit=False,
+                  gate_fail=False, commit_fail=False, stop_phase=None, pending=None,
+                  dry_run=False):
+        config = agent_autodev.load_config(agent_autodev.DEFAULT_CONFIG)
+        ids = ["FR-GEO-001", "FR-OPS-001", "FR-QUERY-001"]
+        targets = [agent_autodev.Requirement(rid, "进行中") for rid in ids]
+        config.update(requirement_tiers=[ids], requirement_weights={}, retry_delay_seconds=0,
+                      batch_max_packages=4, max_consecutive_failures=3)
+        state = dict(successful_cycles=0, consecutive_failures=0, history=[], requirement_cycles={})
+        if pending:
+            state["pending"] = copy.deepcopy(pending)
+        args = argparse.Namespace(max_cycles=1, no_commit=False, dry_run=dry_run,
+                                  config=agent_autodev.DEFAULT_CONFIG, agent_command=None,
+                                  allow_dirty=False, resume_failed=pending is not None,
+                                  stop_after_seconds=5 if stop_phase else 0)
+        files = dict(pending["files"]) if pending else {}
+        events, prompts, snapshots = [], [], []
+        counts = {"develop": 0, "repair": 0, "docs": 0, "gates": 0, "commit": 0}
+
+        def invoke(*a, **kw):
+            phase = state["pending"]["phase"]
+            counts[phase] += 1
+            events.append(phase)
+            prompts.append(kw["stdin"])
+            if phase == "docs":
+                files["docs/api/api.md"] = str(counts[phase])
+                if docs_code_edit and counts[phase] == 1:
+                    files["src/axiom/geo/a.cpp"] = "unvalidated"
+                if docs_fail and counts[phase] == 1:
+                    return Mock(returncode=1, stdout="", stderr="docs timeout")
+            else:
+                files[f"src/axiom/geo/{counts['develop']}.cpp"] = str(counts[phase])
+            return Mock(returncode=0, stdout="done", stderr="")
+
+        def report():
+            return dict(status="completed_slice", requirement_id=state["pending"]["requirement_id"],
+                        module="Geo", summary=f"feature {counts['develop']}", tests=[], remaining="next")
+
+        def gates(*a, **kw):
+            events.append("gates")
+            counts["gates"] += 1
+            self.assertTrue(kw["force_full"])
+            self.assertGreaterEqual(len(state["pending"]["reports"]), 3)
+            if gate_fail and counts["gates"] == 1:
+                raise agent_autodev.RunnerError("compile error")
+            return True
+
+        def commit(*a):
+            counts["commit"] += 1
+            events.append("commit")
+            if commit_fail and counts["commit"] == 1:
+                raise agent_autodev.RunnerError("commit hook failure")
+            return "commit"
+
+        def now():
+            return 10 if stop_phase and state.get("pending", {}).get("phase") == stop_phase else 0
+
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+            ledger = Path(directory) / "ledger.md"
+            ledger.write_text("header\n")
+            mocks = {
+                "parse_args": Mock(return_value=args),
+                "load_config": Mock(return_value=config),
+                "load_state": Mock(return_value=state),
+                "ensure_safe_start": Mock(),
+                "read_requirements": Mock(return_value=targets),
+                "checked_output": Mock(return_value="head"),
+                "workspace_snapshot": Mock(side_effect=lambda: dict(files)),
+                "save_state": Mock(side_effect=lambda s: snapshots.append(copy.deepcopy(s))),
+                "run": Mock(side_effect=invoke), "load_report": Mock(side_effect=report),
+                "production_code_lines": Mock(side_effect=lambda: counts["develop"] * lines),
+                "verify_slice": Mock(side_effect=gates),
+                "execute_gate": Mock(side_effect=lambda *a: events.append("docs_check")),
+                "commit_slice": Mock(side_effect=commit),
+            }
+            for name, value in mocks.items():
+                stack.enter_context(patch.object(agent_autodev, name, value))
+            for name, path in (("PROGRESS_LEDGER", ledger), ("LOG_DIR", Path(directory)),
+                               ("REPORT_PATH", Path(directory) / "report.json")):
+                stack.enter_context(patch.object(agent_autodev, name, path))
+            stack.enter_context(patch.object(agent_autodev.time, "sleep"))
+            stack.enter_context(patch.object(agent_autodev.time, "monotonic", side_effect=now))
+            result = agent_autodev.main()
+            return result, state, events, prompts, ledger.read_text(), snapshots
+
+    def test_three_packages_then_single_gates_then_docs_then_commit(self):
+        result, state, events, prompts, ledger, _ = self.run_batch()
+        self.assertEqual(result, 0)
+        self.assertEqual(events, ["develop"] * 3 + ["gates", "docs", "docs_check", "docs_check", "commit"])
+        self.assertEqual(state["successful_cycles"], 1)
+        self.assertEqual(state["history"][0]["code_lines"], 1350)
+        self.assertEqual(set(state["requirement_cycles"]), {"FR-GEO-001", "FR-OPS-001", "FR-QUERY-001"})
+        self.assertIn("不要运行构建、测试", prompts[0])
+        self.assertIn("已通过调度器的独立编译和测试", prompts[-1])
+        self.assertEqual(ledger.count("完整测试通过"), 1)
+
+    def test_line_threshold_extends_batch_and_cap_never_runs_gates(self):
+        _, state, events, _, _, _ = self.run_batch(lines=250)
+        self.assertEqual(events[:5], ["develop"] * 4 + ["gates"])
+        self.assertEqual(state["history"][0]["code_lines"], 1000)
+        result, state, events, _, ledger, _ = self.run_batch(lines=100)
+        self.assertEqual(result, 1)
+        self.assertEqual(events, ["develop"] * 4)
+        self.assertEqual(len(state["pending"]["reports"]), 4)
+        self.assertEqual(ledger, "header\n")
+
+    def test_large_first_package_still_requires_multiple_packages(self):
+        _, state, events, _, _, _ = self.run_batch(lines=1200)
+        self.assertEqual(events[:4], ["develop"] * 3 + ["gates"])
+        self.assertEqual(len(state["history"][0]["packages"]), 3)
+
+    def test_docs_failure_retries_only_docs(self):
+        _, _, events, _, _, _ = self.run_batch(docs_fail=True)
+        self.assertEqual(events.count("gates"), 1)
+        self.assertEqual(events.count("docs"), 2)
+        self.assertEqual(events.count("develop"), 3)
+
+    def test_failed_build_repairs_whole_batch_without_extra_package(self):
+        _, state, events, prompts, _, _ = self.run_batch(gate_fail=True)
+        self.assertEqual(events[3:7], ["gates", "repair", "gates", "docs"])
+        self.assertEqual(len(state["history"][0]["packages"]), 3)
+        self.assertIn("compile error", prompts[3])
+
+    def test_docs_code_mutation_invalidates_successful_gates(self):
+        _, _, events, prompts, _, _ = self.run_batch(docs_code_edit=True)
+        self.assertEqual(events[3:8], ["gates", "docs", "repair", "gates", "docs"])
+        self.assertIn("documentation agent changed code", prompts[4])
+
+    def test_commit_failure_keeps_validation_and_rolls_back_ledger(self):
+        _, _, events, _, ledger, _ = self.run_batch(commit_fail=True)
+        self.assertEqual(events.count("gates"), 1)
+        self.assertEqual(events.count("docs"), 1)
+        self.assertEqual(events.count("commit"), 2)
+        self.assertEqual(ledger.count("完整测试通过"), 1)
+
+    def test_deadline_preserves_docs_checkpoint_and_resume_skips_build(self):
+        _, state, events, _, _, _ = self.run_batch(stop_phase="docs")
+        self.assertEqual(events, ["develop"] * 3 + ["gates"])
+        self.assertEqual(state["successful_cycles"], 0)
+        _, resumed, events, _, _, _ = self.run_batch(pending=state["pending"])
+        self.assertEqual(events, ["docs", "docs_check", "docs_check", "commit"])
+        self.assertEqual(resumed["successful_cycles"], 1)
+
+    def test_dry_run_does_not_write_state(self):
+        _, state, events, _, _, snapshots = self.run_batch(dry_run=True)
+        self.assertEqual(events, [])
+        self.assertEqual(snapshots, [])
+        self.assertNotIn("pending", state)
+
+    def test_code_count_includes_staged_and_untracked_excludes_tests_docs_and_deletions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            def git(*args):
+                return subprocess.run(["git", *args], cwd=root, text=True, capture_output=True, check=True)
+            git("init")
+            git("config", "user.email", "test@example.invalid")
+            git("config", "user.name", "test")
+            for name in ("src/a.cpp", "src/remove.cpp", "tests/a.cpp", "docs/a.md"):
+                (root / name).parent.mkdir(exist_ok=True)
+                (root / name).write_text("int original;\n")
+            git("add", ".")
+            git("commit", "-m", "base")
+            (root / "src/a.cpp").write_text("int original;\nint staged;\n")
+            git("add", "src/a.cpp")
+            (root / "src/a.cpp").write_text("int original;\nint staged;\nint unstaged;\n// comment\n\n}\n")
+            (root / "src/new.cpp").write_text("int fresh;\n// comment\n")
+            (root / "src/remove.cpp").unlink()
+            (root / "tests/a.cpp").write_text("int test;\n" * 1500)
+            (root / "docs/a.md").write_text("doc\n" * 2000)
+            original_run = agent_autodev.run
+            with patch.object(agent_autodev, "ROOT", root), patch.object(
+                    agent_autodev, "run", side_effect=lambda command, **kw: original_run(command, cwd=root, **kw)):
+                self.assertEqual(agent_autodev.production_code_lines(), 3)
 
 
 if __name__ == "__main__":
