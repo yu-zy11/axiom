@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -162,8 +163,10 @@ struct BodyRecord {
     Scalar extrude_poly_cap_area {0.0};
     Scalar extrude_lateral_area {0.0};
     Point3 extrude_mass_centroid {};
-    /// 多边形 `revolve`：子午面轮廓副本，供真实旋转体 BRep 物化（轴须在轮廓平面内，转角 `< 2π`）。
+    /// 多边形 `revolve`：子午面轮廓副本，供真实旋转体 BRep 物化（轴须在轮廓平面内，转角 `<= 2π`）。
     std::vector<Point3> revolve_profile_xyz;
+    /// 整周旋转必须走专用闭壳物化，失败时禁止回退到 bbox 占位拓扑。
+    bool revolve_full_turn {false};
     /// 多边形 `extrude`：轮廓副本，供 **平面多边形 + 非退化拉伸方向** 的棱柱 BRep 物化（见 `try_materialize_sweep_extrude_prism_body`）。
     std::vector<Point3> extrude_profile_xyz;
     std::vector<std::vector<Point3>> extrude_holes_xyz;
@@ -171,9 +174,19 @@ struct BodyRecord {
     /// Zero scale is a single shared apex and requires a hole-free profile.
     Scalar extrude_end_scale {1.0};
     Point3 extrude_scale_center {};
+    /// Optional terminating plane for a straight extrusion with vertex-dependent travel.
+    std::optional<Plane> extrude_end_plane;
     /// Fixed-orientation polyline sweep: station displacements relative to the rail start.
     /// Empty for a single extrusion; otherwise starts at zero and is strictly monotone through the profile plane.
     std::vector<Vec3> sweep_station_offsets;
+    /// Curve-following sweep stations. `u/v` are a rotation-minimizing section frame at each
+    /// rail point; open rails include both endpoints, while a closed rail omits its repeated end.
+    /// The materializer reconstructs every section from the original world-space profile in
+    /// this frame, so the result owns real side/cap topology instead of a rail bounding box.
+    std::vector<Point3> sweep_frame_origins;
+    std::vector<Vec3> sweep_frame_u;
+    std::vector<Vec3> sweep_frame_v;
+    bool sweep_frame_closed {false};
     /// 三角网格闭壳（ρ=1）质量：体积/质心/惯性（关于质心，世界系行主序 3×3）；与 `sweep_cached_surface_area` 在 `sweep_polyhedral_mass_valid` 时由物化写入。
     bool sweep_polyhedral_mass_valid {false};
     Scalar sweep_polyhedral_volume {0.0};

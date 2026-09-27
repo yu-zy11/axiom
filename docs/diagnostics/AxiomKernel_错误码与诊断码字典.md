@@ -307,7 +307,7 @@
 |---|---|---|
 | `AXM-QUERY-E-0001` | Error | 最近点查询失败 |
 | `AXM-QUERY-E-0002` | Error | 截面计算失败 |
-| `AXM-QUERY-E-0003` | Error | 质量属性计算失败 |
+| `AXM-QUERY-E-0003` | Error | 质量属性或解析修剪面积的数值积分失败 |
 | `AXM-QUERY-E-0004` | Error | 距离计算失败 |
 | `AXM-QUERY-E-0005` | Warning | 质量属性基于近似网格计算 |
 
@@ -449,7 +449,7 @@
 
 `DiagnosticService::export_grouped_by_stage_txt/json` 的空路径、文件打开及最终写入/关闭失败复用 `AXM-IO-E-0005`；空路径在打开文件前拒绝，失败不修改参与聚合的源报告，底层设备写入失败不保证恢复目标文件。回归入口：`axiom_diagnostics_test`。
 
-`IOService::export_obj/export_stl/export_gltf/export_3mf` 的失败阶段为 `io.export.<format>.input/path/convert/mesh/open/write/sidecar`，并关联输入 Body（无效 ID 也保留）。输入、网格数据、打开与最终写入/关闭失败复用 `AXM-IO-E-0005`，路径与转换/侧车失败保留下层错误码；严格 QA 继续使用 `AXM-IO-E-0006 / io.export.mesh_strict_qa`。失败回滚本次新增网格、实体 ID、体/面三角化缓存及统计，保留诊断；输入/转换/校验失败保护已有文件，设备写入失败不保证恢复文件，侧车失败可能保留完整主文件。策略和回归见 [IO 导出策略矩阵](../quality/AxiomKernel_IO_导出策略矩阵.md)；第 64 包实现就绪，待统一验收。
+`IOService::export_obj/export_stl/export_gltf/export_3mf` 的失败阶段为 `io.export.<format>.input/path/convert/mesh/open/write/sidecar`，并关联输入 Body（无效 ID 也保留）。输入、网格数据、打开与最终写入/关闭失败复用 `AXM-IO-E-0005`，路径与转换/侧车失败保留下层错误码；严格 QA 继续使用 `AXM-IO-E-0006 / io.export.mesh_strict_qa`。失败回滚本次新增网格、实体 ID、体/面三角化缓存及统计，保留诊断；输入/转换/校验失败保护已有文件，设备写入失败不保证恢复文件，侧车失败可能保留完整主文件。策略和回归见 [IO 导出策略矩阵](../quality/AxiomKernel_IO_导出策略矩阵.md)；第 64 包已纳入第 68 批全量门禁。
 
 `IOService::export_step` 的失败继续复用 `AXM-IO-E-0005`，并关联输入 Body：无效 Body/空路径为 `io.export.step.input`，父目录不存在或不可写为 `io.export.step.path`，打开失败为 `io.export.step.open`，最终写入或关闭失败为 `io.export.step.write`。输入/路径失败不创建目标文件，所有失败不修改模型；底层设备写入失败不保证恢复目标文件。回归入口：`axiom_io_workflow_test`。
 
@@ -607,3 +607,24 @@
 - `AXM-TOPO-E-0003/0004`：面外/内环引用缺失或重复；`InvalidTopology`。
 
 边→环→面失败原样传播诊断且不返回部分和；查询只增加诊断和 Topo 查询审计，不修改模型、事务写计数、几何/网格缓存或 Eval 失效状态。
+
+### FR-QUERY-001 解析曲面修剪面积诊断（第 68 批）
+
+- `AXM-CORE-E-0001`：`TopologyQueryService::face_area` 目标面句柄无效、已删除或已回滚；`InvalidInput`，无面积。
+- `AXM-CORE-E-0004`：Bezier/BSpline/NURBS/Revolved/Swept 面尚无面积实现；`NotImplemented`，无面积。
+- `AXM-TOPO-E-0008`：非平面缺少 PCurve、同一面仅部分定向边绑定 PCurve、曲面包装链/偏置/参数域与拓扑不兼容，或 PCurve 端点映射与定向拓扑顶点不一致；`InvalidTopology`。
+- `AXM-TOPO-E-0003/0004`：外/内 PCurve 环缺失、空、非折线、断裂、未闭合、退化、自交或越出参数域；内环不严格位于外环内，或内环之间相交、重叠、嵌套，使用 `E-0004`。
+- `AXM-GEO-E-0003`：扣除内环后面积非正或数值退化；`DegenerateGeometry`。
+- `AXM-QUERY-E-0003`：解析面积密度积分产生非有限结果；`NumericalInstability`。
+- `AXM-CORE-E-0002`：有限解析结果超出 `Scalar` 范围；`InvalidInput`。
+
+查询不返回部分面积，不写几何/求值/网格缓存，不创建模型对象。未包装 Plane 且完全无 PCurve 时兼容调用 `planar_face_area`，并沿用其既有失败码。
+
+### FR-OPS-001 SweepService 新路径诊断（第 68 批）
+
+- `AXM-CORE-E-0001`：`sweep` 轮廓标签为空或导轨句柄无效。
+- `AXM-CORE-E-0002`：`extrude_to_plane` 的轮廓/孔非法、方向或平面非有限/近退化、方向切向或反向、平面接触/相交或舍入塌缩。
+- `AXM-CORE-E-0002`：整周 `revolve` 角度不在 `(0,2π]`、轴非法，或轮廓带孔、跨轴、孤立轴点、近轴、自交、非共面/偏轴。
+- `AXM-CORE-E-0002`：曲线 `sweep` 截面非法或未与导轨起点/切向对齐，导轨为未支持类型、闭合样条、尖点、过紧曲率、自靠近，或周期标架/物化/质量积分失败。
+
+上述 Ops 失败允许新增诊断，但在模型/拓扑对象和 ID 分配前完成验证，不改变活动拓扑事务写计数，也不污染求值或网格缓存。

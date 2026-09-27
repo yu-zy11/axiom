@@ -70,6 +70,11 @@ public:
     /// 平面、直线边面片的真实边界面积（外环减内环），单位为模型长度单位的平方。
     /// 不支持曲边/非平面面；无效面返回失败且无数值。每次从当前拓扑重算，不缓存。
     Result<Scalar> planar_face_area(FaceId face_id) const;
+    /// 由完整折线 PCurve 修剪环计算解析曲面面积（外环减内环），单位为模型长度单位的平方。
+    /// 支持 Plane/Cylinder/Cone/Sphere/Torus 及其 Trimmed/Offset 包装；未包装 Plane 无 PCurve 时兼容回退 `planar_face_area`。
+    /// UV 环必须连续闭合、位于当前参数域且内环严格位于外环内；退化/自交/重叠或缺失 PCurve 不返回部分面积。
+    /// 每次从当前面、环与曲面记录重算，不写几何求值/网格缓存；事务内替换/删除即时可见，回滚后恢复。
+    Result<Scalar> face_area(FaceId face_id) const;
     /// 当前 Line/LineSegment 边的端点距离，单位为模型长度单位；端点须位于支撑曲线范围内。
     /// 曲边缺少裁剪区间，返回 NotImplemented；退化/不一致拓扑返回 InvalidTopology。
     Result<Scalar> edge_length(EdgeId edge_id) const;

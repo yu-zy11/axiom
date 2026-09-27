@@ -23,6 +23,254 @@ struct TopoQueryAuditScope {
   std::shared_ptr<detail::KernelState> state_;
 };
 
+struct AnalyticAreaSurface {
+  detail::SurfaceKind kind{detail::SurfaceKind::Plane};
+  const detail::SurfaceRecord *base{nullptr};
+  Scalar offset{0.0};
+  Range2D domain{{-std::numeric_limits<Scalar>::infinity(),
+                  std::numeric_limits<Scalar>::infinity()},
+                 {-std::numeric_limits<Scalar>::infinity(),
+                  std::numeric_limits<Scalar>::infinity()}};
+};
+
+bool tighten_area_interval(Range1D &current, Scalar lo, Scalar hi) {
+  if (!std::isfinite(lo) || !std::isfinite(hi) || !(lo < hi)) return false;
+  current.min = std::max(current.min, lo);
+  current.max = std::min(current.max, hi);
+  return current.min < current.max;
+}
+
+bool resolve_analytic_area_surface(const detail::KernelState &state,
+                                   SurfaceId surface_id,
+                                   AnalyticAreaSurface &out) {
+  std::unordered_set<std::uint64_t> visited;
+  SurfaceId current = surface_id;
+  while (visited.insert(current.value).second) {
+    const auto it = state.surfaces.find(current.value);
+    if (it == state.surfaces.end()) return false;
+    const auto &surface = it->second;
+    if (surface.kind == detail::SurfaceKind::Trimmed) {
+      if (!tighten_area_interval(out.domain.u, surface.trim_u_min,
+                                 surface.trim_u_max) ||
+          !tighten_area_interval(out.domain.v, surface.trim_v_min,
+                                 surface.trim_v_max) ||
+          surface.base_surface_id.value == 0) {
+        return false;
+      }
+      current = surface.base_surface_id;
+      continue;
+    }
+    if (surface.kind == detail::SurfaceKind::Offset) {
+      if (!std::isfinite(surface.offset_distance) ||
+          surface.base_surface_id.value == 0) {
+        return false;
+      }
+      out.offset += surface.offset_distance;
+      if (!std::isfinite(out.offset)) return false;
+      current = surface.base_surface_id;
+      continue;
+    }
+    out.kind = surface.kind;
+    out.base = &surface;
+    const Scalar pi = std::acos(-1.0);
+    switch (surface.kind) {
+    case detail::SurfaceKind::Plane:
+      return true;
+    case detail::SurfaceKind::Cylinder:
+      return tighten_area_interval(out.domain.u, 0.0, 2.0 * pi) &&
+             surface.radius_a + out.offset > 0.0;
+    case detail::SurfaceKind::Cone:
+      out.domain.u.min = std::max(out.domain.u.min, 0.0);
+      out.domain.u.max = std::min(out.domain.u.max, 2.0 * pi);
+      out.domain.v.min = std::max(out.domain.v.min, 0.0);
+      return out.domain.u.min < out.domain.u.max &&
+             out.domain.v.min < out.domain.v.max;
+    case detail::SurfaceKind::Sphere:
+      return tighten_area_interval(out.domain.u, 0.0, 2.0 * pi) &&
+             tighten_area_interval(out.domain.v, 0.0, pi) &&
+             surface.radius_a + out.offset > 0.0;
+    case detail::SurfaceKind::Torus:
+      return tighten_area_interval(out.domain.u, 0.0, 2.0 * pi) &&
+             tighten_area_interval(out.domain.v, 0.0, 2.0 * pi) &&
+             surface.radius_b + out.offset > 0.0;
+    default:
+      return true; // Resolved successfully, but the caller reports unsupported kind.
+    }
+  }
+  return false;
+}
+
+long double analytic_area_density(const AnalyticAreaSurface &surface,
+                                  long double v) {
+  const auto &base = *surface.base;
+  const long double d = surface.offset;
+  switch (surface.kind) {
+  case detail::SurfaceKind::Plane:
+    return 1.0L;
+  case detail::SurfaceKind::Cylinder:
+    return std::abs(static_cast<long double>(base.radius_a) + d);
+  case detail::SurfaceKind::Cone: {
+    const long double angle = base.semi_angle;
+    const long double radial = std::tan(angle) * v + d * std::cos(angle);
+    return std::abs(radial) / std::cos(angle);
+  }
+  case detail::SurfaceKind::Sphere: {
+    const long double radius = static_cast<long double>(base.radius_a) + d;
+    return radius * radius * std::abs(std::sin(v));
+  }
+  case detail::SurfaceKind::Torus: {
+    const long double minor = static_cast<long double>(base.radius_b) + d;
+    const long double ring = static_cast<long double>(base.radius_a) + minor * std::cos(v);
+    return std::abs(minor * ring);
+  }
+  default:
+    return std::numeric_limits<long double>::quiet_NaN();
+  }
+}
+
+Point3 analytic_area_surface_point(const AnalyticAreaSurface &surface,
+                                   const Point2 &uv) {
+  const auto &base = *surface.base;
+  const auto w = detail::normalize(base.normal);
+  const auto reference = std::abs(w.z) < 0.9 ? Vec3{0.0, 0.0, 1.0}
+                                             : Vec3{0.0, 1.0, 0.0};
+  const auto axis_u = detail::normalize(detail::cross(reference, w));
+  const auto axis_v = detail::normalize(detail::cross(w, axis_u));
+  const auto from_local = [&](long double x, long double y, long double z) {
+    return Point3{
+        static_cast<Scalar>(base.origin.x + axis_u.x * x + axis_v.x * y + w.x * z),
+        static_cast<Scalar>(base.origin.y + axis_u.y * x + axis_v.y * y + w.y * z),
+        static_cast<Scalar>(base.origin.z + axis_u.z * x + axis_v.z * y + w.z * z)};
+  };
+  const long double u = uv.x;
+  const long double v = uv.y;
+  const long double d = surface.offset;
+  switch (surface.kind) {
+  case detail::SurfaceKind::Plane:
+    return from_local(u, v, d);
+  case detail::SurfaceKind::Cylinder: {
+    const long double radius = static_cast<long double>(base.radius_a) + d;
+    return from_local(radius * std::cos(u), radius * std::sin(u), v);
+  }
+  case detail::SurfaceKind::Cone: {
+    const long double angle = base.semi_angle;
+    const long double radius = std::tan(angle) * v + d * std::cos(angle);
+    return from_local(radius * std::cos(u), radius * std::sin(u),
+                      v - d * std::sin(angle));
+  }
+  case detail::SurfaceKind::Sphere: {
+    const long double radius = static_cast<long double>(base.radius_a) + d;
+    // SphereService intentionally uses the world XYZ spherical frame.
+    return Point3{static_cast<Scalar>(base.origin.x + radius * std::cos(u) * std::sin(v)),
+                  static_cast<Scalar>(base.origin.y + radius * std::sin(u) * std::sin(v)),
+                  static_cast<Scalar>(base.origin.z + radius * std::cos(v))};
+  }
+  case detail::SurfaceKind::Torus: {
+    const long double minor = static_cast<long double>(base.radius_b) + d;
+    const long double ring = static_cast<long double>(base.radius_a) + minor * std::cos(v);
+    return from_local(ring * std::cos(u), ring * std::sin(u), minor * std::sin(v));
+  }
+  default:
+    return {};
+  }
+}
+
+long double weighted_uv_ring_area(const std::vector<Point2> &ring,
+                                  const AnalyticAreaSurface &surface) {
+  // Green: integral_D J(v) du dv = integral_boundary u J(v) dv.  Eight-point
+  // Gauss-Legendre is exact for constant metrics and stable for the trigonometric
+  // analytic metrics over the bounded standard surface domains.
+  constexpr std::array<long double, 4> nodes{
+      0.18343464249564980494L, 0.52553240991632898582L,
+      0.79666647741362673959L, 0.96028985649753623168L};
+  constexpr std::array<long double, 4> weights{
+      0.36268378337836198297L, 0.31370664587788728734L,
+      0.22238103445337447054L, 0.10122853629037625915L};
+  long double integral = 0.0L;
+  for (std::size_t i = 0; i < ring.size(); ++i) {
+    const auto &a = ring[i];
+    const auto &b = ring[(i + 1) % ring.size()];
+    const long double du = static_cast<long double>(b.x) - a.x;
+    const long double dv = static_cast<long double>(b.y) - a.y;
+    if (dv == 0.0L) continue;
+    long double segment = 0.0L;
+    for (std::size_t q = 0; q < nodes.size(); ++q) {
+      for (const long double sign : {-1.0L, 1.0L}) {
+        const long double t = 0.5L * (1.0L + sign * nodes[q]);
+        const long double u = static_cast<long double>(a.x) + du * t;
+        const long double v = static_cast<long double>(a.y) + dv * t;
+        segment += weights[q] * u * analytic_area_density(surface, v);
+      }
+    }
+    integral += 0.5L * dv * segment;
+  }
+  return integral;
+}
+
+long double uv_orientation(const Point2 &a, const Point2 &b, const Point2 &c) {
+  return (static_cast<long double>(b.x) - a.x) *
+             (static_cast<long double>(c.y) - a.y) -
+         (static_cast<long double>(b.y) - a.y) *
+             (static_cast<long double>(c.x) - a.x);
+}
+
+bool uv_point_on_segment(const Point2 &p, const Point2 &a, const Point2 &b,
+                         long double tolerance) {
+  const long double cross = std::abs(uv_orientation(a, b, p));
+  const long double scale = std::hypot(static_cast<long double>(b.x) - a.x,
+                                       static_cast<long double>(b.y) - a.y);
+  if (cross > tolerance * std::max(1.0L, scale)) return false;
+  return static_cast<long double>(p.x) >= std::min(a.x, b.x) - tolerance &&
+         static_cast<long double>(p.x) <= std::max(a.x, b.x) + tolerance &&
+         static_cast<long double>(p.y) >= std::min(a.y, b.y) - tolerance &&
+         static_cast<long double>(p.y) <= std::max(a.y, b.y) + tolerance;
+}
+
+bool uv_segments_intersect(const Point2 &a, const Point2 &b, const Point2 &c,
+                           const Point2 &d, long double tolerance) {
+  const auto oa = uv_orientation(a, b, c);
+  const auto ob = uv_orientation(a, b, d);
+  const auto oc = uv_orientation(c, d, a);
+  const auto od = uv_orientation(c, d, b);
+  if (((oa > tolerance && ob < -tolerance) ||
+       (oa < -tolerance && ob > tolerance)) &&
+      ((oc > tolerance && od < -tolerance) ||
+       (oc < -tolerance && od > tolerance))) return true;
+  return (std::abs(oa) <= tolerance && uv_point_on_segment(c, a, b, tolerance)) ||
+         (std::abs(ob) <= tolerance && uv_point_on_segment(d, a, b, tolerance)) ||
+         (std::abs(oc) <= tolerance && uv_point_on_segment(a, c, d, tolerance)) ||
+         (std::abs(od) <= tolerance && uv_point_on_segment(b, c, d, tolerance));
+}
+
+bool simple_uv_ring(const std::vector<Point2> &ring, long double tolerance) {
+  if (ring.size() < 3) return false;
+  for (std::size_t i = 0; i < ring.size(); ++i) {
+    const std::size_t i1 = (i + 1) % ring.size();
+    if (uv_point_on_segment(ring[i], ring[i], ring[i1], tolerance) &&
+        std::hypot(static_cast<long double>(ring[i1].x) - ring[i].x,
+                   static_cast<long double>(ring[i1].y) - ring[i].y) <= tolerance)
+      return false;
+    for (std::size_t j = i + 1; j < ring.size(); ++j) {
+      const std::size_t j1 = (j + 1) % ring.size();
+      if (j == i || j == i1 || j1 == i) continue;
+      if (uv_segments_intersect(ring[i], ring[i1], ring[j], ring[j1], tolerance))
+        return false;
+    }
+  }
+  return true;
+}
+
+bool rings_touch_or_cross(const std::vector<Point2> &a,
+                          const std::vector<Point2> &b,
+                          long double tolerance) {
+  for (std::size_t i = 0; i < a.size(); ++i)
+    for (std::size_t j = 0; j < b.size(); ++j)
+      if (uv_segments_intersect(a[i], a[(i + 1) % a.size()], b[j],
+                                b[(j + 1) % b.size()], tolerance))
+        return true;
+  return false;
+}
+
 }  // namespace
 
 TopologyQueryService::TopologyQueryService(
@@ -887,6 +1135,239 @@ Result<Scalar> TopologyQueryService::planar_face_area(FaceId face_id) const {
         "面面积查询失败：边界面积无效或超出数值范围", "面面积查询失败");
   }
   return ok_result(static_cast<Scalar>(area), state_->create_diagnostic("已查询平面面片面积"));
+}
+
+Result<Scalar> TopologyQueryService::face_area(FaceId face_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
+  const auto face_it = state_->faces.find(face_id.value);
+  if (face_it == state_->faces.end()) {
+    return detail::invalid_input_result<Scalar>(
+        *state_, diag_codes::kCoreInvalidHandle,
+        "通用面积查询失败：目标面不存在", "通用面积查询失败");
+  }
+  const auto surface_it = state_->surfaces.find(face_it->second.surface_id.value);
+  if (surface_it == state_->surfaces.end()) {
+    return detail::failed_result<Scalar>(
+        *state_, StatusCode::InvalidTopology, diag_codes::kTopoFaceOuterLoopInvalid,
+        "通用面积查询失败：面引用的曲面不存在", "通用面积查询失败",
+        {face_id.value, face_it->second.surface_id.value});
+  }
+
+  std::vector<LoopId> loop_ids{face_it->second.outer_loop};
+  loop_ids.insert(loop_ids.end(), face_it->second.inner_loops.begin(),
+                  face_it->second.inner_loops.end());
+  std::size_t with_pcurve = 0;
+  std::size_t without_pcurve = 0;
+  for (const auto loop_id : loop_ids) {
+    const auto loop_it = state_->loops.find(loop_id.value);
+    if (loop_it == state_->loops.end() || loop_it->second.coedges.empty()) {
+      return detail::failed_result<Scalar>(
+          *state_, StatusCode::InvalidTopology,
+          loop_id == face_it->second.outer_loop ? diag_codes::kTopoFaceOuterLoopInvalid
+                                                 : diag_codes::kTopoFaceInnerLoopInvalid,
+          "通用面积查询失败：边界环不存在或为空", "通用面积查询失败",
+          {face_id.value, loop_id.value});
+    }
+    for (const auto coedge_id : loop_it->second.coedges) {
+      const auto coedge_it = state_->coedges.find(coedge_id.value);
+      if (coedge_it == state_->coedges.end()) {
+        return detail::failed_result<Scalar>(
+            *state_, StatusCode::InvalidTopology, diag_codes::kTopoInvariantBroken,
+            "通用面积查询失败：边界环引用的定向边不存在", "通用面积查询失败",
+            {face_id.value, loop_id.value, coedge_id.value});
+      }
+      if (coedge_it->second.pcurve_id.value == 0) ++without_pcurve;
+      else ++with_pcurve;
+    }
+  }
+
+  if (with_pcurve == 0 && surface_it->second.kind == detail::SurfaceKind::Plane) {
+    return planar_face_area(face_id);
+  }
+  if (with_pcurve == 0 || without_pcurve != 0) {
+    return detail::failed_result<Scalar>(
+        *state_, StatusCode::InvalidTopology, diag_codes::kTopoCurveTopologyMismatch,
+        with_pcurve == 0
+            ? "通用面积查询失败：非平面面片未提供 PCurve 修剪环"
+            : "通用面积查询失败：PCurve 修剪环绑定不完整",
+        "通用面积查询失败", {face_id.value});
+  }
+
+  AnalyticAreaSurface area_surface;
+  if (!resolve_analytic_area_surface(*state_, face_it->second.surface_id,
+                                     area_surface) || !area_surface.base) {
+    return detail::failed_result<Scalar>(
+        *state_, StatusCode::InvalidTopology, diag_codes::kTopoCurveTopologyMismatch,
+        "通用面积查询失败：曲面包装链、参数域或偏置无效", "通用面积查询失败",
+        {face_id.value, face_it->second.surface_id.value});
+  }
+  if (area_surface.kind != detail::SurfaceKind::Plane &&
+      area_surface.kind != detail::SurfaceKind::Cylinder &&
+      area_surface.kind != detail::SurfaceKind::Cone &&
+      area_surface.kind != detail::SurfaceKind::Sphere &&
+      area_surface.kind != detail::SurfaceKind::Torus) {
+    return detail::failed_result<Scalar>(
+        *state_, StatusCode::NotImplemented, diag_codes::kCoreOperationUnsupported,
+        "通用面积查询暂仅支持解析平面/柱面/锥面/球面/环面及其修剪或偏置包装",
+        "通用面积查询失败", {face_id.value, face_it->second.surface_id.value});
+  }
+
+  const long double uv_tol = std::max<long double>(
+      1e-12L, std::abs(static_cast<long double>(state_->config.tolerance.linear)));
+  const auto in_domain = [&](const Point2 &p) {
+    const auto in_one = [uv_tol](Scalar value, const Range1D &range) {
+      return std::isfinite(value) &&
+             (!std::isfinite(range.min) || value >= range.min - uv_tol) &&
+             (!std::isfinite(range.max) || value <= range.max + uv_tol);
+    };
+    return in_one(p.x, area_surface.domain.u) && in_one(p.y, area_surface.domain.v);
+  };
+  const auto build_ring = [&](LoopId loop_id, std::vector<Point2> &ring,
+                              std::string &reason) -> bool {
+    const auto &loop = state_->loops.at(loop_id.value);
+    ring.clear();
+    for (const auto coedge_id : loop.coedges) {
+      const auto &coedge = state_->coedges.at(coedge_id.value);
+      const auto pc_it = state_->pcurves.find(coedge.pcurve_id.value);
+      if (pc_it == state_->pcurves.end() ||
+          pc_it->second.kind != detail::PCurveKind::Polyline ||
+          pc_it->second.poles.size() < 2) {
+        reason = "PCurve 不存在、类型不支持或已退化";
+        return false;
+      }
+      const auto &poles = pc_it->second.poles;
+      const auto oriented = [&](std::size_t i) -> const Point2 & {
+        return coedge.reversed ? poles[poles.size() - 1 - i] : poles[i];
+      };
+      const auto topology_vertices = oriented_vertices(*state_, coedge_id);
+      if (!topology_vertices) {
+        reason = "定向边的拓扑端点无效";
+        return false;
+      }
+      const auto vertex0 = state_->vertices.find((*topology_vertices)[0].value);
+      const auto vertex1 = state_->vertices.find((*topology_vertices)[1].value);
+      const auto expected0 = analytic_area_surface_point(area_surface, oriented(0));
+      const auto expected1 =
+          analytic_area_surface_point(area_surface, oriented(poles.size() - 1));
+      const auto endpoint_distance = [](const Point3 &a, const Point3 &b) {
+        return std::hypot(std::hypot(static_cast<long double>(a.x) - b.x,
+                                    static_cast<long double>(a.y) - b.y),
+                          static_cast<long double>(a.z) - b.z);
+      };
+      const long double xyz_tol = std::max<long double>(
+          1e-9L, std::abs(static_cast<long double>(state_->config.tolerance.linear)));
+      if (vertex0 == state_->vertices.end() || vertex1 == state_->vertices.end() ||
+          endpoint_distance(vertex0->second.point, expected0) > xyz_tol ||
+          endpoint_distance(vertex1->second.point, expected1) > xyz_tol) {
+        reason = "PCurve 端点在支撑曲面上与拓扑顶点不一致";
+        return false;
+      }
+      if (!ring.empty()) {
+        const auto &start = oriented(0);
+        if (std::hypot(static_cast<long double>(ring.back().x) - start.x,
+                       static_cast<long double>(ring.back().y) - start.y) > uv_tol) {
+          reason = "PCurve 片段不连续";
+          return false;
+        }
+      }
+      for (std::size_t i = ring.empty() ? 0 : 1; i < poles.size(); ++i) {
+        const auto &p = oriented(i);
+        if (!in_domain(p)) {
+          reason = "PCurve 顶点非有限或超出当前曲面参数域";
+          return false;
+        }
+        if (ring.empty() ||
+            std::hypot(static_cast<long double>(ring.back().x) - p.x,
+                       static_cast<long double>(ring.back().y) - p.y) > uv_tol)
+          ring.push_back(p);
+      }
+    }
+    if (ring.size() < 4 ||
+        std::hypot(static_cast<long double>(ring.front().x) - ring.back().x,
+                   static_cast<long double>(ring.front().y) - ring.back().y) > uv_tol) {
+      reason = "PCurve 环未闭合或有效顶点不足";
+      return false;
+    }
+    ring.pop_back();
+    if (!simple_uv_ring(ring, uv_tol)) {
+      reason = "PCurve 环退化或自交";
+      return false;
+    }
+    long double uv_area2 = 0.0L;
+    for (std::size_t i = 0; i < ring.size(); ++i) {
+      const auto &a = ring[i];
+      const auto &b = ring[(i + 1) % ring.size()];
+      uv_area2 += static_cast<long double>(a.x) * b.y -
+                  static_cast<long double>(b.x) * a.y;
+    }
+    if (std::abs(uv_area2) <= uv_tol * uv_tol * 2.0L) {
+      reason = "PCurve 环参数面积退化";
+      return false;
+    }
+    return true;
+  };
+
+  std::vector<std::vector<Point2>> rings(loop_ids.size());
+  for (std::size_t i = 0; i < loop_ids.size(); ++i) {
+    std::string reason;
+    if (!build_ring(loop_ids[i], rings[i], reason)) {
+      return detail::failed_result<Scalar>(
+          *state_, StatusCode::InvalidTopology,
+          i == 0 ? diag_codes::kTopoFaceOuterLoopInvalid : diag_codes::kTopoFaceInnerLoopInvalid,
+          "通用面积查询失败：" + reason, "通用面积查询失败",
+          {face_id.value, loop_ids[i].value});
+    }
+  }
+  const auto strictly_inside = [&](const Point2 &p, const std::vector<Point2> &ring) {
+    for (std::size_t i = 0; i < ring.size(); ++i)
+      if (uv_point_on_segment(p, ring[i], ring[(i + 1) % ring.size()], uv_tol))
+        return false;
+    return detail::point_in_polygon_2d_raycast(
+        p, std::span<const Point2>(ring.data(), ring.size()));
+  };
+  for (std::size_t i = 1; i < rings.size(); ++i) {
+    if (rings_touch_or_cross(rings[0], rings[i], uv_tol) ||
+        !std::all_of(rings[i].begin(), rings[i].end(),
+                     [&](const Point2 &p) { return strictly_inside(p, rings[0]); })) {
+      return detail::failed_result<Scalar>(
+          *state_, StatusCode::InvalidTopology, diag_codes::kTopoFaceInnerLoopInvalid,
+          "通用面积查询失败：内环不严格位于外环内或与外环相交", "通用面积查询失败",
+          {face_id.value, loop_ids[i].value});
+    }
+    for (std::size_t j = 1; j < i; ++j) {
+      if (rings_touch_or_cross(rings[j], rings[i], uv_tol) ||
+          strictly_inside(rings[i].front(), rings[j]) ||
+          strictly_inside(rings[j].front(), rings[i])) {
+        return detail::failed_result<Scalar>(
+            *state_, StatusCode::InvalidTopology, diag_codes::kTopoFaceInnerLoopInvalid,
+            "通用面积查询失败：内环之间相交、重叠或嵌套", "通用面积查询失败",
+            {face_id.value, loop_ids[j].value, loop_ids[i].value});
+      }
+    }
+  }
+
+  long double area = std::abs(weighted_uv_ring_area(rings.front(), area_surface));
+  if (!std::isfinite(area)) {
+    return detail::failed_result<Scalar>(
+        *state_, StatusCode::NumericalInstability, diag_codes::kQueryMassPropertiesFailure,
+        "通用面积查询失败：解析面积密度产生非有限结果", "通用面积查询失败",
+        {face_id.value});
+  }
+  for (std::size_t i = 1; i < rings.size(); ++i)
+    area -= std::abs(weighted_uv_ring_area(rings[i], area_surface));
+  if (!(area > uv_tol * uv_tol) || !std::isfinite(area)) {
+    return detail::failed_result<Scalar>(
+        *state_, StatusCode::DegenerateGeometry, diag_codes::kGeoDegenerateGeometry,
+        "通用面积查询失败：扣除内环后面积非正或数值退化", "通用面积查询失败",
+        {face_id.value});
+  }
+  if (area > std::numeric_limits<Scalar>::max()) {
+    return detail::invalid_input_result<Scalar>(
+        *state_, diag_codes::kCoreParameterOutOfRange,
+        "通用面积查询失败：结果超出数值范围", "通用面积查询失败");
+  }
+  return ok_result(static_cast<Scalar>(area),
+                   state_->create_diagnostic("已查询解析曲面修剪面积"));
 }
 
 Result<BoundingBox>

@@ -212,7 +212,7 @@ auto faces = kernel.topology().query().faces_of_body(*holed.value); // 32 个真
 auto edges = kernel.topology().query().edges_of_body(*holed.value); // 48 条边
 auto mass = kernel.query().mass_properties(*holed.value); // 体积 (48−4)×3 = 132
 // 同一 plate 可传给 sweep(plate, line_segment_id)，孔随截面一起平移。
-// 第 62 包：截面方向不变的折线平移扫掠（待统一验收）。
+// 截面方向不变的折线平移扫掠（第 62 包，已纳入统一门禁）。
 // 每段 Z 位移同号；中间折点共享拓扑，孔贯通整条路径。
 std::vector<axiom::Point3> rail_points {{50,60,70}, {54,58,71}, {47,61,73}, {51,60,76}};
 auto rail = kernel.curves().make_composite_polyline(rail_points);
@@ -230,7 +230,7 @@ if (rail.value) {
 
 孔之间必须分离且不嵌套，不能接触外环；失败不留下部分实体。`revolve/loft` 尚不接受带孔截面。
 
-### 等比变截面拉伸（第 65 包待统一验收）
+### 等比变截面拉伸（第 65 包，已纳入统一门禁）
 
 ```cpp
 // 孔与外环一起绕平面内的 (4,3,0) 缩放：顶部尺寸减半，法向高度 3。
@@ -244,7 +244,7 @@ auto mass = kernel.query().mass_properties(*tapered.value); // (48−4)×3×(1+0
 
 末端比例大于 1 表示扩张，等于 1 与普通显式轮廓拉伸一致；缩放中心可以在截面材料之外，但必须位于截面平面。反向通过方向向量表达，距离仍为正；不接受负比例、带孔尖顶、离面中心或数值退化。各截面保持等比相似，不等同于逐壁恒角拔模。
 
-### 无孔尖顶拉伸（第 66 包待统一验收）
+### 无孔尖顶拉伸（第 66 包，已纳入统一门禁）
 
 ```cpp
 ProfileRef base {"pyramid", {{0,0,0}, {4,0,0}, {4,3,0}, {0,3,0}}};
@@ -260,18 +260,50 @@ auto apex_mesh = kernel.convert().brep_to_mesh(*pyramid.value, {});
 
 仅恰好为零的末端比例进入尖顶路径；很小的正比例仍按独立末端截面处理，数值塌缩则拒绝。带孔轮廓的尖顶会形成非流形顶点，返回 `InvalidInput / AXM-CORE-E-0002`，不分配模型对象。
 
+### 至平面拉伸
+
+```cpp
+// 每个轮廓顶点沿 +Z 射线命中斜目标面；距离可因顶点而异。
+Plane target {{0, 0, 4}, {-0.2, 0.1, 1}};
+auto to_plane = kernel.sweeps().extrude_to_plane(plate, {0, 0, 1}, target);
+if (!to_plane.value) { handle_error(to_plane); return; }
+auto to_plane_valid = kernel.validate().validate_all(*to_plane.value, ValidationMode::Strict);
+auto to_plane_mass = kernel.query().mass_properties(*to_plane.value);
+```
+
+该入口支持凹多边形和孔，方向缩放及目标法向反号不改变几何。目标面必须在每条顶点射线的严格前方；切向、反向、接触/交叉平面或近退化输入返回 `InvalidInput / AXM-CORE-E-0002`，不留下部分实体。
+
 ## 6.2 旋转
 
 ```cpp
-Axis3 axis{
-  .origin = {0, 0, 0},
-  .direction = {0, 1, 0}
-};
-
-auto body = kernel.sweeps().revolve(profile, axis, 360.0);
+ProfileRef meridian {"ring", {{1,0,-1}, {3,0,-1}, {3,0,2}, {1,0,2}}};
+Axis3 axis{.origin = {0, 0, 0}, .direction = {0, 0, 1}};
+auto body = kernel.sweeps().revolve(meridian, axis, 2 * std::acos(-1.0)); // 弧度
+if (!body.value) { handle_error(body); return; }
+auto valid_revolution = kernel.validate().validate_all(*body.value, ValidationMode::Strict);
+auto revolution_mesh = kernel.convert().brep_to_mesh(*body.value, {});
 ```
 
-## 6.3 放样
+整周显式多边形旋转支持与轴分离的环形体，也支持仅有一条连续边位于轴上的实心轮廓。带孔、跨轴、孤立轴点、近轴、自交或偏轴轮廓会被拒绝。结果是 48 站的周期多面体 BRep，不是解析圆柱/圆锥/圆环面。
+
+## 6.3 曲线导轨扫掠
+
+```cpp
+auto rail = kernel.curves().make_bezier({{0,0,0}, {4,0,0}, {8,1.5,0.5}, {12,3,1.5}});
+// 起始截面位于导轨起点，法向与起始切向 +X 对齐。
+ProfileRef section {"section", {{0,-.8,-.6}, {0,.8,-.6}, {0,.8,.6},
+                                {0,.15,.6}, {0,.15,.15}, {0,-.8,.15}}};
+if (rail.value) {
+    auto swept = kernel.sweeps().sweep(section, *rail.value);
+    if (!swept.value) { handle_error(swept); return; }
+    auto strict = kernel.validate().validate_all(*swept.value, ValidationMode::Strict);
+    auto mesh = kernel.convert().brep_to_mesh(*swept.value, {});
+}
+```
+
+Bezier/BSpline/NURBS 开放导轨和整圆/椭圆周期导轨使用旋转最小化标架。周期带孔截面的外边界与各孔边界分别物化为独立闭壳，因此壳数和网格连通分量都为 `1 + holes_xyz.size()`；开放带孔导轨由端盖连成单壳。尖点、闭合样条、过紧曲率和自靠近导轨保守拒绝；这是采样多面体 BRep，不是解析扫掠曲面。
+
+## 6.4 放样
 
 ```cpp
 std::vector<ProfileRef> profiles = {
@@ -687,3 +719,16 @@ if (box.value) {
 ```
 
 曲线长度对直线有限区间、线段、圆和折线使用解析计算，对椭圆、抛物线、双曲线、Bezier、BSpline 和 NURBS 使用可配置自适应积分。复合链沿用 eval 的子曲线局部 `[0,1]`，不自动取子曲线全域。拓扑长度目前支持直线边，曲边因缺少裁剪参数返回不支持；不以弦长冒充曲边弧长。
+
+### 解析曲面 PCurve 修剪面积
+
+```cpp
+// analytic_face 的每条 coedge 已绑定连续闭合的折线 PCurve。
+auto area = kernel.topology().query().face_area(analytic_face);
+if (!area.value) {
+    auto diagnostic = kernel.diagnostics().get(area.diagnostic_id);
+    handle_query_error(diagnostic);
+}
+```
+
+`face_area` 返回模型长度单位的平方，支持 Plane/Cylinder/Cone/Sphere/Torus 及嵌套 Trimmed/Offset，外环减去全部内环。未包装 Plane 没有 PCurve 时兼容回退 `planar_face_area`。所有其他支持曲面都要求完整折线 PCurve；UV 端点必须与定向拓扑顶点的 3D 位置一致。周期缝须显式用同一展开区间表达；Bezier/BSpline/NURBS/Revolved/Swept 面暂不支持。查询从当前拓扑和曲面重算，不写求值或网格缓存。

@@ -40,11 +40,24 @@ public:
     /// at one shared apex (center + unit(direction)*distance); holes and numerical degeneracy are rejected.
     Result<BodyId> extrude_scaled(const ProfileRef& profile, const Vec3& direction, Scalar distance,
                                  const Point3& center, Scalar end_scale);
+    /// Extrude an explicit planar polygon (including concavities/holes) along direction to a plane.
+    /// Every boundary point must reach the plane strictly forward, beyond the planarity tolerance.
+    /// Direction must be transverse to both planes; normal sign and vector magnitudes are immaterial.
+    /// Produces an actual planar closed BRep; touching/crossing planes and numerical degeneracy are rejected.
+    Result<BodyId> extrude_to_plane(const ProfileRef& profile, const Vec3& direction, const Plane& end_plane);
+    /// Revolve a profile through a positive angle no greater than one full turn.
+    /// Explicit polygons produce owned topology when the axis lies in the profile plane.
+    /// A full turn supports a profile strictly separated from the axis, or a simply
+    /// connected profile whose single boundary edge lies on the axis. Profiles that
+    /// cross the axis, touch it at an isolated point, contain holes or are numerically
+    /// near-degenerate are rejected without creating model objects.
     Result<BodyId> revolve(const ProfileRef& profile, const Axis3& axis, Scalar angle);
-    /// Explicit polygons: fixed-orientation translation along a line segment or CompositePolyline.
-    /// The profile stays in world space; station offsets are relative to the rail start.
-    /// Each segment must advance strictly in the same profile-normal direction (no tangency/backtracking).
-    /// Supports concave profiles and holes as for extrude; other rail kinds return InvalidInput.
+    /// Explicit polygons along a bounded rail, producing owned triangulated closed topology.
+    /// Line segments and CompositePolyline keep the profile in world space and require every
+    /// segment to advance through its plane. Bezier, B-spline and NURBS rails use a sampled
+    /// rotation-minimizing frame; Circle/Ellipse rails are periodic and have no caps. Curve-following profiles
+    /// must start on the rail in a plane normal to its tangent. Concavities and holes are supported;
+    /// cusps, closed splines, excessive curvature and self-approaching rails are rejected.
     Result<BodyId> sweep(const ProfileRef& profile, CurveId rail);
     Result<BodyId> loft(std::span<const ProfileRef> profiles);
     Result<BodyId> thicken(FaceId face_id, Scalar distance);

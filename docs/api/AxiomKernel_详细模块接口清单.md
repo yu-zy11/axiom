@@ -368,6 +368,8 @@ public:
   Result<SurfaceId> surface_of_face(FaceId) const;
   // 平面直线边面片面积；模型长度单位的平方，外环减内环。
   Result<Scalar> planar_face_area(FaceId) const;
+  // 解析曲面的折线 PCurve 修剪面积；模型长度单位的平方，外环减内环。
+  Result<Scalar> face_area(FaceId) const;
   Result<Scalar> edge_length(EdgeId) const;
   Result<Scalar> loop_length(LoopId) const;
   Result<Scalar> face_boundary_length(FaceId) const;
@@ -380,7 +382,11 @@ public:
 
 `planar_face_area` 从当前拓扑顶点和曲面法向计算边界面积，不使用 bbox 或三角网格。顶点到平面的距离须不超过内核线性容差；曲面必须为 Plane，边曲线必须为 Line/LineSegment。曲面或曲边不支持时返回 `NotImplemented / AXM-CORE-E-0004`；拓扑不完整、非共面或面积超出数值范围时返回 `InvalidTopology / AXM-TOPO-E-0003`（内环为 `E-0004`）；无效或已删除面返回 `InvalidInput / AXM-CORE-E-0001`，这些失败均无面积值。无内环时仅计外环；每次查询从当前模型重算，事务修改即时可见，回滚后恢复原面积。
 
-`edge_length / loop_length / face_boundary_length`（第 63 包待统一验收）组成直线边拓扑长度接口族，单位为模型长度单位。边长取当前两个拓扑端点的三维距离；两端点到 Line/LineSegment 的距离、线段端点越界距离不得超过内核线性容差，不投影或修复原模型。零长度或不一致边返回 `InvalidTopology / AXM-TOPO-E-0008`，缺失边引用返回 `InvalidTopology / AXM-TOPO-E-0006`。Edge 没有曲线裁剪参数，曲边明确返回 `NotImplemented / AXM-CORE-E-0004`，不以端点弦长代替弧长。环查询复用边查询，要求闭合且无重复成员；空/损坏/未闭合环返回 `InvalidTopology / AXM-TOPO-E-0002`。面查询复用环查询，返回**外环加全部内环**的长度，方向无关；支撑曲面类型不参与边界长度计算。缺失/重复面边界环返回 `InvalidTopology / AXM-TOPO-E-0003`（内环 `E-0004`），内层失败原样传播，不返回部分和。无效、已删除或已回滚的目标句柄返回 `InvalidInput / AXM-CORE-E-0001`，累加超出 Scalar 范围返回 `InvalidInput / AXM-CORE-E-0002`。所有失败均无数值；每次查询重算，事务内创建可查询、删除即时不可查询，回滚恢复原结果或使临时句柄失效。查询不修改模型、事务写计数、几何/网格缓存或 Eval 状态，只追加诊断和一次顶层查询审计。
+`face_area` 用曲面面积密度的 Green 边界积分计算完整折线 PCurve 修剪环的外环减内环面积，支持 Plane/Cylinder/Cone/Sphere/Torus 以及嵌套 Trimmed/Offset 包装。未包装 Plane 且所有定向边都没有 PCurve 时兼容回退 `planar_face_area`；其他曲面缺少 PCurve，或同一面上只绑定了部分 PCurve，返回 `InvalidTopology / AXM-TOPO-E-0008`。Bezier/BSpline/NURBS/Revolved/Swept 面目前返回 `NotImplemented / AXM-CORE-E-0004`。
+
+PCurve 必须为至少两点的折线，按 coedge 方向连续闭合，各点位于当前包装后参数域，且 UV 端点在支撑曲面上与定向拓扑顶点的 3D 位置一致。退化、自交、断裂或越域的外/内环分别返回 `InvalidTopology / AXM-TOPO-E-0003/0004`；内环必须严格位于外环内且不得相交、重叠或嵌套。非有限面积返回 `NumericalInstability / AXM-QUERY-E-0003`，扣孔后非正或退化返回 `DegenerateGeometry / AXM-GEO-E-0003`，结果溢出返回 `InvalidInput / AXM-CORE-E-0002`；所有失败均无部分面积。周期参数缝须由调用方在同一展开区间内表达，查询不自动解包裹。每次查询从当前面/环/曲面重算，不写求值或网格缓存；事务内替换/删除即时可见，回滚后恢复。
+
+`edge_length / loop_length / face_boundary_length`（第 63 包已纳入统一门禁）组成直线边拓扑长度接口族，单位为模型长度单位。边长取当前两个拓扑端点的三维距离；两端点到 Line/LineSegment 的距离、线段端点越界距离不得超过内核线性容差，不投影或修复原模型。零长度或不一致边返回 `InvalidTopology / AXM-TOPO-E-0008`，缺失边引用返回 `InvalidTopology / AXM-TOPO-E-0006`。Edge 没有曲线裁剪参数，曲边明确返回 `NotImplemented / AXM-CORE-E-0004`，不以端点弦长代替弧长。环查询复用边查询，要求闭合且无重复成员；空/损坏/未闭合环返回 `InvalidTopology / AXM-TOPO-E-0002`。面查询复用环查询，返回**外环加全部内环**的长度，方向无关；支撑曲面类型不参与边界长度计算。缺失/重复面边界环返回 `InvalidTopology / AXM-TOPO-E-0003`（内环 `E-0004`），内层失败原样传播，不返回部分和。无效、已删除或已回滚的目标句柄返回 `InvalidInput / AXM-CORE-E-0001`，累加超出 Scalar 范围返回 `InvalidInput / AXM-CORE-E-0002`。所有失败均无数值；每次查询重算，事务内创建可查询、删除即时不可查询，回滚恢复原结果或使临时句柄失效。查询不修改模型、事务写计数、几何/网格缓存或 Eval 状态，只追加诊断和一次顶层查询审计。
 
 ### 6.2 拓扑事务接口
 
@@ -555,6 +561,7 @@ public:
   Result<BodyId> extrude(const ProfileRef&, const Vec3& direction, Scalar distance);
   Result<BodyId> extrude_scaled(const ProfileRef&, const Vec3& direction, Scalar distance,
                                 const Point3& center, Scalar end_scale);
+  Result<BodyId> extrude_to_plane(const ProfileRef&, const Vec3& direction, const Plane& end_plane);
   Result<BodyId> revolve(const ProfileRef&, const Axis3&, Scalar angle);
   Result<BodyId> sweep(const ProfileRef&, CurveId rail);
   Result<BodyId> loft(std::span<const ProfileRef> profiles);
@@ -564,11 +571,13 @@ public:
 
 显式 `ProfileRef::polygon_xyz` 拉伸支持有限坐标、共面且简单的多边形，包括凸轮廓和 L/U 形等凹轮廓（首尾隐式闭合，不重复首点）。方向按单位化后乘正距离使用，须不平行于轮廓平面并形成非退化体积。端盖采用耳切剖分，侧壁为平面三角片；无孔时 n 个轮廓顶点生成 2n 个顶点、6n−6 条边和 4n−4 个面，保留真实凹口，支持双绕向、不同起点、反向和斜向拉伸。自交或非相邻边接触、共线转角/重复顶点、非平面、数值退化或非有限参数在创建实体前返回 `InvalidInput` / `AXM-CORE-E-0002`，不退回 bbox 壳。投影边界使用随轮廓尺度增长的浮点容差，接近退化的轮廓保守拒绝。公开拓扑查询、质量属性、Strict 验证及 `brep_to_mesh` 的 `owned_topo_welded` 路径共同构成验收链路。无显式轮廓的历史占位路径仍存在。
 
-第 65 包新增 `extrude_scaled`（实现及回归就绪，待统一验收）：显式凸/凹多边形及分离孔洞的等比变截面直线拉伸。截面点按 `p(t)=center+[1+t(end_scale−1)]·(p−center)+t·unit(direction)·distance`（`0≤t≤1`）变化；缩放中心须有限且在轮廓平面内（采用现有共面容差），可在材料区域外。距离须有限且为正，末端比例须有限且非负，方向须横穿轮廓平面。支持收缩、扩张、等截面、独立环绕向/起点/孔序、反向斜拉和倾斜平面；`end_scale=1` 与显式 `extrude` 几何一致。外环与孔采用同一缩放中心和比例，不能独立指定孔壁斜度；这不是一般恒角拔模或任意截面放样。
+`extrude_to_plane` 将显式平面多边形（可凹、可带孔）沿射线方向逐顶点投影到目标 Plane，物化真实三角端盖、侧壁、共享边/顶点的单一闭壳 `ExactBRep`。方向与目标法向的长度无关，目标法向反号不改变结果；每个边界点必须在严格正向且超过平面容差的射线参数处命中目标面。方向切向、反向、起止面相交/接触、近退化平面、非有限参数或大坐标舍入塌缩均在分配对象前返回 `InvalidInput / AXM-CORE-E-0002`。体积、面积、质心与惯性张量由闭合多面体积分缓存。该入口仅支持显式平面多边形轮廓，不是圆弧/样条扫掠或显式轮廓历史。
+
+第 65 包新增 `extrude_scaled`（已纳入统一门禁）：显式凸/凹多边形及分离孔洞的等比变截面直线拉伸。截面点按 `p(t)=center+[1+t(end_scale−1)]·(p−center)+t·unit(direction)·distance`（`0≤t≤1`）变化；缩放中心须有限且在轮廓平面内（采用现有共面容差），可在材料区域外。距离须有限且为正，末端比例须有限且非负，方向须横穿轮廓平面。支持收缩、扩张、等截面、独立环绕向/起点/孔序、反向斜拉和倾斜平面；`end_scale=1` 与显式 `extrude` 几何一致。外环与孔采用同一缩放中心和比例，不能独立指定孔壁斜度；这不是一般恒角拔模或任意截面放样。
 
 正末端比例时，末端边仍与起始边平行，因此侧壁为真实平面，三角 Face 是平面分割，不是曲面的网格近似；两端盖及内外侧壁组成 `ExactBRep` 闭壳。n 个总环顶点、h 个孔生成 `V=2n`、`F=4n+4h−4`、`E=3F/2`；体积为 `A·H·(1+s+s²)/3`（H 为法向高度），面积、质心和完整惯性来自实际闭壳积分。公开拓扑/邻接、面面积和边长查询、Strict 验证及焊接网格转换均有回归。负比例、带孔尖顶、切向、非法轮廓、缩放中心离面以及非预期的舍入塌缩/退化均在分配前以 `InvalidInput / AXM-CORE-E-0002` 拒绝；无显式轮廓也拒绝。失败允许新增诊断，但不写模型/几何/模型 ID/活动事务计数/几何与网格缓存。
 
-第 66 包扩展 `end_scale=0` 为无孔尖顶拉伸（实现及回归就绪，待统一验收）：凸/凹简单轮廓收敛到唯一顶点 `center+unit(direction)·distance`，底面耳切剖分，每条边界边生成一个真实三角侧面；不创建塌缩端盖或重合顶点。n 个轮廓点生成 `V=n+1`、`F=2n−2`、`E=3n−3`，体积 `A·H/3`，质心为底面面积质心的 3/4 加尖顶的 1/4，面积和完整惯性由闭壳积分给出。支持三角/凸/凹轮廓、双绕向/起点、平面内任意中心（可在边界或区域外）、正反向斜拉及倾斜平面。带孔轮廓收敛到同一点会形成非流形顶点，明确拒绝；不会把很小的正比例自动吸附为零。72 组矩形/L 形变体及 4 组四面体回归覆盖解析质量、共享尖顶/真实面边体与邻接、Strict/网格、失败不污染和编辑回滚重试，保留第 65 包 360 组正比例回归。
+第 66 包扩展 `end_scale=0` 为无孔尖顶拉伸（已纳入统一门禁）：凸/凹简单轮廓收敛到唯一顶点 `center+unit(direction)·distance`，底面耳切剖分，每条边界边生成一个真实三角侧面；不创建塌缩端盖或重合顶点。n 个轮廓点生成 `V=n+1`、`F=2n−2`、`E=3n−3`，体积 `A·H/3`，质心为底面面积质心的 3/4 加尖顶的 1/4，面积和完整惯性由闭壳积分给出。支持三角/凸/凹轮廓、双绕向/起点、平面内任意中心（可在边界或区域外）、正反向斜拉及倾斜平面。带孔轮廓收敛到同一点会形成非流形顶点，明确拒绝；不会把很小的正比例自动吸附为零。72 组矩形/L 形变体及 4 组四面体回归覆盖解析质量、共享尖顶/真实面边体与邻接、Strict/网格、失败不污染和编辑回滚重试，保留第 65 包 360 组正比例回归。
 
 防自交依赖内部截面的正比例等比变换及严格法向推进；无孔尖顶是简单边界的锥顶，实际顶点须严格位于整个底面之外的法向半空间。正比例末端另复查末端环合法性、复用端盖三角形方向和实际截面不交叠；未扩大既有 Sweep Strict 网格 SAT 范围。沿用保守浮点剖分，近退化或极端尺度可拒绝，不承诺工业容差或大轮廓性能。
 
@@ -578,7 +587,13 @@ public:
 
 折线扫掠复用上述凸/凹及带孔轮廓约束，折点共享一组截面顶点/边，仅在整条路径两端封盖，不产生内部端盖。每段侧壁为真实平面（可拆为三角 Face），形成一个可查询的闭壳实体；n 个环顶点、h 个孔、m 个导轨点生成 `V=nm`、`F=2(n+2h−2)+2n(m−1)`、`E=3F/2`，欧拉特征为 `2−2h`。包围盒包含所有中间截面，质量属性及质心惯性来自完整闭壳积分。各段投影单调和实际舍入后截面不交叠检查、轮廓剖分、三角片退化及积分检查均在实体分配前完成，失败不创建模型实体/几何、不推进模型 ID、不改变活动拓扑事务写计数和几何缓存；错误沿用 `InvalidInput / AXM-CORE-E-0002`，空标签/无效导轨句柄沿用 `AXM-CORE-E-0001`。
 
-第 62 包已编写公开拓扑/邻接、分段独立解析体积/面积/质心/惯性、`validate_all(Strict)`、`brep_to_mesh` 与回滚重试回归，待调度器统一构建验收。本轮未扩大既有 Sweep Strict 验证器的网格 SAT 范围，防交叠依靠上述严格单调限制；近退化轮廓与路径保守拒绝，不承诺工业容差或大轮廓性能。其他导轨类型（包括圆弧/样条/无界直线/CompositeChain）仍不支持显式轮廓，无显式轮廓仍为历史 bbox 占位路径。
+第 62 包的公开拓扑/邻接、分段独立解析体积/面积/质心/惯性、`validate_all(Strict)`、`brep_to_mesh` 与回滚重试回归已纳入统一门禁。本轮未扩大既有 Sweep Strict 验证器的网格 SAT 范围，防交叠依靠上述严格单调限制；近退化轮廓与路径保守拒绝，不承诺工业容差或大轮廓性能。
+
+`revolve` 的角度单位为弧度，必须位于 `(0, 2π]`。整周显式多边形路径以 48 站周期分片物化真实三角面、共享边/顶点和闭壳，支持与轴严格分离的凸/凹简单子午面轮廓，以及仅通过一条唯一连续轴边闭合的实心轮廓。轮廓绕向/起点、轴方向反号/缩放和任意空间子午面保持等价；带孔、跨轴、孤立轴点、近轴、自交、非共面或偏轴轮廓在分配前返回 `InvalidInput / AXM-CORE-E-0002`。结果体积、面积、质心和惯性来自闭合多面体积分。整周结果是保守分片多面体 BRep，不是解析圆柱/圆锥/圆环面；部分角旋转仍沿用原有受限路径。
+
+`sweep` 还支持显式凹多边形或带孔截面沿 Bezier/BSpline/NURBS 开放导轨，以及整圆/椭圆周期导轨扫掠。截面必须位于导轨起点且其平面法向与起始切向对齐；开放样条从 33 站起步并按弦偏差保守细分，截面随旋转最小化标架运动。开放导轨生成两端盖；周期导轨无端盖。周期带孔截面的外边界与每个孔边界是互不连通的闭壳，因此一个 Body 含 `1 + holes_xyz.size()` 个 Shell，`owned_topo_welded` 网格也报告同数量的连通分量；开放带孔导轨由端盖连成单壳，周期无孔也为单壳。
+
+曲线扫掠的尖点、闭合样条、过紧曲率、非局部自靠近、局部不前进、周期标架不闭合及退化物化都以 `InvalidInput / AXM-CORE-E-0002` 拒绝，不产生模型、拓扑、ID、事务写或求值/网格缓存污染。当前仅支持显式平面多边形截面；闭合样条、复合曲线链、无界直线以及其他曲线种类不支持。结果是保守采样多面体 BRep，不是解析扫掠曲面；无显式轮廓仍为历史 bbox 占位路径。
 
 ### 8.2 布尔操作接口
 

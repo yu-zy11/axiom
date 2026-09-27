@@ -32,9 +32,19 @@ BodyId make_body(std::shared_ptr<detail::KernelState> state, detail::BodyRecord 
         // shells/faces/loops/coedges with their provenance sources.
         fresh_topology = record.rep_kind == RepKind::ExactBRep && record.bbox.is_valid && record.shells.empty();
         if (record.kind == detail::BodyKind::Sweep && !record.extrude_profile_xyz.empty()) {
-            // Explicit polygon extrusion/polyline sweep must never fall back to a bbox shell.
-            // The prism materializer returns false before allocating topology.
-            if (!detail::try_materialize_sweep_extrude_prism_body(*state, record)) {
+            // Explicit polygon sweeps must never fall back to a bbox shell. Both
+            // materializers finish validation before allocating topology.
+            const bool materialized = record.sweep_frame_origins.empty()
+                ? detail::try_materialize_sweep_extrude_prism_body(*state, record)
+                : detail::try_materialize_sweep_curve_frame_body(*state, record);
+            if (!materialized) {
+                return BodyId {};
+            }
+        } else if (record.kind == detail::BodyKind::Sweep && record.revolve_full_turn) {
+            // A requested full turn is an explicit modeling operation. It must
+            // materialize its periodic closed shell instead of silently becoming
+            // a bounding-box proxy when geometric validation fails.
+            if (!detail::try_materialize_sweep_revolve_full_body(*state, record)) {
                 return BodyId {};
             }
         } else {
@@ -572,6 +582,241 @@ BoundingBox curve_bbox_for_query(const detail::CurveRecord& curve) {
     }
 }
 
+namespace {
+
+bool finite_sweep_point(const Point3& p) {
+    return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z);
+}
+
+Point3 de_casteljau_sweep_point(std::span<const Point3> poles, Scalar t) {
+    std::vector<Point3> work(poles.begin(), poles.end());
+    for (std::size_t level = 1; level < work.size(); ++level) {
+        for (std::size_t i = 0; i + level < work.size(); ++i) {
+            work[i] = {work[i].x + (work[i + 1].x - work[i].x) * t,
+                       work[i].y + (work[i + 1].y - work[i].y) * t,
+                       work[i].z + (work[i + 1].z - work[i].z) * t};
+        }
+    }
+    return work.empty() ? Point3 {} : work.front();
+}
+
+Vec3 de_casteljau_sweep_derivative(std::span<const Point3> poles, Scalar t) {
+    if (poles.size() < 2) return {};
+    std::vector<Point3> derivative_poles;
+    derivative_poles.reserve(poles.size() - 1);
+    const Scalar degree = static_cast<Scalar>(poles.size() - 1);
+    for (std::size_t i = 0; i + 1 < poles.size(); ++i) {
+        const auto difference = detail::subtract(poles[i + 1], poles[i]);
+        derivative_poles.push_back({degree * difference.x, degree * difference.y, degree * difference.z});
+    }
+    const auto derivative = de_casteljau_sweep_point(derivative_poles, t);
+    return {derivative.x, derivative.y, derivative.z};
+}
+
+bool spline_sweep_degree_and_domain(const detail::CurveRecord& curve, int& degree,
+                                    Scalar& domain_min, Scalar& domain_max) {
+    const auto count = curve.poles.size();
+    if (count < 2 || curve.knots_u.size() <= count) return false;
+    degree = static_cast<int>(curve.knots_u.size() - count - 1);
+    if (degree < 1 || degree >= static_cast<int>(count) ||
+        curve.knots_u.size() != count + static_cast<std::size_t>(degree) + 1) return false;
+    if (!std::all_of(curve.knots_u.begin(), curve.knots_u.end(), [](Scalar x) { return std::isfinite(x); }) ||
+        !std::is_sorted(curve.knots_u.begin(), curve.knots_u.end())) return false;
+    domain_min = curve.knots_u[static_cast<std::size_t>(degree)];
+    domain_max = curve.knots_u[count];
+    return std::isfinite(domain_min) && std::isfinite(domain_max) && domain_max > domain_min;
+}
+
+bool evaluate_spline_sweep_point(const detail::CurveRecord& curve, Scalar t, Point3& point) {
+    int degree = 0;
+    Scalar domain_min = 0.0, domain_max = 0.0;
+    if (!spline_sweep_degree_and_domain(curve, degree, domain_min, domain_max)) return false;
+    const std::size_t count = curve.poles.size();
+    if (curve.kind == detail::CurveKind::Nurbs && !curve.weights.empty() && curve.weights.size() != count) return false;
+    const Scalar parameter = std::clamp(t, domain_min, domain_max);
+    if (parameter == domain_max) {
+        point = curve.poles.back();
+        return finite_sweep_point(point);
+    }
+    std::vector<long double> basis(count, 0.0L), next(count, 0.0L);
+    for (std::size_t i = 0; i < count; ++i) {
+        if (curve.knots_u[i] <= parameter && parameter < curve.knots_u[i + 1]) basis[i] = 1.0L;
+    }
+    for (int p = 1; p <= degree; ++p) {
+        std::fill(next.begin(), next.end(), 0.0L);
+        for (std::size_t i = 0; i < count; ++i) {
+            const Scalar left_den = curve.knots_u[i + static_cast<std::size_t>(p)] - curve.knots_u[i];
+            if (left_den > 0.0) basis[i] *= (parameter - curve.knots_u[i]) / left_den;
+            else basis[i] = 0.0L;
+            if (i + 1 < count) {
+                const Scalar right_den = curve.knots_u[i + static_cast<std::size_t>(p) + 1] - curve.knots_u[i + 1];
+                if (right_den > 0.0) {
+                    next[i] = basis[i] + basis[i + 1] *
+                        (curve.knots_u[i + static_cast<std::size_t>(p) + 1] - parameter) / right_den;
+                } else {
+                    next[i] = basis[i];
+                }
+            } else {
+                next[i] = basis[i];
+            }
+        }
+        basis.swap(next);
+    }
+    long double denominator = 0.0L, x = 0.0L, y = 0.0L, z = 0.0L;
+    for (std::size_t i = 0; i < count; ++i) {
+        const Scalar weight = curve.kind == detail::CurveKind::Nurbs
+            ? (curve.weights.empty() ? Scalar(1.0) : curve.weights[i]) : Scalar(1.0);
+        if (!std::isfinite(weight) || weight <= 0.0) return false;
+        const long double coefficient = basis[i] * weight;
+        denominator += coefficient;
+        x += coefficient * curve.poles[i].x;
+        y += coefficient * curve.poles[i].y;
+        z += coefficient * curve.poles[i].z;
+    }
+    if (!(denominator > 0.0L) || !std::isfinite(static_cast<Scalar>(denominator))) return false;
+    point = {static_cast<Scalar>(x / denominator), static_cast<Scalar>(y / denominator),
+             static_cast<Scalar>(z / denominator)};
+    return finite_sweep_point(point);
+}
+
+}  // namespace
+
+bool sample_curved_sweep_rail(const detail::CurveRecord& curve, std::vector<Point3>& points,
+                              std::vector<Vec3>& tangents, bool& closed) {
+    points.clear();
+    tangents.clear();
+    closed = curve.kind == detail::CurveKind::Circle || curve.kind == detail::CurveKind::Ellipse;
+    constexpr std::size_t kOpenStations = 33;
+    constexpr std::size_t kCircleStations = 48;
+    if (closed) {
+        const bool circle = curve.kind == detail::CurveKind::Circle;
+        if (!finite_sweep_point(curve.origin) ||
+            (circle && (!std::isfinite(curve.radius) || curve.radius <= 0.0)) ||
+            detail::norm(curve.axis_u) <= 1e-14 || detail::norm(curve.axis_v) <= 1e-14 ||
+            detail::norm(detail::cross(curve.axis_u, curve.axis_v)) <= 1e-14) return false;
+        points.reserve(kCircleStations);
+        tangents.reserve(kCircleStations);
+        for (std::size_t i = 0; i < kCircleStations; ++i) {
+            const Scalar angle = 2.0 * kPi * static_cast<Scalar>(i) / static_cast<Scalar>(kCircleStations);
+            const Scalar cosine = std::cos(angle), sine = std::sin(angle);
+            const Vec3 radial {curve.axis_u.x * cosine + curve.axis_v.x * sine,
+                               curve.axis_u.y * cosine + curve.axis_v.y * sine,
+                               curve.axis_u.z * cosine + curve.axis_v.z * sine};
+            const Vec3 derivative {-curve.axis_u.x * sine + curve.axis_v.x * cosine,
+                                   -curve.axis_u.y * sine + curve.axis_v.y * cosine,
+                                   -curve.axis_u.z * sine + curve.axis_v.z * cosine};
+            points.push_back(detail::add_point_vec(curve.origin, circle ? detail::scale(radial, curve.radius) : radial));
+            tangents.push_back(detail::normalize(derivative));
+        }
+    } else {
+        if (curve.kind != detail::CurveKind::Bezier && curve.kind != detail::CurveKind::BSpline &&
+            curve.kind != detail::CurveKind::Nurbs) return false;
+        if (curve.poles.size() < 2 ||
+            !std::all_of(curve.poles.begin(), curve.poles.end(), finite_sweep_point)) return false;
+        Scalar domain_min = 0.0, domain_max = 1.0;
+        int degree = 0;
+        if (curve.kind != detail::CurveKind::Bezier &&
+            !spline_sweep_degree_and_domain(curve, degree, domain_min, domain_max)) return false;
+        const auto evaluate = [&](Scalar parameter, Point3& point) {
+            if (curve.kind == detail::CurveKind::Bezier) {
+                point = de_casteljau_sweep_point(curve.poles, parameter);
+                return finite_sweep_point(point);
+            }
+            return evaluate_spline_sweep_point(curve, parameter, point);
+        };
+        std::vector<Scalar> parameters;
+        points.reserve(kOpenStations);
+        parameters.reserve(kOpenStations);
+        for (std::size_t i = 0; i < kOpenStations; ++i) {
+            const Scalar fraction = static_cast<Scalar>(i) / static_cast<Scalar>(kOpenStations - 1);
+            const Scalar parameter = domain_min + fraction * (domain_max - domain_min);
+            Point3 point {};
+            if (!evaluate(parameter, point)) return false;
+            parameters.push_back(parameter);
+            points.push_back(point);
+        }
+        // Refine spans whose actual midpoint visibly leaves the chord. This keeps
+        // gentle rails compact while preventing a high-degree spline from hiding
+        // curvature between the fixed seed stations. Two passes cap topology size.
+        Scalar coordinate_scale = 1.0;
+        for (const auto& p : curve.poles) {
+            coordinate_scale = std::max({coordinate_scale, std::abs(p.x), std::abs(p.y), std::abs(p.z)});
+        }
+        for (int pass = 0; pass < 2; ++pass) {
+            bool inserted = false;
+            std::vector<Scalar> refined_parameters;
+            std::vector<Point3> refined_points;
+            refined_parameters.reserve(2 * parameters.size());
+            refined_points.reserve(2 * points.size());
+            refined_parameters.push_back(parameters.front());
+            refined_points.push_back(points.front());
+            for (std::size_t i = 0; i + 1 < parameters.size(); ++i) {
+                const Scalar middle_parameter = (parameters[i] + parameters[i + 1]) * 0.5;
+                const Scalar quarter_parameter = (3.0 * parameters[i] + parameters[i + 1]) * 0.25;
+                const Scalar three_quarter_parameter = (parameters[i] + 3.0 * parameters[i + 1]) * 0.25;
+                Point3 quarter {}, middle {}, three_quarter {};
+                if (!evaluate(quarter_parameter, quarter) || !evaluate(middle_parameter, middle) ||
+                    !evaluate(three_quarter_parameter, three_quarter)) return false;
+                const Point3 chord_middle {(points[i].x + points[i + 1].x) * 0.5,
+                                           (points[i].y + points[i + 1].y) * 0.5,
+                                           (points[i].z + points[i + 1].z) * 0.5};
+                const Point3 chord_quarter {0.75 * points[i].x + 0.25 * points[i + 1].x,
+                                            0.75 * points[i].y + 0.25 * points[i + 1].y,
+                                            0.75 * points[i].z + 0.25 * points[i + 1].z};
+                const Point3 chord_three_quarter {0.25 * points[i].x + 0.75 * points[i + 1].x,
+                                                  0.25 * points[i].y + 0.75 * points[i + 1].y,
+                                                  0.25 * points[i].z + 0.75 * points[i + 1].z};
+                const Scalar chord = detail::norm(detail::subtract(points[i + 1], points[i]));
+                const Scalar deviation = std::max({detail::norm(detail::subtract(quarter, chord_quarter)),
+                                                   detail::norm(detail::subtract(middle, chord_middle)),
+                                                   detail::norm(detail::subtract(three_quarter, chord_three_quarter))});
+                const Scalar tolerance = std::max(Scalar(1e-7) * coordinate_scale, Scalar(0.002) * chord);
+                if (!std::isfinite(deviation) || !std::isfinite(chord)) return false;
+                if (deviation > tolerance) {
+                    refined_parameters.push_back(middle_parameter);
+                    refined_points.push_back(middle);
+                    inserted = true;
+                }
+                refined_parameters.push_back(parameters[i + 1]);
+                refined_points.push_back(points[i + 1]);
+            }
+            parameters.swap(refined_parameters);
+            points.swap(refined_points);
+            if (!inserted) break;
+        }
+        const Scalar scale = std::max({Scalar(1.0), detail::norm(detail::subtract(points.back(), points.front()))});
+        if (detail::norm(detail::subtract(points.back(), points.front())) <=
+            128.0 * std::numeric_limits<Scalar>::epsilon() * scale) return false;
+        tangents.resize(points.size());
+        for (std::size_t i = 0; i < points.size(); ++i) {
+            if (curve.kind == detail::CurveKind::Bezier) {
+                const auto derivative = de_casteljau_sweep_derivative(curve.poles, parameters[i]);
+                if (!finite_sweep_point({derivative.x, derivative.y, derivative.z}) ||
+                    detail::norm(derivative) <= 1e-14) return false;
+                tangents[i] = detail::normalize(derivative);
+                continue;
+            }
+            const Scalar h = std::max((domain_max - domain_min) * Scalar(1e-6), Scalar(1e-9));
+            const Scalar ta = std::max(domain_min, parameters[i] - h);
+            const Scalar tb = std::min(domain_max, parameters[i] + h);
+            Point3 a {}, b {};
+            if (!evaluate(ta, a) || !evaluate(tb, b) || !(tb > ta)) return false;
+            const auto chord = detail::subtract(b, a);
+            if (!finite_sweep_point({chord.x, chord.y, chord.z}) || detail::norm(chord) <= 1e-14) return false;
+            tangents[i] = detail::normalize(chord);
+        }
+    }
+    if (points.size() != tangents.size() || points.size() < 3) return false;
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        const std::size_t next = (i + 1) % points.size();
+        if (!closed && next == 0) break;
+        const auto step = detail::subtract(points[next], points[i]);
+        if (!finite_sweep_point(points[i]) || !finite_sweep_point({tangents[i].x, tangents[i].y, tangents[i].z}) ||
+            detail::norm(step) <= 1e-12 || detail::norm(tangents[i]) <= 1e-12) return false;
+    }
+    return true;
+}
+
 BoundingBox surface_bbox_for_query(const detail::SurfaceRecord& surface) {
     switch (surface.kind) {
         case detail::SurfaceKind::Plane:
@@ -854,7 +1099,7 @@ bool try_sweep_body_mass_properties(const detail::BodyRecord& body, MassProperti
         return true;
     }
     if (((body.label.size() >= 8 && body.label.compare(0, 8, "extrude:") == 0) ||
-         !body.sweep_station_offsets.empty()) && body.a > 0.0) {
+         !body.sweep_station_offsets.empty() || !body.sweep_frame_origins.empty()) && body.a > 0.0) {
         if (body.sweep_polyhedral_mass_valid) {
             props.volume = body.sweep_polyhedral_volume;
             props.area = body.sweep_cached_surface_area;
