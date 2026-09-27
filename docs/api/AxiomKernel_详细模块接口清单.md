@@ -289,6 +289,12 @@ struct CurveEvalResult {
   std::vector<Vec3> derivatives;
 };
 
+struct CurveLengthOptions {
+  Scalar absolute_tolerance{1e-9};
+  Scalar relative_tolerance{1e-10};
+  std::uint32_t max_evaluations{100000};
+};
+
 class CurveService {
 public:
   Result<CurveEvalResult> eval(CurveId, Scalar t, int deriv_order) const;
@@ -297,13 +303,17 @@ public:
   Result<Range1D> domain(CurveId) const;
   Result<Scalar> length(CurveId) const;
   Result<Scalar> length(CurveId, Scalar t0, Scalar t1) const;
+  Result<Scalar> length(CurveId, const CurveLengthOptions&) const;
+  Result<Scalar> length(CurveId, Scalar t0, Scalar t1, const CurveLengthOptions&) const;
   Result<BoundingBox> bbox(CurveId) const;
 };
 ```
 
-`CurveService::length`（第 63 包待统一验收）以模型长度单位返回解析弧长；支持 Line 的有限区间、LineSegment、Circle、CompositePolyline 与由这些类型组成的 CompositeChain。不使用 bbox、网格、采样弦长或数值积分；差值、距离和累加使用 `long double` 中间量，最终舍入到 `Scalar`，不承诺任意尺度的精确算术。完整域重载复用区间算法；反向端点返回相同非负长度，零区间和常值/重复点折线返回 0。有界域外参数不钳制，返回 `InvalidInput / AXM-GEO-E-0004`；非有限端点、全域无限直线及结果溢出返回 `InvalidInput / AXM-CORE-E-0002`。不支持的样条、椭圆等返回 `NotImplemented / AXM-CORE-E-0004`，无效句柄返回 `InvalidInput / AXM-CORE-E-0001`，退化直线方向返回 `DegenerateGeometry / AXM-GEO-E-0003`。所有失败均无数值。
+`CurveService::length`（FR-QUERY-001 第 63/67 功能包）以模型长度单位返回弧长。Line 有限区间、LineSegment、Circle 和 CompositePolyline 使用解析计算；Ellipse、Parabola、Hyperbola、Bezier、BSpline 和 NURBS 对真实一阶导数的速度做自适应 Simpson 积分，不使用 bbox、网格或采样弦长冒充弧长。差值、速度和累加使用 `long double` 中间量，最终舍入到 `Scalar`；数值路径的容差是误差估计目标，不是任意曲线的严格误差界。
 
-复合链严格沿用现有 `eval` 约定：父域 `[0,n]` 每一格映射到对应子曲线的局部 `[0,1]`，**不缩放到子曲线完整域**；例如圆子曲线只贡献一弧度，折线子曲线只贡献首段，嵌套链只遍历其第一格。只检查/累加查询区间实际覆盖的非零子区间；不连续连接处不补直线距离。长度查询不写几何、拓扑、求值缓存或 Eval 失效状态，只新增诊断。
+`CurveLengthOptions` 的默认绝对容差为 `1e-9` 模型长度单位，相对容差为 `1e-10`，整次查询（含复合链）最多做 `100000` 次速度求值。两种容差可单独置零但不可同时为零，并且必须有限且非负；预算必须大于零。非法选项返回 `InvalidInput / AXM-CORE-E-0002`；预算耗尽、精度停滞或非有限速度返回 `OperationFailed / AXM-GEO-E-0011`。所有失败都不返回部分长度。完整域重载复用区间算法；反向端点返回相同非负长度，零区间和常值曲线返回 0。有界域外参数不钳制，返回 `InvalidInput / AXM-GEO-E-0004`；非有限端点、全域无限直线及结果溢出返回 `InvalidInput / AXM-CORE-E-0002`；无效句柄返回 `InvalidInput / AXM-CORE-E-0001`，退化直线方向返回 `DegenerateGeometry / AXM-GEO-E-0003`。
+
+复合链严格沿用现有 `eval` 约定：父域 `[0,n]` 每一格映射到对应子曲线的局部 `[0,1]`，**不缩放到子曲线完整域**；例如圆子曲线只贡献一弧度，折线子曲线只贡献首段，嵌套链只遍历其第一格。只检查/累加查询区间实际覆盖的非零子区间；不连续连接处不补直线距离。BSpline/NURBS 按非空结点区间分开积分，满重数断点的几何跳跃不计入弧长。长度查询不写几何、拓扑、求值缓存或 Eval 失效状态，只新增诊断。
 
 `CurveService::closest_parameter/closest_point` 对 BSpline/NURBS 会在全域粗采样之外逐个覆盖非空结点分段，再进行阻尼局部细化；因此合法的极窄分段（包括满重数断点隔开的分支与常值退化分段）不会仅因宽度小于全域采样步长而被跳过。返回值仍是数值搜索结果，不构成任意曲线全局最优或工业精度保证。非有限查询点返回 `InvalidInput` / `AXM-CORE-E-0002`，不修改几何或求值缓存。
 线段最近参数使用解析投影与 `[0,1]` 钳制；投影的差值、点积和长度平方使用扩展精度中间量，使端点及查询点均有限但长度平方超出 `Scalar` 范围时仍可返回有限参数。无效句柄返回 `InvalidInput` / `AXM-GEO-E-0006`；退化线段在创建时返回 `InvalidInput` / `AXM-GEO-E-0001`，失败不修改几何或求值缓存。

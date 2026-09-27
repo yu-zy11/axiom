@@ -17,6 +17,7 @@ inline constexpr std::string_view kGeoParameterSolveFailure = "AXM-GEO-E-0006";
 inline constexpr std::string_view kGeoIntersectionFailure = "AXM-GEO-E-0007";
 /// 偏置距离导致有效曲率半径非正（球/柱等解析情形下的自交/退化壳）
 inline constexpr std::string_view kGeoOffsetSelfIntersection = "AXM-GEO-E-0010";
+inline constexpr std::string_view kGeoLengthIntegrationFailure = "AXM-GEO-E-0011";
 
 inline constexpr std::string_view kTopoLoopNotClosed = "AXM-TOPO-E-0002";
 inline constexpr std::string_view kTopoFaceOuterLoopInvalid = "AXM-TOPO-E-0003";

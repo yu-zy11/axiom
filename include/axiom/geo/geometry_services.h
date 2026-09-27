@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <span>
 #include <utility>
@@ -75,6 +76,12 @@ private:
     std::shared_ptr<detail::KernelState> state_;
 };
 
+struct CurveLengthOptions {
+    Scalar absolute_tolerance {1e-9};  // 模型长度单位，有限且非负。
+    Scalar relative_tolerance {1e-10}; // 无量纲，有限且非负；两种容差不可同时为零。
+    std::uint32_t max_evaluations {100000}; // 整次查询（含复合链）的速度求值预算，须 > 0。
+};
+
 class CurveService {
 public:
     explicit CurveService(std::shared_ptr<detail::KernelState> state);
@@ -86,12 +93,17 @@ public:
     Result<Point3> closest_point(CurveId curve_id, const Point3& point) const;
     Result<std::vector<Point3>> closest_points_batch(CurveId curve_id, std::span<const Point3> points) const;
     Result<Range1D> domain(CurveId curve_id) const;
-    /// 解析弧长，单位为模型长度单位；支持 LineSegment/Circle/CompositePolyline/CompositeChain。
+    /// 弧长，单位为模型长度单位；直线/圆/折线使用解析计算，其他已支持曲线使用导数数值积分。
     /// 全域 Line 无有限长度；区间重载支持 Line，端点可反向，有限域外参数不钳制。
     /// Chain 与 eval 一致：每个子曲线使用局部参数 [0,1]，不计不连续连接处的跳跃距离。
-    /// 支持类型的零区间/常值折线返回 0；不支持类型、非法参数或溢出返回失败且无值。
+    /// 支持类型的零区间/常值曲线返回 0；不支持类型、非法参数或溢出返回失败且无值。
     Result<Scalar> length(CurveId curve_id) const;
     Result<Scalar> length(CurveId curve_id, Scalar t0, Scalar t1) const;
+    /// 椭圆/抛物线/双曲线/Bezier/BSpline/NURBS 共享自适应积分；容差为误差估计目标，非严格误差界。
+    /// 按非空结点区间积分，不计不连续结点的跳跃距离；常值曲线返回 0。
+    /// 预算耗尽、精度停滞或非有限速度返回 OperationFailed，无部分长度；查询不写求值缓存。
+    Result<Scalar> length(CurveId curve_id, const CurveLengthOptions& options) const;
+    Result<Scalar> length(CurveId curve_id, Scalar t0, Scalar t1, const CurveLengthOptions& options) const;
     Result<BoundingBox> bbox(CurveId curve_id) const;
     Result<std::vector<BoundingBox>> bbox_batch(std::span<const CurveId> curve_ids) const;
 

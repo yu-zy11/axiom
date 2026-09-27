@@ -1,7 +1,10 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <limits>
 
 #include "axiom/diag/error_codes.h"
@@ -73,7 +76,7 @@ bool length_query_regression() {
     const auto invalid_before = kernel.eval_graph().invalid_node_count();
     if (!objects_before.value || !geometry_before.value || !runtime_before.value || !invalid_before.value) return false;
     for (const auto id : {*ellipse.value, *bezier.value, *unsupported_chain.value}) {
-        if (!failed(geo.length(id), axiom::StatusCode::NotImplemented, axiom::diag_codes::kCoreOperationUnsupported)) return false;
+        if (!geo.length(id).value) return false;
     }
     if (!failed(geo.length({}), axiom::StatusCode::InvalidInput, axiom::diag_codes::kCoreInvalidHandle) ||
         !failed(geo.length(*line.value), axiom::StatusCode::InvalidInput, axiom::diag_codes::kCoreParameterOutOfRange) ||
@@ -244,9 +247,216 @@ bool length_query_regression() {
     return true;
 }
 
+bool numerical_length_query_regression() {
+    axiom::Kernel kernel;
+    auto& factory = kernel.curves();
+    auto& geo = kernel.curve_service();
+    const double pi = std::acos(-1.0);
+    const double quadratic_length = std::sqrt(5.0) / 2 + std::asinh(2.0) / 4;
+    const auto equal = [](const axiom::Result<double>& r, double expected) {
+        return r.status == axiom::StatusCode::Ok && r.value &&
+               std::abs(*r.value - expected) <= 2e-8 * std::max(1e-3, std::abs(expected));
+    };
+    const auto failed = [&](const axiom::Result<double>& r, axiom::StatusCode status, std::string_view code) {
+        const auto report = kernel.diagnostics().get(r.diagnostic_id);
+        return r.status == status && !r.value && report.value && has_issue_code(*report.value, code);
+    };
+    // x=t, y=t^2, represented in three bases, scales and spatial frames.
+    for (const double scale : {1e-3, 1.0, 1e3}) {
+        for (const bool tilted : {false, true}) {
+            const auto point = [&](double x, double y) -> axiom::Point3 {
+                return tilted ? axiom::Point3{7 + .6 * scale * x, -3 + .8 * scale * x, 2 + scale * y}
+                              : axiom::Point3{scale * x, scale * y, 0};
+            };
+            const std::vector<axiom::Point3> poles{point(0, 0), point(.5, 0), point(1, 1)};
+            const auto bezier = factory.make_bezier(poles);
+            axiom::BSplineCurveDesc desc;
+            desc.poles = poles; desc.degree = 2; desc.knots = {2, 2, 2, 5, 5, 5};
+            const auto spline = factory.make_bspline(desc);
+            axiom::NURBSCurveDesc rational;
+            rational.poles = poles; rational.degree = 2; rational.knots = desc.knots;
+            rational.weights = {7, 7, 7};
+            const auto nurbs = factory.make_nurbs(rational);
+            if (!bezier.value || !spline.value || !nurbs.value) return false;
+            for (const auto id : {*bezier.value, *spline.value, *nurbs.value}) {
+                const auto domain = geo.domain(id);
+                if (!domain.value || !equal(geo.length(id), scale * quadratic_length)) return false;
+                const auto a = domain.value->min, b = domain.value->max, m = (a + b) / 2;
+                const auto first = geo.length(id, a, m), last = geo.length(id, m, b);
+                if (!first.value || !last.value || !equal(geo.length(id, b, a), scale * quadratic_length) ||
+                    !equal(geo.length(id), *first.value + *last.value) || !equal(geo.length(id, m, m), 0)) return false;
+                if (!failed(geo.length(id, a - 1, b), axiom::StatusCode::InvalidInput,
+                            axiom::diag_codes::kGeoParameterOutOfDomain)) return false;
+            }
+        }
+    }
+    const auto ellipse = factory.make_ellipse({4, -3, 2}, {3, 0, 0}, {0, 0, 2});
+    const auto round = factory.make_ellipse({0, 0, 0}, {2, 0, 0}, {0, 2, 0});
+    const auto parabola = factory.make_parabola({0, 0, 0}, {1, 0, 0}, {0, 1, 0}, .25);
+    const auto hyperbola = factory.make_hyperbola({0, 0, 0}, {1, 0, 0}, {0, 1, 0}, 1, 1);
+    if (!ellipse.value || !round.value || !parabola.value || !hyperbola.value ||
+        !equal(geo.length(*ellipse.value), 15.8654395892905898) ||
+        !equal(geo.length(*ellipse.value, 0, pi / 2), 15.8654395892905898 / 4) ||
+        !equal(geo.length(*round.value), 4 * pi) ||
+        !equal(geo.length(*parabola.value, 0, 1), quadratic_length) ||
+        !equal(geo.length(*parabola.value), 10 * std::sqrt(401.0) + std::asinh(20.0) / 2)) return false;
+    // Independent dense composite midpoint oracle for non-orthogonal conics.
+    const auto skew = factory.make_ellipse({0, 0, 0}, {3, 0, 0}, {1, 2, 0});
+    if (!skew.value) return false;
+    double hyperbola_reference = 0, skew_reference = 0;
+    constexpr int samples = 100000;
+    for (int i = 0; i < samples; ++i) {
+        const double t = (i + .5) / samples;
+        hyperbola_reference += std::sqrt(std::cosh(2 * t)) / samples;
+        const double angle = 2 * pi * t;
+        skew_reference += std::hypot(-3 * std::sin(angle) + std::cos(angle), 2 * std::cos(angle)) * 2 * pi / samples;
+    }
+    if (!equal(geo.length(*hyperbola.value, 0, 1), hyperbola_reference) ||
+        !equal(geo.length(*skew.value), skew_reference)) return false;
+    axiom::NURBSCurveDesc quarter_desc;
+    quarter_desc.poles = {{1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+    quarter_desc.weights = {1, std::sqrt(.5), 1};
+    quarter_desc.degree = 2; quarter_desc.knots = {0, 0, 0, 1, 1, 1};
+    const auto quarter = factory.make_nurbs(quarter_desc);
+    const auto cusp = factory.make_bezier(std::array<axiom::Point3, 3>{{{0, 0, 0}, {1, 0, 0}, {0, 0, 0}}});
+    const auto constant = factory.make_bezier(std::array<axiom::Point3, 1>{{{7, 8, 9}}});
+    if (!quarter.value || !cusp.value || !constant.value || !equal(geo.length(*quarter.value), pi / 2) ||
+        !equal(geo.length(*quarter.value, .5, 0), pi / 4) || !equal(geo.length(*cusp.value), 1) ||
+        !equal(geo.length(*constant.value), 0)) return false;
+    // Degree-elevated quadratic and nonconstant-weight straight rational curve.
+    std::vector<axiom::Point3> elevated;
+    for (int i = 0; i <= 12; ++i) elevated.push_back({i / 12.0, i * (i - 1) / 132.0, 0});
+    const auto high_degree = factory.make_bezier(elevated);
+    axiom::NURBSCurveDesc rational_line;
+    rational_line.poles = {{0, 0, 0}, {3, 4, 0}}; rational_line.weights = {1, 10};
+    const auto weighted_line = factory.make_nurbs(rational_line);
+    if (!high_degree.value || !weighted_line.value || !equal(geo.length(*high_degree.value), quadratic_length) ||
+        !equal(geo.length(*weighted_line.value), 5)) return false;
+    // Repeated/discontinuous, non-clamped, and extremely narrow knot spans.
+    for (int variant = 0; variant < 3; ++variant) {
+        axiom::BSplineCurveDesc desc;
+        desc.degree = 1;
+        if (variant == 0) {
+            desc.poles = {{0, 0, 0}, {3, 0, 0}, {30, 40, 0}, {30, 44, 0}};
+            desc.knots = {0, 0, .5, .5, 1, 1};
+        } else {
+            desc.poles = {{0, 0, 0}, {3, 0, 0}, {3, 4, 0}};
+            desc.knots = variant == 1 ? std::vector<double>{0, 1, 2, 3, 4}
+                                      : std::vector<double>{0, 0, 1e-30, 1, 1};
+        }
+        const auto spline = factory.make_bspline(desc);
+        axiom::NURBSCurveDesc rational;
+        rational.poles = desc.poles; rational.knots = desc.knots; rational.degree = 1;
+        const auto nurbs = factory.make_nurbs(rational);
+        if (!spline.value || !nurbs.value || !equal(geo.length(*spline.value), 7) || !equal(geo.length(*nurbs.value), 7)) return false;
+    }
+    const auto chain = factory.make_composite_chain(std::array{*quarter.value, *parabola.value, *cusp.value});
+    if (!chain.value || !equal(geo.length(*chain.value), pi / 2 + quadratic_length + 1) ||
+        !equal(geo.length(*chain.value, .5, 2), pi / 4 + quadratic_length)) return false;
+    const auto nested = factory.make_composite_chain(std::array{*chain.value, *constant.value});
+    if (!nested.value || !equal(geo.length(*nested.value), pi / 2)) return false;
+    const auto moved = kernel.geometry_transform().transform_curve(*quarter.value,
+        kernel.linear_algebra().make_translation({5, -3, 8}));
+    if (!moved.value || !equal(geo.length(*moved.value), pi / 2) || !equal(geo.length(*quarter.value), pi / 2)) return false;
+    axiom::BSplineCurveDesc shifted_desc;
+    shifted_desc.poles = {{0, 0, 0}, {1, 0, 0}}; shifted_desc.degree = 1; shifted_desc.knots = {2, 2, 3, 3};
+    const auto shifted = factory.make_bspline(shifted_desc);
+    if (!shifted.value) return false;
+    const auto invalid_chain = factory.make_composite_chain(std::array{*quarter.value, *shifted.value});
+    if (!invalid_chain.value || !equal(geo.length(*invalid_chain.value, 0, 1), pi / 2) ||
+        !failed(geo.length(*invalid_chain.value), axiom::StatusCode::InvalidInput,
+                axiom::diag_codes::kGeoParameterOutOfDomain)) return false;
+    shifted_desc.poles = {{5, 7, 8}, {5, 7, 8}};
+    const auto constant_spline = factory.make_bspline(shifted_desc);
+    axiom::NURBSCurveDesc constant_desc;
+    constant_desc.poles = shifted_desc.poles; constant_desc.weights = {1, 5};
+    const auto constant_nurbs = factory.make_nurbs(constant_desc);
+    if (!constant_spline.value || !constant_nurbs.value || !equal(geo.length(*constant_spline.value), 0) ||
+        !equal(geo.length(*constant_nurbs.value), 0)) return false;
+    const auto huge = factory.make_bezier(std::array<axiom::Point3, 2>{{{-1e308, 0, 0}, {1e308, 0, 0}}});
+    const auto invalid_curve = factory.make_bezier(std::array<axiom::Point3, 2>{{{0, 0, 0},
+        {std::numeric_limits<double>::infinity(), 0, 0}}});
+    if (!huge.value) return false;
+    // Query success/failure is read-only, even within a topology transaction.
+    auto txn = kernel.topology().begin_transaction();
+    const auto v0 = txn.create_vertex({1, 0, 0}), v1 = txn.create_vertex({0, 1, 0});
+    if (!v0.value || !v1.value) return false;
+    const auto edge = txn.create_edge(*quarter.value, *v0.value, *v1.value);
+    const auto node = kernel.eval_graph().register_node(axiom::NodeKind::Geometry, "curve:length-regression");
+    if (!edge.value || !node.value || kernel.eval_graph().recompute(*node.value).status != axiom::StatusCode::Ok) return false;
+    const auto writes = txn.write_operation_count();
+    const auto objects = kernel.object_count_total();
+    const auto geometry = kernel.geometry_count();
+    const auto stores = kernel.runtime_store_counts();
+    const auto recomputes = kernel.eval_graph().recompute_count(*node.value);
+    if (!stores.value || !writes.value || !objects.value || !geometry.value) return false;
+    axiom::CurveLengthOptions tight;
+    tight.absolute_tolerance = 1e-11; tight.relative_tolerance = 1e-11;
+    if (!equal(geo.length(*quarter.value, tight), pi / 2)) return false;
+    axiom::CurveLengthOptions limited = tight;
+    limited.max_evaluations = 1;
+    const auto exhausted = geo.length(*quarter.value, limited);
+    const auto report_path = std::filesystem::temp_directory_path() / "axiom_query_length_diagnostic.json";
+    if (kernel.diagnostics().export_report_json(exhausted.diagnostic_id, report_path.string()).status != axiom::StatusCode::Ok) return false;
+    std::ifstream report_file(report_path);
+    const std::string report_json((std::istreambuf_iterator<char>(report_file)), std::istreambuf_iterator<char>{});
+    report_file.close();
+    std::filesystem::remove(report_path);
+    if (report_json.find(axiom::diag_codes::kGeoLengthIntegrationFailure) == std::string::npos) return false;
+    auto unattainable = tight;
+    unattainable.absolute_tolerance = 0; unattainable.relative_tolerance = 1e-30; unattainable.max_evaluations = 1000;
+    if (!failed(geo.length(*quarter.value, unattainable), axiom::StatusCode::OperationFailed,
+                axiom::diag_codes::kGeoLengthIntegrationFailure)) return false;
+    for (const bool relative_only : {false, true}) {
+        auto options = tight;
+        if (relative_only) options.absolute_tolerance = 0;
+        else options.relative_tolerance = 0;
+        if (!equal(geo.length(*quarter.value, options), pi / 2)) return false;
+    }
+    if (!failed(geo.length(*quarter.value, limited), axiom::StatusCode::OperationFailed, axiom::diag_codes::kGeoLengthIntegrationFailure) ||
+        !failed(geo.length(*chain.value, limited), axiom::StatusCode::OperationFailed, axiom::diag_codes::kGeoLengthIntegrationFailure) ||
+        !equal(geo.length(*quarter.value, .5, .5, limited), 0) || !equal(geo.length(*quarter.value, tight), pi / 2) ||
+        !failed(geo.length(*huge.value), axiom::StatusCode::InvalidInput, axiom::diag_codes::kCoreParameterOutOfRange) ||
+        !failed(geo.length({}), axiom::StatusCode::InvalidInput, axiom::diag_codes::kCoreInvalidHandle)) return false;
+    if (invalid_curve.value && !failed(geo.length(*invalid_curve.value), axiom::StatusCode::OperationFailed,
+                                      axiom::diag_codes::kGeoLengthIntegrationFailure)) return false;
+    for (const double bad : {-1.0, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()}) {
+        auto options = tight; options.absolute_tolerance = bad;
+        if (!failed(geo.length(*quarter.value, options), axiom::StatusCode::InvalidInput, axiom::diag_codes::kCoreParameterOutOfRange)) return false;
+        options = tight; options.relative_tolerance = bad;
+        if (!failed(geo.length(*quarter.value, options), axiom::StatusCode::InvalidInput, axiom::diag_codes::kCoreParameterOutOfRange)) return false;
+    }
+    for (int variant = 0; variant < 2; ++variant) {
+        auto options = tight;
+        if (variant == 0) options.max_evaluations = 0;
+        else options.absolute_tolerance = options.relative_tolerance = 0;
+        if (!failed(geo.length(*quarter.value, options), axiom::StatusCode::InvalidInput, axiom::diag_codes::kCoreParameterOutOfRange)) return false;
+    }
+    if (!failed(kernel.topology().query().edge_length(*edge.value), axiom::StatusCode::NotImplemented,
+                axiom::diag_codes::kCoreOperationUnsupported) || !equal(geo.length(*quarter.value), pi / 2)) return false;
+    const auto after = kernel.runtime_store_counts();
+    if (!after.value || stores.value->curve_eval_cache_entries != after.value->curve_eval_cache_entries ||
+        stores.value->surface_eval_cache_entries != after.value->surface_eval_cache_entries ||
+        stores.value->mesh_records != after.value->mesh_records ||
+        stores.value->tessellation_cache_entries != after.value->tessellation_cache_entries ||
+        stores.value->face_tessellation_cache_entries != after.value->face_tessellation_cache_entries ||
+        stores.value->intersection_records != after.value->intersection_records ||
+        txn.write_operation_count().value != writes.value || kernel.object_count_total().value != objects.value ||
+        kernel.geometry_count().value != geometry.value || kernel.eval_graph().is_invalid(*node.value).value != false ||
+        kernel.eval_graph().recompute_count(*node.value).value != recomputes.value) return false;
+    if (txn.rollback().status != axiom::StatusCode::Ok || !equal(geo.length(*quarter.value), pi / 2) ||
+        !failed(kernel.topology().query().edge_length(*edge.value), axiom::StatusCode::InvalidInput,
+                axiom::diag_codes::kCoreInvalidHandle)) return false;
+    return true;
+}
+
 }  // namespace
 
 int main() {
+    if (!numerical_length_query_regression()) {
+        std::cerr << "numerical length query regression failed\n";
+        return 1;
+    }
     if (!length_query_regression()) {
         std::cerr << "analytic length query regression failed\n";
         return 1;

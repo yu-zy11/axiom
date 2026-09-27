@@ -656,13 +656,22 @@ TEST(Blend, too_large_radius_should_return_stable_error_code) {
 2. `docs/api/AxiomKernel_插件开发样例集.md`
 
 
-### 解析长度查询（FR-QUERY-001，第 63 包待统一验收）
+### 曲线与边界长度查询（FR-QUERY-001，第 63/67 功能包）
 
 ```cpp
 auto segment = kernel.curves().make_line_segment({0, 0, 0}, {3, 4, 0});
 if (segment.value) {
     auto full = kernel.curve_service().length(*segment.value);       // 5 模型长度单位
     auto part = kernel.curve_service().length(*segment.value, .8, .2); // 3，方向无关
+}
+auto ellipse = kernel.curves().make_ellipse({0, 0, 0}, {3, 0, 0}, {0, 2, 0});
+if (ellipse.value) {
+    axiom::CurveLengthOptions options;
+    options.absolute_tolerance = 1e-10; // 模型长度单位
+    options.relative_tolerance = 1e-11;
+    options.max_evaluations = 200000;
+    auto quarter = kernel.curve_service().length(*ellipse.value, 0, std::acos(-1.0) / 2, options);
+    // 数值路径成功时返回弧长；预算或精度失败时无 value，并返回 AXM-GEO-E-0011。
 }
 auto box = kernel.primitives().box({0, 0, 0}, 2, 3, 4);
 if (box.value) {
@@ -677,4 +686,4 @@ if (box.value) {
 }
 ```
 
-曲线长度目前支持直线有限区间、线段、圆、折线和复合链；复合链沿用 eval 的子曲线局部 `[0,1]`，不自动取子曲线全域。拓扑长度目前支持直线边，曲边因缺少裁剪参数返回不支持；不以弦长冒充曲边弧长。
+曲线长度对直线有限区间、线段、圆和折线使用解析计算，对椭圆、抛物线、双曲线、Bezier、BSpline 和 NURBS 使用可配置自适应积分。复合链沿用 eval 的子曲线局部 `[0,1]`，不自动取子曲线全域。拓扑长度目前支持直线边，曲边因缺少裁剪参数返回不支持；不以弦长冒充曲边弧长。

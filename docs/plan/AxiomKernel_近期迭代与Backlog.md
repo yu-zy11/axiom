@@ -156,7 +156,8 @@
 | P2 | 进行中 | ops | 布尔非 `bbox` 结果子里程碑 | `axiom_boolean_*` | geo/topo |
 | P2～P3 | 进行中 | eval/rep | 重算指标、Rep 误差预算 | `axiom_query_eval_test`、`axiom_representation_io_test` | ops（部分） |
 
-- **FR-QUERY-001 第 63 功能包（待统一验收）**：实现 `CurveService::length` 全域/区间解析长度（直线有限区间、线段、圆、折线、嵌套复合链）和 `TopologyQueryService::edge_length/loop_length/face_boundary_length` 直线边长度接口族，共享区间/边/环计算，明确模型长度单位、反向/零区间、有限域拒绝、复合链局部参数、不连续连接不补距离、内外环长度相加及溢出语义。`axiom_query_eval_test` 新增解析参考、24 组缩放/倾斜平面/绕向/反向共边的带双孔凹面、盒体跨 Ops/Topo/Eval、退化/不支持/错误码、缓存与事务不污染、删除及回滚回归。实现与回归就绪，未运行构建或测试，交调度器在 build-agent 统一验收；需求保持进行中。曲边拓扑缺少裁剪参数而明确拒绝；曲边面积、样条/椭圆弧长、通用体积/重心/惯性矩与稳定求交仍待后续验收。
+- **FR-QUERY-001 第 67 功能包（实现就绪，待统一验收）**：在第 63 包解析长度上，完整扩展 `CurveService::length` 为椭圆、抛物线、双曲线、Bezier、BSpline 和 NURBS 的真实导数自适应弧长积分；新增可配置绝对/相对容差和整次查询求值预算，按非空结点区间积分且不把断点跳跃计入长度，复合链继续使用子曲线局部 `[0,1]`。回归覆盖解析可知圆锥曲线、三种样条基/尺度/空间姿态、有理四分之一圆、高次/非夹持/极窄/满重数断点、常值/尖点、反向/零/域外区间、非法容差、预算耗尽、诊断 JSON、几何/缓存/Eval/事务不污染和回滚。故障复验已集中重建并运行 `axiom_query_eval_test`、`axiom_geometry_test`、`axiom_topology_test` 与 `axiom_ops_heal_test`，4/4 通过；待调度器运行未变更的完整门禁。需求保持进行中；拓扑曲边仍因缺少裁剪参数返回 `NotImplemented`，曲边面积、通用质量属性与稳定求交仍待后续功能包。
+- **FR-QUERY-001 第 63 功能包（待统一验收）**：实现 `CurveService::length` 全域/区间解析长度（直线有限区间、线段、圆、折线、嵌套复合链）和 `TopologyQueryService::edge_length/loop_length/face_boundary_length` 直线边长度接口族，共享区间/边/环计算，明确模型长度单位、反向/零区间、有限域拒绝、复合链局部参数、不连续连接不补距离、内外环长度相加及溢出语义。`axiom_query_eval_test` 新增解析参考、24 组缩放/倾斜平面/绕向/反向共边的带双孔凹面、盒体跨 Ops/Topo/Eval、退化/不支持/错误码、缓存与事务不污染、删除及回滚回归。实现与回归就绪，未运行构建或测试，交调度器在 build-agent 统一验收；需求保持进行中。曲边拓扑缺少裁剪参数而明确拒绝；数值曲线弧长由第 67 包接续。
 
 ## 4. 下一未闭合批次
 

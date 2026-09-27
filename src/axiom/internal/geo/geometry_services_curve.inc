@@ -713,12 +713,21 @@ Result<Range1D> CurveService::domain(CurveId curve_id) const {
 }
 
 Result<Scalar> CurveService::length(CurveId curve_id) const {
-  const auto range = domain(curve_id);
-  if (!range.value) return error_result<Scalar>(range.status, range.diagnostic_id);
-  return length(curve_id, range.value->min, range.value->max);
+  return length(curve_id, CurveLengthOptions{});
 }
 
 Result<Scalar> CurveService::length(CurveId curve_id, Scalar t0, Scalar t1) const {
+  return length(curve_id, t0, t1, CurveLengthOptions{});
+}
+
+Result<Scalar> CurveService::length(CurveId curve_id, const CurveLengthOptions &options) const {
+  const auto range = domain(curve_id);
+  if (!range.value) return error_result<Scalar>(range.status, range.diagnostic_id);
+  return length(curve_id, range.value->min, range.value->max, options);
+}
+
+Result<Scalar> CurveService::length(CurveId curve_id, Scalar t0, Scalar t1,
+                                    const CurveLengthOptions &options) const {
   if (!detail::has_curve(*state_, curve_id)) {
     return detail::invalid_input_result<Scalar>(
         *state_, diag_codes::kCoreInvalidHandle,
@@ -729,10 +738,23 @@ Result<Scalar> CurveService::length(CurveId curve_id, Scalar t0, Scalar t1) cons
         *state_, diag_codes::kCoreParameterOutOfRange,
         "曲线长度查询失败：需要有限参数区间", "曲线长度查询失败");
   }
+  if (!std::isfinite(options.absolute_tolerance) || options.absolute_tolerance < 0 ||
+      !std::isfinite(options.relative_tolerance) || options.relative_tolerance < 0 ||
+      (options.absolute_tolerance == 0 && options.relative_tolerance == 0) || options.max_evaluations == 0) {
+    return detail::invalid_input_result<Scalar>(
+        *state_, diag_codes::kCoreParameterOutOfRange,
+        "曲线长度查询失败：容差或求值预算非法", "曲线长度查询失败");
+  }
+  const auto integration_failure = [&]() {
+    return detail::failed_result<Scalar>(
+        *state_, StatusCode::OperationFailed, diag_codes::kGeoLengthIntegrationFailure,
+        "曲线长度查询失败：积分预算耗尽、精度停滞或速度不可用", "曲线长度查询失败");
+  };
+  std::uint32_t evaluations = 0;
   // Iterate the same local [0,1] child intervals as eval; never approximate
   // curved geometry by chords, and do not add jumps between chain children.
-  struct Interval { CurveId id; Scalar a; Scalar b; };
-  std::vector<Interval> pending{{curve_id, std::min(t0, t1), std::max(t0, t1)}};
+  struct Interval { CurveId id; Scalar a; Scalar b; long double tolerance; };
+  std::vector<Interval> pending{{curve_id, std::min(t0, t1), std::max(t0, t1), options.absolute_tolerance}};
   long double total = 0.0L;
   while (!pending.empty()) {
     const auto interval = pending.back();
@@ -784,13 +806,148 @@ Result<Scalar> CurveService::length(CurveId curve_id, Scalar t0, Scalar t1) cons
       for (std::size_t i = 0; i < curve.children.size(); ++i) {
         const auto a = std::max(interval.a, static_cast<Scalar>(i));
         const auto b = std::min(interval.b, static_cast<Scalar>(i + 1));
-        if (a < b) pending.push_back({curve.children[i], a - static_cast<Scalar>(i), b - static_cast<Scalar>(i)});
+        if (a < b) pending.push_back({curve.children[i], a - static_cast<Scalar>(i), b - static_cast<Scalar>(i),
+                                    interval.tolerance * (static_cast<long double>(b) - a) / width});
       }
       break;
+    case detail::CurveKind::Ellipse:
+    case detail::CurveKind::Parabola:
+    case detail::CurveKind::Hyperbola:
+    case detail::CurveKind::Bezier:
+    case detail::CurveKind::BSpline:
+    case detail::CurveKind::Nurbs: {
+      const bool bezier = curve.kind == detail::CurveKind::Bezier;
+      const bool spline = bezier || curve.kind == detail::CurveKind::BSpline || curve.kind == detail::CurveKind::Nurbs;
+      int degree = 0;
+      // Work in translated homogeneous coordinates and extended precision. This
+      // avoids both absolute knot-denominator cutoffs and rational weight clamps
+      // in the general point evaluator; no point-evaluation cache is touched.
+      using HPoint = std::array<long double, 4>;
+      std::vector<HPoint> poles;
+      if (spline) {
+        if (curve.poles.empty()) return integration_failure();
+        if (bezier) degree = static_cast<int>(curve.poles.size()) - 1;
+        else if (!bspline_knots_valid_for_curve(curve, degree)) return integration_failure();
+        const auto origin = curve.poles.front();
+        for (std::size_t i = 0; i < curve.poles.size(); ++i) {
+          const auto &p = curve.poles[i];
+          const long double w = curve.kind == detail::CurveKind::Nurbs && i < curve.weights.size()
+                                    ? curve.weights[i] : 1.0L;
+          if (!finite_point(p) || !(w > 0) || !std::isfinite(w)) return integration_failure();
+          poles.push_back({(static_cast<long double>(p.x) - origin.x) * w,
+                           (static_cast<long double>(p.y) - origin.y) * w,
+                           (static_cast<long double>(p.z) - origin.z) * w, w});
+        }
+      }
+      if (width == 0) break;
+      std::vector<long double> cuts{interval.a};
+      if (spline && !bezier) {
+        for (const auto knot : curve.knots_u) {
+          if (knot > cuts.back() && knot < interval.b) cuts.push_back(knot);
+        }
+      }
+      cuts.push_back(interval.b);
+      for (std::size_t cut = 0; cut + 1 < cuts.size(); ++cut) {
+        const auto left = cuts[cut];
+        const auto right = cuts[cut + 1];
+        int span = degree;
+        if (spline && !bezier) {
+          // Select this span once, including its one-sided endpoint limits.
+          span = static_cast<int>(std::upper_bound(curve.knots_u.begin(), curve.knots_u.end(),
+                                                  (left + right) / 2) - curve.knots_u.begin()) - 1;
+        }
+        const auto speed = [&](long double t) -> long double {
+          if (evaluations == options.max_evaluations) return std::numeric_limits<long double>::quiet_NaN();
+          ++evaluations;
+          if (spline) {
+            std::vector<HPoint> points(static_cast<std::size_t>(degree + 1));
+            std::vector<HPoint> derivatives(points.size(), HPoint{});
+            for (int j = 0; j <= degree; ++j) points[static_cast<std::size_t>(j)] = poles[static_cast<std::size_t>(span - degree + j)];
+            // Differentiate the de Casteljau / de Boor recurrence itself.
+            for (int r = 1; r <= degree; ++r) {
+              for (int j = degree; j >= r; --j) {
+                long double alpha = t;
+                long double dalpha = 1;
+                if (!bezier) {
+                  const auto i = static_cast<std::size_t>(span - degree + j);
+                  const long double lo = curve.knots_u[i];
+                  const long double hi = curve.knots_u[i + static_cast<std::size_t>(degree - r + 1)];
+                  if (!(hi > lo)) return std::numeric_limits<long double>::quiet_NaN();
+                  alpha = (t - lo) / (hi - lo);
+                  dalpha = 1 / (hi - lo);
+                }
+                const auto index = static_cast<std::size_t>(j);
+                for (std::size_t k = 0; k < 4; ++k) {
+                  derivatives[index][k] = (1 - alpha) * derivatives[index - 1][k] + alpha * derivatives[index][k] +
+                                          dalpha * (points[index][k] - points[index - 1][k]);
+                  points[index][k] = (1 - alpha) * points[index - 1][k] + alpha * points[index][k];
+                }
+              }
+            }
+            const auto &p = points.back();
+            const auto &d = derivatives.back();
+            if (!(p[3] > 0)) return std::numeric_limits<long double>::quiet_NaN();
+            return std::hypot((d[0] - (p[0] / p[3]) * d[3]) / p[3],
+                              (d[1] - (p[1] / p[3]) * d[3]) / p[3],
+                              (d[2] - (p[2] / p[3]) * d[3]) / p[3]);
+          }
+          long double du{}, dv{};
+          if (curve.kind == detail::CurveKind::Ellipse) {
+            du = -std::sin(t); dv = std::cos(t);
+          } else if (curve.kind == detail::CurveKind::Parabola) {
+            du = 1; dv = t / (2 * static_cast<long double>(std::max(curve.param_a, 1e-9)));
+          } else {
+            du = std::max(curve.param_a, 1e-9) * std::sinh(t);
+            dv = std::max(curve.param_b, 1e-9) * std::cosh(t);
+          }
+          return std::hypot(du * curve.axis_u.x + dv * curve.axis_v.x,
+                            du * curve.axis_u.y + dv * curve.axis_v.y,
+                            du * curve.axis_u.z + dv * curve.axis_v.z);
+        };
+        struct Panel {
+          long double a, b, fa, fm, fb, estimate, tolerance;
+          unsigned depth;
+        };
+        // Seed each smooth knot span to reduce aliasing on higher-degree curves.
+        const auto seeds = std::max(4, degree + 1);
+        for (int seed = 0; seed < seeds; ++seed) {
+          const auto a = left + (right - left) * seed / seeds;
+          const auto b = left + (right - left) * (seed + 1) / seeds;
+          const auto m = (a + b) / 2;
+          const auto fa = speed(a), fm = speed(m), fb = speed(b);
+          std::vector<Panel> panels{{a, b, fa, fm, fb, (b - a) * (fa + 4 * fm + fb) / 6,
+                                     interval.tolerance * (b - a) / width, 0}};
+          while (!panels.empty()) {
+            const auto panel = panels.back();
+            panels.pop_back();
+            const auto mid = (panel.a + panel.b) / 2;
+            const auto lm = (panel.a + mid) / 2, rm = (mid + panel.b) / 2;
+            if (!(lm > panel.a && rm < panel.b)) return integration_failure();
+            const auto fl = speed(lm), fr = speed(rm);
+            const auto sl = (mid - panel.a) * (panel.fa + 4 * fl + panel.fm) / 6;
+            const auto sr = (panel.b - mid) * (panel.fm + 4 * fr + panel.fb) / 6;
+            const auto sum = sl + sr;
+            if (!std::isfinite(sum) || !std::isfinite(panel.estimate)) return integration_failure();
+            const auto error = std::abs(sum - panel.estimate) / 15 +
+                               8 * std::numeric_limits<Scalar>::epsilon() * std::abs(sum);
+            if (error <= panel.tolerance + options.relative_tolerance * std::abs(sum)) {
+              // Arc length is non-negative even when a deliberately loose
+              // tolerance accepts a panel whose Richardson correction undershoots.
+              total += std::max(0.0L, sum + (sum - panel.estimate) / 15);
+            } else {
+              if (panel.depth >= 64) return integration_failure();
+              panels.push_back({mid, panel.b, panel.fm, fr, panel.fb, sr, panel.tolerance / 2, panel.depth + 1});
+              panels.push_back({panel.a, mid, panel.fa, fl, panel.fm, sl, panel.tolerance / 2, panel.depth + 1});
+            }
+          }
+        }
+      }
+      break;
+    }
     default:
       return detail::failed_result<Scalar>(
           *state_, StatusCode::NotImplemented, diag_codes::kCoreOperationUnsupported,
-          "曲线长度查询失败：该曲线类型尚无解析长度实现", "曲线长度查询失败");
+          "曲线长度查询失败：该曲线类型尚无长度实现", "曲线长度查询失败");
     }
     if (!std::isfinite(total) || total > std::numeric_limits<Scalar>::max()) {
       return detail::invalid_input_result<Scalar>(
@@ -798,7 +955,7 @@ Result<Scalar> CurveService::length(CurveId curve_id, Scalar t0, Scalar t1) cons
           "曲线长度查询失败：结果超出数值范围", "曲线长度查询失败");
     }
   }
-  return ok_result(static_cast<Scalar>(total), state_->create_diagnostic("已查询解析曲线长度"));
+  return ok_result(static_cast<Scalar>(total), state_->create_diagnostic("已查询曲线长度"));
 }
 
 Result<BoundingBox> CurveService::bbox(CurveId curve_id) const {
