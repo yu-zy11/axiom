@@ -266,6 +266,67 @@ Result<void> TopologyValidationService::validate_loop(LoopId loop_id) const {
   return ok_void(state_->create_diagnostic("环验证通过"));
 }
 
+Result<std::optional<FaceBoundaryConflict>>
+TopologyValidationService::first_boundary_conflict(
+    LoopId outer_loop, std::span<const LoopId> inner_loops,
+    Scalar linear_tolerance) const {
+  if (!std::isfinite(linear_tolerance) || linear_tolerance < 0.0) {
+    return detail::invalid_input_result<std::optional<FaceBoundaryConflict>>(
+        *state_, diag_codes::kCoreParameterOutOfRange,
+        "边界冲突查询失败：线性容差必须为有限非负值",
+        "边界冲突查询失败");
+  }
+  if (!detail::has_loop(*state_, outer_loop)) {
+    return detail::invalid_input_result<std::optional<FaceBoundaryConflict>>(
+        *state_, diag_codes::kCoreInvalidHandle,
+        "边界冲突查询失败：外环不存在", "边界冲突查询失败");
+  }
+  if (has_duplicate_ids(inner_loops) ||
+      std::any_of(inner_loops.begin(), inner_loops.end(),
+                  [outer_loop](LoopId loop_id) {
+                    return loop_id.value == outer_loop.value;
+                  })) {
+    return detail::failed_result<std::optional<FaceBoundaryConflict>>(
+        *state_, StatusCode::InvalidTopology,
+        diag_codes::kTopoFaceInnerLoopInvalid,
+        "边界冲突查询失败：内环重复或与外环相同",
+        "边界冲突查询失败", {outer_loop.value});
+  }
+  std::string reason;
+  if (!validate_loop_id(*state_, outer_loop, reason)) {
+    return detail::failed_result<std::optional<FaceBoundaryConflict>>(
+        *state_, StatusCode::InvalidTopology,
+        diag_codes::kTopoFaceOuterLoopInvalid,
+        "边界冲突查询失败：外环非法，" + reason,
+        "边界冲突查询失败", {outer_loop.value});
+  }
+  for (const auto loop_id : inner_loops) {
+    if (!detail::has_loop(*state_, loop_id)) {
+      return detail::invalid_input_result<std::optional<FaceBoundaryConflict>>(
+          *state_, diag_codes::kCoreInvalidHandle,
+          "边界冲突查询失败：存在无效内环", "边界冲突查询失败");
+    }
+    if (!validate_loop_id(*state_, loop_id, reason)) {
+      return detail::failed_result<std::optional<FaceBoundaryConflict>>(
+          *state_, StatusCode::InvalidTopology,
+          diag_codes::kTopoFaceInnerLoopInvalid,
+          "边界冲突查询失败：内环非法，" + reason,
+          "边界冲突查询失败", {loop_id.value});
+    }
+  }
+
+  const auto tolerance = detail::resolve_linear_tolerance(
+      linear_tolerance, state_->config.tolerance);
+  auto conflict = face_cross_loop_boundary_conflict(
+      *state_, outer_loop, inner_loops, tolerance);
+  if (conflict.has_value()) {
+    return ok_result(std::optional<FaceBoundaryConflict>{*conflict},
+                     state_->create_diagnostic("已发现跨环边界冲突"));
+  }
+  return ok_result(std::optional<FaceBoundaryConflict>{},
+                   state_->create_diagnostic("未发现跨环边界冲突"));
+}
+
 Result<void>
 TopologyValidationService::validate_loop_pcurve_closedness(LoopId loop_id) const {
   const auto loop_it = state_->loops.find(loop_id.value);
@@ -1307,19 +1368,39 @@ Result<void> TopologyValidationService::validate_face(FaceId face_id) const {
         {face_id.value, (*coincident)[0], (*coincident)[1],
          (*coincident)[2], (*coincident)[3]});
   }
-  if (const auto crossing = face_cross_loop_straight_edge_intersection(
-          *state_, face_it->second.outer_loop, face_it->second.inner_loops)) {
+  const auto boundary_tolerance = detail::resolve_linear_tolerance(
+      0.0, state_->config.tolerance);
+  if (const auto conflict = face_cross_loop_boundary_conflict(
+          *state_, face_it->second.outer_loop, face_it->second.inner_loops,
+          boundary_tolerance)) {
+    std::string_view code =
+        diag_codes::kTopoFaceCrossLoopStraightEdgeIntersection;
+    std::string message =
+        "面验证失败：不同边界环的直线边段在内部相交";
+    switch (conflict->kind) {
+      case FaceBoundaryConflictKind::EndpointTouch:
+        code = diag_codes::kTopoFaceCrossLoopStraightEdgeEndpointTouch;
+        message = "面验证失败：不同边界环的直线边段在端点相接";
+        break;
+      case FaceBoundaryConflictKind::CollinearOverlap:
+        code = diag_codes::kTopoFaceCrossLoopCollinearOverlap;
+        message = "面验证失败：不同边界环的共线直线边段发生重叠";
+        break;
+      case FaceBoundaryConflictKind::NearContact:
+        code = diag_codes::kTopoFaceCrossLoopNearContact;
+        message = "面验证失败：不同边界环的直线边段在拓扑容差内邻近相接（间距=" +
+                  std::to_string(conflict->distance) + "，容差=" +
+                  std::to_string(boundary_tolerance) + "）";
+        break;
+      case FaceBoundaryConflictKind::ProperIntersection:
+        break;
+    }
     return detail::failed_void(
-        *state_, StatusCode::InvalidTopology,
-        crossing->endpoint_touch
-            ? diag_codes::kTopoFaceCrossLoopStraightEdgeEndpointTouch
-            : diag_codes::kTopoFaceCrossLoopStraightEdgeIntersection,
-        crossing->endpoint_touch
-            ? "面验证失败：不同边界环的直线边段在端点相接"
-            : "面验证失败：不同边界环的直线边段在内部相交",
-        "面验证失败", {face_id.value, crossing->entities[0],
-                       crossing->entities[1], crossing->entities[2],
-                       crossing->entities[3]});
+        *state_, StatusCode::InvalidTopology, code, message,
+        "面验证失败", {face_id.value, conflict->first_loop.value,
+                       conflict->second_loop.value,
+                       conflict->first_edge.value,
+                       conflict->second_edge.value});
   }
 
   // Planar faces without PCurve trim: (1) outer 3D winding must align with Surface normal

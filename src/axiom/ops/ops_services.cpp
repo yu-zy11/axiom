@@ -25,6 +25,7 @@ namespace {
 
 Result<OpReport> boolean_op_fail_staged(std::shared_ptr<detail::KernelState> state,
                                         bool diagnostics,
+                                        BooleanOp op,
                                         StatusCode st,
                                         std::string_view code,
                                         std::string message,
@@ -43,6 +44,22 @@ Result<OpReport> boolean_op_fail_staged(std::shared_ptr<detail::KernelState> sta
     }
     auto issue = detail::make_error_issue(code, std::move(message), {lhs.value, rhs.value});
     set_boolean_diagnostic_stage(issue, code);
+    issue.numeric_evidence = {
+        {"operation", static_cast<Scalar>(op), "enum"},
+        {"lhs_exists", detail::has_body(*state, lhs) ? 1.0 : 0.0, "bool"},
+        {"rhs_exists", detail::has_body(*state, rhs) ? 1.0 : 0.0, "bool"},
+        {"diagnostics_enabled", diagnostics ? 1.0 : 0.0, "bool"},
+    };
+    if (prep != nullptr) {
+        issue.numeric_evidence.push_back(
+            {"lhs_regions", static_cast<Scalar>(prep->lhs_regions), "count"});
+        issue.numeric_evidence.push_back(
+            {"rhs_regions", static_cast<Scalar>(prep->rhs_regions), "count"});
+        issue.numeric_evidence.push_back(
+            {"overlap_candidates", static_cast<Scalar>(prep->overlap_candidates), "count"});
+        issue.numeric_evidence.push_back(
+            {"overlap_volume_sum", prep->overlap_volume_sum, "model_unit^3"});
+    }
     state->append_diagnostic_issue(diag, std::move(issue));
     return error_result<OpReport>(st, diag);
 }
@@ -60,6 +77,38 @@ Result<OpReport> op_report_error_with_stage(detail::KernelState& st, StatusCode 
     issue.stage = std::string(stage);
     const DiagnosticId diag = st.create_diagnostic(std::move(summary), {std::move(issue)});
     return error_result<OpReport>(code_status, diag);
+}
+
+Result<void> boolean_prep_export_fail(detail::KernelState& state,
+                                      StatusCode status,
+                                      std::string_view code,
+                                      std::string message,
+                                      BodyId lhs,
+                                      BodyId rhs,
+                                      std::string_view path,
+                                      std::string_view stage,
+                                      const BooleanPrepStats* stats) {
+    auto issue = detail::make_error_issue(code, std::move(message), {lhs.value, rhs.value});
+    issue.stage = std::string(stage);
+    issue.numeric_evidence = {
+        {"lhs_exists", detail::has_body(state, lhs) ? 1.0 : 0.0, "bool"},
+        {"rhs_exists", detail::has_body(state, rhs) ? 1.0 : 0.0, "bool"},
+        {"path_empty", path.empty() ? 1.0 : 0.0, "bool"},
+        {"path_length", static_cast<Scalar>(path.size()), "byte"},
+    };
+    if (stats != nullptr) {
+        issue.numeric_evidence.push_back(
+            {"lhs_regions", static_cast<Scalar>(stats->lhs_regions), "count"});
+        issue.numeric_evidence.push_back(
+            {"rhs_regions", static_cast<Scalar>(stats->rhs_regions), "count"});
+        issue.numeric_evidence.push_back(
+            {"overlap_candidates", static_cast<Scalar>(stats->overlap_candidates), "count"});
+        issue.numeric_evidence.push_back(
+            {"overlap_volume_sum", stats->overlap_volume_sum, "model_unit^3"});
+    }
+    const auto diagnostic = state.create_diagnostic(
+        "布尔预处理统计导出失败", {std::move(issue)});
+    return error_void(status, diagnostic);
 }
 
 }  // namespace
@@ -767,12 +816,12 @@ BooleanService::BooleanService(std::shared_ptr<detail::KernelState> state) : sta
 Result<OpReport> BooleanService::run(BooleanOp op, BodyId lhs, BodyId rhs, const BooleanOptions& boolean_options) {
     if (op != BooleanOp::Union && op != BooleanOp::Subtract &&
         op != BooleanOp::Intersect && op != BooleanOp::Split) {
-        return boolean_op_fail_staged(state_, boolean_options.diagnostics, StatusCode::InvalidInput,
+        return boolean_op_fail_staged(state_, boolean_options.diagnostics, op, StatusCode::InvalidInput,
                                       diag_codes::kBoolInvalidInput,
                                       "布尔运算失败：运算类型无效", "布尔运算失败", lhs, rhs, nullptr);
     }
     if (!detail::has_body(*state_, lhs) || !detail::has_body(*state_, rhs)) {
-        return boolean_op_fail_staged(state_, boolean_options.diagnostics, StatusCode::InvalidInput,
+        return boolean_op_fail_staged(state_, boolean_options.diagnostics, op, StatusCode::InvalidInput,
                                       diag_codes::kBoolInvalidInput,
                                       "布尔运算失败：输入实体不存在或无效", "布尔运算失败", lhs, rhs, nullptr);
     }
@@ -808,7 +857,7 @@ Result<OpReport> BooleanService::run(BooleanOp op, BodyId lhs, BodyId rhs, const
             break;
         case BooleanOp::Intersect:
             if (relation == BBoxRelation::Disjoint) {
-                return boolean_op_fail_staged(state_, boolean_options.diagnostics, StatusCode::OperationFailed,
+                return boolean_op_fail_staged(state_, boolean_options.diagnostics, op, StatusCode::OperationFailed,
                                               diag_codes::kBoolIntersectionFailure,
                                               "布尔交集失败：两个输入体的包围盒不相交", "布尔交集失败", lhs, rhs,
                                               &prep);
@@ -840,7 +889,7 @@ Result<OpReport> BooleanService::run(BooleanOp op, BodyId lhs, BodyId rhs, const
                     diag_codes::kBoolPrepNoCandidateWarning,
                     "减运算未发现局部重叠候选，当前仅按全局语义保留左体"));
             } else if (relation == BBoxRelation::RhsContainsLhs) {
-                return boolean_op_fail_staged(state_, boolean_options.diagnostics, StatusCode::OperationFailed,
+                return boolean_op_fail_staged(state_, boolean_options.diagnostics, op, StatusCode::OperationFailed,
                                               diag_codes::kBoolClassificationFailure,
                                               "布尔减运算失败：右体近似完全包含左体，当前阶段无法稳定表达空结果",
                                               "布尔减运算失败", lhs, rhs, &prep);
@@ -1225,18 +1274,18 @@ Result<OpReport> BooleanService::run(BooleanOp op, BodyId lhs, BodyId rhs, const
 
 Result<void> BooleanService::export_boolean_prep_stats(BodyId lhs, BodyId rhs, std::string_view path) const {
     if (!detail::has_body(*state_, lhs) || !detail::has_body(*state_, rhs) || path.empty()) {
-        return detail::failed_void(
+        return boolean_prep_export_fail(
             *state_, StatusCode::InvalidInput, diag_codes::kBoolInvalidInput,
-            "布尔预处理统计导出失败：输入实体无效或输出路径为空", "布尔预处理统计导出失败",
-            {lhs.value, rhs.value}, "bool.prep.export.input");
+            "布尔预处理统计导出失败：输入实体无效或输出路径为空",
+            lhs, rhs, path, "bool.prep.export.input", nullptr);
     }
     const auto stats = compute_boolean_prep_stats(*state_, lhs, rhs);
     std::ofstream out {std::string(path)};
     if (!out) {
-        return detail::failed_void(
+        return boolean_prep_export_fail(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
-            "布尔预处理统计导出失败：无法打开输出文件", "布尔预处理统计导出失败",
-            {lhs.value, rhs.value}, "bool.prep.export.open");
+            "布尔预处理统计导出失败：无法打开输出文件",
+            lhs, rhs, path, "bool.prep.export.open", &stats);
     }
     out << "{";
     out << "\"lhs_regions\":" << stats.lhs_regions << ",";
@@ -1256,10 +1305,10 @@ Result<void> BooleanService::export_boolean_prep_stats(BodyId lhs, BodyId rhs, s
     out << "}";
     out.close();
     if (!out) {
-        return detail::failed_void(
+        return boolean_prep_export_fail(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
-            "布尔预处理统计导出失败：文件写入失败", "布尔预处理统计导出失败",
-            {lhs.value, rhs.value}, "bool.prep.export.write");
+            "布尔预处理统计导出失败：文件写入失败",
+            lhs, rhs, path, "bool.prep.export.write", &stats);
     }
     return ok_void(state_->create_diagnostic("已导出布尔预处理统计"));
 }

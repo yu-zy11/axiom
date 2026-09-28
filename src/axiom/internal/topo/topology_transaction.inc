@@ -1,7 +1,18 @@
 TopologyTransaction::TopologyTransaction(
     std::shared_ptr<detail::KernelState> state)
+    : TopologyTransaction(std::move(state), TopologyCancellationToken{}) {}
+
+TopologyTransaction::TopologyTransaction(
+    std::shared_ptr<detail::KernelState> state,
+    TopologyCancellationToken cancellation_token)
     : state_(std::move(state)),
-      transaction_state_(std::make_shared<detail::TopologyTransactionState>()) {
+      transaction_state_(std::make_shared<detail::TopologyTransactionState>()),
+      cancellation_token_(std::move(cancellation_token)) {
+  if (token_cancellation_requested()) {
+    record_cancellation_observed(false, 0);
+    active_ = false;
+    return;
+  }
   if (!state_->active_topology_transaction.expired()) {
     active_ = false;
     return;
@@ -15,6 +26,7 @@ TopologyTransaction::TopologyTransaction(TopologyTransaction&& other)
   // failed allocation leaves the source transaction untouched.
   auto closed_state = std::make_shared<detail::TopologyTransactionState>();
   transaction_state_ = std::move(other.transaction_state_);
+  cancellation_token_ = std::move(other.cancellation_token_);
   created_vertices_ = std::move(other.created_vertices_);
   created_edges_ = std::move(other.created_edges_);
   created_coedges_ = std::move(other.created_coedges_);
@@ -29,6 +41,8 @@ TopologyTransaction::TopologyTransaction(TopologyTransaction&& other)
   txn_coedge_pcurve_binds_ = other.txn_coedge_pcurve_binds_;
   txn_coedge_pcurve_clears_ = other.txn_coedge_pcurve_clears_;
   txn_write_ops_ = other.txn_write_ops_;
+  cancelled_write_ops_ = other.cancelled_write_ops_;
+  cancellation_observed_ = other.cancellation_observed_;
   active_ = other.active_;
   other.transaction_state_ = std::move(closed_state);
   other.txn_deleted_faces_ = 0;
@@ -38,6 +52,8 @@ TopologyTransaction::TopologyTransaction(TopologyTransaction&& other)
   other.txn_coedge_pcurve_binds_ = 0;
   other.txn_coedge_pcurve_clears_ = 0;
   other.txn_write_ops_ = 0;
+  other.cancelled_write_ops_ = 0;
+  other.cancellation_observed_ = false;
   other.active_ = false;
 }
 
@@ -46,6 +62,9 @@ TopologyTransaction::~TopologyTransaction() noexcept {
     return;
   }
   if (txn_write_ops_ == 0) {
+    if (token_cancellation_requested()) {
+      record_cancellation_observed(true, 0);
+    }
     if (const auto owner = state_->active_topology_transaction.lock();
         owner.get() == transaction_state_.get()) {
       state_->active_topology_transaction.reset();
@@ -63,6 +82,9 @@ TopologyTransaction::~TopologyTransaction() noexcept {
 }
 
 Result<VertexId> TopologyTransaction::create_vertex(const Point3 &point) {
+  if (const auto cancelled = observe_cancellation("创建顶点")) {
+    return error_result<VertexId>(StatusCode::OperationFailed, *cancelled);
+  }
   if (!active_) {
     return detail::failed_result<VertexId>(
         *state_, StatusCode::OperationFailed, diag_codes::kTxCommitFailure,
@@ -83,6 +105,9 @@ Result<VertexId> TopologyTransaction::create_vertex(const Point3 &point) {
 
 Result<EdgeId> TopologyTransaction::create_edge(CurveId curve_id, VertexId v0,
                                                 VertexId v1) {
+  if (const auto cancelled = observe_cancellation("创建边")) {
+    return error_result<EdgeId>(StatusCode::OperationFailed, *cancelled);
+  }
   if (!active_ || !detail::has_curve(*state_, curve_id) ||
       !detail::has_vertex(*state_, v0) || !detail::has_vertex(*state_, v1) ||
       v0.value == v1.value) {
@@ -100,6 +125,9 @@ Result<EdgeId> TopologyTransaction::create_edge(CurveId curve_id, VertexId v0,
 
 Result<CoedgeId> TopologyTransaction::create_coedge(EdgeId edge_id,
                                                     bool reversed) {
+  if (const auto cancelled = observe_cancellation("创建定向边")) {
+    return error_result<CoedgeId>(StatusCode::OperationFailed, *cancelled);
+  }
   if (!active_ || state_->edges.find(edge_id.value) == state_->edges.end()) {
     return detail::invalid_input_result<CoedgeId>(
         *state_, diag_codes::kCoreInvalidHandle,
@@ -115,6 +143,9 @@ Result<CoedgeId> TopologyTransaction::create_coedge(EdgeId edge_id,
 
 Result<void> TopologyTransaction::set_coedge_pcurve(CoedgeId coedge_id,
                                                     PCurveId pcurve_id) {
+  if (const auto cancelled = observe_cancellation("绑定共边参数曲线")) {
+    return error_void(StatusCode::OperationFailed, *cancelled);
+  }
   if (!active_) {
     return detail::failed_void(*state_, StatusCode::OperationFailed,
                                diag_codes::kTxCommitFailure,
@@ -148,6 +179,9 @@ Result<void> TopologyTransaction::set_coedge_pcurve(CoedgeId coedge_id,
 
 Result<LoopId>
 TopologyTransaction::create_loop(std::span<const CoedgeId> coedges) {
+  if (const auto cancelled = observe_cancellation("创建环")) {
+    return error_result<LoopId>(StatusCode::OperationFailed, *cancelled);
+  }
   if (!active_ || coedges.empty()) {
     return detail::failed_result<LoopId>(
         *state_, StatusCode::OperationFailed, diag_codes::kTxCommitFailure,
@@ -219,6 +253,9 @@ TopologyTransaction::create_loop(std::span<const CoedgeId> coedges) {
 Result<FaceId>
 TopologyTransaction::create_face(SurfaceId surface_id, LoopId outer_loop,
                                  std::span<const LoopId> inner_loops) {
+  if (const auto cancelled = observe_cancellation("创建面")) {
+    return error_result<FaceId>(StatusCode::OperationFailed, *cancelled);
+  }
   if (!active_ || !detail::has_surface(*state_, surface_id) ||
       !detail::has_loop(*state_, outer_loop)) {
     return detail::invalid_input_result<FaceId>(
@@ -338,18 +375,38 @@ TopologyTransaction::create_face(SurfaceId surface_id, LoopId outer_loop,
         {(*coincident)[0], (*coincident)[1], (*coincident)[2],
          (*coincident)[3]});
   }
-  if (const auto crossing = face_cross_loop_straight_edge_intersection(
-          *state_, outer_loop, inner_loops)) {
+  const auto boundary_tolerance = detail::resolve_linear_tolerance(
+      0.0, state_->config.tolerance);
+  if (const auto conflict = face_cross_loop_boundary_conflict(
+          *state_, outer_loop, inner_loops, boundary_tolerance)) {
+    std::string_view code =
+        diag_codes::kTopoFaceCrossLoopStraightEdgeIntersection;
+    std::string message =
+        "创建面失败：不同边界环的直线边段在内部相交";
+    switch (conflict->kind) {
+      case FaceBoundaryConflictKind::EndpointTouch:
+        code = diag_codes::kTopoFaceCrossLoopStraightEdgeEndpointTouch;
+        message = "创建面失败：不同边界环的直线边段在端点相接";
+        break;
+      case FaceBoundaryConflictKind::CollinearOverlap:
+        code = diag_codes::kTopoFaceCrossLoopCollinearOverlap;
+        message = "创建面失败：不同边界环的共线直线边段发生重叠";
+        break;
+      case FaceBoundaryConflictKind::NearContact:
+        code = diag_codes::kTopoFaceCrossLoopNearContact;
+        message = "创建面失败：不同边界环的直线边段在拓扑容差内邻近相接（间距=" +
+                  std::to_string(conflict->distance) + "，容差=" +
+                  std::to_string(boundary_tolerance) + "）";
+        break;
+      case FaceBoundaryConflictKind::ProperIntersection:
+        break;
+    }
     return detail::failed_result<FaceId>(
-        *state_, StatusCode::InvalidTopology,
-        crossing->endpoint_touch
-            ? diag_codes::kTopoFaceCrossLoopStraightEdgeEndpointTouch
-            : diag_codes::kTopoFaceCrossLoopStraightEdgeIntersection,
-        crossing->endpoint_touch
-            ? "创建面失败：不同边界环的直线边段在端点相接"
-            : "创建面失败：不同边界环的直线边段在内部相交",
-        "创建面失败", {crossing->entities[0], crossing->entities[1],
-                         crossing->entities[2], crossing->entities[3]});
+        *state_, StatusCode::InvalidTopology, code, message,
+        "创建面失败", {conflict->first_loop.value,
+                         conflict->second_loop.value,
+                         conflict->first_edge.value,
+                         conflict->second_edge.value});
   }
   const auto id = FaceId{state_->allocate_id()};
   detail::FaceRecord face_record;
@@ -366,6 +423,9 @@ TopologyTransaction::create_face(SurfaceId surface_id, LoopId outer_loop,
 
 Result<ShellId>
 TopologyTransaction::create_shell(std::span<const FaceId> faces) {
+  if (const auto cancelled = observe_cancellation("创建壳")) {
+    return error_result<ShellId>(StatusCode::OperationFailed, *cancelled);
+  }
   if (!active_ || faces.empty()) {
     return detail::failed_result<ShellId>(
         *state_, StatusCode::OperationFailed, diag_codes::kTxCommitFailure,
@@ -439,6 +499,9 @@ TopologyTransaction::create_shell(std::span<const FaceId> faces) {
 
 Result<BodyId>
 TopologyTransaction::create_body(std::span<const ShellId> shells) {
+  if (const auto cancelled = observe_cancellation("创建体")) {
+    return error_result<BodyId>(StatusCode::OperationFailed, *cancelled);
+  }
   if (!active_ || shells.empty()) {
     return detail::failed_result<BodyId>(
         *state_, StatusCode::OperationFailed, diag_codes::kTxCommitFailure,
@@ -514,6 +577,9 @@ TopologyTransaction::create_body(std::span<const ShellId> shells) {
 }
 
 Result<void> TopologyTransaction::delete_face(FaceId face_id) {
+  if (const auto cancelled = observe_cancellation("删除面")) {
+    return error_void(StatusCode::OperationFailed, *cancelled);
+  }
   if (!active_) {
     return detail::failed_void(*state_, StatusCode::OperationFailed,
                                diag_codes::kTxCommitFailure,
@@ -610,6 +676,9 @@ Result<void> TopologyTransaction::delete_face(FaceId face_id) {
 }
 
 Result<void> TopologyTransaction::delete_shell(ShellId shell_id) {
+  if (const auto cancelled = observe_cancellation("删除壳")) {
+    return error_void(StatusCode::OperationFailed, *cancelled);
+  }
   if (!active_) {
     return detail::failed_void(*state_, StatusCode::OperationFailed,
                                diag_codes::kTxCommitFailure,
@@ -660,6 +729,9 @@ Result<void> TopologyTransaction::delete_shell(ShellId shell_id) {
 }
 
 Result<void> TopologyTransaction::delete_body(BodyId body_id) {
+  if (const auto cancelled = observe_cancellation("删除体")) {
+    return error_void(StatusCode::OperationFailed, *cancelled);
+  }
   if (!active_) {
     return detail::failed_void(*state_, StatusCode::OperationFailed,
                                diag_codes::kTxCommitFailure,
@@ -684,6 +756,9 @@ Result<void> TopologyTransaction::delete_body(BodyId body_id) {
 
 Result<void> TopologyTransaction::replace_surface(FaceId face_id,
                                                   SurfaceId replacement) {
+  if (const auto cancelled = observe_cancellation("替换面曲面")) {
+    return error_void(StatusCode::OperationFailed, *cancelled);
+  }
   if (!active_) {
     return detail::failed_void(*state_, StatusCode::OperationFailed,
                                diag_codes::kTxCommitFailure,
@@ -704,6 +779,9 @@ Result<void> TopologyTransaction::replace_surface(FaceId face_id,
 }
 
 Result<VersionId> TopologyTransaction::commit() {
+  if (const auto cancelled = observe_cancellation("提交事务")) {
+    return error_result<VersionId>(StatusCode::OperationFailed, *cancelled);
+  }
   if (!active_) {
     return detail::failed_result<VersionId>(
         *state_, StatusCode::OperationFailed, diag_codes::kTxCommitFailure,
@@ -758,6 +836,51 @@ Result<void> TopologyTransaction::rollback() {
                                diag_codes::kTxRollbackFailure,
                                "事务回滚失败：事务已关闭", "事务回滚失败");
   }
+  if (token_cancellation_requested()) {
+    record_cancellation_observed(true, txn_write_ops_);
+  }
+  restore_model_and_close();
+  return ok_void(state_->create_diagnostic(
+      cancellation_observed_ ? "事务已响应取消并回滚" : "事务已回滚"));
+}
+
+bool TopologyTransaction::token_cancellation_requested() const noexcept {
+  return cancellation_token_.is_cancellation_requested();
+}
+
+void TopologyTransaction::record_cancellation_observed(
+    bool rolled_back, std::uint64_t write_operations) {
+  if (cancellation_observed_) {
+    return;
+  }
+  cancellation_observed_ = true;
+  cancelled_write_ops_ = write_operations;
+  ++state_->topology_cancellation_observed_count;
+  if (rolled_back) {
+    ++state_->topology_cancellation_rollback_count;
+    state_->topology_cancelled_write_operations_total += write_operations;
+    state_->topology_last_cancelled_write_operations = write_operations;
+  }
+}
+
+std::optional<DiagnosticId> TopologyTransaction::observe_cancellation(
+    std::string_view operation) {
+  if (!cancellation_observed_ &&
+      (!active_ || !token_cancellation_requested())) {
+    return std::nullopt;
+  }
+  if (active_) {
+    record_cancellation_observed(true, txn_write_ops_);
+    restore_model_and_close();
+  }
+  return detail::error_diag(
+      *state_, std::string(operation) + "已取消",
+      diag_codes::kTxCancellationRequested,
+      std::string(operation) +
+          "失败：协作式取消请求已生效，事务写入已完整回滚");
+}
+
+void TopologyTransaction::restore_model_and_close() {
   for (const auto &[id, pcurve_id] : transaction_state_->original_coedge_pcurves) {
     const auto it = state_->coedges.find(id);
     if (it != state_->coedges.end()) {
@@ -861,11 +984,39 @@ Result<void> TopologyTransaction::rollback() {
     state_->active_topology_transaction.reset();
   }
   active_ = false;
-  return ok_void(state_->create_diagnostic("事务已回滚"));
+}
+
+Result<void> TopologyTransaction::poll_cancellation() {
+  if (const auto cancelled = observe_cancellation("轮询事务取消")) {
+    return error_void(StatusCode::OperationFailed, *cancelled);
+  }
+  if (!active_) {
+    return detail::failed_void(*state_, StatusCode::OperationFailed,
+                               diag_codes::kTxCommitFailure,
+                               "轮询事务取消失败：事务已关闭",
+                               "轮询事务取消失败");
+  }
+  return ok_void(state_->create_diagnostic("事务尚未请求取消"));
 }
 
 Result<bool> TopologyTransaction::is_active() const {
   return ok_result(active_, state_->create_diagnostic("已查询事务活动状态"));
+}
+
+Result<bool> TopologyTransaction::cancellation_requested() const {
+  return ok_result(token_cancellation_requested(),
+                   state_->create_diagnostic("已查询事务取消请求状态"));
+}
+
+Result<bool> TopologyTransaction::cancellation_observed() const {
+  return ok_result(cancellation_observed_,
+                   state_->create_diagnostic("已查询事务取消观察状态"));
+}
+
+Result<std::uint64_t>
+TopologyTransaction::cancelled_write_operation_count() const {
+  return ok_result(cancelled_write_ops_,
+                   state_->create_diagnostic("已查询事务取消回滚写次数"));
 }
 
 Result<std::uint64_t> TopologyTransaction::created_vertex_count() const {
@@ -1026,10 +1177,25 @@ Result<bool> TopologyTransaction::has_created_body(BodyId body_id) const {
 }
 
 Result<bool> TopologyTransaction::can_commit() const {
-  return ok_result(active_, state_->create_diagnostic("已查询事务是否可提交"));
+  return ok_result(active_ && !token_cancellation_requested(),
+                   state_->create_diagnostic("已查询事务是否可提交"));
 }
 
 Result<VersionId> TopologyTransaction::preview_commit_version() const {
+  if (active_ && token_cancellation_requested()) {
+    return detail::failed_result<VersionId>(
+        *state_, StatusCode::OperationFailed,
+        diag_codes::kTxCancellationRequested,
+        "事务预览失败：协作式取消请求等待事务边界处理",
+        "事务预览失败");
+  }
+  if (cancellation_observed_) {
+    return detail::failed_result<VersionId>(
+        *state_, StatusCode::OperationFailed,
+        diag_codes::kTxCancellationRequested,
+        "事务预览失败：事务已响应协作式取消并回滚",
+        "事务预览失败");
+  }
   if (!active_) {
     return detail::failed_result<VersionId>(
         *state_, StatusCode::OperationFailed, diag_codes::kTxCommitFailure,
@@ -1078,6 +1244,7 @@ Result<void> TopologyTransaction::clear_tracking_records() {
   txn_coedge_pcurve_binds_ = 0;
   txn_coedge_pcurve_clears_ = 0;
   txn_write_ops_ = 0;
+  cancelled_write_ops_ = 0;
   transaction_state_->original_coedge_pcurves.clear();
   transaction_state_->original_faces.clear();
   transaction_state_->original_shells.clear();

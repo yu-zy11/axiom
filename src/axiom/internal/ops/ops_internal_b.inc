@@ -458,6 +458,12 @@ void append_boolean_prep_candidate_issue(detail::KernelState& state,
             << ", overlap_volume_sum=" << prep.overlap_volume_sum;
     auto issue = detail::make_info_issue(diag_codes::kBoolPrepCandidatesBuilt, message.str());
     issue.related_entities = {lhs.value, rhs.value};
+    issue.numeric_evidence = {
+        {"lhs_regions", static_cast<Scalar>(prep.lhs_regions), "count"},
+        {"rhs_regions", static_cast<Scalar>(prep.rhs_regions), "count"},
+        {"overlap_candidates", static_cast<Scalar>(prep.overlap_candidates), "count"},
+        {"overlap_volume_sum", prep.overlap_volume_sum, "model_unit^3"},
+    };
     set_boolean_diagnostic_stage(issue, diag_codes::kBoolPrepCandidatesBuilt);
     state.append_diagnostic_issue(diag, std::move(issue));
 
@@ -466,6 +472,7 @@ void append_boolean_prep_candidate_issue(detail::KernelState& state,
             diag_codes::kBoolLocalClipApplied,
             "布尔局部裁剪已应用：结果 bbox 已按候选重叠区域收缩");
         clip_issue.related_entities = {lhs.value, rhs.value};
+        clip_issue.numeric_evidence = {{"local_clip_applied", 1.0, "bool"}};
         set_boolean_diagnostic_stage(clip_issue, diag_codes::kBoolLocalClipApplied);
         state.append_diagnostic_issue(diag, std::move(clip_issue));
     }
@@ -519,6 +526,14 @@ void append_boolean_run_stage_issue(detail::KernelState& state,
         << " local_clip=" << (prep.local_clip_applied ? "true" : "false");
     auto issue = detail::make_info_issue(diag_codes::kBoolRunStageSummary, msg.str());
     issue.related_entities = {lhs.value, rhs.value, output.value};
+    issue.numeric_evidence = {
+        {"operation", static_cast<Scalar>(op), "enum"},
+        {"bbox_relation", static_cast<Scalar>(relation), "enum"},
+        {"lhs_regions", static_cast<Scalar>(prep.lhs_regions), "count"},
+        {"rhs_regions", static_cast<Scalar>(prep.rhs_regions), "count"},
+        {"overlap_candidates", static_cast<Scalar>(prep.overlap_candidates), "count"},
+        {"local_clip_applied", prep.local_clip_applied ? 1.0 : 0.0, "bool"},
+    };
     set_boolean_diagnostic_stage(issue, diag_codes::kBoolRunStageSummary);
     state.append_diagnostic_issue(diag, std::move(issue));
 }
@@ -549,6 +564,7 @@ void append_boolean_face_candidate_issue(detail::KernelState& state,
     msg << "布尔面级候选对已生成: face_candidates=" << count;
     auto issue = detail::make_info_issue(diag_codes::kBoolFaceCandidatesBuilt, msg.str());
     issue.related_entities = {lhs.value, rhs.value};
+    issue.numeric_evidence = {{"face_candidates", static_cast<Scalar>(count), "count"}};
     set_boolean_diagnostic_stage(issue, diag_codes::kBoolFaceCandidatesBuilt);
     state.append_diagnostic_issue(diag, std::move(issue));
 }
@@ -565,6 +581,7 @@ void append_boolean_intersection_curve_issue(detail::KernelState& state,
     msg << "布尔精确求交（解析）已生成交线: curves=" << curves.size();
     auto issue = detail::make_info_issue(diag_codes::kBoolIntersectionCurvesBuilt, msg.str());
     issue.related_entities = {lhs.value, rhs.value};
+    issue.numeric_evidence = {{"curves", static_cast<Scalar>(curves.size()), "count"}};
     set_boolean_diagnostic_stage(issue, diag_codes::kBoolIntersectionCurvesBuilt);
     const std::size_t kMaxCurves = 8;
     for (std::size_t i = 0; i < std::min(kMaxCurves, curves.size()); ++i) {
@@ -585,6 +602,7 @@ void append_boolean_intersection_segment_issue(detail::KernelState& state,
     msg << "布尔交线裁剪完成: segments=" << segments.size();
     auto issue = detail::make_info_issue(diag_codes::kBoolIntersectionSegmentsBuilt, msg.str());
     issue.related_entities = {lhs.value, rhs.value};
+    issue.numeric_evidence = {{"segments", static_cast<Scalar>(segments.size()), "count"}};
     set_boolean_diagnostic_stage(issue, diag_codes::kBoolIntersectionSegmentsBuilt);
     const std::size_t kMaxSeg = 8;
     for (std::size_t i = 0; i < std::min(kMaxSeg, segments.size()); ++i) {
@@ -607,7 +625,7 @@ void append_boolean_intersection_stored_issue(detail::KernelState& state,
         << " curve_count=" << curve_count;
     auto issue = detail::make_info_issue(diag_codes::kBoolIntersectionWiresStored, msg.str());
     issue.related_entities = {lhs.value, rhs.value, intersection_id.value};
+    issue.numeric_evidence = {{"curve_count", static_cast<Scalar>(curve_count), "count"}};
     set_boolean_diagnostic_stage(issue, diag_codes::kBoolIntersectionWiresStored);
     state.append_diagnostic_issue(diag, std::move(issue));
 }
-

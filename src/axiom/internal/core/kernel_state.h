@@ -290,6 +290,11 @@ struct KernelState {
     std::uint64_t topology_last_commit_write_operations{0};
     TopologyCommitWriteBreakdown topology_last_commit_write_breakdown{};
     TopologyCommitWriteBreakdown topology_committed_write_breakdown_totals{};
+    /// 协作式取消累计审计；与成功提交审计分离，取消回滚不推进 `next_version`。
+    std::uint64_t topology_cancellation_observed_count{0};
+    std::uint64_t topology_cancellation_rollback_count{0};
+    std::uint64_t topology_cancelled_write_operations_total{0};
+    std::uint64_t topology_last_cancelled_write_operations{0};
     /// 当前拓扑写事务的唯一所有权令牌；事务关闭后弱引用自动失效。
     std::weak_ptr<void> active_topology_transaction;
 

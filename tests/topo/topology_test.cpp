@@ -4831,22 +4831,210 @@ int main() {
             std::cerr << "cross-loop endpoint touch validation or rollback failed\n";
             return 1;
         }
-        // Identical XY projections at different Z values are skew in 3D.
+        // Identical XY projections at a positive but sub-tolerance Z offset
+        // are not exact intersections; they are nevertheless invalid near
+        // contacts under the kernel topology tolerance.
         auto skew_txn = topo.begin_transaction();
         const auto skew_face = skew_txn.create_face(*plane.value, outer->loop,
             std::array<axiom::LoopId, 1>{skew_to_outer->loop});
-        if (!skew_face.value || skew_txn.rollback().status != axiom::StatusCode::Ok ||
-            topo.query().has_face(*skew_face.value).value != std::optional<bool>{false}) {
-            std::cerr << "3D skew boundaries were treated as crossing\n";
+        const auto skew_report = diagnostics.get(skew_face.diagnostic_id);
+        if (skew_face.status != axiom::StatusCode::InvalidTopology || skew_face.value ||
+            !skew_report.value || !has_issue_code(*skew_report.value,
+                axiom::diag_codes::kTopoFaceCrossLoopNearContact) ||
+            skew_txn.write_operation_count().value != std::optional<std::uint64_t>{0} ||
+            skew_txn.rollback().status != axiom::StatusCode::Ok) {
+            std::cerr << "sub-tolerance skew boundary was not rejected as near contact\n";
             return 1;
         }
         auto skew_touch_txn = topo.begin_transaction();
         const auto skew_touch_face = skew_touch_txn.create_face(*plane.value, outer->loop,
             std::array<axiom::LoopId, 1>{skew_touch_outer->loop});
-        if (!skew_touch_face.value ||
+        const auto skew_touch_report = diagnostics.get(skew_touch_face.diagnostic_id);
+        if (skew_touch_face.status != axiom::StatusCode::InvalidTopology ||
+            skew_touch_face.value || !skew_touch_report.value ||
+            !has_issue_code(*skew_touch_report.value,
+                axiom::diag_codes::kTopoFaceCrossLoopNearContact) ||
             skew_touch_txn.rollback().status != axiom::StatusCode::Ok ||
-            topo.query().has_face(*skew_touch_face.value).value != std::optional<bool>{false}) {
-            std::cerr << "3D separated endpoint was treated as touching\n";
+            !state->faces.empty()) {
+            std::cerr << "sub-tolerance separated endpoint was not rejected\n";
+            return 1;
+        }
+    }
+
+    // FR-TOPO-001: cross-loop straight boundaries reject collinear overlap and
+    // positive-distance near contact, expose the same predicate for preflight,
+    // and keep rejected face creation fully transactional.
+    {
+        axiom::KernelConfig config;
+        config.tolerance.linear = 1e-6;
+        config.tolerance.min_local = 1e-9;
+        config.tolerance.max_local = 1e-3;
+        auto state = std::make_shared<axiom::detail::KernelState>(config);
+        axiom::TopologyService topo{state};
+        axiom::DiagnosticService diagnostics{state};
+        axiom::SurfaceFactory surfaces{state};
+        axiom::CurveFactory curves{state};
+        const auto plane = surfaces.make_plane({0, 0, 0}, {0, 0, 1});
+        if (!plane.value) return 1;
+
+        struct Triangle {
+            axiom::LoopId loop;
+            std::array<axiom::EdgeId, 3> edges;
+            std::array<axiom::VertexId, 3> vertices;
+        };
+        auto setup = topo.begin_transaction();
+        const auto triangle = [&](std::array<axiom::Point3, 3> points)
+            -> std::optional<Triangle> {
+            Triangle result{};
+            std::array<axiom::CoedgeId, 3> coedges;
+            for (std::size_t i = 0; i < 3; ++i) {
+                const auto vertex = setup.create_vertex(points[i]);
+                if (!vertex.value) return {};
+                result.vertices[i] = *vertex.value;
+            }
+            for (std::size_t i = 0; i < 3; ++i) {
+                const auto curve = curves.make_line_segment(
+                    points[i], points[(i + 1) % 3]);
+                if (!curve.value) return {};
+                const auto edge = setup.create_edge(
+                    *curve.value, result.vertices[i],
+                    result.vertices[(i + 1) % 3]);
+                if (!edge.value) return {};
+                result.edges[i] = *edge.value;
+                const auto coedge = setup.create_coedge(*edge.value, false);
+                if (!coedge.value) return {};
+                coedges[i] = *coedge.value;
+            }
+            const auto loop = setup.create_loop(coedges);
+            if (!loop.value) return {};
+            result.loop = *loop.value;
+            return result;
+        };
+
+        const auto outer = triangle({{{0, 0, 0}, {10, 0, 0}, {0, 10, 0}}});
+        const auto overlap = triangle({{{2, 0, 0}, {4, 0, 0}, {3, 1, 0}}});
+        const auto near = triangle({{{2, 5e-7, 0}, {4, 5e-7, 0}, {3, 1, 0}}});
+        const auto separated = triangle({{{2, 2e-6, 0}, {4, 2e-6, 0}, {3, 1, 0}}});
+        const auto safe = triangle({{{6, 1, 0}, {7, 1, 0}, {6, 2, 0}}});
+        if (!outer || !overlap || !near || !separated || !safe ||
+            setup.commit().status != axiom::StatusCode::Ok) return 1;
+
+        const auto writes_before_queries =
+            state->topology_committed_write_operations_total;
+        const auto overlap_query = topo.validate().first_boundary_conflict(
+            outer->loop, std::array<axiom::LoopId, 1>{overlap->loop});
+        const auto near_query = topo.validate().first_boundary_conflict(
+            outer->loop, std::array<axiom::LoopId, 1>{near->loop});
+        const auto separated_query = topo.validate().first_boundary_conflict(
+            outer->loop, std::array<axiom::LoopId, 1>{separated->loop});
+        if (!overlap_query.value || !overlap_query.value->has_value() ||
+            overlap_query.value->value().kind !=
+                axiom::FaceBoundaryConflictKind::CollinearOverlap ||
+            overlap_query.value->value().first_edge.value != outer->edges[0].value ||
+            overlap_query.value->value().second_edge.value != overlap->edges[0].value ||
+            overlap_query.value->value().distance != 0.0 ||
+            !near_query.value || !near_query.value->has_value() ||
+            near_query.value->value().kind !=
+                axiom::FaceBoundaryConflictKind::NearContact ||
+            !(near_query.value->value().distance > 0.0 &&
+              near_query.value->value().distance <= config.tolerance.linear) ||
+            !separated_query.value || separated_query.value->has_value() ||
+            state->topology_committed_write_operations_total != writes_before_queries) {
+            std::cerr << "boundary preflight classification or read-only guarantee failed\n";
+            return 1;
+        }
+        const auto exact_only_query = topo.validate().first_boundary_conflict(
+            outer->loop, std::array<axiom::LoopId, 1>{near->loop}, 1e-9);
+        const auto invalid_tolerance = topo.validate().first_boundary_conflict(
+            outer->loop, std::array<axiom::LoopId, 1>{near->loop},
+            std::numeric_limits<double>::quiet_NaN());
+        if (!exact_only_query.value || exact_only_query.value->has_value() ||
+            invalid_tolerance.status != axiom::StatusCode::InvalidInput ||
+            invalid_tolerance.value ||
+            state->topology_committed_write_operations_total != writes_before_queries) {
+            std::cerr << "explicit boundary tolerance handling failed\n";
+            return 1;
+        }
+
+        auto txn = topo.begin_transaction();
+        const auto next_id = state->next_id;
+        const auto writes = txn.write_operation_count().value;
+        for (const auto& rejected_case : {
+                 std::pair{overlap->loop,
+                           axiom::diag_codes::kTopoFaceCrossLoopCollinearOverlap},
+                 std::pair{near->loop,
+                           axiom::diag_codes::kTopoFaceCrossLoopNearContact}}) {
+            const auto rejected = txn.create_face(
+                *plane.value, outer->loop,
+                std::array<axiom::LoopId, 1>{rejected_case.first});
+            const auto report = diagnostics.get(rejected.diagnostic_id);
+            if (rejected.status != axiom::StatusCode::InvalidTopology || rejected.value ||
+                !report.value || !issue_links_entities(*report.value,
+                    rejected_case.second,
+                    {outer->loop.value, rejected_case.first.value,
+                     outer->edges[0].value}) ||
+                state->next_id != next_id || !state->faces.empty() ||
+                txn.created_face_count().value != std::optional<std::uint64_t>{0} ||
+                txn.write_operation_count().value != writes) {
+                std::cerr << "overlap/near-contact rejection polluted face transaction\n";
+                return 1;
+            }
+            const auto path = std::filesystem::temp_directory_path() /
+                (rejected_case.second == axiom::diag_codes::kTopoFaceCrossLoopCollinearOverlap
+                     ? "axiom_topo_collinear_overlap.json"
+                     : "axiom_topo_near_contact.json");
+            if (diagnostics.export_report_json(rejected.diagnostic_id, path.string()).status !=
+                axiom::StatusCode::Ok) return 1;
+            std::ifstream input(path);
+            const std::string json((std::istreambuf_iterator<char>(input)),
+                                   std::istreambuf_iterator<char>());
+            input.close();
+            std::filesystem::remove(path);
+            if (json.find(rejected_case.second) == std::string::npos ||
+                json.find("related_entities") == std::string::npos) return 1;
+        }
+
+        // Point-like corrupted boundary segments still produce finite evidence
+        // and are treated as near contact rather than escaping through a divide
+        // by zero or contaminating the active transaction.
+        const auto original_degenerate_point =
+            state->vertices.at(separated->vertices[1].value).point;
+        state->vertices.at(separated->vertices[1].value).point =
+            state->vertices.at(separated->vertices[0].value).point;
+        state->vertices.at(separated->vertices[0].value).point.y = 5e-7;
+        state->vertices.at(separated->vertices[1].value).point.y = 5e-7;
+        const auto degenerate_query = topo.validate().first_boundary_conflict(
+            outer->loop, std::array<axiom::LoopId, 1>{separated->loop});
+        if (!degenerate_query.value || !degenerate_query.value->has_value() ||
+            degenerate_query.value->value().kind !=
+                axiom::FaceBoundaryConflictKind::NearContact ||
+            !std::isfinite(degenerate_query.value->value().distance) ||
+            txn.write_operation_count().value != writes) {
+            std::cerr << "point-like boundary segment was not handled deterministically\n";
+            return 1;
+        }
+        state->vertices.at(separated->vertices[0].value).point = {2, 2e-6, 0};
+        state->vertices.at(separated->vertices[1].value).point = original_degenerate_point;
+
+        const auto good = txn.create_face(
+            *plane.value, outer->loop,
+            std::array<axiom::LoopId, 1>{safe->loop});
+        if (!good.value) return 1;
+        state->faces.at(good.value->value).inner_loops[0] = overlap->loop;
+        state->loop_to_faces.erase(safe->loop.value);
+        state->loop_to_faces[overlap->loop.value] = {good.value->value};
+        const auto writes_before_validation = txn.write_operation_count().value;
+        const auto invalid = topo.validate().validate_face(*good.value);
+        const auto invalid_report = diagnostics.get(invalid.diagnostic_id);
+        if (invalid.status != axiom::StatusCode::InvalidTopology ||
+            !invalid_report.value || !issue_links_entities(*invalid_report.value,
+                axiom::diag_codes::kTopoFaceCrossLoopCollinearOverlap,
+                {good.value->value, outer->loop.value, overlap->loop.value,
+                 outer->edges[0].value, overlap->edges[0].value}) ||
+            txn.write_operation_count().value != writes_before_validation ||
+            txn.rollback().status != axiom::StatusCode::Ok ||
+            topo.query().has_face(*good.value).value != std::optional<bool>{false}) {
+            std::cerr << "overlap validator evidence or rollback failed\n";
             return 1;
         }
     }
@@ -5433,6 +5621,294 @@ int main() {
         if (!after_empty.create_vertex({10, 11, 12}).value ||
             after_empty.rollback().status != axiom::StatusCode::Ok) {
             std::cerr << "empty transaction scope did not release writer ownership\n";
+            return 1;
+        }
+    }
+
+    // NFR-REL-001: cooperative cancellation is shared by source/token copies
+    // and is observed only at explicit transaction boundaries. Observation
+    // restores all writes, releases the single-writer slot, preserves commit
+    // audit/version state, and emits a stable cancellation diagnostic.
+    {
+        axiom::Kernel cancellation_kernel;
+        auto& topo = cancellation_kernel.topology();
+
+        const axiom::TopologyCancellationToken inert_token;
+        if (inert_token.can_be_cancelled() ||
+            inert_token.is_cancellation_requested()) {
+            std::cerr << "default cancellation token must be inert\n";
+            return 1;
+        }
+
+        axiom::TopologyCancellationSource pre_cancelled_source;
+        auto shared_source = pre_cancelled_source;
+        const auto pre_cancelled_token = shared_source.token();
+        if (!pre_cancelled_token.can_be_cancelled() ||
+            pre_cancelled_token.is_cancellation_requested() ||
+            !pre_cancelled_source.request_cancellation() ||
+            shared_source.request_cancellation() ||
+            !pre_cancelled_token.is_cancellation_requested()) {
+            std::cerr << "shared cancellation signal is not idempotent\n";
+            return 1;
+        }
+        auto pre_cancelled = topo.begin_transaction(pre_cancelled_token);
+        const auto pre_cancelled_write =
+            pre_cancelled.create_vertex({1, 2, 3});
+        const auto pre_cancelled_report =
+            cancellation_kernel.diagnostics().get(
+                pre_cancelled_write.diagnostic_id);
+        const auto pre_metrics = topo.cancellation_metrics();
+        if (pre_cancelled.is_active().value != std::optional<bool>{false} ||
+            pre_cancelled.can_commit().value != std::optional<bool>{false} ||
+            pre_cancelled.cancellation_requested().value !=
+                std::optional<bool>{true} ||
+            pre_cancelled.cancellation_observed().value !=
+                std::optional<bool>{true} ||
+            pre_cancelled_write.status != axiom::StatusCode::OperationFailed ||
+            pre_cancelled_write.value || !pre_cancelled_report.value ||
+            !has_issue_code(*pre_cancelled_report.value,
+                            axiom::diag_codes::kTxCancellationRequested) ||
+            !pre_metrics.value ||
+            pre_metrics.value->observed_transaction_count != 1 ||
+            pre_metrics.value->rolled_back_transaction_count != 0 ||
+            topo.has_active_write_transaction().value !=
+                std::optional<bool>{false}) {
+            std::cerr << "pre-cancelled transaction acquired or changed writer state\n";
+            return 1;
+        }
+
+        // A rejected overlapping handle owns neither the writer slot nor the
+        // owner's undo log. Cancelling its token must not cancel or roll back
+        // the actual owner and must not be counted as an observed cancellation.
+        auto isolation_owner = topo.begin_transaction();
+        const auto isolation_vertex =
+            isolation_owner.create_vertex({2, 3, 4});
+        axiom::TopologyCancellationSource rejected_source;
+        auto rejected_overlap =
+            topo.begin_transaction(rejected_source.token());
+        if (!isolation_vertex.value ||
+            rejected_overlap.is_active().value !=
+                std::optional<bool>{false} ||
+            !rejected_source.request_cancellation() ||
+            rejected_overlap.poll_cancellation().status !=
+                axiom::StatusCode::OperationFailed ||
+            rejected_overlap.cancellation_observed().value !=
+                std::optional<bool>{false} ||
+            topo.query().has_vertex(*isolation_vertex.value).value !=
+                std::optional<bool>{true} ||
+            isolation_owner.rollback().status != axiom::StatusCode::Ok ||
+            topo.cancellation_metrics().value->observed_transaction_count != 1) {
+            std::cerr << "rejected writer observed cancellation or changed owner\n";
+            return 1;
+        }
+
+        // A bound but unrequested token is behaviorally identical to a normal
+        // transaction. Cancelling the source after commit cannot reinterpret or
+        // undo the closed transaction.
+        axiom::TopologyCancellationSource committed_source;
+        auto committed_txn = topo.begin_transaction(committed_source.token());
+        const auto durable_vertex = committed_txn.create_vertex({4, 5, 6});
+        const auto committed_version = committed_txn.commit();
+        if (!durable_vertex.value || !committed_version.value ||
+            committed_source.request_cancellation() != true ||
+            committed_txn.cancellation_requested().value !=
+                std::optional<bool>{true} ||
+            committed_txn.cancellation_observed().value !=
+                std::optional<bool>{false} ||
+            topo.query().has_vertex(*durable_vertex.value).value !=
+                std::optional<bool>{true}) {
+            std::cerr << "post-commit cancellation changed durable topology\n";
+            return 1;
+        }
+        const auto audit_before_cancelled_commit =
+            cancellation_kernel.topology_commit_audit();
+        const auto version_before_cancelled_commit =
+            cancellation_kernel.topology_version_next();
+
+        // Automatic observation on a write boundary rolls back prior writes.
+        axiom::TopologyCancellationSource write_source;
+        auto write_cancelled = topo.begin_transaction(write_source.token());
+        const auto transient_a = write_cancelled.create_vertex({10, 11, 12});
+        const auto transient_b = write_cancelled.create_vertex({13, 14, 15});
+        if (!transient_a.value || !transient_b.value ||
+            topo.has_active_write_transaction().value !=
+                std::optional<bool>{true}) return 1;
+        const auto next_id_before_boundary = cancellation_kernel.next_object_id();
+        if (!write_source.request_cancellation() ||
+            write_cancelled.can_commit().value != std::optional<bool>{false}) {
+            return 1;
+        }
+        const auto preview_cancelled = write_cancelled.preview_commit_version();
+        const auto boundary_failure =
+            write_cancelled.create_vertex({16, 17, 18});
+        const auto boundary_report = cancellation_kernel.diagnostics().get(
+            boundary_failure.diagnostic_id);
+        if (preview_cancelled.status != axiom::StatusCode::OperationFailed ||
+            boundary_failure.status != axiom::StatusCode::OperationFailed ||
+            boundary_failure.value || !boundary_report.value ||
+            !has_issue_code(*boundary_report.value,
+                            axiom::diag_codes::kTxCancellationRequested) ||
+            write_cancelled.is_active().value != std::optional<bool>{false} ||
+            write_cancelled.cancellation_observed().value !=
+                std::optional<bool>{true} ||
+            write_cancelled.cancelled_write_operation_count().value !=
+                std::optional<std::uint64_t>{2} ||
+            write_cancelled.write_operation_count().value !=
+                std::optional<std::uint64_t>{0} ||
+            cancellation_kernel.next_object_id().value !=
+                next_id_before_boundary.value ||
+            topo.query().has_vertex(*transient_a.value).value !=
+                std::optional<bool>{false} ||
+            topo.query().has_vertex(*transient_b.value).value !=
+                std::optional<bool>{false} ||
+            topo.query().has_vertex(*durable_vertex.value).value !=
+                std::optional<bool>{true} ||
+            topo.has_active_write_transaction().value !=
+                std::optional<bool>{false}) {
+            std::cerr << "write-boundary cancellation failed to isolate rollback\n";
+            return 1;
+        }
+
+        const auto metrics_after_write = topo.cancellation_metrics();
+        if (!metrics_after_write.value ||
+            metrics_after_write.value->observed_transaction_count != 2 ||
+            metrics_after_write.value->rolled_back_transaction_count != 1 ||
+            metrics_after_write.value->rolled_back_write_operations_total != 2 ||
+            metrics_after_write.value->last_rolled_back_write_operations != 2) {
+            std::cerr << "write-boundary cancellation audit is inconsistent\n";
+            return 1;
+        }
+
+        // Scope exit is also a cleanup boundary. An empty cancelled transaction
+        // records a zero-write rollback and releases ownership without a poll.
+        axiom::TopologyCancellationSource scope_source;
+        {
+            auto scope_cancelled = topo.begin_transaction(scope_source.token());
+            if (!scope_source.request_cancellation()) return 1;
+        }
+        const auto metrics_after_scope = topo.cancellation_metrics();
+        if (!metrics_after_scope.value ||
+            metrics_after_scope.value->observed_transaction_count != 3 ||
+            metrics_after_scope.value->rolled_back_transaction_count != 2 ||
+            metrics_after_scope.value->rolled_back_write_operations_total != 2 ||
+            metrics_after_scope.value->last_rolled_back_write_operations != 0 ||
+            topo.has_active_write_transaction().value !=
+                std::optional<bool>{false}) {
+            std::cerr << "cancelled empty scope was not audited or released\n";
+            return 1;
+        }
+
+        // Commit is also a cancellation boundary. It must not advance the
+        // version or successful-commit audit when it converts into a rollback.
+        axiom::TopologyCancellationSource commit_source;
+        auto commit_cancelled = topo.begin_transaction(commit_source.token());
+        const auto commit_vertex = commit_cancelled.create_vertex({20, 21, 22});
+        if (!commit_vertex.value || !commit_source.request_cancellation()) return 1;
+        const auto rejected_commit = commit_cancelled.commit();
+        const auto rejected_commit_report = cancellation_kernel.diagnostics().get(
+            rejected_commit.diagnostic_id);
+        const auto audit_after_cancelled_commit =
+            cancellation_kernel.topology_commit_audit();
+        if (rejected_commit.status != axiom::StatusCode::OperationFailed ||
+            rejected_commit.value || !rejected_commit_report.value ||
+            !has_issue_code(*rejected_commit_report.value,
+                            axiom::diag_codes::kTxCancellationRequested) ||
+            topo.query().has_vertex(*commit_vertex.value).value !=
+                std::optional<bool>{false} ||
+            cancellation_kernel.topology_version_next().value !=
+                version_before_cancelled_commit.value ||
+            !audit_before_cancelled_commit.value ||
+            !audit_after_cancelled_commit.value ||
+            audit_after_cancelled_commit.value->committed_transaction_count !=
+                audit_before_cancelled_commit.value->committed_transaction_count ||
+            audit_after_cancelled_commit.value->committed_write_operations_total !=
+                audit_before_cancelled_commit.value->committed_write_operations_total) {
+            std::cerr << "cancelled commit polluted version or commit audit\n";
+            return 1;
+        }
+
+        // Explicit polling restores a destructive snapshot, including reverse
+        // indices reachable from a pre-existing body, then permits a new writer.
+        const auto box = cancellation_kernel.primitives().box(
+            {0, 0, 0}, 2, 3, 4);
+        if (!box.value) return 1;
+        const auto box_faces = topo.query().faces_of_body(*box.value);
+        if (!box_faces.value || box_faces.value->empty()) return 1;
+        const auto edited_face = box_faces.value->front();
+        const auto original_surface = topo.query().surface_of_face(edited_face);
+        const auto replacement_surface = cancellation_kernel.surfaces().make_plane(
+            {100, 200, 300}, {0, 0, 1});
+        if (!original_surface.value || !replacement_surface.value) return 1;
+        axiom::TopologyCancellationSource poll_source;
+        auto poll_cancelled = topo.begin_transaction(poll_source.token());
+        if (poll_cancelled.replace_surface(edited_face,
+                                           *replacement_surface.value).status !=
+                axiom::StatusCode::Ok ||
+            poll_cancelled.delete_body(*box.value).status !=
+                axiom::StatusCode::Ok ||
+            cancellation_kernel.has_body_id(*box.value).value !=
+                std::optional<bool>{false} ||
+            !poll_source.request_cancellation()) return 1;
+        const auto poll_result = poll_cancelled.poll_cancellation();
+        if (poll_result.status != axiom::StatusCode::OperationFailed ||
+            cancellation_kernel.has_body_id(*box.value).value !=
+                std::optional<bool>{true} ||
+            topo.query().surface_of_face(edited_face).value !=
+                original_surface.value ||
+            cancellation_kernel.core_runtime_invariants_hold().value !=
+                std::optional<bool>{true} ||
+            poll_cancelled.deleted_body_count().value !=
+                std::optional<std::uint64_t>{0} ||
+            poll_cancelled.replaced_surface_count().value !=
+                std::optional<std::uint64_t>{0} ||
+            poll_cancelled.cancelled_write_operation_count().value !=
+                std::optional<std::uint64_t>{2}) {
+            std::cerr << "explicit cancellation poll did not restore body snapshot\n";
+            return 1;
+        }
+        auto after_poll = topo.begin_transaction();
+        const auto after_poll_vertex = after_poll.create_vertex({30, 31, 32});
+        if (!after_poll_vertex.value ||
+            after_poll.rollback().status != axiom::StatusCode::Ok) {
+            std::cerr << "cancelled transaction did not release writer slot\n";
+            return 1;
+        }
+
+        // Moving transfers both writer and cancellation observation authority.
+        axiom::TopologyCancellationSource moved_source;
+        auto move_source_txn = topo.begin_transaction(moved_source.token());
+        const auto moved_vertex = move_source_txn.create_vertex({40, 41, 42});
+        if (!moved_vertex.value) return 1;
+        axiom::TopologyTransaction move_target(std::move(move_source_txn));
+        if (!moved_source.request_cancellation()) return 1;
+        const auto moved_poll = move_target.poll_cancellation();
+        if (moved_poll.status != axiom::StatusCode::OperationFailed ||
+            move_source_txn.cancellation_observed().value !=
+                std::optional<bool>{false} ||
+            move_target.cancellation_observed().value !=
+                std::optional<bool>{true} ||
+            topo.query().has_vertex(*moved_vertex.value).value !=
+                std::optional<bool>{false}) {
+            std::cerr << "moved cancellation authority was not unique\n";
+            return 1;
+        }
+
+        // Explicit rollback remains a successful cleanup operation even when
+        // cancellation is pending, while still contributing cancellation audit.
+        axiom::TopologyCancellationSource rollback_source;
+        auto explicit_cancel_rollback =
+            topo.begin_transaction(rollback_source.token());
+        const auto rollback_vertex =
+            explicit_cancel_rollback.create_vertex({50, 51, 52});
+        if (!rollback_vertex.value || !rollback_source.request_cancellation() ||
+            explicit_cancel_rollback.rollback().status != axiom::StatusCode::Ok ||
+            explicit_cancel_rollback.cancellation_observed().value !=
+                std::optional<bool>{true} ||
+            explicit_cancel_rollback.cancelled_write_operation_count().value !=
+                std::optional<std::uint64_t>{1} ||
+            topo.query().has_vertex(*rollback_vertex.value).value !=
+                std::optional<bool>{false}) {
+            std::cerr << "explicit cancellation rollback contract failed\n";
             return 1;
         }
     }

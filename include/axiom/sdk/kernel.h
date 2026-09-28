@@ -97,7 +97,7 @@ public:
     Result<bool> topology_version_audit_consistent() const;
     /// `eval_nodes` 与 `eval_labels`/`eval_invalid`/`eval_recompute_count`、依赖表及体绑定中的节点 id 一致；且 `eval_dependencies` 与 `eval_reverse_dependencies` 互为逆索引（不校验 `BodyId` 是否仍存在于 `bodies`）。
     Result<bool> eval_graph_store_maps_consistent() const;
-    /// 数值配置合法、拓扑版本审计、EvalGraph 存储映射与三角化缓存一致性均通过。
+    /// 数值配置合法、拓扑版本/取消审计、EvalGraph 存储映射与三角化缓存一致性均通过。
     Result<bool> core_runtime_invariants_hold() const;
     /// 成功提交的版本与写操作累计快照；可与 `topology_version_next()` 对照做门禁。
     Result<KernelTopologyCommitAudit> topology_commit_audit() const;

@@ -82,12 +82,47 @@ struct CurveLengthOptions {
     std::uint32_t max_evaluations {100000}; // 整次查询（含复合链）的速度求值预算，须 > 0。
 };
 
+/// 曲线最近点全域搜索的终止原因。成功结果始终覆盖完整有效参数域；
+/// `DistanceTolerance` 给出距离上下界差，`ParameterTolerance` 给出仍可能改进区间的最大参数宽度。
+enum class CurveClosestPointConvergence : std::uint8_t {
+    Analytic,
+    DistanceTolerance,
+    ParameterTolerance
+};
+
+struct CurveClosestPointOptions {
+    /// 模型长度单位下的全域最小距离上下界允许差；有限且非负。
+    Scalar distance_tolerance {1e-9};
+    /// 无法由距离界提前证明时，每个仍可能改进的参数区间须细分到此宽度；有限且大于零。
+    Scalar parameter_tolerance {1e-9};
+    /// 点值求值总预算（解析曲线不消耗该预算）；至少为 3。
+    std::uint32_t max_evaluations {100000};
+};
+
+struct CurveClosestPointResult {
+    Scalar parameter {};
+    Point3 point {};
+    Scalar distance {};
+    /// 全域最小距离的保守下界；与 `distance` 的差不超过请求容差时以距离容差收敛。
+    Scalar distance_lower_bound {};
+    /// 以参数容差终止时，所有未由距离界排除区间的最大宽度；其他终止类型为 0。
+    Scalar parameter_uncertainty {};
+    std::uint32_t evaluations {};
+    std::uint32_t intervals_processed {};
+    CurveClosestPointConvergence convergence {CurveClosestPointConvergence::Analytic};
+};
+
 class CurveService {
 public:
     explicit CurveService(std::shared_ptr<detail::KernelState> state);
 
     Result<CurveEvalResult> eval(CurveId curve_id, Scalar t, int deriv_order) const;
     Result<std::vector<CurveEvalResult>> eval_batch(CurveId curve_id, std::span<const Scalar> ts, int deriv_order) const;
+    /// 对完整有效域执行确定性分支限界搜索；样条逐个非空结点段覆盖，满重数断点两侧独立参与。
+    /// 预算耗尽、选项非法或数值范围不可表示时失败且不返回部分结果，也不写求值缓存。
+    Result<CurveClosestPointResult> closest_point_detailed(
+        CurveId curve_id, const Point3& point,
+        const CurveClosestPointOptions& options = {}) const;
     Result<Scalar> closest_parameter(CurveId curve_id, const Point3& point) const;
     Result<std::vector<Scalar>> closest_parameters_batch(CurveId curve_id, std::span<const Point3> points) const;
     Result<Point3> closest_point(CurveId curve_id, const Point3& point) const;

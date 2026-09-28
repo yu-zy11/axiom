@@ -295,9 +295,34 @@ struct CurveLengthOptions {
   std::uint32_t max_evaluations{100000};
 };
 
+enum class CurveClosestPointConvergence : std::uint8_t {
+  Analytic,
+  DistanceTolerance,
+  ParameterTolerance
+};
+
+struct CurveClosestPointOptions {
+  Scalar distance_tolerance{1e-9};
+  Scalar parameter_tolerance{1e-9};
+  std::uint32_t max_evaluations{100000};
+};
+
+struct CurveClosestPointResult {
+  Scalar parameter;
+  Point3 point;
+  Scalar distance;
+  Scalar distance_lower_bound;
+  Scalar parameter_uncertainty;
+  std::uint32_t evaluations;
+  std::uint32_t intervals_processed;
+  CurveClosestPointConvergence convergence;
+};
+
 class CurveService {
 public:
   Result<CurveEvalResult> eval(CurveId, Scalar t, int deriv_order) const;
+  Result<CurveClosestPointResult> closest_point_detailed(
+      CurveId, const Point3&, const CurveClosestPointOptions& = {}) const;
   Result<Scalar> closest_parameter(CurveId, const Point3&) const;
   Result<Point3> closest_point(CurveId, const Point3&) const;
   Result<Range1D> domain(CurveId) const;
@@ -308,6 +333,10 @@ public:
   Result<BoundingBox> bbox(CurveId) const;
 };
 ```
+
+`closest_point_detailed`（FR-GEO-001 第 69 批）对完整有效参数域给出最近参数、最近点、距离、保守距离下界、参数不确定度、求值/区间计数及终止原因。Line、LineSegment、Circle 与 CompositePolyline 走解析路径（`Analytic`，不消耗点值预算）；Ellipse、Parabola、Hyperbola、Bezier、BSpline、NURBS 与 CompositeChain 走确定性分支限界，样条的每个非空结点段独立覆盖，并用保守速度/加速度界剪枝。`DistanceTolerance` 保证 `distance - distance_lower_bound` 不超过请求的距离容差；`ParameterTolerance` 表示仍可能改进区间的最大宽度不超过请求的参数容差。非解析的旧 `closest_parameter/closest_point` 复用该主流程，并在全域证书收敛后用剩余预算做下降式参数精修。
+
+选项要求 `distance_tolerance` 有限且非负、`parameter_tolerance` 有限且大于零、`max_evaluations >= 3`。非法选项或不可表示的有限输入返回结构化失败；预算耗尽返回 `OperationFailed / AXM-GEO-E-0006`，不返回部分结果。查询不写几何求值缓存。该合同只覆盖曲线；Bezier/BSpline/NURBS 及派生/修剪曲面的完整参数域、修剪边界、预算与收敛证书尚未提供。
 
 `CurveService::length`（FR-QUERY-001 第 63/67 功能包）以模型长度单位返回弧长。Line 有限区间、LineSegment、Circle 和 CompositePolyline 使用解析计算；Ellipse、Parabola、Hyperbola、Bezier、BSpline 和 NURBS 对真实一阶导数的速度做自适应 Simpson 积分，不使用 bbox、网格或采样弦长冒充弧长。差值、速度和累加使用 `long double` 中间量，最终舍入到 `Scalar`；数值路径的容差是误差估计目标，不是任意曲线的严格误差界。
 
@@ -360,6 +389,26 @@ public:
 ### 6.1 拓扑只读查询接口
 
 ```cpp
+enum class FaceBoundaryConflictKind : std::uint8_t {
+  ProperIntersection,
+  EndpointTouch,
+  CollinearOverlap,
+  NearContact
+};
+
+struct FaceBoundaryConflict {
+  FaceBoundaryConflictKind kind;
+  LoopId first_loop;
+  LoopId second_loop;
+  EdgeId first_edge;
+  EdgeId second_edge;
+  Point3 first_point;
+  Point3 second_point;
+  Scalar distance;
+};
+```
+
+```cpp
 class TopologyQueryService {
 public:
   Result<std::array<VertexId, 2>> vertices_of_edge(EdgeId) const;
@@ -396,6 +445,26 @@ enum class TopologyIsolationLevel : std::uint8_t {
   SnapshotSerializable = 1,
 };
 
+class TopologyCancellationToken {
+public:
+  bool can_be_cancelled() const noexcept;
+  bool is_cancellation_requested() const noexcept;
+};
+
+class TopologyCancellationSource {
+public:
+  TopologyCancellationToken token() const noexcept;
+  bool request_cancellation() noexcept;
+  bool is_cancellation_requested() const noexcept;
+};
+
+struct TopologyCancellationMetrics {
+  std::uint64_t observed_transaction_count;
+  std::uint64_t rolled_back_transaction_count;
+  std::uint64_t rolled_back_write_operations_total;
+  std::uint64_t last_rolled_back_write_operations;
+};
+
 class TopologyTransaction {
 public:
   TopologyTransaction(TopologyTransaction&&);
@@ -424,6 +493,10 @@ public:
 
   Result<VersionId> commit();
   Result<void> rollback();
+  Result<void> poll_cancellation();
+  Result<bool> cancellation_requested() const;
+  Result<bool> cancellation_observed() const;
+  Result<std::uint64_t> cancelled_write_operation_count() const;
 
   Result<std::uint64_t> write_operation_count() const;
   Result<TopologyIsolationLevel> effective_isolation_level() const;
@@ -434,12 +507,17 @@ public:
 
 > 说明：`TopologyTransaction` 的完整签名见 `include/axiom/topo/topology_service.h`；事务具有唯一所有权，只能移动构造，不能复制或移动赋值。移动后的源对象处于可安全查询的关闭状态，写入、提交和回滚均被拒绝，事务权限仅由目标对象持有。活动事务若未显式提交或回滚便离开作用域，`noexcept` 析构会自动回滚成功写入；空事务析构是纯 no-op，已关闭事务与移动后的源对象析构不改变模型。另含 `set_coedge_pcurve`、删除壳/体、以及 trim 桥接审计读数 `coedge_pcurve_bind_count()` / `coedge_pcurve_clear_count()` 等。`write_operation_count()` 统计本事务内每次**成功**的写操作（创建/删除实体、`replace_surface`、每次 `set_coedge_pcurve` 含清除）；回滚或 `clear_tracking_records()` 归零。`clear_tracking_records()` 仅在提交或回滚后允许调用，可重复清理且不改变模型；活动事务（含空事务）返回 `OperationFailed` / `AXM-TX-E-0006`，保留创建记录、修改快照与计数。`effective_isolation_level()` 当前实现返回 `SnapshotSerializable`（单事务 + 快照回滚的工程占位，见头文件注释）。
 
+第 69 批支持把 `TopologyCancellationSource::token()` 传给 `begin_transaction(token)`。默认令牌不可取消；源及其副本共享幂等信号。预取消事务不取得写者槽；活动事务在显式 `poll_cancellation`、全部拓扑写入口、`commit`、显式 `rollback` 或作用域退出边界观察取消，随后用完整快照恢复创建、删除、曲面替换与反向索引，释放写者槽，不推进版本或成功提交审计，并返回 `OperationFailed / AXM-TX-E-0007`。重叠而被拒绝的事务不能通过取消影响实际所有者，移动事务唯一转移取消权限。`TopologyService::has_active_write_transaction()` 与 `cancellation_metrics()` 提供只读状态和累计审计，`core_runtime_invariants_hold()` 已包含取消审计自洽性。取消是协作式边界轮询，不会抢占单个正在执行的拓扑调用；长耗时 BOOL/HEAL/IO 内部阶段轮询、子事务和保存点仍未实现。
+
 ### 6.3 拓扑验证接口
 
 ```cpp
 class TopologyValidationService {
 public:
   Result<void> validate_edge(EdgeId) const;
+  Result<std::optional<FaceBoundaryConflict>> first_boundary_conflict(
+      LoopId outer_loop, std::span<const LoopId> inner_loops,
+      Scalar linear_tolerance = 0.0) const;
   Result<void> validate_face(FaceId) const;
   Result<void> validate_shell(ShellId) const;
   // Strict 闭合性：每条边须由两个不同面反向配对，且全部面只能形成一个连通分量。
@@ -448,6 +526,8 @@ public:
   Result<void> validate_body(BodyId) const;
 };
 ```
+
+`first_boundary_conflict` 返回不同边界环间按稳定遍历顺序遇到的首个冲突及两环、两边、两最近点和距离；无冲突是成功的空 `optional`。当前仅检测 Line/LineSegment 支撑的有限拓扑边，分类为 `ProperIntersection`、`EndpointTouch`、`CollinearOverlap` 或 `NearContact`。默认 `linear_tolerance == 0` 使用内核线性容差；有限正值按策略上下限钳制，负值或非有限值返回 `InvalidInput`。`create_face` 与 `validate_face` 复用同一流程；共线正长度重叠和容差内正距离邻近分别使用 `AXM-TOPO-E-0028/0029`。预检和验证均为只读，不分配 `FaceId`、不修改反向索引或事务写计数。一般曲线尚无显式边 trim 区间，因此圆锥曲线、样条和复合链跨环求交仍不在支持范围内。
 
 ## 7. `RepCore` 接口清单
 
@@ -779,17 +859,58 @@ enum class IssueSeverity {
   Fatal
 };
 
+struct NumericEvidence {
+  std::string name;
+  Scalar value;
+  std::string unit;
+};
+
 struct Issue {
   std::string code;
   IssueSeverity severity;
   std::string message;
   std::vector<uint64_t> related_entities;
+  std::string stage;
+  std::vector<NumericEvidence> numeric_evidence;
 };
 
 struct DiagnosticReport {
   DiagnosticId id;
   std::vector<Issue> issues;
   std::string summary;
+};
+
+struct DiagnosticEvidencePolicy {
+  std::string issue_code_prefix;
+  std::string stage_prefix;
+  IssueSeverity minimum_severity{IssueSeverity::Error};
+  bool require_stage{true};
+  bool require_related_entities{true};
+  bool require_numeric_evidence{true};
+  std::uint64_t max_findings{256};
+};
+
+struct DiagnosticEvidenceFinding {
+  DiagnosticId diagnostic_id;
+  std::uint64_t issue_index;
+  std::string issue_code;
+  bool matching_issue_missing;
+  bool stage_missing_or_mismatched;
+  bool related_entities_missing;
+  bool numeric_evidence_missing_or_invalid;
+};
+
+struct DiagnosticEvidenceAudit {
+  std::uint64_t reports_inspected;
+  std::uint64_t matching_issues;
+  std::uint64_t complete_issues;
+  std::uint64_t reports_without_matching_issue;
+  std::uint64_t issues_missing_stage;
+  std::uint64_t issues_missing_related_entities;
+  std::uint64_t issues_missing_numeric_evidence;
+  std::uint64_t omitted_findings;
+  std::vector<DiagnosticEvidenceFinding> findings;
+  bool passed() const;
 };
 ```
 
@@ -810,8 +931,17 @@ public:
   Result<std::vector<DiagnosticId>> find_by_related_entity(std::uint64_t entity_id, std::uint64_t max_results) const;
   Result<std::vector<DiagnosticId>> find_by_issue_stage(std::string_view stage, std::uint64_t max_results) const;
   Result<std::vector<DiagnosticId>> find_by_issue_stage_prefix(std::string_view prefix, std::uint64_t max_results) const;
+  Result<DiagnosticEvidenceAudit> audit_evidence(
+      std::span<const DiagnosticId>, const DiagnosticEvidencePolicy&) const;
+  Result<void> export_evidence_audit_json(
+      std::span<const DiagnosticId>, const DiagnosticEvidencePolicy&,
+      std::string_view path) const;
 };
 ```
+
+`NumericEvidence{name, value, unit}` 为可机器读取的计数、阈值、距离或容差证据；名称在单个 issue 内稳定，单位可为空。单条、指定 ID 批量和全量 TXT/JSON 导出均保留该字段；JSON 遇到非有限数值写 `null`，审计则把空名称或非有限值视为证据无效。
+
+`audit_evidence` 按问题码前缀与最低严重级别筛选 issue，并可要求阶段前缀、关联实体及有效数值证据。重复 `DiagnosticId` 只审计一次；没有匹配 issue 的报告计入 `reports_without_matching_issue`；`max_findings` 仅限制明细，额外缺口计入 `omitted_findings`，完整统计不截断。空 ID 集、空问题码前缀、必需但为空的阶段前缀、零明细上限、非法严重级别或无效 ID 均结构化失败，且不修改源报告。`export_evidence_audit_json` 先完成审计再打开文件；空路径、打开或最终写入失败复用 `AXM-IO-E-0005`。当前 BOOL 主运行和预处理统计导出的受覆盖失败分支已写入数值证据并通过该门禁；HEAL 与 IO 的重量级失败分支尚未全面迁移。
 
 问题码前缀、阶段精确与阶段前缀检索均按 `DiagnosticId` 升序返回最早的前 `max_results` 个匹配报告，单报告的多个匹配 issue 只返回一次。空问题码前缀、空阶段/阶段前缀或零上限返回 `InvalidInput` / `AXM-CORE-E-0002`，源报告保持不变。
 
@@ -833,7 +963,11 @@ public:
 class TopologyService {
 public:
   TopologyTransaction begin_transaction();
+  TopologyTransaction begin_transaction(const TopologyCancellationToken&);
+  Result<bool> has_active_write_transaction() const;
+  Result<TopologyCancellationMetrics> cancellation_metrics() const;
   TopologyQueryService& query();
+  TopologyValidationService& validate();
 };
 ```
 

@@ -14,6 +14,7 @@
 
 #include "axiom/core/types.h"
 #include "axiom/internal/core/kernel_state.h"
+#include "axiom/topo/topology_service.h"
 
 namespace axiom {
 namespace topo_internal {
@@ -92,15 +93,12 @@ face_cross_loop_coincident_vertices(const detail::KernelState &state,
                                     LoopId outer_loop,
                                     std::span<const LoopId> inner_loops);
 
-// Reports a nonparallel 3D intersection of straight boundary segments.
-struct FaceStraightEdgeIntersection {
-  std::array<std::uint64_t, 4> entities;  // Two loops, then two edges.
-  bool endpoint_touch{false};
-};
-std::optional<FaceStraightEdgeIntersection>
-face_cross_loop_straight_edge_intersection(
+// Returns the first conflict between finite Line/LineSegment boundary edges in
+// distinct loops.  Exact intersections, endpoint touches, collinear overlap,
+// and positive-distance contacts within `linear_tolerance` are distinguished.
+std::optional<FaceBoundaryConflict> face_cross_loop_boundary_conflict(
     const detail::KernelState &state, LoopId outer_loop,
-    std::span<const LoopId> inner_loops);
+    std::span<const LoopId> inner_loops, Scalar linear_tolerance);
 
 bool face_record_references_loop(const detail::FaceRecord &face,
                                  std::uint64_t loop_value);

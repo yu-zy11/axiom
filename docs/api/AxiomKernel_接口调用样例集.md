@@ -144,6 +144,30 @@ if (cp.status != StatusCode::Ok) {
 }
 ```
 
+需要全域精度与终止证据时，使用曲线详细入口：
+
+```cpp
+CurveClosestPointOptions options;
+options.distance_tolerance = 1e-10;
+options.parameter_tolerance = 1e-10;
+options.max_evaluations = 50000;
+
+auto closest = kernel.curve_service().closest_point_detailed(curve_id, query_p, options);
+if (!closest.value) {
+  handle_error(closest);  // 预算耗尽等失败不返回部分结果，也不写求值缓存
+  return;
+}
+
+print(closest.value->parameter,
+      closest.value->distance,
+      closest.value->distance_lower_bound,
+      closest.value->parameter_uncertainty,
+      closest.value->evaluations,
+      closest.value->intervals_processed);
+```
+
+Line、LineSegment、Circle 与折线返回 `Analytic`；Ellipse、Parabola、Hyperbola、Bezier、BSpline、NURBS 和 CompositeChain 对完整有效域做分支限界。该入口目前只适用于曲线；曲面的完整参数域和修剪边界证书尚未实现。
+
 ## 5. 基础体构造样例
 
 ## 5.1 创建盒体
@@ -551,6 +575,48 @@ if (r.status != StatusCode::Ok) {
 }
 ```
 
+## 13.3 协作式取消
+
+```cpp
+TopologyCancellationSource cancellation;
+auto txn = kernel.topology().begin_transaction(cancellation.token());
+
+auto v0 = txn.create_vertex({0, 0, 0});
+cancellation.request_cancellation();
+
+// 也可不显式轮询：下一次写入、commit、rollback 或作用域退出会观察取消。
+auto cancelled = txn.poll_cancellation();
+if (cancelled.status == StatusCode::OperationFailed) {
+  auto observed = txn.cancellation_observed();
+  auto reverted_writes = txn.cancelled_write_operation_count();
+  auto metrics = kernel.topology().cancellation_metrics();
+  // 已有写入已从完整快照恢复，写者槽已释放，版本与成功提交审计不推进。
+}
+```
+
+取消只在 API 边界协作式观察，不抢占单个正在执行的拓扑调用。预取消事务不会取得写者槽；移动事务唯一转移取消权限；被单写者规则拒绝的重叠事务不能借取消影响所有者。
+
+## 13.4 建面前检查跨环边界冲突
+
+```cpp
+auto conflict = kernel.topology().validate().first_boundary_conflict(
+    outer_loop, inner_loops);  // tolerance=0 使用内核线性容差
+
+if (!conflict.value) {
+  handle_error(conflict);
+  return;
+}
+if (conflict.value->has_value()) {
+  const auto& evidence = conflict.value->value();
+  print(evidence.first_loop.value, evidence.second_loop.value,
+        evidence.first_edge.value, evidence.second_edge.value,
+        evidence.distance);
+  return;  // 不进入 create_face
+}
+```
+
+当前预检只覆盖 Line/LineSegment 的有限边段，可区分内部相交、端点相接、共线正长度重叠和容差内正距离邻近；一般曲线需等待显式边 trim 区间。
+
 ## 14. 诊断与错误处理样例
 
 ## 14.1 打印主错误和警告
@@ -588,6 +654,28 @@ std::string to_user_message(const Issue& issue) {
   return "操作失败，请查看详细诊断。";
 }
 ```
+
+## 14.3 审计重量级失败的结构化证据
+
+```cpp
+DiagnosticEvidencePolicy policy;
+policy.issue_code_prefix = "AXM-BOOL-E-";
+policy.stage_prefix = "bool.";
+policy.minimum_severity = IssueSeverity::Error;
+policy.require_stage = true;
+policy.require_related_entities = true;
+policy.require_numeric_evidence = true;
+policy.max_findings = 256;
+
+auto audit = kernel.diagnostics().audit_evidence(diagnostic_ids, policy);
+if (!audit.value || !audit.value->passed()) {
+  kernel.diagnostics().export_evidence_audit_json(
+      diagnostic_ids, policy, "bool-evidence-audit.json");
+  return;
+}
+```
+
+重复 `DiagnosticId` 只审计一次；未匹配到目标 issue 的报告也会使门禁失败。`max_findings` 只截断明细，遗漏数由 `omitted_findings` 记录，统计总数保持完整。当前系统化覆盖门禁已接入 BOOL 的受支持失败分支；HEAL/IO 尚待迁移。
 
 ## 15. Python绑定样例
 

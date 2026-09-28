@@ -392,9 +392,24 @@ int main() {
                                   on_ellipse.y + 0.25 * normal.y, 0.0};
         const auto closest_t = kernel.curve_service().closest_parameter(*ellipse.value, query);
         const auto closest_p = kernel.curve_service().closest_point(*ellipse.value, query);
+        axiom::CurveClosestPointOptions precise_options;
+        precise_options.distance_tolerance = 1e-10;
+        precise_options.parameter_tolerance = 1e-10;
+        precise_options.max_evaluations = 20000;
+        const auto detailed = kernel.curve_service().closest_point_detailed(
+            *ellipse.value, query, precise_options);
         if (!closest_t.value || !closest_p.value || !approx(*closest_t.value, t0, 1e-7) ||
             !approx(closest_p.value->x, on_ellipse.x, 1e-7) ||
-            !approx(closest_p.value->y, on_ellipse.y, 1e-7)) {
+            !approx(closest_p.value->y, on_ellipse.y, 1e-7) ||
+            !detailed.value || !approx(detailed.value->parameter, t0, 1e-7) ||
+            !approx(detailed.value->point.x, on_ellipse.x, 1e-7) ||
+            !approx(detailed.value->point.y, on_ellipse.y, 1e-7) ||
+            detailed.value->distance_lower_bound > detailed.value->distance ||
+            detailed.value->distance - detailed.value->distance_lower_bound >
+                precise_options.distance_tolerance * 1.01 ||
+            detailed.value->evaluations == 0 || detailed.value->intervals_processed == 0 ||
+            detailed.value->convergence !=
+                axiom::CurveClosestPointConvergence::DistanceTolerance) {
             std::cerr << "ellipse closest point did not minimize Euclidean distance\n";
             return 1;
         }
@@ -414,6 +429,33 @@ int main() {
         if (!seam.value || *seam.value < 0.0 || *seam.value >= 2.0 * std::acos(-1.0) ||
             !approx(*seam.value, 0.0, 1e-10)) {
             std::cerr << "ellipse closest parameter must remain normalized at seam\n";
+            return 1;
+        }
+
+        // Budget and option failures are explicit and must not populate the eval cache.
+        axiom::CurveClosestPointOptions exhausted_options;
+        exhausted_options.distance_tolerance = 0.0;
+        exhausted_options.parameter_tolerance = 1e-15;
+        exhausted_options.max_evaluations = 3;
+        const auto budget_count = kernel.geometry_count();
+        const auto budget_cache = kernel.cache_entry_count();
+        const auto exhausted = kernel.curve_service().closest_point_detailed(
+            *ellipse.value, query, exhausted_options);
+        axiom::CurveClosestPointOptions invalid_options;
+        invalid_options.parameter_tolerance = 0.0;
+        const auto invalid_options_result = kernel.curve_service().closest_point_detailed(
+            *ellipse.value, query, invalid_options);
+        const auto exhausted_code = kernel.diagnostics().has_issue_code(
+            exhausted.diagnostic_id, "AXM-GEO-E-0006");
+        const auto invalid_options_code = kernel.diagnostics().has_issue_code(
+            invalid_options_result.diagnostic_id, "AXM-CORE-E-0002");
+        if (exhausted.status != axiom::StatusCode::OperationFailed || exhausted.value ||
+            invalid_options_result.status != axiom::StatusCode::InvalidInput ||
+            invalid_options_result.value || !exhausted_code.value || !*exhausted_code.value ||
+            !invalid_options_code.value || !*invalid_options_code.value ||
+            kernel.geometry_count().value != budget_count.value ||
+            kernel.cache_entry_count().value != budget_cache.value) {
+            std::cerr << "detailed closest-point failure polluted geometry or cache\n";
             return 1;
         }
     }
@@ -667,6 +709,8 @@ int main() {
             *segment.value, {1e155, 2e155, 0.0});
         const auto closest = kernel.curve_service().closest_point(
             *segment.value, {1e155, 2e155, 0.0});
+        const auto detailed = kernel.curve_service().closest_point_detailed(
+            *segment.value, {1e155, 2e155, 0.0});
         const auto before = kernel.curve_service().closest_parameter(
             *segment.value, {-1e155, 0.0, 0.0});
         const auto after = kernel.curve_service().closest_parameter(
@@ -676,6 +720,12 @@ int main() {
             closest.status != axiom::StatusCode::Ok || !closest.value ||
             std::abs(closest.value->x / 1e155 - 1.0) > 1e-12 ||
             !approx(closest.value->y, 0.0) ||
+            detailed.status != axiom::StatusCode::Ok || !detailed.value ||
+            !approx(detailed.value->parameter, 1.0 / 3.0, 1e-12) ||
+            detailed.value->convergence !=
+                axiom::CurveClosestPointConvergence::Analytic ||
+            detailed.value->evaluations != 0 ||
+            std::abs(detailed.value->point.x / 1e155 - 1.0) > 1e-12 ||
             before.status != axiom::StatusCode::Ok || !before.value ||
             !approx(*before.value, 0.0) ||
             after.status != axiom::StatusCode::Ok || !after.value ||
@@ -758,8 +808,17 @@ int main() {
         // Second segment length 2 in Y: GN must use true speed (derivatives[0]), not unit tangent.
         const double expect_tv = 1.0 + 0.99 / 2.0;
         auto t_vert = kernel.curve_service().closest_parameter(*chain.value, {1.0, 0.99, 0.0});
+        axiom::CurveClosestPointOptions chain_options;
+        chain_options.distance_tolerance = 1e-10;
+        chain_options.parameter_tolerance = 1e-10;
+        const auto chain_global = kernel.curve_service().closest_point_detailed(
+            *chain.value, {1.0, 0.99, 0.0}, chain_options);
         if (t_vert.status != axiom::StatusCode::Ok || !t_vert.value.has_value() ||
-            std::abs(*t_vert.value - expect_tv) > 0.06) {
+            std::abs(*t_vert.value - expect_tv) > 0.06 || !chain_global.value ||
+            std::abs(chain_global.value->parameter - expect_tv) > 1e-7 ||
+            !approx(chain_global.value->point.x, 1.0, 1e-9) ||
+            !approx(chain_global.value->point.y, 0.99, 1e-7) ||
+            chain_global.value->distance_lower_bound > chain_global.value->distance) {
             std::cerr << "unexpected composite chain closest_parameter on non-unit-speed segment\n";
             return 1;
         }
@@ -1671,9 +1730,20 @@ int main() {
                 *curve.value, {100, 1, 0});
             const auto closest = kernel.curve_service().closest_point(
                 *curve.value, {100, 1, 0});
+            axiom::CurveClosestPointOptions global_options;
+            global_options.distance_tolerance = 1e-8;
+            global_options.parameter_tolerance = 1e-10;
+            global_options.max_evaluations = 50000;
+            const auto global = kernel.curve_service().closest_point_detailed(
+                *curve.value, {100, 1, 0}, global_options);
             if (!closest_t.value || *closest_t.value < 0.501 || *closest_t.value > 0.502 ||
                 !closest.value || !approx(closest.value->x, 100) ||
-                !approx(closest.value->y, 1, 1e-5)) {
+                !approx(closest.value->y, 1, 1e-5) || !global.value ||
+                global.value->parameter < 0.501 || global.value->parameter > 0.502 ||
+                !approx(global.value->point.x, 100, 1e-7) ||
+                !approx(global.value->point.y, 1, 1e-5) ||
+                global.value->distance_lower_bound > global.value->distance ||
+                global.value->evaluations == 0) {
                 std::cerr << "spline closest point missed narrow knot span\n";
                 return 1;
             }
@@ -1684,8 +1754,15 @@ int main() {
             const auto constant_t = constant.value
                 ? kernel.curve_service().closest_parameter(*constant.value, {100, 1, 0})
                 : axiom::Result<double>{};
+            const auto constant_global = constant.value
+                ? kernel.curve_service().closest_point_detailed(
+                      *constant.value, {100, 1, 0}, global_options)
+                : axiom::Result<axiom::CurveClosestPointResult>{};
             if (!constant.value || !constant_t.value || *constant_t.value < 0.501 ||
-                *constant_t.value > 0.502) {
+                *constant_t.value > 0.502 || !constant_global.value ||
+                constant_global.value->parameter < 0.501 ||
+                constant_global.value->parameter > 0.502 ||
+                !approx(constant_global.value->distance, 0.0, 1e-12)) {
                 std::cerr << "constant narrow knot span was not considered\n";
                 return 1;
             }

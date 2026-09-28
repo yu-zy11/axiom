@@ -1,6 +1,7 @@
 #include "axiom/diag/diagnostic_service.h"
 
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <limits>
 #include <set>
@@ -68,6 +69,15 @@ void write_diagnostic_report_txt(std::ostream& out, const DiagnosticReport& repo
                 out << ' ' << entity;
             }
         }
+        if (!issue.numeric_evidence.empty()) {
+            out << " | NumericEvidence:";
+            for (const auto& evidence : issue.numeric_evidence) {
+                out << ' ' << evidence.name << '=' << evidence.value;
+                if (!evidence.unit.empty()) {
+                    out << '[' << evidence.unit << ']';
+                }
+            }
+        }
         out << '\n';
     }
 }
@@ -90,11 +100,87 @@ void write_diagnostic_report_json_object(std::ostream& out, const DiagnosticRepo
             if (j + 1 < issue.related_entities.size()) out << ",";
         }
         out << "]";
+        if (!issue.numeric_evidence.empty()) {
+            out << ",\"numeric_evidence\":[";
+            for (std::size_t j = 0; j < issue.numeric_evidence.size(); ++j) {
+                const auto& evidence = issue.numeric_evidence[j];
+                out << "{\"name\":\"" << json_escape(evidence.name) << "\",";
+                out << "\"value\":";
+                if (std::isfinite(evidence.value)) {
+                    out << evidence.value;
+                } else {
+                    out << "null";
+                }
+                out << ",";
+                out << "\"unit\":\"" << json_escape(evidence.unit) << "\"}";
+                if (j + 1 < issue.numeric_evidence.size()) out << ",";
+            }
+            out << "]";
+        }
         out << "}";
         if (i + 1 < report.issues.size()) out << ",";
     }
     out << "]";
     out << "}";
+}
+
+bool starts_with(std::string_view value, std::string_view prefix) {
+    return value.size() >= prefix.size() && value.substr(0, prefix.size()) == prefix;
+}
+
+bool severity_at_least(IssueSeverity actual, IssueSeverity minimum) {
+    return static_cast<unsigned>(actual) >= static_cast<unsigned>(minimum);
+}
+
+bool has_valid_numeric_evidence(const Issue& issue) {
+    return !issue.numeric_evidence.empty() &&
+           std::all_of(issue.numeric_evidence.begin(), issue.numeric_evidence.end(),
+                       [](const NumericEvidence& evidence) {
+                           return !evidence.name.empty() && std::isfinite(evidence.value);
+                       });
+}
+
+void write_evidence_audit_json(std::ostream& out,
+                               const DiagnosticEvidencePolicy& policy,
+                               const DiagnosticEvidenceAudit& audit) {
+    out << "{";
+    out << "\"policy\":{";
+    out << "\"issue_code_prefix\":\"" << json_escape(policy.issue_code_prefix) << "\",";
+    out << "\"stage_prefix\":\"" << json_escape(policy.stage_prefix) << "\",";
+    out << "\"minimum_severity\":\"" << issue_severity_name(policy.minimum_severity) << "\",";
+    out << "\"require_stage\":" << (policy.require_stage ? "true" : "false") << ",";
+    out << "\"require_related_entities\":" << (policy.require_related_entities ? "true" : "false") << ",";
+    out << "\"require_numeric_evidence\":" << (policy.require_numeric_evidence ? "true" : "false") << ",";
+    out << "\"max_findings\":" << policy.max_findings << "},";
+    out << "\"passed\":" << (audit.passed() ? "true" : "false") << ",";
+    out << "\"reports_inspected\":" << audit.reports_inspected << ",";
+    out << "\"matching_issues\":" << audit.matching_issues << ",";
+    out << "\"complete_issues\":" << audit.complete_issues << ",";
+    out << "\"reports_without_matching_issue\":" << audit.reports_without_matching_issue << ",";
+    out << "\"issues_missing_stage\":" << audit.issues_missing_stage << ",";
+    out << "\"issues_missing_related_entities\":" << audit.issues_missing_related_entities << ",";
+    out << "\"issues_missing_numeric_evidence\":" << audit.issues_missing_numeric_evidence << ",";
+    out << "\"omitted_findings\":" << audit.omitted_findings << ",";
+    out << "\"findings\":[";
+    for (std::size_t i = 0; i < audit.findings.size(); ++i) {
+        const auto& finding = audit.findings[i];
+        out << "{\"diagnostic_id\":" << finding.diagnostic_id.value << ",";
+        if (finding.matching_issue_missing) {
+            out << "\"issue_index\":null,";
+        } else {
+            out << "\"issue_index\":" << finding.issue_index << ",";
+        }
+        out << "\"issue_code\":\"" << json_escape(finding.issue_code) << "\",";
+        out << "\"matching_issue_missing\":" << (finding.matching_issue_missing ? "true" : "false") << ",";
+        out << "\"stage_missing_or_mismatched\":"
+            << (finding.stage_missing_or_mismatched ? "true" : "false") << ",";
+        out << "\"related_entities_missing\":"
+            << (finding.related_entities_missing ? "true" : "false") << ",";
+        out << "\"numeric_evidence_missing_or_invalid\":"
+            << (finding.numeric_evidence_missing_or_invalid ? "true" : "false") << "}";
+        if (i + 1 < audit.findings.size()) out << ",";
+    }
+    out << "]}";
 }
 
 }  // namespace
@@ -565,6 +651,12 @@ Result<void> DiagnosticService::export_all_reports_json(std::string_view path) c
         write_diagnostic_report_json_object(out, it->second);
     }
     out << "]}";
+    out.close();
+    if (!out) {
+        return detail::failed_void(
+            *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+            "全量诊断JSON导出失败：文件写入失败", "全量诊断JSON导出失败");
+    }
     return ok_void(state_->create_diagnostic("已全量导出诊断JSON"));
 }
 
@@ -594,22 +686,13 @@ Result<void> DiagnosticService::export_all_reports_txt(std::string_view path) co
             out << "\n";
         }
         first_report = false;
-        out << "DiagnosticId: " << it->second.id.value << '\n';
-        out << "Summary: " << it->second.summary << '\n';
-        for (const auto& issue : it->second.issues) {
-            out << "- [" << issue_severity_name(issue.severity) << "] "
-                << issue.code << ": " << issue.message;
-            if (!issue.stage.empty()) {
-                out << " | Stage:" << issue.stage;
-            }
-            if (!issue.related_entities.empty()) {
-                out << " | RelatedEntities:";
-                for (const auto entity : issue.related_entities) {
-                    out << ' ' << entity;
-                }
-            }
-            out << '\n';
-        }
+        write_diagnostic_report_txt(out, it->second);
+    }
+    out.close();
+    if (!out) {
+        return detail::failed_void(
+            *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+            "全量诊断文本导出失败：文件写入失败", "全量诊断文本导出失败");
     }
     return ok_void(state_->create_diagnostic("已全量导出诊断文本"));
 }
@@ -1036,6 +1119,101 @@ Result<DiagnosticStats> DiagnosticService::stats_of_ids(std::span<const Diagnost
         }
     }
     return ok_result(stats, state_->create_diagnostic("已统计指定诊断集合"));
+}
+
+Result<DiagnosticEvidenceAudit> DiagnosticService::audit_evidence(
+    std::span<const DiagnosticId> ids, const DiagnosticEvidencePolicy& policy) const {
+    const auto severity_value = static_cast<unsigned>(policy.minimum_severity);
+    if (ids.empty() || policy.issue_code_prefix.empty() || policy.max_findings == 0 ||
+        severity_value > static_cast<unsigned>(IssueSeverity::Fatal) ||
+        (policy.require_stage && policy.stage_prefix.empty())) {
+        return detail::invalid_input_result<DiagnosticEvidenceAudit>(
+            *state_, diag_codes::kCoreParameterOutOfRange,
+            "诊断证据审计失败：报告列表或策略参数非法", "诊断证据审计失败");
+    }
+
+    std::set<std::uint64_t> unique_ids;
+    for (const auto id : ids) {
+        if (id.value == 0 || state_->diagnostics.find(id.value) == state_->diagnostics.end()) {
+            return detail::invalid_input_result<DiagnosticEvidenceAudit>(
+                *state_, diag_codes::kCoreInvalidHandle,
+                "诊断证据审计失败：目标诊断不存在", "诊断证据审计失败");
+        }
+        unique_ids.insert(id.value);
+    }
+
+    DiagnosticEvidenceAudit audit;
+    audit.reports_inspected = static_cast<std::uint64_t>(unique_ids.size());
+    const auto record_finding = [&](DiagnosticEvidenceFinding finding) {
+        if (audit.findings.size() < policy.max_findings) {
+            audit.findings.push_back(std::move(finding));
+        } else {
+            ++audit.omitted_findings;
+        }
+    };
+
+    for (const auto id_value : unique_ids) {
+        const auto& report = state_->diagnostics.at(id_value);
+        bool report_matched = false;
+        for (std::size_t issue_index = 0; issue_index < report.issues.size(); ++issue_index) {
+            const auto& issue = report.issues[issue_index];
+            if (!starts_with(issue.code, policy.issue_code_prefix) ||
+                !severity_at_least(issue.severity, policy.minimum_severity)) {
+                continue;
+            }
+            report_matched = true;
+            ++audit.matching_issues;
+
+            const bool bad_stage = policy.require_stage && !starts_with(issue.stage, policy.stage_prefix);
+            const bool bad_entities = policy.require_related_entities && issue.related_entities.empty();
+            const bool bad_numeric = policy.require_numeric_evidence && !has_valid_numeric_evidence(issue);
+            audit.issues_missing_stage += static_cast<std::uint64_t>(bad_stage);
+            audit.issues_missing_related_entities += static_cast<std::uint64_t>(bad_entities);
+            audit.issues_missing_numeric_evidence += static_cast<std::uint64_t>(bad_numeric);
+            if (!bad_stage && !bad_entities && !bad_numeric) {
+                ++audit.complete_issues;
+                continue;
+            }
+            record_finding(DiagnosticEvidenceFinding {
+                DiagnosticId {id_value}, static_cast<std::uint64_t>(issue_index), issue.code, false,
+                bad_stage, bad_entities, bad_numeric});
+        }
+        if (!report_matched) {
+            ++audit.reports_without_matching_issue;
+            record_finding(DiagnosticEvidenceFinding {
+                DiagnosticId {id_value}, 0, {}, true, false, false, false});
+        }
+    }
+
+    return ok_result(std::move(audit), state_->create_diagnostic("已完成诊断证据覆盖审计"));
+}
+
+Result<void> DiagnosticService::export_evidence_audit_json(
+    std::span<const DiagnosticId> ids, const DiagnosticEvidencePolicy& policy, std::string_view path) const {
+    const auto audit = audit_evidence(ids, policy);
+    if (audit.status != StatusCode::Ok || !audit.value.has_value()) {
+        return error_result<void>(audit.status, audit.diagnostic_id);
+    }
+    if (path.empty()) {
+        return detail::invalid_input_void(
+            *state_, diag_codes::kIoExportFailure,
+            "诊断证据审计导出失败：输出路径为空", "诊断证据审计导出失败");
+    }
+
+    std::ofstream out {std::string(path)};
+    if (!out) {
+        return detail::failed_void(
+            *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+            "诊断证据审计导出失败：无法打开输出文件", "诊断证据审计导出失败");
+    }
+    write_evidence_audit_json(out, policy, *audit.value);
+    out.close();
+    if (!out) {
+        return detail::failed_void(
+            *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+            "诊断证据审计导出失败：文件写入失败", "诊断证据审计导出失败");
+    }
+    return ok_void(state_->create_diagnostic("已导出诊断证据覆盖审计 JSON"));
 }
 
 }  // namespace axiom

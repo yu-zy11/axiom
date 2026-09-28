@@ -360,6 +360,910 @@ CurveService::eval_batch(CurveId curve_id, std::span<const Scalar> ts,
   return ok_result(std::move(out), state_->create_diagnostic("曲线批量求值完成"));
 }
 
+namespace {
+
+long double closest_distance(const Point3 &lhs, const Point3 &rhs) {
+  const long double dx = static_cast<long double>(lhs.x) - rhs.x;
+  const long double dy = static_cast<long double>(lhs.y) - rhs.y;
+  const long double dz = static_cast<long double>(lhs.z) - rhs.z;
+  return std::hypot(dx, dy, dz);
+}
+
+long double vector_length(const Vec3 &value) {
+  return std::hypot(static_cast<long double>(value.x),
+                    static_cast<long double>(value.y),
+                    static_cast<long double>(value.z));
+}
+
+long double point_delta_length(const Point3 &lhs, const Point3 &rhs) {
+  return std::hypot(static_cast<long double>(lhs.x) - rhs.x,
+                    static_cast<long double>(lhs.y) - rhs.y,
+                    static_cast<long double>(lhs.z) - rhs.z);
+}
+
+bool closest_search_point(const detail::KernelState &state, CurveId curve_id,
+                          Scalar t, Point3 &point, std::uint32_t depth = 0) {
+  if (depth > 64) {
+    return false;
+  }
+  const auto found = state.curves.find(curve_id.value);
+  if (found == state.curves.end()) {
+    return false;
+  }
+  const auto &curve = found->second;
+  switch (curve.kind) {
+  case detail::CurveKind::Line:
+    point = detail::add_point_vec(curve.origin, detail::scale(curve.direction, t));
+    break;
+  case detail::CurveKind::Circle:
+    point = Point3{curve.origin.x + curve.radius *
+                                          (curve.axis_u.x * std::cos(t) +
+                                           curve.axis_v.x * std::sin(t)),
+                   curve.origin.y + curve.radius *
+                                          (curve.axis_u.y * std::cos(t) +
+                                           curve.axis_v.y * std::sin(t)),
+                   curve.origin.z + curve.radius *
+                                          (curve.axis_u.z * std::cos(t) +
+                                           curve.axis_v.z * std::sin(t))};
+    break;
+  case detail::CurveKind::Ellipse:
+    point = Point3{curve.origin.x + curve.axis_u.x * std::cos(t) +
+                                          curve.axis_v.x * std::sin(t),
+                   curve.origin.y + curve.axis_u.y * std::cos(t) +
+                                          curve.axis_v.y * std::sin(t),
+                   curve.origin.z + curve.axis_u.z * std::cos(t) +
+                                          curve.axis_v.z * std::sin(t)};
+    break;
+  case detail::CurveKind::CompositeChain: {
+    if (curve.children.empty()) {
+      return false;
+    }
+    const auto count = static_cast<Scalar>(curve.children.size());
+    const auto ct = std::clamp(t, 0.0, count);
+    const auto mapped = std::min(ct, std::nextafter(count, 0.0));
+    const auto child_index = std::min<std::size_t>(
+        static_cast<std::size_t>(std::max<Scalar>(0.0, std::floor(mapped))),
+        curve.children.size() - 1);
+    return closest_search_point(state, curve.children[child_index],
+                                mapped - static_cast<Scalar>(child_index), point,
+                                depth + 1);
+  }
+  default:
+    point = evaluate_curve_point(curve, t);
+    break;
+  }
+  return finite_point(point);
+}
+
+long double spline_speed_bound(const detail::CurveRecord &curve) {
+  const auto count = curve.poles.size();
+  int degree = 0;
+  if (count < 2 || !bspline_knots_valid_for_curve(curve, degree) || degree < 1) {
+    return 0.0L;
+  }
+  const auto &knots = curve.knots_u;
+  if (curve.kind != detail::CurveKind::Nurbs) {
+    long double bound = 0.0L;
+    for (std::size_t i = 0; i + 1 < count; ++i) {
+      const long double denominator =
+          static_cast<long double>(knots[i + static_cast<std::size_t>(degree) + 1]) -
+          knots[i + 1];
+      if (denominator > 0.0L) {
+        bound = std::max(
+            bound, static_cast<long double>(degree) *
+                       point_delta_length(curve.poles[i + 1], curve.poles[i]) /
+                       denominator);
+      }
+    }
+    return bound;
+  }
+
+  if (curve.weights.size() != count) {
+    return std::numeric_limits<long double>::infinity();
+  }
+  long double minimum_weight = std::numeric_limits<long double>::infinity();
+  long double maximum_weighted_point = 0.0L;
+  for (std::size_t i = 0; i < count; ++i) {
+    const long double weight = curve.weights[i];
+    minimum_weight = std::min(minimum_weight, weight);
+    maximum_weighted_point = std::max(
+        maximum_weighted_point,
+        weight * std::hypot(static_cast<long double>(curve.poles[i].x),
+                            static_cast<long double>(curve.poles[i].y),
+                            static_cast<long double>(curve.poles[i].z)));
+  }
+  if (!(minimum_weight > 0.0L)) {
+    return std::numeric_limits<long double>::infinity();
+  }
+  long double derivative_xyz = 0.0L;
+  long double derivative_weight = 0.0L;
+  for (std::size_t i = 0; i + 1 < count; ++i) {
+    const long double denominator =
+        static_cast<long double>(knots[i + static_cast<std::size_t>(degree) + 1]) -
+        knots[i + 1];
+    if (!(denominator > 0.0L)) {
+      continue;
+    }
+    const long double factor = static_cast<long double>(degree) / denominator;
+    const long double x0 = static_cast<long double>(curve.weights[i]) * curve.poles[i].x;
+    const long double y0 = static_cast<long double>(curve.weights[i]) * curve.poles[i].y;
+    const long double z0 = static_cast<long double>(curve.weights[i]) * curve.poles[i].z;
+    const long double x1 = static_cast<long double>(curve.weights[i + 1]) * curve.poles[i + 1].x;
+    const long double y1 = static_cast<long double>(curve.weights[i + 1]) * curve.poles[i + 1].y;
+    const long double z1 = static_cast<long double>(curve.weights[i + 1]) * curve.poles[i + 1].z;
+    derivative_xyz = std::max(
+        derivative_xyz, factor * std::hypot(x1 - x0, y1 - y0, z1 - z0));
+    derivative_weight = std::max(
+        derivative_weight,
+        factor * std::abs(static_cast<long double>(curve.weights[i + 1]) -
+                          curve.weights[i]));
+  }
+  return derivative_xyz / minimum_weight +
+         maximum_weighted_point * derivative_weight /
+             (minimum_weight * minimum_weight);
+}
+
+long double closest_search_speed_bound(const detail::KernelState &state,
+                                       CurveId curve_id, Scalar t0, Scalar t1,
+                                       std::uint32_t depth = 0) {
+  if (depth > 64) {
+    return std::numeric_limits<long double>::infinity();
+  }
+  const auto found = state.curves.find(curve_id.value);
+  if (found == state.curves.end()) {
+    return std::numeric_limits<long double>::infinity();
+  }
+  const auto &curve = found->second;
+  switch (curve.kind) {
+  case detail::CurveKind::Line:
+    return vector_length(curve.direction);
+  case detail::CurveKind::LineSegment:
+    return curve.poles.size() >= 2
+               ? point_delta_length(curve.poles.back(), curve.poles.front())
+               : 0.0L;
+  case detail::CurveKind::Circle:
+    return std::abs(static_cast<long double>(curve.radius)) *
+           (vector_length(curve.axis_u) + vector_length(curve.axis_v));
+  case detail::CurveKind::Ellipse:
+    return vector_length(curve.axis_u) + vector_length(curve.axis_v);
+  case detail::CurveKind::Parabola: {
+    const long double focal = std::max<long double>(curve.param_a, 1e-9L);
+    const long double max_t = std::max(std::abs(static_cast<long double>(t0)),
+                                       std::abs(static_cast<long double>(t1)));
+    return vector_length(curve.axis_u) +
+           max_t * vector_length(curve.axis_v) / (2.0L * focal);
+  }
+  case detail::CurveKind::Hyperbola: {
+    const long double max_t = std::max(std::abs(static_cast<long double>(t0)),
+                                       std::abs(static_cast<long double>(t1)));
+    return std::abs(static_cast<long double>(curve.param_a)) * std::sinh(max_t) *
+               vector_length(curve.axis_u) +
+           std::abs(static_cast<long double>(curve.param_b)) * std::cosh(max_t) *
+               vector_length(curve.axis_v);
+  }
+  case detail::CurveKind::Bezier: {
+    long double bound = 0.0L;
+    const long double degree =
+        curve.poles.empty() ? 0.0L : static_cast<long double>(curve.poles.size() - 1);
+    for (std::size_t i = 0; i + 1 < curve.poles.size(); ++i) {
+      bound = std::max(bound, degree *
+                                   point_delta_length(curve.poles[i + 1], curve.poles[i]));
+    }
+    return bound;
+  }
+  case detail::CurveKind::BSpline:
+  case detail::CurveKind::Nurbs:
+    return spline_speed_bound(curve);
+  case detail::CurveKind::CompositePolyline: {
+    long double bound = 0.0L;
+    for (std::size_t i = 0; i + 1 < curve.poles.size(); ++i) {
+      bound = std::max(bound, point_delta_length(curve.poles[i + 1], curve.poles[i]));
+    }
+    return bound;
+  }
+  case detail::CurveKind::CompositeChain: {
+    if (curve.children.empty()) {
+      return 0.0L;
+    }
+    const auto midpoint = (t0 + t1) * 0.5;
+    const auto child_index = std::min<std::size_t>(
+        static_cast<std::size_t>(std::max<Scalar>(0.0, std::floor(midpoint))),
+        curve.children.size() - 1);
+    const auto offset = static_cast<Scalar>(child_index);
+    return closest_search_speed_bound(state, curve.children[child_index],
+                                      std::clamp(t0 - offset, 0.0, 1.0),
+                                      std::clamp(t1 - offset, 0.0, 1.0),
+                                      depth + 1);
+  }
+  default:
+    return std::numeric_limits<long double>::infinity();
+  }
+}
+
+bool closest_search_derivative(const detail::KernelState &state,
+                               CurveId curve_id, Scalar t, Vec3 &derivative,
+                               std::uint32_t depth = 0) {
+  if (depth > 64) {
+    return false;
+  }
+  const auto found = state.curves.find(curve_id.value);
+  if (found == state.curves.end()) {
+    return false;
+  }
+  const auto &curve = found->second;
+  switch (curve.kind) {
+  case detail::CurveKind::Line:
+    derivative = curve.direction;
+    break;
+  case detail::CurveKind::LineSegment:
+    if (curve.poles.size() < 2) {
+      return false;
+    }
+    derivative = detail::subtract(curve.poles.back(), curve.poles.front());
+    break;
+  case detail::CurveKind::Circle:
+    derivative = Vec3{
+        curve.radius * (-curve.axis_u.x * std::sin(t) + curve.axis_v.x * std::cos(t)),
+        curve.radius * (-curve.axis_u.y * std::sin(t) + curve.axis_v.y * std::cos(t)),
+        curve.radius * (-curve.axis_u.z * std::sin(t) + curve.axis_v.z * std::cos(t))};
+    break;
+  case detail::CurveKind::Ellipse:
+    derivative = Vec3{-curve.axis_u.x * std::sin(t) + curve.axis_v.x * std::cos(t),
+                      -curve.axis_u.y * std::sin(t) + curve.axis_v.y * std::cos(t),
+                      -curve.axis_u.z * std::sin(t) + curve.axis_v.z * std::cos(t)};
+    break;
+  case detail::CurveKind::Parabola: {
+    const auto focal = std::max(curve.param_a, 1e-9);
+    derivative = Vec3{curve.axis_u.x + curve.axis_v.x * t / (2.0 * focal),
+                      curve.axis_u.y + curve.axis_v.y * t / (2.0 * focal),
+                      curve.axis_u.z + curve.axis_v.z * t / (2.0 * focal)};
+    break;
+  }
+  case detail::CurveKind::Hyperbola:
+    derivative = Vec3{
+        curve.axis_u.x * curve.param_a * std::sinh(t) +
+            curve.axis_v.x * curve.param_b * std::cosh(t),
+        curve.axis_u.y * curve.param_a * std::sinh(t) +
+            curve.axis_v.y * curve.param_b * std::cosh(t),
+        curve.axis_u.z * curve.param_a * std::sinh(t) +
+            curve.axis_v.z * curve.param_b * std::cosh(t)};
+    break;
+  case detail::CurveKind::Bezier:
+    derivative = bezier_first_derivative(curve.poles, t);
+    break;
+  case detail::CurveKind::BSpline: {
+    Point3 evaluated{};
+    Vec3 second{};
+    bspline_curve_eval_record(curve, t, evaluated, derivative, second);
+    break;
+  }
+  case detail::CurveKind::Nurbs: {
+    Point3 evaluated{};
+    Vec3 second{};
+    nurbs_curve_eval_all_record(curve, t, evaluated, derivative, second);
+    break;
+  }
+  case detail::CurveKind::CompositePolyline: {
+    if (curve.poles.size() < 2) {
+      return false;
+    }
+    const auto index = std::min<std::size_t>(
+        static_cast<std::size_t>(std::max<Scalar>(0.0, std::floor(t))),
+        curve.poles.size() - 2);
+    derivative = detail::subtract(curve.poles[index + 1], curve.poles[index]);
+    break;
+  }
+  case detail::CurveKind::CompositeChain: {
+    if (curve.children.empty()) {
+      return false;
+    }
+    const auto count = static_cast<Scalar>(curve.children.size());
+    const auto mapped = std::min(std::clamp(t, 0.0, count),
+                                 std::nextafter(count, 0.0));
+    const auto child_index = std::min<std::size_t>(
+        static_cast<std::size_t>(std::max<Scalar>(0.0, std::floor(mapped))),
+        curve.children.size() - 1);
+    return closest_search_derivative(
+        state, curve.children[child_index],
+        mapped - static_cast<Scalar>(child_index), derivative, depth + 1);
+  }
+  default:
+    return false;
+  }
+  return finite_vec(derivative);
+}
+
+long double spline_acceleration_bound(const detail::CurveRecord &curve) {
+  const auto count = curve.poles.size();
+  int degree = 0;
+  if (count < 2 || !bspline_knots_valid_for_curve(curve, degree) ||
+      degree < 1) {
+    return 0.0L;
+  }
+  if (degree == 1 && curve.kind != detail::CurveKind::Nurbs) {
+    return 0.0L;
+  }
+
+  using HPoint = std::array<long double, 4>;
+  std::vector<HPoint> homogeneous;
+  homogeneous.reserve(count);
+  const auto reference = curve.poles.front();
+  long double minimum_weight = std::numeric_limits<long double>::infinity();
+  long double maximum_weighted_point = 0.0L;
+  for (std::size_t i = 0; i < count; ++i) {
+    const long double weight = curve.kind == detail::CurveKind::Nurbs
+                                   ? curve.weights[i]
+                                   : 1.0L;
+    const HPoint value{
+        (static_cast<long double>(curve.poles[i].x) - reference.x) * weight,
+        (static_cast<long double>(curve.poles[i].y) - reference.y) * weight,
+        (static_cast<long double>(curve.poles[i].z) - reference.z) * weight,
+        weight};
+    homogeneous.push_back(value);
+    minimum_weight = std::min(minimum_weight, weight);
+    maximum_weighted_point = std::max(
+        maximum_weighted_point,
+        std::hypot(value[0], value[1], value[2]));
+  }
+  if (!(minimum_weight > 0.0L)) {
+    return std::numeric_limits<long double>::infinity();
+  }
+
+  std::vector<HPoint> first(count - 1, HPoint{});
+  long double first_xyz = 0.0L;
+  long double first_weight = 0.0L;
+  for (std::size_t i = 0; i + 1 < count; ++i) {
+    const long double denominator =
+        static_cast<long double>(curve.knots_u[i + static_cast<std::size_t>(degree) + 1]) -
+        curve.knots_u[i + 1];
+    if (!(denominator > 0.0L)) {
+      continue;
+    }
+    const long double factor = static_cast<long double>(degree) / denominator;
+    for (std::size_t component = 0; component < 4; ++component) {
+      first[i][component] =
+          factor * (homogeneous[i + 1][component] - homogeneous[i][component]);
+    }
+    first_xyz = std::max(
+        first_xyz,
+        std::hypot(first[i][0], first[i][1], first[i][2]));
+    first_weight = std::max(first_weight, std::abs(first[i][3]));
+  }
+
+  long double second_xyz = 0.0L;
+  long double second_weight = 0.0L;
+  for (std::size_t i = 0; i + 1 < first.size(); ++i) {
+    const long double denominator =
+        static_cast<long double>(curve.knots_u[i + static_cast<std::size_t>(degree) + 1]) -
+        curve.knots_u[i + 2];
+    if (!(denominator > 0.0L)) {
+      continue;
+    }
+    const long double factor = static_cast<long double>(degree - 1) / denominator;
+    HPoint second{};
+    for (std::size_t component = 0; component < 4; ++component) {
+      second[component] = factor * (first[i + 1][component] - first[i][component]);
+    }
+    second_xyz =
+        std::max(second_xyz, std::hypot(second[0], second[1], second[2]));
+    second_weight = std::max(second_weight, std::abs(second[3]));
+  }
+
+  if (curve.kind != detail::CurveKind::Nurbs) {
+    return second_xyz;
+  }
+  const long double inverse_weight = 1.0L / minimum_weight;
+  return second_xyz * inverse_weight +
+         maximum_weighted_point * second_weight * inverse_weight * inverse_weight +
+         2.0L * first_xyz * first_weight * inverse_weight * inverse_weight +
+         2.0L * maximum_weighted_point * first_weight * first_weight *
+             inverse_weight * inverse_weight * inverse_weight;
+}
+
+long double closest_search_acceleration_bound(
+    const detail::KernelState &state, CurveId curve_id, Scalar t0, Scalar t1,
+    std::uint32_t depth = 0) {
+  if (depth > 64) {
+    return std::numeric_limits<long double>::infinity();
+  }
+  const auto found = state.curves.find(curve_id.value);
+  if (found == state.curves.end()) {
+    return std::numeric_limits<long double>::infinity();
+  }
+  const auto &curve = found->second;
+  switch (curve.kind) {
+  case detail::CurveKind::Line:
+  case detail::CurveKind::LineSegment:
+  case detail::CurveKind::CompositePolyline:
+    return 0.0L;
+  case detail::CurveKind::Circle:
+    return std::abs(static_cast<long double>(curve.radius)) *
+           (vector_length(curve.axis_u) + vector_length(curve.axis_v));
+  case detail::CurveKind::Ellipse:
+    return vector_length(curve.axis_u) + vector_length(curve.axis_v);
+  case detail::CurveKind::Parabola:
+    return vector_length(curve.axis_v) /
+           (2.0L * std::max<long double>(curve.param_a, 1e-9L));
+  case detail::CurveKind::Hyperbola: {
+    const long double max_t = std::max(std::abs(static_cast<long double>(t0)),
+                                       std::abs(static_cast<long double>(t1)));
+    return std::abs(static_cast<long double>(curve.param_a)) * std::cosh(max_t) *
+               vector_length(curve.axis_u) +
+           std::abs(static_cast<long double>(curve.param_b)) * std::sinh(max_t) *
+               vector_length(curve.axis_v);
+  }
+  case detail::CurveKind::Bezier: {
+    if (curve.poles.size() < 3) {
+      return 0.0L;
+    }
+    const long double factor = static_cast<long double>(curve.poles.size() - 1) *
+                               static_cast<long double>(curve.poles.size() - 2);
+    long double bound = 0.0L;
+    for (std::size_t i = 0; i + 2 < curve.poles.size(); ++i) {
+      const long double x = static_cast<long double>(curve.poles[i + 2].x) -
+                            2.0L * curve.poles[i + 1].x + curve.poles[i].x;
+      const long double y = static_cast<long double>(curve.poles[i + 2].y) -
+                            2.0L * curve.poles[i + 1].y + curve.poles[i].y;
+      const long double z = static_cast<long double>(curve.poles[i + 2].z) -
+                            2.0L * curve.poles[i + 1].z + curve.poles[i].z;
+      bound = std::max(bound, factor * std::hypot(x, y, z));
+    }
+    return bound;
+  }
+  case detail::CurveKind::BSpline:
+  case detail::CurveKind::Nurbs:
+    if (curve.kind == detail::CurveKind::Nurbs &&
+        curve.weights.size() != curve.poles.size()) {
+      return std::numeric_limits<long double>::infinity();
+    }
+    return spline_acceleration_bound(curve);
+  case detail::CurveKind::CompositeChain: {
+    if (curve.children.empty()) {
+      return 0.0L;
+    }
+    const auto midpoint = (t0 + t1) * 0.5;
+    const auto child_index = std::min<std::size_t>(
+        static_cast<std::size_t>(std::max<Scalar>(0.0, std::floor(midpoint))),
+        curve.children.size() - 1);
+    const auto offset = static_cast<Scalar>(child_index);
+    return closest_search_acceleration_bound(
+        state, curve.children[child_index],
+        std::clamp(t0 - offset, 0.0, 1.0),
+        std::clamp(t1 - offset, 0.0, 1.0), depth + 1);
+  }
+  default:
+    return std::numeric_limits<long double>::infinity();
+  }
+}
+
+std::vector<Range1D> closest_search_spans(const detail::CurveRecord &curve) {
+  const auto domain = curve_domain(curve);
+  std::vector<Range1D> spans;
+  if ((curve.kind == detail::CurveKind::BSpline ||
+       curve.kind == detail::CurveKind::Nurbs) &&
+      curve.knots_u.size() >= 2) {
+    for (std::size_t i = 0; i + 1 < curve.knots_u.size(); ++i) {
+      const auto begin = std::max(domain.min, curve.knots_u[i]);
+      const auto end = std::min(domain.max, curve.knots_u[i + 1]);
+      if (end > begin) {
+        spans.push_back({begin, end});
+      }
+    }
+  } else if (curve.kind == detail::CurveKind::CompositeChain) {
+    for (std::size_t i = 0; i < curve.children.size(); ++i) {
+      spans.push_back({static_cast<Scalar>(i), static_cast<Scalar>(i + 1)});
+    }
+  } else {
+    const std::uint32_t pieces =
+        curve.kind == detail::CurveKind::Ellipse ? 8u
+        : (curve.kind == detail::CurveKind::Parabola ||
+           curve.kind == detail::CurveKind::Hyperbola)
+              ? 16u
+              : 1u;
+    for (std::uint32_t i = 0; i < pieces; ++i) {
+      const auto a = static_cast<Scalar>(i) / static_cast<Scalar>(pieces);
+      const auto b = static_cast<Scalar>(i + 1) / static_cast<Scalar>(pieces);
+      spans.push_back({domain.min + (domain.max - domain.min) * a,
+                       domain.min + (domain.max - domain.min) * b});
+    }
+  }
+  return spans;
+}
+
+} // namespace
+
+Result<CurveClosestPointResult> CurveService::closest_point_detailed(
+    CurveId curve_id, const Point3 &point,
+    const CurveClosestPointOptions &options) const {
+  if (!finite_point(point) || !finite_scalar(options.distance_tolerance) ||
+      !finite_scalar(options.parameter_tolerance) ||
+      options.distance_tolerance < 0.0 || options.parameter_tolerance <= 0.0 ||
+      options.max_evaluations < 3) {
+    return detail::invalid_input_result<CurveClosestPointResult>(
+        *state_, diag_codes::kCoreParameterOutOfRange,
+        "曲线全域最近点求解失败：输入点或精度/预算选项非法",
+        "曲线全域最近点求解失败");
+  }
+  const auto found = state_->curves.find(curve_id.value);
+  if (found == state_->curves.end()) {
+    return detail::failed_result<CurveClosestPointResult>(
+        *state_, StatusCode::InvalidInput, diag_codes::kGeoParameterSolveFailure,
+        "曲线全域最近点求解失败：目标曲线不存在",
+        "曲线全域最近点求解失败");
+  }
+  const auto &curve = found->second;
+
+  auto analytic_result = [&](Scalar parameter, const Point3 &nearest) {
+    const auto distance = closest_distance(nearest, point);
+    if (!std::isfinite(distance) ||
+        distance > std::numeric_limits<Scalar>::max()) {
+      return detail::failed_result<CurveClosestPointResult>(
+          *state_, StatusCode::NumericalInstability,
+          diag_codes::kGeoParameterSolveFailure,
+          "曲线全域最近点求解失败：距离超出可表示范围",
+          "曲线全域最近点求解失败");
+    }
+    CurveClosestPointResult result;
+    result.parameter = parameter;
+    result.point = nearest;
+    result.distance = static_cast<Scalar>(distance);
+    result.distance_lower_bound = result.distance;
+    result.convergence = CurveClosestPointConvergence::Analytic;
+    return ok_result(result, state_->create_diagnostic(
+                                 "曲线全域最近点已由解析路径求解"));
+  };
+
+  if (curve.kind == detail::CurveKind::Line) {
+    const long double dx = curve.direction.x;
+    const long double dy = curve.direction.y;
+    const long double dz = curve.direction.z;
+    const long double denominator = dx * dx + dy * dy + dz * dz;
+    if (!(denominator > 0.0L)) {
+      return detail::failed_result<CurveClosestPointResult>(
+          *state_, StatusCode::DegenerateGeometry,
+          diag_codes::kGeoParameterSolveFailure,
+          "曲线全域最近点求解失败：直线方向退化",
+          "曲线全域最近点求解失败");
+    }
+    const long double parameter =
+        ((static_cast<long double>(point.x) - curve.origin.x) * dx +
+         (static_cast<long double>(point.y) - curve.origin.y) * dy +
+         (static_cast<long double>(point.z) - curve.origin.z) * dz) /
+        denominator;
+    if (!std::isfinite(parameter) ||
+        std::abs(parameter) > std::numeric_limits<Scalar>::max()) {
+      return detail::failed_result<CurveClosestPointResult>(
+          *state_, StatusCode::NumericalInstability,
+          diag_codes::kGeoParameterSolveFailure,
+          "曲线全域最近点求解失败：解析参数超出可表示范围",
+          "曲线全域最近点求解失败");
+    }
+    Point3 nearest{};
+    if (!closest_search_point(*state_, curve_id, static_cast<Scalar>(parameter),
+                              nearest)) {
+      return detail::failed_result<CurveClosestPointResult>(
+          *state_, StatusCode::NumericalInstability,
+          diag_codes::kGeoParameterSolveFailure,
+          "曲线全域最近点求解失败：解析点不可表示",
+          "曲线全域最近点求解失败");
+    }
+    return analytic_result(static_cast<Scalar>(parameter), nearest);
+  }
+
+  if (curve.kind == detail::CurveKind::LineSegment ||
+      curve.kind == detail::CurveKind::CompositePolyline) {
+    if (curve.poles.size() < 2) {
+      return detail::failed_result<CurveClosestPointResult>(
+          *state_, StatusCode::DegenerateGeometry,
+          diag_codes::kGeoParameterSolveFailure,
+          "曲线全域最近点求解失败：折线数据缺失",
+          "曲线全域最近点求解失败");
+    }
+    long double best_distance = std::numeric_limits<long double>::infinity();
+    Scalar best_parameter = 0.0;
+    Point3 best_point{};
+    const std::size_t segment_count = curve.kind == detail::CurveKind::LineSegment
+                                          ? 1
+                                          : curve.poles.size() - 1;
+    for (std::size_t i = 0; i < segment_count; ++i) {
+      const auto &a = curve.poles[curve.kind == detail::CurveKind::LineSegment ? 0 : i];
+      const auto &b = curve.poles[curve.kind == detail::CurveKind::LineSegment
+                                      ? curve.poles.size() - 1
+                                      : i + 1];
+      const long double dx = static_cast<long double>(b.x) - a.x;
+      const long double dy = static_cast<long double>(b.y) - a.y;
+      const long double dz = static_cast<long double>(b.z) - a.z;
+      const long double qx = static_cast<long double>(point.x) - a.x;
+      const long double qy = static_cast<long double>(point.y) - a.y;
+      const long double qz = static_cast<long double>(point.z) - a.z;
+      const long double denominator = dx * dx + dy * dy + dz * dz;
+      const long double local = denominator > 0.0L
+                                    ? std::clamp((qx * dx + qy * dy + qz * dz) /
+                                                     denominator,
+                                                 0.0L, 1.0L)
+                                    : 0.0L;
+      const Point3 candidate{
+          static_cast<Scalar>(static_cast<long double>(a.x) + local * dx),
+          static_cast<Scalar>(static_cast<long double>(a.y) + local * dy),
+          static_cast<Scalar>(static_cast<long double>(a.z) + local * dz)};
+      const auto distance = closest_distance(candidate, point);
+      const auto parameter = curve.kind == detail::CurveKind::LineSegment
+                                 ? static_cast<Scalar>(local)
+                                 : static_cast<Scalar>(i) + static_cast<Scalar>(local);
+      if (distance < best_distance ||
+          (distance == best_distance && parameter < best_parameter)) {
+        best_distance = distance;
+        best_parameter = parameter;
+        best_point = candidate;
+      }
+    }
+    return analytic_result(best_parameter, best_point);
+  }
+
+  if (curve.kind == detail::CurveKind::Circle) {
+    const auto relative = detail::subtract(point, curve.origin);
+    const auto parameter = normalize_angle_0_2pi(
+        std::atan2(detail::dot(relative, curve.axis_v),
+                   detail::dot(relative, curve.axis_u)));
+    Point3 nearest{};
+    if (!closest_search_point(*state_, curve_id, parameter, nearest)) {
+      return detail::failed_result<CurveClosestPointResult>(
+          *state_, StatusCode::NumericalInstability,
+          diag_codes::kGeoParameterSolveFailure,
+          "曲线全域最近点求解失败：圆解析点不可表示",
+          "曲线全域最近点求解失败");
+    }
+    return analytic_result(parameter, nearest);
+  }
+
+  struct SearchInterval {
+    Scalar begin{};
+    Scalar end{};
+    long double lower_bound{};
+    long double speed_bound{};
+    long double acceleration_bound{};
+  };
+  struct LowerFirst {
+    bool operator()(const SearchInterval &lhs,
+                    const SearchInterval &rhs) const {
+      if (lhs.lower_bound != rhs.lower_bound) {
+        return lhs.lower_bound > rhs.lower_bound;
+      }
+      return lhs.begin > rhs.begin;
+    }
+  };
+  std::priority_queue<SearchInterval, std::vector<SearchInterval>, LowerFirst>
+      pending;
+  long double best_distance = std::numeric_limits<long double>::infinity();
+  Scalar best_parameter = 0.0;
+  Point3 best_point{};
+  std::uint32_t evaluations = 0;
+  std::uint32_t intervals_processed = 0;
+
+  const auto evaluate_candidate = [&](Scalar parameter, Point3 &candidate,
+                                      long double &distance) {
+    if (evaluations >= options.max_evaluations ||
+        !closest_search_point(*state_, curve_id, parameter, candidate)) {
+      return false;
+    }
+    ++evaluations;
+    distance = closest_distance(candidate, point);
+    if (!std::isfinite(distance)) {
+      return false;
+    }
+    if (distance < best_distance ||
+        (distance == best_distance && parameter < best_parameter)) {
+      best_distance = distance;
+      best_parameter = parameter;
+      best_point = candidate;
+    }
+    return true;
+  };
+  const auto enqueue = [&](Scalar begin, Scalar end, long double speed_bound,
+                           long double acceleration_bound) {
+    Point3 midpoint_point{};
+    long double midpoint_distance = 0.0L;
+    const Scalar midpoint = begin + (end - begin) * 0.5;
+    if (!evaluate_candidate(midpoint, midpoint_point, midpoint_distance)) {
+      return false;
+    }
+    const long double radius =
+        static_cast<long double>(end - begin) * 0.5L;
+    long double lower_bound =
+        std::max(0.0L, midpoint_distance - speed_bound * radius);
+    Vec3 midpoint_derivative{};
+    if (std::isfinite(acceleration_bound) &&
+        closest_search_derivative(*state_, curve_id, midpoint,
+                                  midpoint_derivative)) {
+      const long double dx = static_cast<long double>(midpoint_point.x) - point.x;
+      const long double dy = static_cast<long double>(midpoint_point.y) - point.y;
+      const long double dz = static_cast<long double>(midpoint_point.z) - point.z;
+      const long double slope =
+          2.0L * (dx * midpoint_derivative.x + dy * midpoint_derivative.y +
+                  dz * midpoint_derivative.z);
+      const long double maximum_distance =
+          midpoint_distance + speed_bound * radius;
+      const long double second_derivative_bound =
+          2.0L * (speed_bound * speed_bound +
+                  maximum_distance * acceleration_bound);
+      const long double squared_lower =
+          midpoint_distance * midpoint_distance - std::abs(slope) * radius -
+          0.5L * second_derivative_bound * radius * radius;
+      lower_bound = std::max(lower_bound, std::sqrt(std::max(0.0L, squared_lower)));
+    }
+    pending.push(SearchInterval{begin, end, lower_bound, speed_bound,
+                                acceleration_bound});
+    return true;
+  };
+
+  const auto spans = closest_search_spans(curve);
+  if (spans.empty()) {
+    return detail::failed_result<CurveClosestPointResult>(
+        *state_, StatusCode::DegenerateGeometry,
+        diag_codes::kGeoParameterSolveFailure,
+        "曲线全域最近点求解失败：有效参数域为空",
+        "曲线全域最近点求解失败");
+  }
+  for (const auto &span : spans) {
+    const auto speed = closest_search_speed_bound(*state_, curve_id, span.min,
+                                                  span.max);
+    const auto acceleration = closest_search_acceleration_bound(
+        *state_, curve_id, span.min, span.max);
+    if (!std::isfinite(speed) || speed < 0.0L ||
+        !std::isfinite(acceleration) || acceleration < 0.0L) {
+      return detail::failed_result<CurveClosestPointResult>(
+          *state_, StatusCode::NumericalInstability,
+          diag_codes::kGeoParameterSolveFailure,
+          "曲线全域最近点求解失败：无法建立有限速度界",
+          "曲线全域最近点求解失败");
+    }
+    if (!enqueue(span.min, span.max, speed, acceleration)) {
+      return detail::failed_result<CurveClosestPointResult>(
+          *state_, StatusCode::OperationFailed,
+          diag_codes::kGeoParameterSolveFailure,
+          "曲线全域最近点求解失败：初始覆盖超过求值预算或点值不可用",
+          "曲线全域最近点求解失败");
+    }
+  }
+
+  const long double distance_tolerance = options.distance_tolerance;
+  const long double parameter_tolerance = options.parameter_tolerance;
+  long double terminal_lower_bound = std::numeric_limits<long double>::infinity();
+  long double maximum_terminal_width = 0.0L;
+  auto convergence = CurveClosestPointConvergence::ParameterTolerance;
+  while (!pending.empty()) {
+    const long double global_lower =
+        std::min(terminal_lower_bound, pending.top().lower_bound);
+    if (best_distance - global_lower <= distance_tolerance) {
+      convergence = CurveClosestPointConvergence::DistanceTolerance;
+      break;
+    }
+    const auto current = pending.top();
+    pending.pop();
+    ++intervals_processed;
+    const long double width =
+        static_cast<long double>(current.end) - current.begin;
+    if (width <= parameter_tolerance ||
+        current.begin == std::nextafter(current.end, current.begin)) {
+      terminal_lower_bound =
+          std::min(terminal_lower_bound, current.lower_bound);
+      maximum_terminal_width = std::max(maximum_terminal_width, width);
+      continue;
+    }
+    if (evaluations + 2 > options.max_evaluations) {
+      return detail::failed_result<CurveClosestPointResult>(
+          *state_, StatusCode::OperationFailed,
+          diag_codes::kGeoParameterSolveFailure,
+          "曲线全域最近点求解失败：全域精度证明耗尽求值预算",
+          "曲线全域最近点求解失败");
+    }
+    const Scalar midpoint = current.begin + (current.end - current.begin) * 0.5;
+    if (!enqueue(current.begin, midpoint, current.speed_bound,
+                 current.acceleration_bound) ||
+        !enqueue(midpoint, current.end, current.speed_bound,
+                 current.acceleration_bound)) {
+      return detail::failed_result<CurveClosestPointResult>(
+          *state_, StatusCode::NumericalInstability,
+          diag_codes::kGeoParameterSolveFailure,
+          "曲线全域最近点求解失败：细分点值不可用",
+          "曲线全域最近点求解失败");
+    }
+  }
+
+  // The distance certificate may converge while the parameter is still less
+  // accurate than legacy closest_parameter callers expect (distance grows
+  // quadratically around a smooth minimum).  Refine only the already selected
+  // global candidate, keep descent-only acceptance, and charge every added
+  // point evaluation to the caller's budget.
+  const auto search_domain = curve_domain(curve);
+  for (std::uint32_t iteration = 0;
+       iteration < 32 && evaluations < options.max_evaluations; ++iteration) {
+    Vec3 derivative{};
+    if (!closest_search_derivative(*state_, curve_id, best_parameter,
+                                   derivative)) {
+      break;
+    }
+    const long double vx = derivative.x;
+    const long double vy = derivative.y;
+    const long double vz = derivative.z;
+    const long double denominator = vx * vx + vy * vy + vz * vz;
+    if (!(denominator > 0.0L) || !std::isfinite(denominator)) {
+      break;
+    }
+    const long double dx = static_cast<long double>(best_point.x) - point.x;
+    const long double dy = static_cast<long double>(best_point.y) - point.y;
+    const long double dz = static_cast<long double>(best_point.z) - point.z;
+    long double step = -(dx * vx + dy * vy + dz * vz) / denominator;
+    if (!std::isfinite(step)) {
+      break;
+    }
+    bool accepted = false;
+    for (std::uint32_t attempt = 0;
+         attempt < 8 && evaluations < options.max_evaluations; ++attempt) {
+      const auto candidate_parameter = std::clamp(
+          static_cast<Scalar>(static_cast<long double>(best_parameter) + step),
+          search_domain.min, search_domain.max);
+      if (candidate_parameter == best_parameter) {
+        break;
+      }
+      Point3 candidate_point{};
+      if (!closest_search_point(*state_, curve_id, candidate_parameter,
+                                candidate_point)) {
+        break;
+      }
+      ++evaluations;
+      const auto candidate_distance = closest_distance(candidate_point, point);
+      if (candidate_distance < best_distance) {
+        best_parameter = candidate_parameter;
+        best_point = candidate_point;
+        best_distance = candidate_distance;
+        accepted = true;
+        break;
+      }
+      step *= 0.5L;
+    }
+    if (!accepted ||
+        std::abs(step) <= std::numeric_limits<Scalar>::epsilon() *
+                              std::max<long double>(1.0L, std::abs(best_parameter))) {
+      break;
+    }
+  }
+
+  if (!std::isfinite(best_distance) ||
+      best_distance > std::numeric_limits<Scalar>::max()) {
+    return detail::failed_result<CurveClosestPointResult>(
+        *state_, StatusCode::NumericalInstability,
+        diag_codes::kGeoParameterSolveFailure,
+        "曲线全域最近点求解失败：最小距离超出可表示范围",
+        "曲线全域最近点求解失败");
+  }
+  long double global_lower = best_distance;
+  if (!pending.empty()) {
+    global_lower = std::min(global_lower, pending.top().lower_bound);
+  }
+  global_lower = std::min(global_lower, terminal_lower_bound);
+  if (!std::isfinite(global_lower)) {
+    global_lower = best_distance;
+  }
+  CurveClosestPointResult result;
+  result.parameter = curve.kind == detail::CurveKind::Ellipse
+                         ? normalize_angle_0_2pi(best_parameter)
+                         : best_parameter;
+  result.point = best_point;
+  result.distance = static_cast<Scalar>(best_distance);
+  result.distance_lower_bound = static_cast<Scalar>(
+      std::clamp(global_lower, 0.0L, best_distance));
+  result.parameter_uncertainty =
+      convergence == CurveClosestPointConvergence::ParameterTolerance
+          ? static_cast<Scalar>(maximum_terminal_width)
+          : 0.0;
+  result.evaluations = evaluations;
+  result.intervals_processed = intervals_processed;
+  result.convergence = convergence;
+  return ok_result(result,
+                   state_->create_diagnostic("曲线全域最近点已按请求精度收敛"));
+}
+
 Result<Scalar> CurveService::closest_parameter(CurveId curve_id,
                                                const Point3 &point) const {
   if (!finite_point(point)) {
@@ -460,164 +1364,21 @@ Result<Scalar> CurveService::closest_parameter(CurveId curve_id,
       curve.kind == detail::CurveKind::Ellipse ||
       curve.kind == detail::CurveKind::Parabola ||
       curve.kind == detail::CurveKind::Hyperbola) {
-    const auto domain = curve_domain(curve);
-    Scalar t = std::clamp(approximate_curve_parameter(curve, point),
-                          domain.min, domain.max);
-    // Damped Gauss-Newton (LM-style) 1D refinement:
-    // minimize ||C(t) - P||^2 with clamp + descent-only acceptance.
-    auto best_cost = std::numeric_limits<Scalar>::max();
-    {
-      const auto ev0 = eval(curve_id, t, 0);
-      if (ev0.status == StatusCode::Ok && ev0.value.has_value()) {
-        best_cost = squared_distance(ev0.value->point, point);
-      }
+    const auto detailed = closest_point_detailed(curve_id, point);
+    if (detailed.status != StatusCode::Ok || !detailed.value.has_value()) {
+      return error_result<Scalar>(detailed.status, detailed.diagnostic_id,
+                                  detailed.warnings);
     }
-    Scalar lambda = 1e-6;
-    for (int iter = 0; iter < 20; ++iter) {
-      const auto ct = std::clamp(t, domain.min, domain.max);
-      const auto ev = eval(curve_id, ct, 1);
-      if (ev.status != StatusCode::Ok || !ev.value.has_value()) {
-        break;
-      }
-      const auto &r = *ev.value;
-      const Vec3 err = detail::subtract(r.point, point);
-      const Vec3 vel = curve_velocity_for_closest(r);
-      const auto jtj = detail::dot(vel, vel);
-      const auto g = detail::dot(vel, err);
-      if (!(jtj > 1e-18) || !std::isfinite(jtj) || !std::isfinite(g)) {
-        break;
-      }
-      bool accepted = false;
-      for (int attempt = 0; attempt < 8; ++attempt) {
-        const auto scale = std::max<Scalar>(1.0, jtj);
-        const auto lam = lambda * scale;
-        const auto denom = jtj + lam;
-        if (!(denom > 0.0) || !std::isfinite(denom)) {
-          lambda *= 10.0;
-          continue;
-        }
-        const auto step = -g / denom;
-        if (!std::isfinite(step)) {
-          lambda *= 10.0;
-          continue;
-        }
-        const auto next_t = std::clamp(ct + step, domain.min, domain.max);
-        const auto ev_next = eval(curve_id, next_t, 0);
-        if (ev_next.status != StatusCode::Ok || !ev_next.value.has_value()) {
-          lambda *= 10.0;
-          continue;
-        }
-        const auto next_cost = squared_distance(ev_next.value->point, point);
-        if (next_cost <= best_cost) {
-          best_cost = next_cost;
-          t = next_t;
-          lambda = std::max<Scalar>(1e-12, lambda * 0.3);
-          accepted = true;
-          if (std::abs(step) < 1e-12) {
-            iter = 9999;
-          }
-          break;
-        }
-        lambda *= 10.0;
-      }
-      if (!accepted) {
-        break;
-      }
-    }
-    const auto result_t = curve.kind == detail::CurveKind::Ellipse
-                              ? normalize_angle_0_2pi(t)
-                              : std::clamp(t, domain.min, domain.max);
-    return ok_result<Scalar>(result_t,
-                             state_->create_diagnostic("曲线最近参数已求解"));
+    return ok_result(detailed.value->parameter, detailed.diagnostic_id);
   }
 
   if (curve.kind == detail::CurveKind::CompositeChain) {
-    if (curve.children.empty()) {
-      return detail::failed_result<Scalar>(
-          *state_, StatusCode::OperationFailed, diag_codes::kGeoParameterSolveFailure,
-          "曲线最近参数求解失败：复合链不包含任何子曲线", "曲线最近参数求解失败");
+    const auto detailed = closest_point_detailed(curve_id, point);
+    if (detailed.status != StatusCode::Ok || !detailed.value.has_value()) {
+      return error_result<Scalar>(detailed.status, detailed.diagnostic_id,
+                                  detailed.warnings);
     }
-    const auto domain = curve_domain(curve);
-    // Coarse: try each child and pick the best mapped parameter.
-    Scalar best_t = domain.min;
-    Scalar best_cost = std::numeric_limits<Scalar>::max();
-    for (std::size_t i = 0; i < curve.children.size(); ++i) {
-      const auto child_id = curve.children[i];
-      if (!detail::has_curve(*state_, child_id)) {
-        continue;
-      }
-      const auto child_t = closest_parameter(child_id, point);
-      if (child_t.status != StatusCode::Ok || !child_t.value.has_value()) {
-        continue;
-      }
-      const auto child_eval = eval(child_id, *child_t.value, 0);
-      if (child_eval.status != StatusCode::Ok || !child_eval.value.has_value()) {
-        continue;
-      }
-      const auto cost = squared_distance(child_eval.value->point, point);
-      if (cost < best_cost) {
-        best_cost = cost;
-        const auto local = std::clamp(*child_t.value, 0.0, 1.0);
-        best_t = std::clamp(static_cast<Scalar>(i) + local, domain.min, domain.max);
-      }
-    }
-
-    // Refine on the composite chain parameter directly (uses chain eval/tangent).
-    Scalar t = std::clamp(best_t, domain.min, domain.max);
-    Scalar lambda = 1e-6;
-    for (int iter = 0; iter < 25; ++iter) {
-      const auto ct = std::clamp(t, domain.min, domain.max);
-      const auto ev = eval(curve_id, ct, 1);
-      if (ev.status != StatusCode::Ok || !ev.value.has_value()) {
-        break;
-      }
-      const auto &r = *ev.value;
-      const Vec3 err = detail::subtract(r.point, point);
-      const Vec3 vel = curve_velocity_for_closest(r);
-      const auto jtj = detail::dot(vel, vel);
-      const auto g = detail::dot(vel, err);
-      if (!(jtj > 1e-18) || !std::isfinite(jtj) || !std::isfinite(g)) {
-        break;
-      }
-      bool accepted = false;
-      for (int attempt = 0; attempt < 8; ++attempt) {
-        const auto scale = std::max<Scalar>(1.0, jtj);
-        const auto lam = lambda * scale;
-        const auto denom = jtj + lam;
-        if (!(denom > 0.0) || !std::isfinite(denom)) {
-          lambda *= 10.0;
-          continue;
-        }
-        const auto step = -g / denom;
-        if (!std::isfinite(step)) {
-          lambda *= 10.0;
-          continue;
-        }
-        const auto next_t = std::clamp(ct + step, domain.min, domain.max);
-        const auto ev_next = eval(curve_id, next_t, 0);
-        if (ev_next.status != StatusCode::Ok || !ev_next.value.has_value()) {
-          lambda *= 10.0;
-          continue;
-        }
-        const auto next_cost = squared_distance(ev_next.value->point, point);
-        if (next_cost <= best_cost) {
-          best_cost = next_cost;
-          t = next_t;
-          lambda = std::max<Scalar>(1e-12, lambda * 0.3);
-          accepted = true;
-          if (std::abs(step) < 1e-12) {
-            iter = 9999;
-          }
-          break;
-        }
-        lambda *= 10.0;
-      }
-      if (!accepted) {
-        break;
-      }
-    }
-    return ok_result<Scalar>(std::clamp(t, domain.min, domain.max),
-                             state_->create_diagnostic("曲线最近参数已求解"));
+    return ok_result(detailed.value->parameter, detailed.diagnostic_id);
   }
 
   const auto eval0 = eval(curve_id, 0.0, 1);

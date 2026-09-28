@@ -252,8 +252,10 @@
 | `AXM-TOPO-E-0023` | Error | 环在闭合终点之外重复经过同一顶点，形成自接触的非简单边界；`create_loop` 在写入前拒绝并关联重复顶点与两条冲突定向边 |
 | `AXM-TOPO-E-0024` | Error | 同一面中不同边界环共用同一拓扑顶点；`create_face` 在写入前拒绝，`validate_face` 检出存量缺陷，关联冲突环与顶点 ID |
 | `AXM-TOPO-E-0025` | Error | 同一面中不同边界环的独立顶点具有完全相同的有限三维坐标；`create_face` 在写入前拒绝，`validate_face` 检出存量缺陷，关联两个环与两个顶点 ID。仅覆盖顶点坐标精确重合，不代表完整几何自交检测 |
-| `AXM-TOPO-E-0026` | Error | 同一面中不同边界环的直线或线段边在三维空间内部相交；`create_face` 在写入前拒绝，`validate_face` 检出存量缺陷，关联两个环与两条边 ID。仅覆盖直线边段的非平行内部交点，不代表曲线求交、端点触碰或共线重叠检测 |
-| `AXM-TOPO-E-0027` | Error | 同一面中不同边界环的非平行直线或线段边在三维空间端点相接（至少一条边的端点落在另一条边上）；`create_face` 在写入前拒绝，`validate_face` 检出存量缺陷，关联两个环与两条边 ID。共线重叠、曲线求交及容差邻近相接仍待覆盖 |
+| `AXM-TOPO-E-0026` | Error | 同一面中不同边界环的有限 Line/LineSegment 边段在三维空间内部相交；`create_face` 在写入前拒绝，`validate_face` 检出存量缺陷，关联两个环与两条边 ID |
+| `AXM-TOPO-E-0027` | Error | 同一面中不同边界环的有限 Line/LineSegment 边段端点相接（至少一条边的端点落在另一条边上）；`create_face` 在写入前拒绝，`validate_face` 检出存量缺陷，关联两个环与两条边 ID |
+| `AXM-TOPO-E-0028` | Error | 同一面中不同边界环的有限 Line/LineSegment 边段共线且存在正长度重叠；`create_face` 在分配 FaceId 前拒绝，`validate_face` 检出存量缺陷，关联两个环与两条边 ID |
+| `AXM-TOPO-E-0029` | Error | 同一面中不同边界环的有限 Line/LineSegment 边段未精确相交，但最近距离为有限正值且不超过有效线性容差；`create_face` 在分配 FaceId 前拒绝，`validate_face` 检出存量缺陷，关联两个环与两条边 ID。一般曲线因缺少显式边 trim 区间尚不在覆盖范围内 |
 
 ## 7.5 `BOOL` 布尔模块错误码
 
@@ -400,6 +402,7 @@
 | `AXM-TX-E-0004` | Error | 目标版本不存在 |
 | `AXM-TX-E-0005` | Fatal | 版本图损坏 |
 | `AXM-TX-E-0006` | Error | 活动事务禁止清空跟踪记录；`clear_tracking_records` 返回 `OperationFailed`，保留模型与撤销记录，须先提交或回滚（含空事务） |
+| `AXM-TX-E-0007` | Error | 拓扑事务在预取消、显式轮询、写入、提交、显式回滚或作用域退出边界观察到协作式取消。已取得写者槽的事务恢复完整快照并释放写者槽，不推进版本或成功提交审计；预取消事务不取得写者槽 |
 
 ## 8. 标准警告码清单
 

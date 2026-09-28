@@ -1,6 +1,7 @@
 #include "axiom/topo/topology_service.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <limits>
 #include <string_view>
@@ -19,6 +20,10 @@ namespace axiom {
 using namespace topo_internal;
 
 namespace detail {
+
+struct TopologyCancellationState {
+  std::atomic<bool> requested{false};
+};
 
 struct TopologyTransactionState {
   std::unordered_map<std::uint64_t, PCurveId> original_coedge_pcurves;
@@ -59,6 +64,36 @@ struct TopologyTransactionState {
 
 }  // namespace detail
 
+TopologyCancellationToken::TopologyCancellationToken(
+    std::shared_ptr<detail::TopologyCancellationState> state)
+    : state_(std::move(state)) {}
+
+bool TopologyCancellationToken::can_be_cancelled() const noexcept {
+  return static_cast<bool>(state_);
+}
+
+bool TopologyCancellationToken::is_cancellation_requested() const noexcept {
+  return state_ && state_->requested.load(std::memory_order_acquire);
+}
+
+TopologyCancellationSource::TopologyCancellationSource()
+    : state_(std::make_shared<detail::TopologyCancellationState>()) {}
+
+TopologyCancellationToken TopologyCancellationSource::token() const noexcept {
+  return TopologyCancellationToken{state_};
+}
+
+bool TopologyCancellationSource::request_cancellation() noexcept {
+  if (!state_) {
+    return false;
+  }
+  return !state_->requested.exchange(true, std::memory_order_acq_rel);
+}
+
+bool TopologyCancellationSource::is_cancellation_requested() const noexcept {
+  return state_ && state_->requested.load(std::memory_order_acquire);
+}
+
 #include "axiom/internal/topo/topology_query.inc"
 #include "axiom/internal/topo/topology_transaction.inc"
 #include "axiom/internal/topo/topology_validation_a.inc"
@@ -71,6 +106,31 @@ TopologyService::TopologyService(std::shared_ptr<detail::KernelState> state)
 
 TopologyTransaction TopologyService::begin_transaction() {
   return TopologyTransaction{state_};
+}
+
+TopologyTransaction TopologyService::begin_transaction(
+    const TopologyCancellationToken& cancellation_token) {
+  return TopologyTransaction{state_, cancellation_token};
+}
+
+Result<bool> TopologyService::has_active_write_transaction() const {
+  return ok_result(!state_->active_topology_transaction.expired(),
+                   state_->create_diagnostic("已查询拓扑活动写事务状态"));
+}
+
+Result<TopologyCancellationMetrics>
+TopologyService::cancellation_metrics() const {
+  TopologyCancellationMetrics metrics;
+  metrics.observed_transaction_count =
+      state_->topology_cancellation_observed_count;
+  metrics.rolled_back_transaction_count =
+      state_->topology_cancellation_rollback_count;
+  metrics.rolled_back_write_operations_total =
+      state_->topology_cancelled_write_operations_total;
+  metrics.last_rolled_back_write_operations =
+      state_->topology_last_cancelled_write_operations;
+  return ok_result(metrics,
+                   state_->create_diagnostic("已查询拓扑协作式取消审计"));
 }
 
 TopologyQueryService &TopologyService::query() { return query_service_; }
