@@ -97,6 +97,13 @@ std::vector<Point3> bbox_corners(const BoundingBox& bbox);
 
 BoundingBox curve_bbox_for_query(const detail::CurveRecord& curve);
 
+/// Sample a supported curved sweep rail without touching evaluation caches or allocating IDs.
+/// Open spline kinds include both endpoints. Circle/Ellipse and endpoint/tangent-continuous
+/// closed Bezier/BSpline/NURBS rails are periodic and omit the duplicate end.
+bool sample_curved_sweep_rail(const detail::KernelState& state, const detail::CurveRecord& curve,
+                              std::vector<Point3>& points,
+                              std::vector<Vec3>& tangents, bool& closed);
+
 BoundingBox surface_bbox_for_query(const detail::SurfaceRecord& surface);
 
 Scalar plane_signed_distance(const Plane& plane, const Point3& point);

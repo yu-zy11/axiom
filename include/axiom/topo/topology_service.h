@@ -2,7 +2,9 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
+#include <string_view>
 #include <vector>
 
 #include "axiom/core/result.h"
@@ -10,6 +12,7 @@
 namespace axiom {
 namespace detail {
 struct KernelState;
+struct TopologyCancellationState;
 struct TopologyTransactionState;
 }
 
@@ -18,6 +21,74 @@ enum class TopologyIsolationLevel : std::uint8_t {
   Unspecified = 0,
   /// 单活动写事务、修改前快照、回滚恢复（工程上接近「串行化」使用方式，但无跨进程锁）。
   SnapshotSerializable = 1,
+};
+
+/// 可在宿主工作流与拓扑事务之间共享的协作式取消令牌。
+/// 请求取消本身不访问内核存储；事务在显式轮询、下一次写入或提交边界观察并回滚。
+class TopologyCancellationToken {
+public:
+    TopologyCancellationToken() = default;
+
+    /// 默认构造的令牌不可取消；由 `TopologyCancellationSource::token()` 创建的令牌返回 true。
+    bool can_be_cancelled() const noexcept;
+    /// 线程安全地读取共享取消请求；不触发事务回滚。
+    bool is_cancellation_requested() const noexcept;
+
+private:
+    explicit TopologyCancellationToken(
+        std::shared_ptr<detail::TopologyCancellationState> state);
+
+    std::shared_ptr<detail::TopologyCancellationState> state_;
+
+    friend class TopologyCancellationSource;
+    friend class TopologyTransaction;
+};
+
+/// 拓扑协作式取消源。副本共享同一信号；首次请求返回 true，后续幂等请求返回 false。
+class TopologyCancellationSource {
+public:
+    TopologyCancellationSource();
+
+    TopologyCancellationToken token() const noexcept;
+    bool request_cancellation() noexcept;
+    bool is_cancellation_requested() const noexcept;
+
+private:
+    std::shared_ptr<detail::TopologyCancellationState> state_;
+};
+
+/// 单个内核实例内协作式取消的累计审计；普通提交/回滚不计入。
+struct TopologyCancellationMetrics {
+    /// 在预取消构造、轮询、写入、提交或显式回滚边界首次观察到取消的事务数。
+    std::uint64_t observed_transaction_count{};
+    /// 已取得写者槽且因取消恢复快照并关闭的事务数（包含空事务）。
+    std::uint64_t rolled_back_transaction_count{};
+    /// 各次取消回滚前成功写操作数之和。
+    std::uint64_t rolled_back_write_operations_total{};
+    /// 最近一次取消回滚前的成功写操作数。
+    std::uint64_t last_rolled_back_write_operations{};
+};
+
+/// 同一面不同边界环之间的首个几何冲突类别。
+/// 当前检测覆盖由 Line/LineSegment 支撑的有限拓扑边；曲边在获得显式 trim 区间后扩展。
+enum class FaceBoundaryConflictKind : std::uint8_t {
+    ProperIntersection = 0,
+    EndpointTouch = 1,
+    CollinearOverlap = 2,
+    NearContact = 3,
+};
+
+/// 跨环边界冲突的可查询证据。`first_point` / `second_point` 是两条有限边段上的最近点；
+/// 精确相交或重叠时 `distance` 为 0，容差邻近时为有限正值。
+struct FaceBoundaryConflict {
+    FaceBoundaryConflictKind kind {FaceBoundaryConflictKind::ProperIntersection};
+    LoopId first_loop {};
+    LoopId second_loop {};
+    EdgeId first_edge {};
+    EdgeId second_edge {};
+    Point3 first_point {};
+    Point3 second_point {};
+    Scalar distance {};
 };
 
 class TopologyQueryService {
@@ -70,6 +141,28 @@ public:
     /// 平面、直线边面片的真实边界面积（外环减内环），单位为模型长度单位的平方。
     /// 不支持曲边/非平面面；无效面返回失败且无数值。每次从当前拓扑重算，不缓存。
     Result<Scalar> planar_face_area(FaceId face_id) const;
+    /// 由完整折线 PCurve 修剪环计算解析曲面面积（外环减内环），单位为模型长度单位的平方。
+    /// 支持 Plane/Cylinder/Cone/Sphere/Torus 及其 Trimmed/Offset 包装；未包装 Plane 无 PCurve 时兼容回退 `planar_face_area`。
+    /// UV 环必须连续闭合、位于当前参数域且内环严格位于外环内；退化/自交/重叠或缺失 PCurve 不返回部分面积。
+    /// 每次从当前面、环与曲面记录重算，不写几何求值/网格缓存；事务内替换/删除即时可见，回滚后恢复。
+    Result<Scalar> face_area(FaceId face_id) const;
+    /// 从单个闭合多面体壳的当前真实拓扑计算均匀密度质量属性；仅支持平面、直线边面（可凹、可带孔）。
+    /// `volume`/`area`/`centroid` 的单位分别为模型长度单位的三次方、平方和一次方；
+    /// `inertia` 是关于质心、世界坐标系行主序的 3x3 张量，密度取 1，单位为模型长度单位的五次方。
+    /// 壳须为双边流形闭壳，面边界绕向须与平面法向一致；曲面、曲边、开壳、非流形或退化壳失败且不返回部分值。
+    /// 每次从当前拓扑重算，不创建网格或写缓存；事务内删除/替换即时可见，回滚后恢复。
+    Result<MassProperties> shell_mass_properties(ShellId shell_id) const;
+    /// 汇总实体拥有的一个或多个独立闭合多面体壳的均匀密度质量属性。
+    /// 多壳按互不重叠的实体分量相加；当前不把独立内壳解释为空腔。单位及失败/只读语义同 `shell_mass_properties`。
+    Result<MassProperties> body_mass_properties(BodyId body_id) const;
+    /// 当前 Line/LineSegment 边的端点距离，单位为模型长度单位；端点须位于支撑曲线范围内。
+    /// 曲边缺少裁剪区间，返回 NotImplemented；退化/不一致拓扑返回 InvalidTopology。
+    Result<Scalar> edge_length(EdgeId edge_id) const;
+    /// 按闭合环的 coedge 累加边长，不受方向影响；空环/不闭合环失败且无值。
+    Result<Scalar> loop_length(LoopId loop_id) const;
+    /// 外环加全部内环的边界长度（不是外环减内环）；不要求支撑曲面为平面。
+    /// 每次重算，不写几何/网格缓存；事务内修改即时可见，回滚后恢复。
+    Result<Scalar> face_boundary_length(FaceId face_id) const;
     Result<BoundingBox> bbox_of_shell(ShellId shell_id) const;
     Result<BoundingBox> bbox_of_body_from_topology(BodyId body_id) const;
     Result<std::vector<FaceId>> faces_of_body(BodyId body_id) const;
@@ -112,6 +205,9 @@ class TopologyTransaction {
 public:
     /// 同一内核已有活动事务时，新事务以关闭状态返回；其写入/提交/回滚均失败且不污染模型。
     explicit TopologyTransaction(std::shared_ptr<detail::KernelState> state);
+    /// 绑定协作式取消令牌。若令牌已取消，事务不占用写者槽并以已取消关闭状态返回。
+    TopologyTransaction(std::shared_ptr<detail::KernelState> state,
+                        TopologyCancellationToken cancellation_token);
     /// 事务为唯一所有权对象：可移动构造，但不可复制或移动赋值。
     /// 移动后源对象保持可析构、可查询的关闭状态，不能再提交或回滚。
     TopologyTransaction(TopologyTransaction&& other);
@@ -141,7 +237,16 @@ public:
     Result<void> replace_surface(FaceId face_id, SurfaceId replacement);
     Result<VersionId> commit();
     Result<void> rollback();
+    /// 主动观察取消边界。已请求时，原子式恢复事务前模型、关闭事务并释放写者槽，
+    /// 返回 OperationFailed / AXM-TX-E-0007；未请求时成功且不改变事务。
+    Result<void> poll_cancellation();
     Result<bool> is_active() const;
+    /// 只读查询共享令牌，不触发回滚；未绑定取消源时恒为 false。
+    Result<bool> cancellation_requested() const;
+    /// 是否已由预取消、轮询、写入口、提交或显式回滚观察到取消。
+    Result<bool> cancellation_observed() const;
+    /// 自动/显式取消回滚前的成功写次数；正常关闭或未观察取消时为 0。
+    Result<std::uint64_t> cancelled_write_operation_count() const;
     Result<std::uint64_t> created_vertex_count() const;
     Result<std::uint64_t> created_edge_count() const;
     Result<std::uint64_t> created_coedge_count() const;
@@ -191,8 +296,15 @@ public:
     Result<std::vector<BodyId>> created_bodies() const;
 
 private:
+    bool token_cancellation_requested() const noexcept;
+    void record_cancellation_observed(bool rolled_back,
+                                      std::uint64_t write_operations);
+    std::optional<DiagnosticId> observe_cancellation(std::string_view operation);
+    void restore_model_and_close();
+
     std::shared_ptr<detail::KernelState> state_;
     std::shared_ptr<detail::TopologyTransactionState> transaction_state_;
+    TopologyCancellationToken cancellation_token_;
     std::vector<std::uint64_t> created_vertices_;
     std::vector<std::uint64_t> created_edges_;
     std::vector<std::uint64_t> created_coedges_;
@@ -207,6 +319,8 @@ private:
     std::uint64_t txn_coedge_pcurve_binds_{0};
     std::uint64_t txn_coedge_pcurve_clears_{0};
     std::uint64_t txn_write_ops_{0};
+    std::uint64_t cancelled_write_ops_{0};
+    bool cancellation_observed_{false};
     bool active_ {true};
 };
 
@@ -218,6 +332,12 @@ public:
     Result<void> validate_vertex(VertexId vertex_id) const;
     Result<void> validate_coedge(CoedgeId coedge_id) const;
     Result<void> validate_loop(LoopId loop_id) const;
+    /// 建面前返回候选外/内环间的首个直线边界冲突；无冲突为成功的空 optional。
+    /// `linear_tolerance == 0` 使用内核容差策略，正值会按策略上下限钳制；负值或非有限值失败。
+    /// 只读查询不会修改拓扑、反向索引或活动事务计数。
+    Result<std::optional<FaceBoundaryConflict>> first_boundary_conflict(
+        LoopId outer_loop, std::span<const LoopId> inner_loops,
+        Scalar linear_tolerance = 0.0) const;
     // Trim bridge (Stage 2): validate that coedge pcurves in a loop are continuous and closed in UV space.
     // Requires every coedge in the loop to have a valid non-zero PCurveId.
     Result<void> validate_loop_pcurve_closedness(LoopId loop_id) const;
@@ -266,6 +386,13 @@ public:
     explicit TopologyService(std::shared_ptr<detail::KernelState> state);
 
     TopologyTransaction begin_transaction();
+    /// 创建绑定协作式取消信号的写事务；取消只在事务边界被观察，不异步访问模型。
+    TopologyTransaction begin_transaction(
+        const TopologyCancellationToken& cancellation_token);
+    /// 是否有事务持有当前内核实例的唯一拓扑写者槽；只读且不观察取消。
+    Result<bool> has_active_write_transaction() const;
+    /// 返回自内核创建起的协作式取消累计审计；读取本身不创建或关闭事务。
+    Result<TopologyCancellationMetrics> cancellation_metrics() const;
     TopologyQueryService& query();
     TopologyValidationService& validate();
 

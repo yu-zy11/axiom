@@ -212,6 +212,13 @@ struct Warning {
   std::string message;
 };
 
+/// 可机器读取的数值证据；`name` 在单个 issue 内应保持稳定，`unit` 可为空（无量纲）。
+struct NumericEvidence {
+  std::string name;
+  Scalar value{};
+  std::string unit;
+};
+
 struct Issue {
   std::string code;
   IssueSeverity severity{IssueSeverity::Info};
@@ -219,6 +226,8 @@ struct Issue {
   std::vector<std::uint64_t> related_entities;
   /// 工作流阶段标签（如 bool.validate、io.post_import.validation）；空表示未标注。
   std::string stage;
+  /// 算法计数、阈值、距离、容差等结构化证据；避免 CI 从本地化 message 中解析数字。
+  std::vector<NumericEvidence> numeric_evidence;
 };
 
 struct DiagnosticReport {
@@ -382,9 +391,14 @@ struct PluginCurveDesc {
 struct ProfileRef {
   std::string label;
   /// Optional planar polygon profile in world coordinates (closedness implicit: last connects to first).
-  /// Extrude supports finite, planar, strictly convex polygons with non-degenerate volume;
+  /// Extrude and line-segment sweep support finite, simple planar polygons (convex or concave),
+  /// without repeated vertices or collinear corners, and with non-degenerate volume;
   /// unsupported profiles return InvalidInput instead of a bbox replacement shell.
   std::vector<Point3> polygon_xyz;
+  /// Optional coplanar holes strictly inside polygon_xyz, implicitly closed, with independent winding.
+  /// Rings must be simple, disjoint and non-nested; touching boundaries are rejected.
+  /// Supported by extrude and explicit polygon sweep; revolve/loft reject nonempty holes.
+  std::vector<std::vector<Point3>> holes_xyz;
 };
 
 struct TessellationOptions {

@@ -17,6 +17,7 @@ inline constexpr std::string_view kGeoParameterSolveFailure = "AXM-GEO-E-0006";
 inline constexpr std::string_view kGeoIntersectionFailure = "AXM-GEO-E-0007";
 /// 偏置距离导致有效曲率半径非正（球/柱等解析情形下的自交/退化壳）
 inline constexpr std::string_view kGeoOffsetSelfIntersection = "AXM-GEO-E-0010";
+inline constexpr std::string_view kGeoLengthIntegrationFailure = "AXM-GEO-E-0011";
 
 inline constexpr std::string_view kTopoLoopNotClosed = "AXM-TOPO-E-0002";
 inline constexpr std::string_view kTopoFaceOuterLoopInvalid = "AXM-TOPO-E-0003";
@@ -45,6 +46,8 @@ inline constexpr std::string_view kTopoFaceSharedBoundaryVertex = "AXM-TOPO-E-00
 inline constexpr std::string_view kTopoFaceCoincidentBoundaryVertices = "AXM-TOPO-E-0025";
 inline constexpr std::string_view kTopoFaceCrossLoopStraightEdgeIntersection = "AXM-TOPO-E-0026";
 inline constexpr std::string_view kTopoFaceCrossLoopStraightEdgeEndpointTouch = "AXM-TOPO-E-0027";
+inline constexpr std::string_view kTopoFaceCrossLoopCollinearOverlap = "AXM-TOPO-E-0028";
+inline constexpr std::string_view kTopoFaceCrossLoopNearContact = "AXM-TOPO-E-0029";
 
 inline constexpr std::string_view kBoolInvalidInput = "AXM-BOOL-E-0001";
 inline constexpr std::string_view kBoolIntersectionFailure = "AXM-BOOL-E-0003";
@@ -199,5 +202,7 @@ inline constexpr std::string_view kTxCommitFailure = "AXM-TX-E-0001";
 inline constexpr std::string_view kTxRollbackFailure = "AXM-TX-E-0002";
 inline constexpr std::string_view kTxConflict = "AXM-TX-E-0003";
 inline constexpr std::string_view kTxActiveTrackingClear = "AXM-TX-E-0006";
+/// 协作式取消已在事务轮询、写入或提交边界生效；已有事务写入已回滚。
+inline constexpr std::string_view kTxCancellationRequested = "AXM-TX-E-0007";
 
 }  // namespace axiom::diag_codes

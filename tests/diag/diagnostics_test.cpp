@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <string>
 
 #include "axiom/diag/error_codes.h"
@@ -26,6 +27,144 @@ const axiom::Issue* find_issue(const axiom::DiagnosticReport& report, std::strin
         }
     }
     return nullptr;
+}
+
+bool check_structured_evidence_audit() {
+    axiom::Kernel kernel;
+    auto& diagnostics = kernel.diagnostics();
+
+    axiom::Issue complete;
+    complete.code = std::string(axiom::diag_codes::kBoolIntersectionFailure);
+    complete.severity = axiom::IssueSeverity::Error;
+    complete.message = "complete bool evidence";
+    complete.related_entities = {41, 42};
+    complete.stage = "bool.abort.intersect";
+    complete.numeric_evidence = {{"gap\"distance", 0.125, "model\\unit"}, {"candidates", 3.0, "count"}};
+
+    axiom::Issue missing_all;
+    missing_all.code = std::string(axiom::diag_codes::kBoolClassificationFailure);
+    missing_all.severity = axiom::IssueSeverity::Error;
+    missing_all.message = "missing structured evidence";
+    missing_all.stage = "heal.wrong_module";
+    missing_all.numeric_evidence = {{"not_finite", std::numeric_limits<double>::quiet_NaN(), "count"}};
+
+    axiom::Issue missing_numeric = complete;
+    missing_numeric.code = std::string(axiom::diag_codes::kBoolInvalidInput);
+    missing_numeric.numeric_evidence.clear();
+
+    axiom::Issue unrelated;
+    unrelated.code = std::string(axiom::diag_codes::kIoExportFailure);
+    unrelated.severity = axiom::IssueSeverity::Error;
+    unrelated.message = "not a BOOL issue";
+    unrelated.related_entities = {99};
+    unrelated.stage = "io.export.write";
+    unrelated.numeric_evidence = {{"bytes", 0.0, "byte"}};
+
+    const std::array<axiom::Issue, 1> complete_issues {complete};
+    const std::array<axiom::Issue, 2> incomplete_issues {missing_all, missing_numeric};
+    const std::array<axiom::Issue, 1> unrelated_issues {unrelated};
+    const auto complete_report = diagnostics.create_report("complete", complete_issues);
+    const auto incomplete_report = diagnostics.create_report("incomplete", incomplete_issues);
+    const auto unrelated_report = diagnostics.create_report("unrelated", unrelated_issues);
+    if (!complete_report.value || !incomplete_report.value || !unrelated_report.value) return false;
+
+    axiom::DiagnosticEvidencePolicy policy;
+    policy.issue_code_prefix = "AXM-BOOL-";
+    policy.stage_prefix = "bool.";
+    policy.max_findings = 1;
+    const std::array<axiom::DiagnosticId, 3> ids {
+        *incomplete_report.value, *complete_report.value, *complete_report.value};
+    const auto before = diagnostics.get(*incomplete_report.value);
+    const auto audit = diagnostics.audit_evidence(ids, policy);
+    if (!before.value || audit.status != axiom::StatusCode::Ok || !audit.value || audit.value->passed() ||
+        audit.value->reports_inspected != 2 || audit.value->matching_issues != 3 ||
+        audit.value->complete_issues != 1 || audit.value->issues_missing_stage != 1 ||
+        audit.value->issues_missing_related_entities != 1 || audit.value->issues_missing_numeric_evidence != 2 ||
+        audit.value->findings.size() != 1 || audit.value->omitted_findings != 1) return false;
+    const auto& finding = audit.value->findings.front();
+    if (finding.diagnostic_id != *incomplete_report.value || !finding.stage_missing_or_mismatched ||
+        !finding.related_entities_missing || !finding.numeric_evidence_missing_or_invalid) return false;
+
+    const std::array<axiom::DiagnosticId, 1> no_match_ids {*unrelated_report.value};
+    const auto no_match = diagnostics.audit_evidence(no_match_ids, policy);
+    if (!no_match.value || no_match.value->passed() || no_match.value->reports_without_matching_issue != 1 ||
+        no_match.value->findings.size() != 1 || !no_match.value->findings.front().matching_issue_missing) return false;
+
+    const auto empty_ids = diagnostics.audit_evidence({}, policy);
+    const std::array<axiom::DiagnosticId, 1> bad_ids {axiom::DiagnosticId {}};
+    const auto invalid_id = diagnostics.audit_evidence(bad_ids, policy);
+    auto bad_policy = policy;
+    bad_policy.issue_code_prefix.clear();
+    const auto invalid_prefix = diagnostics.audit_evidence(ids, bad_policy);
+    bad_policy = policy;
+    bad_policy.stage_prefix.clear();
+    const auto invalid_stage = diagnostics.audit_evidence(ids, bad_policy);
+    bad_policy = policy;
+    bad_policy.max_findings = 0;
+    const auto invalid_limit = diagnostics.audit_evidence(ids, bad_policy);
+    if (empty_ids.status != axiom::StatusCode::InvalidInput || invalid_id.status != axiom::StatusCode::InvalidInput ||
+        invalid_prefix.status != axiom::StatusCode::InvalidInput ||
+        invalid_stage.status != axiom::StatusCode::InvalidInput ||
+        invalid_limit.status != axiom::StatusCode::InvalidInput) return false;
+
+    const auto directory = std::filesystem::temp_directory_path() / "axiom_diag_evidence_audit_slice";
+    std::filesystem::create_directories(directory);
+    struct Cleanup {
+        std::filesystem::path path;
+        ~Cleanup() { std::filesystem::remove_all(path); }
+    } cleanup {directory};
+    const auto audit_path = directory / "audit.json";
+    const auto report_path = directory / "report.json";
+    const auto invalid_numeric_path = directory / "invalid_numeric.json";
+    const auto report_txt_path = directory / "report.txt";
+    const auto read = [](const std::filesystem::path& path) {
+        std::ifstream in(path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    };
+    { std::ofstream out(audit_path); out << "preserve invalid audit target"; }
+    const auto invalid_export = diagnostics.export_evidence_audit_json(ids, bad_policy, audit_path.string());
+    const auto invalid_id_export = diagnostics.export_evidence_audit_json(bad_ids, policy, audit_path.string());
+    if (invalid_export.status != axiom::StatusCode::InvalidInput ||
+        invalid_id_export.status != axiom::StatusCode::InvalidInput ||
+        read(audit_path) != "preserve invalid audit target") return false;
+    if (diagnostics.export_evidence_audit_json(ids, policy, audit_path.string()).status != axiom::StatusCode::Ok ||
+        diagnostics.export_report_json(*complete_report.value, report_path.string()).status != axiom::StatusCode::Ok ||
+        diagnostics.export_report_json(*incomplete_report.value, invalid_numeric_path.string()).status !=
+            axiom::StatusCode::Ok ||
+        diagnostics.export_report(*complete_report.value, report_txt_path.string()).status != axiom::StatusCode::Ok) return false;
+    const auto audit_json = read(audit_path);
+    const auto report_json = read(report_path);
+    const auto invalid_numeric_json = read(invalid_numeric_path);
+    const auto report_txt = read(report_txt_path);
+    if (audit_json.find("\"passed\":false") == std::string::npos ||
+        audit_json.find("\"omitted_findings\":1") == std::string::npos ||
+        report_json.find("\"numeric_evidence\":[{\"name\":\"gap\\\"distance\",\"value\":0.125,\"unit\":\"model\\\\unit\"}") == std::string::npos ||
+        invalid_numeric_json.find("\"name\":\"not_finite\",\"value\":null") == std::string::npos ||
+        report_txt.find("NumericEvidence: gap\"distance=0.125[model\\unit] candidates=3[count]") == std::string::npos) return false;
+
+    const auto empty_path = diagnostics.export_evidence_audit_json(ids, policy, "");
+    const auto open_failure = diagnostics.export_evidence_audit_json(ids, policy, directory.string());
+    const auto empty_path_diag = diagnostics.get(empty_path.diagnostic_id);
+    const auto open_failure_diag = diagnostics.get(open_failure.diagnostic_id);
+    if (empty_path.status != axiom::StatusCode::InvalidInput ||
+        open_failure.status != axiom::StatusCode::OperationFailed || !empty_path_diag.value ||
+        !open_failure_diag.value ||
+        !has_issue_code(*empty_path_diag.value, axiom::diag_codes::kIoExportFailure) ||
+        !has_issue_code(*open_failure_diag.value, axiom::diag_codes::kIoExportFailure)) return false;
+#if defined(__linux__)
+    const auto write_failure = diagnostics.export_evidence_audit_json(ids, policy, "/dev/full");
+    const auto write_failure_diag = diagnostics.get(write_failure.diagnostic_id);
+    if (write_failure.status != axiom::StatusCode::OperationFailed || !write_failure_diag.value ||
+        !has_issue_code(*write_failure_diag.value, axiom::diag_codes::kIoExportFailure)) return false;
+#endif
+    if (diagnostics.export_evidence_audit_json(ids, policy, audit_path.string()).status != axiom::StatusCode::Ok) return false;
+
+    const auto after = diagnostics.get(*incomplete_report.value);
+    return after.value && before.value->summary == after.value->summary &&
+           before.value->issues.size() == after.value->issues.size() &&
+           after.value->issues.front().stage == "heal.wrong_module" &&
+           after.value->issues.front().related_entities.empty() &&
+           after.value->issues.front().numeric_evidence.size() == 1;
 }
 
 bool check_single_report_export_failures() {
@@ -522,6 +661,10 @@ bool check_severity_search_limit_order() {
 }  // namespace
 
 int main() {
+    if (!check_structured_evidence_audit()) {
+        std::cerr << "structured numeric evidence audit/export or source isolation regression\n";
+        return 1;
+    }
     if (!check_severity_search_limit_order()) {
         std::cerr << "severity search order, limit or source isolation regression\n";
         return 1;

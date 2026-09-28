@@ -82,6 +82,7 @@ bool check_prep_export_failures() {
     std::filesystem::create_directory(root);
     const auto path = root / "stats.json";
     const auto diagnostic_path = root / "failure.json";
+    std::vector<axiom::DiagnosticId> failure_diagnostics;
     const auto read_file = [](const std::filesystem::path& file) {
         std::ifstream in {file};
         return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
@@ -100,7 +101,9 @@ bool check_prep_export_failures() {
         if (!report.value || report.value->issues.size() != 1) return false;
         const auto& issue = report.value->issues.front();
         if (issue.code != code || issue.stage != stage || issue.severity != axiom::IssueSeverity::Error ||
-            issue.related_entities != std::vector<std::uint64_t>{a.value, b.value}) return false;
+            issue.related_entities != std::vector<std::uint64_t>{a.value, b.value} ||
+            issue.numeric_evidence.size() < 4) return false;
+        failure_diagnostics.push_back(result.diagnostic_id);
         const auto stages = kernel.diagnostics().find_by_issue_stage(stage, 1000);
         const auto codes = kernel.diagnostics().find_by_issue_code(code, 1000);
         for (const auto* ids : {&stages, &codes}) {
@@ -113,7 +116,8 @@ bool check_prep_export_failures() {
         return json.find("\"code\":\"" + std::string(code) + "\"") != std::string::npos &&
                json.find("\"stage\":\"" + std::string(stage) + "\"") != std::string::npos &&
                json.find("\"related_entities\":[" + std::to_string(a.value) + "," +
-                         std::to_string(b.value) + "]") != std::string::npos;
+                         std::to_string(b.value) + "]") != std::string::npos &&
+               json.find("\"numeric_evidence\":[") != std::string::npos;
     };
     // Reject either invalid handle before opening/truncating an existing file.
     { std::ofstream out {path}; out << "preserve existing file"; }
@@ -139,6 +143,13 @@ bool check_prep_export_failures() {
     if (!check_failure(*lhs.value, *overlap.value, "/dev/full", axiom::StatusCode::OperationFailed,
                        axiom::diag_codes::kIoExportFailure, "bool.prep.export.write")) return false;
 #endif
+    axiom::DiagnosticEvidencePolicy policy;
+    policy.issue_code_prefix = "AXM-";
+    policy.stage_prefix = "bool.prep.export.";
+    const auto audit = kernel.diagnostics().audit_evidence(failure_diagnostics, policy);
+    if (!audit.value || !audit.value->passed() ||
+        audit.value->reports_inspected != failure_diagnostics.size() ||
+        audit.value->matching_issues != failure_diagnostics.size()) return false;
     // Retrying after rejection must export ordinary, touching, disjoint and identical inputs.
     for (const auto rhs : {*overlap.value, *touching.value, *far.value, *lhs.value}) {
         const auto result = kernel.booleans().export_boolean_prep_stats(*lhs.value, rhs, path.string());
@@ -238,7 +249,7 @@ int main() {
         return 1;
     }
     const auto* cls_issue = find_issue(*subtract_diag.value, axiom::diag_codes::kBoolClassificationFailure);
-    if (cls_issue == nullptr || cls_issue->stage != "bool.abort.classify") {
+    if (cls_issue == nullptr || cls_issue->stage != "bool.abort.classify" || cls_issue->numeric_evidence.empty()) {
         std::cerr << "expected bool.abort.classify stage on subtract containment failure\n";
         return 1;
     }
@@ -255,7 +266,8 @@ int main() {
         return 1;
     }
     const auto* isect_issue = find_issue(*intersect_disjoint_diag.value, axiom::diag_codes::kBoolIntersectionFailure);
-    if (isect_issue == nullptr || isect_issue->stage != "bool.abort.intersect") {
+    if (isect_issue == nullptr || isect_issue->stage != "bool.abort.intersect" ||
+        isect_issue->numeric_evidence.empty()) {
         std::cerr << "expected bool.abort.intersect stage on disjoint intersect failure\n";
         return 1;
     }
@@ -301,6 +313,7 @@ int main() {
         {axiom::BooleanOp::Subtract, *inner.value, *outer.value, axiom::StatusCode::OperationFailed,
          axiom::diag_codes::kBoolClassificationFailure, "bool.abort.classify"},
     };
+    std::vector<axiom::DiagnosticId> failure_diagnostics;
     for (const bool diagnostics : {false, true}) {
         axiom::BooleanOptions options;
         options.diagnostics = diagnostics;
@@ -317,10 +330,12 @@ int main() {
             }
             const auto* issue = find_issue(*report.value, test.code);
             if (issue == nullptr || issue->severity != axiom::IssueSeverity::Error || issue->stage != test.stage ||
-                issue->related_entities != std::vector<std::uint64_t>{test.lhs.value, test.rhs.value}) {
+                issue->related_entities != std::vector<std::uint64_t>{test.lhs.value, test.rhs.value} ||
+                issue->numeric_evidence.size() < 3) {
                 std::cerr << "boolean failure lost stage or input context\n";
                 return 1;
             }
+            failure_diagnostics.push_back(failed.diagnostic_id);
             const auto ids = kernel.diagnostics().find_by_issue_stage(test.stage, 1000);
             const auto codes = kernel.diagnostics().find_by_issue_code(test.code, 1000);
             for (const auto* found : {&ids, &codes}) {
@@ -341,6 +356,8 @@ int main() {
                 json.find("\"code\":\"" + std::string(test.code) + "\"") == std::string::npos ||
                 json.find("\"related_entities\":[" + std::to_string(test.lhs.value) + "," +
                           std::to_string(test.rhs.value) + "]") == std::string::npos ||
+                json.find("\"numeric_evidence\":[") == std::string::npos ||
+                json.find("\"name\":\"lhs_exists\"") == std::string::npos ||
                 kernel.body_count().value != bodies_before.value ||
                 kernel.geometry_count().value != geometry_before.value ||
                 kernel.topology_count().value != topology_before.value) {
@@ -348,6 +365,41 @@ int main() {
                 return 1;
             }
         }
+    }
+
+    axiom::DiagnosticEvidencePolicy bool_failure_policy;
+    bool_failure_policy.issue_code_prefix = "AXM-BOOL-E-";
+    bool_failure_policy.stage_prefix = "bool.";
+    const auto first_failure_before = kernel.diagnostics().get(failure_diagnostics.front());
+    const auto coverage = kernel.diagnostics().audit_evidence(failure_diagnostics, bool_failure_policy);
+    if (!first_failure_before.value || coverage.status != axiom::StatusCode::Ok || !coverage.value ||
+        !coverage.value->passed() || coverage.value->reports_inspected != failure_diagnostics.size() ||
+        coverage.value->matching_issues != failure_diagnostics.size() ||
+        coverage.value->complete_issues != failure_diagnostics.size() || !coverage.value->findings.empty()) {
+        std::cerr << "boolean failure evidence coverage gate rejected a covered branch\n";
+        return 1;
+    }
+    const auto coverage_path = std::filesystem::temp_directory_path() / "axiom_boolean_failure_coverage.json";
+    if (kernel.diagnostics().export_evidence_audit_json(
+            failure_diagnostics, bool_failure_policy, coverage_path.string()).status != axiom::StatusCode::Ok) {
+        return 1;
+    }
+    std::ifstream coverage_in {coverage_path};
+    const std::string coverage_json((std::istreambuf_iterator<char>(coverage_in)),
+                                    std::istreambuf_iterator<char>());
+    coverage_in.close();
+    std::filesystem::remove(coverage_path);
+    const auto first_failure_after = kernel.diagnostics().get(failure_diagnostics.front());
+    if (coverage_json.find("\"passed\":true") == std::string::npos ||
+        coverage_json.find("\"issues_missing_numeric_evidence\":0") == std::string::npos ||
+        !first_failure_after.value ||
+        first_failure_after.value->issues.size() != first_failure_before.value->issues.size() ||
+        first_failure_after.value->issues.back().numeric_evidence.size() !=
+            first_failure_before.value->issues.back().numeric_evidence.size() ||
+        first_failure_after.value->issues.back().numeric_evidence.front().name !=
+            first_failure_before.value->issues.back().numeric_evidence.front().name) {
+        std::cerr << "boolean coverage export changed a source report\n";
+        return 1;
     }
 
     // The input gate must continue to accept all four declared operations after rejection.

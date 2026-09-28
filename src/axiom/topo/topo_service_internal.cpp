@@ -356,29 +356,194 @@ face_cross_loop_coincident_vertices(const detail::KernelState &state,
   return std::nullopt;
 }
 
-std::optional<FaceStraightEdgeIntersection>
-face_cross_loop_straight_edge_intersection(
+std::optional<FaceBoundaryConflict> face_cross_loop_boundary_conflict(
     const detail::KernelState &state, LoopId outer_loop,
-    std::span<const LoopId> inner_loops) {
+    std::span<const LoopId> inner_loops, Scalar linear_tolerance) {
+  using WidePoint = std::array<long double, 3>;
   struct Segment {
     LoopId loop;
     EdgeId edge;
-    std::array<long double, 3> start;
-    std::array<long double, 3> end;
+    WidePoint start;
+    WidePoint end;
   };
   std::vector<Segment> seen;
-  const auto subtract = [](const auto &a, const auto &b) {
-    return std::array<long double, 3>{a[0] - b[0], a[1] - b[1],
-                                      a[2] - b[2]};
+  const auto subtract = [](const WidePoint &a, const WidePoint &b) {
+    return WidePoint{a[0] - b[0], a[1] - b[1], a[2] - b[2]};
   };
-  const auto cross = [](const auto &a, const auto &b) {
-    return std::array<long double, 3>{a[1] * b[2] - a[2] * b[1],
-                                      a[2] * b[0] - a[0] * b[2],
-                                      a[0] * b[1] - a[1] * b[0]};
+  const auto add_scaled = [](const WidePoint &a, const WidePoint &b,
+                             long double scale) {
+    return WidePoint{a[0] + scale * b[0], a[1] + scale * b[1],
+                     a[2] + scale * b[2]};
   };
-  const auto dot = [](const auto &a, const auto &b) {
+  const auto dot = [](const WidePoint &a, const WidePoint &b) {
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
   };
+  const auto clamp01 = [](long double value) {
+    return std::max(0.0L, std::min(1.0L, value));
+  };
+  const auto to_point3 = [](const WidePoint &point) {
+    return Point3{static_cast<Scalar>(point[0]),
+                  static_cast<Scalar>(point[1]),
+                  static_cast<Scalar>(point[2])};
+  };
+
+  struct ClosestPair {
+    long double first_parameter{0.0L};
+    long double second_parameter{0.0L};
+    WidePoint first_point{};
+    WidePoint second_point{};
+    long double squared_distance{0.0L};
+  };
+
+  // Closest points of two closed 3D segments.  This handles point-like
+  // degeneracy as well as parallel segments without dividing by a tiny
+  // determinant; the topology caller can therefore diagnose corrupted or
+  // near-degenerate records instead of producing NaNs.
+  const auto closest_pair = [&](const Segment &first,
+                                const Segment &second) {
+    const auto d1 = subtract(first.end, first.start);
+    const auto d2 = subtract(second.end, second.start);
+    const auto r = subtract(first.start, second.start);
+    const long double a = dot(d1, d1);
+    const long double e = dot(d2, d2);
+    const long double f = dot(d2, r);
+    long double s = 0.0L;
+    long double t = 0.0L;
+    if (a == 0.0L && e == 0.0L) {
+      s = 0.0L;
+      t = 0.0L;
+    } else if (a == 0.0L) {
+      s = 0.0L;
+      t = clamp01(f / e);
+    } else {
+      const long double c = dot(d1, r);
+      if (e == 0.0L) {
+        t = 0.0L;
+        s = clamp01(-c / a);
+      } else {
+        const long double b = dot(d1, d2);
+        const long double denominator = a * e - b * b;
+        if (denominator > 0.0L) {
+          s = clamp01((b * f - c * e) / denominator);
+        }
+        t = (b * s + f) / e;
+        if (t < 0.0L) {
+          t = 0.0L;
+          s = clamp01(-c / a);
+        } else if (t > 1.0L) {
+          t = 1.0L;
+          s = clamp01((b - c) / a);
+        }
+      }
+    }
+    const auto p = add_scaled(first.start, d1, s);
+    const auto q = add_scaled(second.start, d2, t);
+    const auto delta = subtract(p, q);
+    return ClosestPair{s, t, p, q, std::max(0.0L, dot(delta, delta))};
+  };
+
+  const auto endpoint_parameter = [](long double value,
+                                     long double parameter_epsilon) {
+    return value <= parameter_epsilon || value >= 1.0L - parameter_epsilon;
+  };
+
+  const auto inspect_pair = [&](const Segment &first,
+                                const Segment &second)
+      -> std::optional<FaceBoundaryConflict> {
+    const auto d1 = subtract(first.end, first.start);
+    const auto d2 = subtract(second.end, second.start);
+    const auto offset = subtract(second.start, first.start);
+    const long double a = dot(d1, d1);
+    const long double e = dot(d2, d2);
+    const long double parameter_epsilon =
+        64.0L * std::numeric_limits<long double>::epsilon();
+    const auto cross_is_roundoff_zero = [](const WidePoint &lhs,
+                                           const WidePoint &rhs) {
+      const std::array<std::array<std::size_t, 4>, 3> terms{{
+          {{1, 2, 2, 1}}, {{2, 0, 0, 2}}, {{0, 1, 1, 0}}}};
+      for (std::size_t axis = 0; axis < 3; ++axis) {
+        const auto indices = terms[axis];
+        const long double first = lhs[indices[0]] * rhs[indices[1]];
+        const long double second = lhs[indices[2]] * rhs[indices[3]];
+        const long double residual = first - second;
+        const long double roundoff =
+            64.0L * std::numeric_limits<long double>::epsilon() *
+            (std::abs(first) + std::abs(second));
+        if (std::abs(residual) > roundoff) return false;
+      }
+      return true;
+    };
+
+    // Exact collinearity is tested independently of the user tolerance so a
+    // true overlap remains distinguishable from merely close parallel edges.
+    // Each cross-product residual is compared with the products that formed it,
+    // so a tiny real separation is not swallowed merely because coordinates on
+    // an unrelated axis are large.
+    if (a > 0.0L && e > 0.0L) {
+      if (cross_is_roundoff_zero(d1, d2) &&
+          cross_is_roundoff_zero(offset, d1)) {
+        long double second_start_on_first = dot(offset, d1) / a;
+        long double second_end_on_first =
+            dot(subtract(second.end, first.start), d1) / a;
+        if (second_start_on_first > second_end_on_first) {
+          std::swap(second_start_on_first, second_end_on_first);
+        }
+        const long double overlap_start =
+            std::max(0.0L, second_start_on_first);
+        const long double overlap_end =
+            std::min(1.0L, second_end_on_first);
+        if (overlap_end + parameter_epsilon >= overlap_start) {
+          const bool positive_length =
+              overlap_end - overlap_start > parameter_epsilon;
+          const long double first_parameter =
+              positive_length ? (overlap_start + overlap_end) * 0.5L
+                              : clamp01((overlap_start + overlap_end) * 0.5L);
+          const auto point = add_scaled(first.start, d1, first_parameter);
+          return FaceBoundaryConflict{
+              positive_length ? FaceBoundaryConflictKind::CollinearOverlap
+                              : FaceBoundaryConflictKind::EndpointTouch,
+              first.loop, second.loop, first.edge, second.edge,
+              to_point3(point), to_point3(point), 0.0};
+        }
+      }
+    }
+
+    const auto closest = closest_pair(first, second);
+    const long double distance = std::sqrt(closest.squared_distance);
+    bool coincident_points = true;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      const long double first_step =
+          closest.first_parameter * d1[axis];
+      const long double second_step =
+          closest.second_parameter * d2[axis];
+      const long double residual =
+          closest.first_point[axis] - closest.second_point[axis];
+      const long double roundoff =
+          64.0L * std::numeric_limits<long double>::epsilon() *
+          (std::abs(first.start[axis]) + std::abs(first_step) +
+           std::abs(second.start[axis]) + std::abs(second_step));
+      if (std::abs(residual) > roundoff) coincident_points = false;
+    }
+    if (coincident_points) {
+      const bool endpoint = endpoint_parameter(closest.first_parameter,
+                                               parameter_epsilon) ||
+                            endpoint_parameter(closest.second_parameter,
+                                               parameter_epsilon);
+      return FaceBoundaryConflict{
+          endpoint ? FaceBoundaryConflictKind::EndpointTouch
+                   : FaceBoundaryConflictKind::ProperIntersection,
+          first.loop, second.loop, first.edge, second.edge,
+          to_point3(closest.first_point), to_point3(closest.second_point), 0.0};
+    }
+    if (distance <= static_cast<long double>(linear_tolerance)) {
+      return FaceBoundaryConflict{
+          FaceBoundaryConflictKind::NearContact, first.loop, second.loop,
+          first.edge, second.edge, to_point3(closest.first_point),
+          to_point3(closest.second_point), static_cast<Scalar>(distance)};
+    }
+    return std::nullopt;
+  };
+
   for (std::size_t i = 0; i <= inner_loops.size(); ++i) {
     const auto loop_id = i == 0 ? outer_loop : inner_loops[i - 1];
     const auto loop_it = state.loops.find(loop_id.value);
@@ -403,33 +568,10 @@ face_cross_loop_straight_edge_intersection(
         continue;
       const Segment current{loop_id, edge_id, {a.x, a.y, a.z},
                             {b.x, b.y, b.z}};
-      const auto r = subtract(current.end, current.start);
       for (const auto &prior : seen) {
         if (prior.loop.value == loop_id.value) continue;
-        const auto s = subtract(prior.end, prior.start);
-        const auto w = subtract(prior.start, current.start);
-        const auto n = cross(r, s);
-        const auto n2 = dot(n, n);
-        if (n2 == 0.0L) continue;  // Parallel or collinear: separate rule.
-        const long double t = dot(cross(w, s), n) / n2;
-        const long double u = dot(cross(w, r), n) / n2;
-        if (t < 0.0L || t > 1.0L || u < 0.0L || u > 1.0L)
-          continue;
-        bool same_point = true;
-        for (std::size_t axis = 0; axis < 3; ++axis) {
-          const long double tr = t * r[axis];
-          const long double us = u * s[axis];
-          const long double roundoff =
-              32.0L * std::numeric_limits<long double>::epsilon() *
-              (std::abs(tr) + std::abs(w[axis]) + std::abs(us));
-          if (std::abs(tr - w[axis] - us) > roundoff)
-            same_point = false;
-        }
-        if (same_point) {
-          return FaceStraightEdgeIntersection{
-              {prior.loop.value, loop_id.value, prior.edge.value,
-               edge_id.value},
-              t == 0.0L || t == 1.0L || u == 0.0L || u == 1.0L};
+        if (auto conflict = inspect_pair(prior, current)) {
+          return conflict;
         }
       }
       seen.push_back(current);

@@ -39,8 +39,25 @@ std::string lower_copy(std::string value);
 std::string base64_encode(std::span<const std::uint8_t> data);
 void append_padding_4(std::vector<std::uint8_t>& out);
 void parse_axiom_interchange_metadata_lines(std::istream& in, detail::BodyRecord& record);
+/// Strict parser used by IGES metadata-subset import before a BodyId is allocated.
+/// Unlike the legacy STEP metadata reader, malformed recognized AXIOM_* fields are rejected.
+std::optional<std::string> parse_iges_subset_body_record(std::string_view content,
+                                                         detail::BodyRecord& record);
 std::string strip_leading_hash_lines(const std::string& in);
-void fill_body_record_from_axmjson_content(const std::string& content, detail::BodyRecord& record);
+/// Strict parser for the JSON payload shared by AXMJSON and AXIOM_BREP interchange.
+/// Every field emitted by write_axmjson_payload is required so truncated files cannot
+/// silently materialize a default unit body.
+std::optional<std::string> parse_exact_brep_json_body_record(std::string_view content,
+                                                              std::string_view expected_format,
+                                                              detail::BodyRecord& record);
+enum class ExactBrepRecordValidationFailure {
+    None,
+    NonFinite,
+    InvalidBounds,
+    DegenerateAxis
+};
+/// Validate imported record geometry before model-store/ID mutation.
+ExactBrepRecordValidationFailure validate_exact_brep_body_record(const detail::BodyRecord& record);
 void write_axmjson_payload(std::ostream& out, const detail::BodyRecord& body, const ExportOptions& options,
                            std::string_view format_json_value);
 std::uint32_t crc32_ieee_update(std::uint32_t crc, const std::uint8_t* p, std::size_t n);

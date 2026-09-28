@@ -1,5 +1,6 @@
 #include "axiom/internal/io/io_service_internal.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -7,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <iterator>
 #include <limits>
 #include <regex>
 #include <sstream>
@@ -314,22 +316,73 @@ std::string json_escape(const std::string& in) {
 }
 
 bool extract_json_string(const std::string& content, std::string_view key, std::string& out) {
-    const std::regex pattern("\"" + std::string(key) + "\"\\s*:\\s*\"([^\"]*)\"");
-    std::smatch match;
-    if (!std::regex_search(content, match, pattern) || match.size() < 2) {
+    const std::string marker = "\"" + std::string(key) + "\"";
+    const auto key_pos = content.find(marker);
+    if (key_pos == std::string::npos) {
         return false;
     }
-    out = match[1].str();
-    return true;
+    auto pos = key_pos + marker.size();
+    while (pos < content.size() && std::isspace(static_cast<unsigned char>(content[pos])) != 0) ++pos;
+    if (pos >= content.size() || content[pos++] != ':') return false;
+    while (pos < content.size() && std::isspace(static_cast<unsigned char>(content[pos])) != 0) ++pos;
+    if (pos >= content.size() || content[pos++] != '"') return false;
+
+    std::string value;
+    while (pos < content.size()) {
+        const char ch = content[pos++];
+        if (ch == '"') {
+            while (pos < content.size() && std::isspace(static_cast<unsigned char>(content[pos])) != 0) ++pos;
+            if (pos < content.size() && content[pos] != ',' && content[pos] != '}') return false;
+            out = std::move(value);
+            return true;
+        }
+        if (ch != '\\') {
+            if (static_cast<unsigned char>(ch) < 0x20) return false;
+            value.push_back(ch);
+            continue;
+        }
+        if (pos >= content.size()) return false;
+        switch (content[pos++]) {
+            case '"': value.push_back('"'); break;
+            case '\\': value.push_back('\\'); break;
+            case '/': value.push_back('/'); break;
+            case 'b': value.push_back('\b'); break;
+            case 'f': value.push_back('\f'); break;
+            case 'n': value.push_back('\n'); break;
+            case 'r': value.push_back('\r'); break;
+            case 't': value.push_back('\t'); break;
+            default: return false;
+        }
+    }
+    return false;
 }
 
 bool extract_json_number(const std::string& content, std::string_view key, Scalar& out) {
-    const std::regex pattern("\"" + std::string(key) + "\"\\s*:\\s*(-?[0-9]+(?:\\.[0-9]+)?)");
+    const std::regex pattern("\"" + std::string(key) +
+                             "\"\\s*:\\s*(-?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?)");
     std::smatch match;
     if (!std::regex_search(content, match, pattern) || match.size() < 2) {
         return false;
     }
-    out = std::stod(match[1].str());
+    const auto token_end = static_cast<std::size_t>(match.position(1) + match.length(1));
+    if (token_end < content.size()) {
+        const auto next = static_cast<unsigned char>(content[token_end]);
+        if (std::isspace(next) == 0 && content[token_end] != ',' && content[token_end] != '}') {
+            return false;
+        }
+    }
+    try {
+        std::size_t consumed = 0;
+        const auto token = match[1].str();
+        out = std::stod(token, &consumed);
+        if (consumed != token.size()) {
+            return false;
+        }
+    } catch (const std::invalid_argument&) {
+        return false;
+    } catch (const std::out_of_range&) {
+        return false;
+    }
     return true;
 }
 
@@ -435,6 +488,77 @@ void parse_axiom_interchange_metadata_lines(std::istream& in, detail::BodyRecord
     }
 }
 
+std::optional<std::string> parse_iges_subset_body_record(std::string_view content,
+                                                         detail::BodyRecord& record) {
+    if (content.empty()) {
+        return "IGES 导入失败：输入文件为空";
+    }
+    if (content.find("START") == std::string_view::npos ||
+        content.find("TERMINATE") == std::string_view::npos) {
+        return "IGES 导入失败：Axiom 子集缺少 START 或 TERMINATE 边界";
+    }
+    if (content.find("1HAXIOM") == std::string_view::npos &&
+        content.find("AxiomKernel IGES metadata") == std::string_view::npos &&
+        content.find("AXIOM_") == std::string_view::npos) {
+        return "IGES 导入失败：文件不是可识别的 Axiom IGES 元数据子集";
+    }
+
+    std::istringstream input {std::string(content)};
+    std::string line;
+    while (std::getline(input, line)) {
+        line = trim_comment(std::move(line));
+        if (line.rfind("AXIOM_LABEL ", 0) == 0) {
+            record.label = line.substr(std::string("AXIOM_LABEL ").size());
+            trim_ascii_inplace(record.label);
+            continue;
+        }
+        if (line.rfind("AXIOM_BODY_KIND ", 0) == 0) {
+            auto value = line.substr(std::string("AXIOM_BODY_KIND ").size());
+            trim_ascii_inplace(value);
+            const auto kind = parse_body_kind(value);
+            if (body_kind_name(kind) != value) {
+                return "IGES 导入失败：AXIOM_BODY_KIND 值不受支持";
+            }
+            record.kind = kind;
+            continue;
+        }
+        if (line.rfind("AXIOM_IGES_ENTITY ", 0) == 0) {
+            record.io_iges_entity_hint = line.substr(std::string("AXIOM_IGES_ENTITY ").size());
+            trim_ascii_inplace(record.io_iges_entity_hint);
+            if (record.io_iges_entity_hint.empty()) {
+                return "IGES 导入失败：AXIOM_IGES_ENTITY 为空";
+            }
+            continue;
+        }
+        if (line.rfind("AXIOM_ORIGIN", 0) == 0) {
+            if (!parse_triplet_line(line, "AXIOM_ORIGIN", record.origin.x, record.origin.y, record.origin.z)) {
+                return "IGES 导入失败：AXIOM_ORIGIN 字段无效";
+            }
+            continue;
+        }
+        if (line.rfind("AXIOM_AXIS", 0) == 0) {
+            if (!parse_triplet_line(line, "AXIOM_AXIS", record.axis.x, record.axis.y, record.axis.z)) {
+                return "IGES 导入失败：AXIOM_AXIS 字段无效";
+            }
+            continue;
+        }
+        if (line.rfind("AXIOM_PARAMS", 0) == 0) {
+            if (!parse_triplet_line(line, "AXIOM_PARAMS", record.a, record.b, record.c)) {
+                return "IGES 导入失败：AXIOM_PARAMS 字段无效";
+            }
+            continue;
+        }
+        if (line.rfind("AXIOM_BBOX", 0) == 0) {
+            BoundingBox parsed {};
+            if (!parse_bbox_line(line, parsed)) {
+                return "IGES 导入失败：AXIOM_BBOX 字段无效";
+            }
+            record.bbox = parsed;
+        }
+    }
+    return std::nullopt;
+}
+
 std::string strip_leading_hash_lines(const std::string& in) {
     std::istringstream sin(in);
     std::ostringstream sout;
@@ -452,30 +576,101 @@ std::string strip_leading_hash_lines(const std::string& in) {
     return sout.str();
 }
 
-void fill_body_record_from_axmjson_content(const std::string& content, detail::BodyRecord& record) {
-    std::string kind;
+std::optional<std::string> parse_exact_brep_json_body_record(std::string_view content,
+                                                              std::string_view expected_format,
+                                                              detail::BodyRecord& record) {
+    const auto first = content.find_first_not_of(" \t\r\n");
+    const auto last = content.find_last_not_of(" \t\r\n");
+    if (first == std::string_view::npos || content[first] != '{' || content[last] != '}') {
+        return "精确 BREP 导入失败：JSON 根对象缺失或截断";
+    }
+
+    const std::string text {content};
+    std::string format;
     std::string label;
-    if (extract_json_string(content, "body_kind", kind)) {
-        record.kind = parse_body_kind(kind);
+    std::string kind_name;
+    if (!extract_json_string(text, "format", format) || format != expected_format) {
+        return "精确 BREP 导入失败：format 标识缺失或与入口不匹配";
     }
-    if (extract_json_string(content, "label", label)) {
-        record.label = label;
+    if (!extract_json_string(text, "label", label)) {
+        return "精确 BREP 导入失败：label 字段缺失或无效";
     }
-    extract_json_number(content, "origin_x", record.origin.x);
-    extract_json_number(content, "origin_y", record.origin.y);
-    extract_json_number(content, "origin_z", record.origin.z);
-    extract_json_number(content, "axis_x", record.axis.x);
-    extract_json_number(content, "axis_y", record.axis.y);
-    extract_json_number(content, "axis_z", record.axis.z);
-    extract_json_number(content, "param_a", record.a);
-    extract_json_number(content, "param_b", record.b);
-    extract_json_number(content, "param_c", record.c);
-    Scalar min_x {}, min_y {}, min_z {}, max_x {}, max_y {}, max_z {};
-    if (extract_json_number(content, "bbox_min_x", min_x) && extract_json_number(content, "bbox_min_y", min_y) &&
-        extract_json_number(content, "bbox_min_z", min_z) && extract_json_number(content, "bbox_max_x", max_x) &&
-        extract_json_number(content, "bbox_max_y", max_y) && extract_json_number(content, "bbox_max_z", max_z)) {
-        record.bbox = detail::make_bbox({min_x, min_y, min_z}, {max_x, max_y, max_z});
+    if (!extract_json_string(text, "body_kind", kind_name)) {
+        return "精确 BREP 导入失败：body_kind 字段缺失或无效";
     }
+    const auto parsed_kind = parse_body_kind(kind_name);
+    if (body_kind_name(parsed_kind) != kind_name) {
+        return "精确 BREP 导入失败：body_kind 值不受支持";
+    }
+
+    Scalar min_x {};
+    Scalar min_y {};
+    Scalar min_z {};
+    Scalar max_x {};
+    Scalar max_y {};
+    Scalar max_z {};
+    struct RequiredNumber {
+        std::string_view key;
+        Scalar* value;
+    };
+    const RequiredNumber metadata[] = {
+        {"origin_x", &record.origin.x}, {"origin_y", &record.origin.y}, {"origin_z", &record.origin.z},
+        {"axis_x", &record.axis.x}, {"axis_y", &record.axis.y}, {"axis_z", &record.axis.z},
+        {"param_a", &record.a}, {"param_b", &record.b}, {"param_c", &record.c},
+    };
+    const RequiredNumber bounds[] = {
+        {"bbox_min_x", &min_x}, {"bbox_min_y", &min_y}, {"bbox_min_z", &min_z},
+        {"bbox_max_x", &max_x}, {"bbox_max_y", &max_y}, {"bbox_max_z", &max_z},
+    };
+    const bool has_metadata = std::any_of(std::begin(metadata), std::end(metadata),
+        [&text](const RequiredNumber& field) {
+            return text.find("\"" + std::string(field.key) + "\"") != std::string::npos;
+        });
+    // Early AXMJSON files contained only identity plus bounds. Preserve that
+    // established import contract, while requiring the extended geometric
+    // metadata as one complete group whenever any of its fields is present.
+    if (expected_format != "AXMJSON" || has_metadata) {
+        for (const auto& field : metadata) {
+            if (!extract_json_number(text, field.key, *field.value)) {
+                return "精确 BREP 导入失败：数值字段 " + std::string(field.key) + " 缺失或无效";
+            }
+        }
+    }
+    for (const auto& field : bounds) {
+        if (!extract_json_number(text, field.key, *field.value)) {
+            return "精确 BREP 导入失败：数值字段 " + std::string(field.key) + " 缺失或无效";
+        }
+    }
+
+    record.kind = parsed_kind;
+    record.label = std::move(label);
+    record.bbox = detail::make_bbox({min_x, min_y, min_z}, {max_x, max_y, max_z});
+    return std::nullopt;
+}
+
+ExactBrepRecordValidationFailure validate_exact_brep_body_record(const detail::BodyRecord& record) {
+    const Scalar values[] = {
+        record.origin.x, record.origin.y, record.origin.z,
+        record.axis.x, record.axis.y, record.axis.z,
+        record.a, record.b, record.c,
+        record.bbox.min.x, record.bbox.min.y, record.bbox.min.z,
+        record.bbox.max.x, record.bbox.max.y, record.bbox.max.z,
+    };
+    if (std::any_of(std::begin(values), std::end(values),
+                    [](Scalar value) { return !std::isfinite(value); })) {
+        return ExactBrepRecordValidationFailure::NonFinite;
+    }
+    if (!record.bbox.is_valid || record.bbox.min.x > record.bbox.max.x ||
+        record.bbox.min.y > record.bbox.max.y || record.bbox.min.z > record.bbox.max.z) {
+        return ExactBrepRecordValidationFailure::InvalidBounds;
+    }
+    const auto axis_length_squared = record.axis.x * record.axis.x +
+                                     record.axis.y * record.axis.y +
+                                     record.axis.z * record.axis.z;
+    if (axis_length_squared <= std::numeric_limits<Scalar>::epsilon()) {
+        return ExactBrepRecordValidationFailure::DegenerateAxis;
+    }
+    return ExactBrepRecordValidationFailure::None;
 }
 
 void write_axmjson_payload(std::ostream& out, const detail::BodyRecord& body, const ExportOptions& options,

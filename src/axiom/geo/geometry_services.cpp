@@ -5,6 +5,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <queue>
 #include <span>
 #include <sstream>
 

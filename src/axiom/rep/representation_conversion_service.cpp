@@ -857,6 +857,13 @@ Result<void> RepresentationConversionService::export_mesh_report_json(
         }
     }
     out << "}";
+    out.flush();
+    out.close();
+    if (!out) {
+        return detail::failed_void(
+            *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+            "网格报告导出失败：写入输出文件失败", "网格报告导出失败");
+    }
     return ok_void(state_->create_diagnostic("已导出网格统计报告"));
 }
 

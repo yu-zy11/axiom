@@ -30,8 +30,39 @@ class SweepService {
 public:
     explicit SweepService(std::shared_ptr<detail::KernelState> state);
 
+    /// Simple planar polygons (including concave profiles and disjoint holes) produce a triangulated closed prism.
+    /// Requires positive finite distance and a direction transverse to the profile plane.
     Result<BodyId> extrude(const ProfileRef& profile, const Vec3& direction, Scalar distance);
+    /// Explicit planar polygon, optionally with holes: straight extrusion with uniform section scaling.
+    /// At t in [0,1], p becomes center + (1+t*(end_scale-1))*(p-center) + t*unit(direction)*distance.
+    /// The finite center must lie in the profile plane; distance is finite and positive, end_scale is finite and nonnegative.
+    /// Positive scales preserve concavities/holes. Zero scale closes a hole-free convex/concave profile
+    /// at one shared apex (center + unit(direction)*distance); holes and numerical degeneracy are rejected.
+    Result<BodyId> extrude_scaled(const ProfileRef& profile, const Vec3& direction, Scalar distance,
+                                 const Point3& center, Scalar end_scale);
+    /// Extrude an explicit planar polygon (including concavities/holes) along direction to a plane.
+    /// Every boundary point must reach the plane strictly forward, beyond the planarity tolerance.
+    /// Direction must be transverse to both planes; normal sign and vector magnitudes are immaterial.
+    /// Produces an actual planar closed BRep; touching/crossing planes and numerical degeneracy are rejected.
+    Result<BodyId> extrude_to_plane(const ProfileRef& profile, const Vec3& direction, const Plane& end_plane);
+    /// Revolve a profile through a positive angle no greater than one full turn.
+    /// Explicit planar polygons are conservatively subdivided in angle and produce an
+    /// owned triangulated closed BRep when the axis lies in the profile plane. Partial
+    /// and full turns support a profile strictly separated from the axis, or a simply
+    /// connected profile whose single boundary edge lies on the axis. Concave outlines
+    /// are supported; profiles that cross the axis, touch it at an isolated point,
+    /// contain holes or are numerically near-degenerate are rejected before allocation.
     Result<BodyId> revolve(const ProfileRef& profile, const Axis3& axis, Scalar angle);
+    /// Explicit polygons along a bounded rail, producing owned triangulated closed topology.
+    /// Line segments and CompositePolyline keep the profile in world space and require every
+    /// segment to advance through its plane. Bezier, B-spline and NURBS rails use a sampled
+    /// rotation-minimizing frame. A CompositeChain may join bounded line, circle/ellipse arc,
+    /// Bezier, B-spline and NURBS children when adjacent endpoints and tangent directions agree;
+    /// closed chains, endpoint/tangent-continuous closed splines and Circle/Ellipse rails are
+    /// periodic and have no caps. Curve-following profiles
+    /// must start on the rail in a plane normal to its tangent. Concavities and holes are supported;
+    /// gaps, tangent-discontinuous joints, cusps, nested chains, excessive curvature and
+    /// self-approaching rails are rejected without allocating a body or owned topology.
     Result<BodyId> sweep(const ProfileRef& profile, CurveId rail);
     Result<BodyId> loft(std::span<const ProfileRef> profiles);
     Result<BodyId> thicken(FaceId face_id, Scalar distance);

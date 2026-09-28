@@ -1363,13 +1363,16 @@ MeshRecord tessellate_face_planar_mesh(const KernelState& state, FaceId face_id,
         mesh.normals.assign(mesh.vertices.size(), n);
     }
     mesh.texcoords.clear();
-    mesh.texcoords.reserve(mesh.vertices.size());
-    const auto& p0 = mesh.vertices.front();
-    const auto u_axis = pick_orthogonal_unit(n);
-    const auto v_axis = normalize(cross(n, u_axis));
-    for (const auto& p : mesh.vertices) {
-        const Vec3 d {p.x - p0.x, p.y - p0.y, p.z - p0.z};
-        mesh.texcoords.push_back(Point2{dot(d, u_axis), dot(d, v_axis)});
+    // Face-local UVs preserve seams during welding; only create them when requested.
+    if (options.generate_texcoords) {
+        mesh.texcoords.reserve(mesh.vertices.size());
+        const auto& p0 = mesh.vertices.front();
+        const auto u_axis = pick_orthogonal_unit(n);
+        const auto v_axis = normalize(cross(n, u_axis));
+        for (const auto& p : mesh.vertices) {
+            const Vec3 d {p.x - p0.x, p.y - p0.y, p.z - p0.z};
+            mesh.texcoords.push_back(Point2{dot(d, u_axis), dot(d, v_axis)});
+        }
     }
 
     // Fan triangulation; suitable for convex faces (the current minimal owned topology uses rectangles).

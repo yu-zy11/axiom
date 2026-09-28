@@ -64,6 +64,20 @@ bool kernel_topology_version_audit_consistent(const detail::KernelState& s) {
   return s.topology_last_committed_version + 1 == s.next_version;
 }
 
+bool kernel_topology_cancellation_audit_consistent(
+    const detail::KernelState& s) {
+  if (s.topology_cancellation_rollback_count >
+      s.topology_cancellation_observed_count) {
+    return false;
+  }
+  if (s.topology_cancellation_rollback_count == 0) {
+    return s.topology_cancelled_write_operations_total == 0 &&
+           s.topology_last_cancelled_write_operations == 0;
+  }
+  return s.topology_last_cancelled_write_operations <=
+         s.topology_cancelled_write_operations_total;
+}
+
 bool kernel_eval_graph_store_maps_consistent(const detail::KernelState& s) {
   const auto has_node = [&s](std::uint64_t id) { return s.eval_nodes.find(id) != s.eval_nodes.end(); };
   for (const auto& [id, kind] : s.eval_nodes) {
@@ -365,6 +379,10 @@ Result<bool> Kernel::core_runtime_invariants_hold() const {
   }
   if (!kernel_topology_version_audit_consistent(*state_)) {
     return ok_result(false, state_->create_diagnostic("核心运行不变量：拓扑版本审计未通过"));
+  }
+  if (!kernel_topology_cancellation_audit_consistent(*state_)) {
+    return ok_result(false, state_->create_diagnostic(
+                                "核心运行不变量：拓扑取消审计未通过"));
   }
   if (!kernel_eval_graph_store_maps_consistent(*state_)) {
     return ok_result(false, state_->create_diagnostic("核心运行不变量：EvalGraph 存储映射未通过"));

@@ -1,20 +1,26 @@
 {
   "agent_command": ["codex", "exec", "--sandbox", "workspace-write", "-"],
   "build_dir": "build-agent",
+  "build_parallel_jobs": 4,
+  "batch_enabled": true,
+  "batch_min_packages": 3,
+  "batch_min_code_lines": 1000,
+  "batch_max_packages": 8,
+  "docs_timeout_seconds": 900,
   "full_test_interval": 5,
   "unlocked_tiers": 2,
   "requirement_weights": {"FR-OPS-001": 5, "FR-QUERY-001": 2},
   "task_briefs": {
     "FR-OPS-001": {
-      "goal": "推进拉伸、旋转或扫掠的一个真实拓扑物化子域；输出应可由拓扑验证器验收，并通过公开 API 查询到实际面、边和体，不能仅新增 bbox 或统计记录。",
+      "goal": "选定拉伸、旋转或扫掠中的一个完整特征功能包，集中实现主流程、相关轮廓/方向变体、拓扑查询和退化/事务回归，再统一构建验收；输出应通过拓扑验证器并可由公开 API 查询实际面、边和体，不能仅新增 bbox 或统计记录。",
       "entrypoints": ["src/axiom/ops/ops_services.cpp", "src/axiom/internal/core/topology_materialization.h", "tests/ops/ops_heal_test.cpp"]
     },
     "FR-QUERY-001": {
-      "goal": "交付一个可从公开 API 调用的几何或拓扑查询能力，明确结果单位、空结果和修改后失效语义，并以跨模块测试验证返回值。",
+      "goal": "交付一组围绕同一模型或算法的完整几何/拓扑查询能力，集中完成公开 API、共享计算、单位、空结果、修改/回滚语义和跨模块回归后统一验收，避免将同一接口族拆成多轮零散查询。",
       "entrypoints": ["include/axiom/geo/geometry_services.h", "include/axiom/topo/topology_service.h", "tests/eval/query_eval_test.cpp"]
     },
     "FR-BOOL-001": {
-      "goal": "推进真实求交、切分、分类或重建链路的一个可验证子域；成功结果需由拓扑验证器检查，不把 bbox 或 mesh 近似宣称为精确布尔。",
+      "goal": "选定有明确输入支持范围的完整布尔功能包，打通该范围所需的真实求交、切分、分类和重建链路并集中补齐回归，再统一验收；成功结果需通过拓扑验证器，不把 bbox 或 mesh 近似宣称为精确布尔。",
       "entrypoints": ["src/axiom/ops/ops_services.cpp", "tests/ops/boolean_workflow_test.cpp"]
     }
   },

@@ -14,6 +14,44 @@ namespace detail {
 struct KernelState;
 }
 
+/// 重量级流程诊断证据门禁。仅审计问题码前缀与最低严重级别同时匹配的 issue。
+struct DiagnosticEvidencePolicy {
+    std::string issue_code_prefix;
+    std::string stage_prefix;
+    IssueSeverity minimum_severity {IssueSeverity::Error};
+    bool require_stage {true};
+    bool require_related_entities {true};
+    bool require_numeric_evidence {true};
+    std::uint64_t max_findings {256};
+};
+
+struct DiagnosticEvidenceFinding {
+    DiagnosticId diagnostic_id {};
+    std::uint64_t issue_index {};
+    std::string issue_code;
+    bool matching_issue_missing {false};
+    bool stage_missing_or_mismatched {false};
+    bool related_entities_missing {false};
+    bool numeric_evidence_missing_or_invalid {false};
+};
+
+struct DiagnosticEvidenceAudit {
+    std::uint64_t reports_inspected {};
+    std::uint64_t matching_issues {};
+    std::uint64_t complete_issues {};
+    std::uint64_t reports_without_matching_issue {};
+    std::uint64_t issues_missing_stage {};
+    std::uint64_t issues_missing_related_entities {};
+    std::uint64_t issues_missing_numeric_evidence {};
+    std::uint64_t omitted_findings {};
+    std::vector<DiagnosticEvidenceFinding> findings;
+
+    [[nodiscard]] bool passed() const {
+        return reports_without_matching_issue == 0 && issues_missing_stage == 0 &&
+               issues_missing_related_entities == 0 && issues_missing_numeric_evidence == 0;
+    }
+};
+
 class DiagnosticService {
 public:
     explicit DiagnosticService(std::shared_ptr<detail::KernelState> state);
@@ -116,6 +154,14 @@ public:
     Result<std::vector<DiagnosticId>> recent_ids_with_issue_code(std::string_view code, std::uint64_t max_results) const;
     Result<std::vector<DiagnosticId>> recent_ids_with_entity(std::uint64_t entity_id, std::uint64_t max_results) const;
     Result<DiagnosticStats> stats_of_ids(std::span<const DiagnosticId> ids) const;
+    /// 审计指定报告内重量级失败 issue 的阶段、实体和有限数值证据；重复 ID 仅审计一次。
+    /// 策略或 ID 非法时结构化失败，且绝不修改被审计的源报告。
+    Result<DiagnosticEvidenceAudit> audit_evidence(std::span<const DiagnosticId> ids,
+                                                    const DiagnosticEvidencePolicy& policy) const;
+    /// 将 `audit_evidence` 的完整统计与限额 findings 导出为稳定 JSON；先完成审计再打开目标文件。
+    Result<void> export_evidence_audit_json(std::span<const DiagnosticId> ids,
+                                            const DiagnosticEvidencePolicy& policy,
+                                            std::string_view path) const;
 
 private:
     std::shared_ptr<detail::KernelState> state_;

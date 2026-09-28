@@ -182,7 +182,7 @@
 | 错误码 | 严重级别 | 含义 |
 |---|---|---|
 | `AXM-CORE-E-0001` | Error | 输入对象为空或句柄无效 |
-| `AXM-CORE-E-0002` | Error | 参数越界（含 `TopologyTransaction::create_vertex` 拒绝任一坐标为 NaN/±Inf；返回 `InvalidInput`，不写入拓扑或事务计数） |
+| `AXM-CORE-E-0002` | Error | 参数越界（含 `TopologyTransaction::create_vertex` 拒绝任一坐标为 NaN/±Inf；返回 `InvalidInput`，不写入拓扑或事务计数；带孔拉伸/线段扫掠的越界、相交/接触/嵌套、非共面/退化环及数值物化失败同样返回该码，失败不分配模型 ID；旋转/放样尚不支持非空内环时也返回该码；第 65 包 `extrude_scaled` 缺失显式轮廓、负/非有限比例、带孔尖顶（第 66 包允许无孔轮廓的零比例尖顶）、离面或非有限中心、无效距离/方向、缩放截面数值退化沿用该码，失败不污染模型） |
 | `AXM-CORE-E-0003` | Error | 当前对象不存在 |
 | `AXM-CORE-E-0004` | Error | 不支持的操作模式 |
 | `AXM-CORE-E-0005` | Fatal | 内部状态损坏 |
@@ -221,6 +221,7 @@
 | `AXM-GEO-E-0008` | Error | 修剪域非法 |
 | `AXM-GEO-E-0009` | Error | 求值器不可用 |
 | `AXM-GEO-E-0010` | Error | 偏置曲面有效半径非正（球/圆柱等解析基面下偏置自交或退化壳） |
+| `AXM-GEO-E-0011` | Error | 数值曲线长度积分失败（求值预算耗尽、精度停滞或速度不可用） |
 
 ## 7.4 `TOPO` 拓扑层错误码
 
@@ -251,8 +252,10 @@
 | `AXM-TOPO-E-0023` | Error | 环在闭合终点之外重复经过同一顶点，形成自接触的非简单边界；`create_loop` 在写入前拒绝并关联重复顶点与两条冲突定向边 |
 | `AXM-TOPO-E-0024` | Error | 同一面中不同边界环共用同一拓扑顶点；`create_face` 在写入前拒绝，`validate_face` 检出存量缺陷，关联冲突环与顶点 ID |
 | `AXM-TOPO-E-0025` | Error | 同一面中不同边界环的独立顶点具有完全相同的有限三维坐标；`create_face` 在写入前拒绝，`validate_face` 检出存量缺陷，关联两个环与两个顶点 ID。仅覆盖顶点坐标精确重合，不代表完整几何自交检测 |
-| `AXM-TOPO-E-0026` | Error | 同一面中不同边界环的直线或线段边在三维空间内部相交；`create_face` 在写入前拒绝，`validate_face` 检出存量缺陷，关联两个环与两条边 ID。仅覆盖直线边段的非平行内部交点，不代表曲线求交、端点触碰或共线重叠检测 |
-| `AXM-TOPO-E-0027` | Error | 同一面中不同边界环的非平行直线或线段边在三维空间端点相接（至少一条边的端点落在另一条边上）；`create_face` 在写入前拒绝，`validate_face` 检出存量缺陷，关联两个环与两条边 ID。共线重叠、曲线求交及容差邻近相接仍待覆盖 |
+| `AXM-TOPO-E-0026` | Error | 同一面中不同边界环的有限 Line/LineSegment 边段在三维空间内部相交；`create_face` 在写入前拒绝，`validate_face` 检出存量缺陷，关联两个环与两条边 ID |
+| `AXM-TOPO-E-0027` | Error | 同一面中不同边界环的有限 Line/LineSegment 边段端点相接（至少一条边的端点落在另一条边上）；`create_face` 在写入前拒绝，`validate_face` 检出存量缺陷，关联两个环与两条边 ID |
+| `AXM-TOPO-E-0028` | Error | 同一面中不同边界环的有限 Line/LineSegment 边段共线且存在正长度重叠；`create_face` 在分配 FaceId 前拒绝，`validate_face` 检出存量缺陷，关联两个环与两条边 ID |
+| `AXM-TOPO-E-0029` | Error | 同一面中不同边界环的有限 Line/LineSegment 边段未精确相交，但最近距离为有限正值且不超过有效线性容差；`create_face` 在分配 FaceId 前拒绝，`validate_face` 检出存量缺陷，关联两个环与两条边 ID。一般曲线因缺少显式边 trim 区间尚不在覆盖范围内 |
 
 ## 7.5 `BOOL` 布尔模块错误码
 
@@ -306,7 +309,7 @@
 |---|---|---|
 | `AXM-QUERY-E-0001` | Error | 最近点查询失败 |
 | `AXM-QUERY-E-0002` | Error | 截面计算失败 |
-| `AXM-QUERY-E-0003` | Error | 质量属性计算失败 |
+| `AXM-QUERY-E-0003` | Error | 质量属性或解析修剪面积的数值积分失败 |
 | `AXM-QUERY-E-0004` | Error | 距离计算失败 |
 | `AXM-QUERY-E-0005` | Warning | 质量属性基于近似网格计算 |
 
@@ -331,6 +334,7 @@
 | `AXM-VAL-E-0004` | Error | 检测到退化几何；`validate_geometry` 按根因绑定 `heal.validate_geometry.*` 阶段并关联目标 Body/问题子实体 |
 | `AXM-VAL-E-0005` | Warning | 检测到薄壁高风险区域 |
 | `AXM-VAL-E-0006` | Warning | 检测到高曲率不稳定区域 |
+| `AXM-VAL-E-0010` | Error | 检测到非有限几何；第 70 批精确 B-Rep 文本子集导入绑定 `io.import.<format>.validation` |
 
 `validate_geometry` 的失败阶段包括 `input`、`bbox`、`references`、`surface_domain`、`curve_domain`、
 `vertices_finite`、`near_duplicate_vertices`、`edges`、`face_area` 与 `face_normal`，统一使用
@@ -342,13 +346,13 @@
 |---|---|---|
 | `AXM-IO-E-0001` | Error | 文件不存在（如 `IOService::validate_import_path` 校验时目标路径不存在） |
 | `AXM-IO-E-0002` | Error | 文件格式无法识别 |
-| `AXM-IO-E-0003` | Error | 文件内容损坏 |
-| `AXM-IO-E-0004` | Error | 导入失败；STEP 早期失败绑定 `io.import.step.input/path/open`；OBJ 物化前失败绑定 `io.import.obj.input/path/open/parse`；STL、glTF 与 3MF 物化前失败分别绑定 `io.import.stl.*`、`io.import.gltf.*`、`io.import.3mf.*` 的 `input/path/open/read/parse/validation` 阶段。OBJ/STL/glTF/3MF 退化三角形复用 `AXM-VAL-E-0002` 与各自的 `.validation` 阶段。3MF 非有限顶点在 `.validation` 阶段复用本码，非法数值及索引溢出在 `.parse` 阶段复用本码；物化前无模型实体可关联。 |
+| `AXM-IO-E-0003` | Error | 文件内容损坏；第 70 批 AXMJSON/Axiom IGES 元数据/Axiom BREP JSON 子集的截断结构、缺失必需字段、错误 `format`、不支持的 `body_kind` 或缺失 BREP 文件头均绑定 `io.import.<format>.parse` |
+| `AXM-IO-E-0004` | Error | 导入失败；STEP 早期失败绑定 `io.import.step.input/path/open`；OBJ 物化前失败绑定 `io.import.obj.input/path/open/parse`；STL、glTF 与 3MF 物化前失败分别绑定 `io.import.stl.*`、`io.import.gltf.*`、`io.import.3mf.*` 的 `input/path/open/read/parse/validation` 阶段。第 70 批为 AXMJSON/Axiom IGES 元数据/Axiom BREP JSON 子集补齐 `io.import.<format>.input/path/open/read`：非普通文件在读取前拒绝，超过 64 MiB 或短读归入 `.read`。OBJ/STL/glTF/3MF 退化三角形复用 `AXM-VAL-E-0002` 与各自的 `.validation` 阶段。3MF 非有限顶点在 `.validation` 阶段复用本码，非法数值及索引溢出在 `.parse` 阶段复用本码；物化前无模型实体可关联。 |
 | `AXM-IO-E-0005` | Error | 导出失败 |
 | `AXM-IO-E-0006` | Error | 严格网格导出 QA 失败（越界索引、退化三角形或检查不可用；`Issue.stage=io.export.mesh_strict_qa`，关联输入 Body） |
 | `AXM-IO-E-0007` | Warning | 导入后存在未映射属性 |
 | `AXM-IO-E-0008` | Warning | 导出采用兼容模式降级 |
-| `AXM-IO-E-0009` | Error | 导出目标目录不可写（`kIoExportPathNotWritable`，`Issue.stage=io.export.path`） |
+| `AXM-IO-E-0009` | Error | 导出目标目录不可写（`kIoExportPathNotWritable`，默认 `Issue.stage=io.export.path`；STEP/OBJ/STL/glTF/3MF 导出使用各自 `io.export.<format>.path`） |
 | `AXM-IO-E-0010` | Error | 检测到标准 STEP 物理文件 DATA 段含 EXPRESS 实例，非 Axiom 子集；完整交换未实现（`kIoStepStandardEntitiesUnsupported`，`Issue.stage=io.import.step`） |
 | `AXM-IO-E-0011` | Error | 检测到典型 IGES 卡片/DE 流，非 Axiom 子集；完整交换未实现（`kIgesStandardEntitiesUnsupported`，`Issue.stage=io.import.iges`） |
 
@@ -399,6 +403,7 @@
 | `AXM-TX-E-0004` | Error | 目标版本不存在 |
 | `AXM-TX-E-0005` | Fatal | 版本图损坏 |
 | `AXM-TX-E-0006` | Error | 活动事务禁止清空跟踪记录；`clear_tracking_records` 返回 `OperationFailed`，保留模型与撤销记录，须先提交或回滚（含空事务） |
+| `AXM-TX-E-0007` | Error | 拓扑事务在预取消、显式轮询、写入、提交、显式回滚或作用域退出边界观察到协作式取消。已取得写者槽的事务恢复完整快照并释放写者槽，不推进版本或成功提交审计；预取消事务不取得写者槽 |
 
 ## 8. 标准警告码清单
 
@@ -447,6 +452,8 @@
 `BooleanService::export_boolean_prep_stats` 失败均携带 `[lhs, rhs]`（保留无效 ID）：参数失败为 `InvalidInput` / `AXM-BOOL-E-0001` / `bool.prep.export.input`；文件打开失败为 `OperationFailed` / `AXM-IO-E-0005` / `bool.prep.export.open`（修正此前误用的 BOOL 输入码）；写入或关闭失败为 `OperationFailed` / `AXM-IO-E-0005` / `bool.prep.export.write`。参数校验先于文件打开，失败不创建或截断目标；所有失败不修改模型，底层写入失败不保证目标文件恢复。回归入口：`axiom_boolean_prep_test`，Linux 使用 `/dev/full` 覆盖缓冲写入失败。
 
 `DiagnosticService::export_grouped_by_stage_txt/json` 的空路径、文件打开及最终写入/关闭失败复用 `AXM-IO-E-0005`；空路径在打开文件前拒绝，失败不修改参与聚合的源报告，底层设备写入失败不保证恢复目标文件。回归入口：`axiom_diagnostics_test`。
+
+`IOService::export_obj/export_stl/export_gltf/export_3mf` 的失败阶段为 `io.export.<format>.input/path/convert/mesh/open/write/sidecar`，并关联输入 Body（无效 ID 也保留）。输入、网格数据、打开与最终写入/关闭失败复用 `AXM-IO-E-0005`，路径与转换/侧车失败保留下层错误码；严格 QA 继续使用 `AXM-IO-E-0006 / io.export.mesh_strict_qa`。失败回滚本次新增网格、实体 ID、体/面三角化缓存及统计，保留诊断；输入/转换/校验失败保护已有文件，设备写入失败不保证恢复文件，侧车失败可能保留完整主文件。策略和回归见 [IO 导出策略矩阵](../quality/AxiomKernel_IO_导出策略矩阵.md)；第 64 包已纳入第 68 批全量门禁。
 
 `IOService::export_step` 的失败继续复用 `AXM-IO-E-0005`，并关联输入 Body：无效 Body/空路径为 `io.export.step.input`，父目录不存在或不可写为 `io.export.step.path`，打开失败为 `io.export.step.open`，最终写入或关闭失败为 `io.export.step.write`。输入/路径失败不创建目标文件，所有失败不修改模型；底层设备写入失败不保证恢复目标文件。回归入口：`axiom_io_workflow_test`。
 
@@ -588,3 +595,62 @@
 后续如果继续细化，建议再补一份：
 
 `docs/diagnostics/AxiomKernel_用户可读错误文案映射表.md`
+
+
+### FR-QUERY-001 长度查询诊断（第 63/67 功能包）
+
+- `AXM-CORE-E-0001`：长度查询目标句柄无效（包括删除或回滚后的句柄）。
+- `AXM-CORE-E-0002`：长度区间、容差或结果非有限，请求无限直线全域长度，长度或累计长度超出 `Scalar` 范围，容差为负、两种容差同时为零，或速度求值预算为零；无数值。
+- `AXM-GEO-E-0004`：有界曲线长度参数超出定义域；不做钳制。
+- `AXM-GEO-E-0011`：椭圆/圆锥曲线或样条的自适应长度积分因预算耗尽、精度停滞或非有限速度失败；`OperationFailed`，无部分长度。
+- `AXM-GEO-E-0003`：长度查询所用直线方向退化；`DegenerateGeometry`。
+- `AXM-CORE-E-0004`：未来新增但尚无长度实现的曲线类型，或缺少裁剪区间的拓扑曲边；`NotImplemented`。
+- `AXM-TOPO-E-0008`：直线边长度查询的端点重合、端点偏离支撑曲线或超出线段范围；`InvalidTopology`。
+- `AXM-TOPO-E-0006`：边引用的曲线/顶点缺失；`InvalidTopology`。
+- `AXM-TOPO-E-0002`：环为空、未闭合或成员关系损坏；`InvalidTopology`。
+- `AXM-TOPO-E-0003/0004`：面外/内环引用缺失或重复；`InvalidTopology`。
+
+边→环→面失败原样传播诊断且不返回部分和；查询只增加诊断和 Topo 查询审计，不修改模型、事务写计数、几何/网格缓存或 Eval 失效状态。
+
+### FR-QUERY-001 解析曲面修剪面积诊断（第 68 批）
+
+- `AXM-CORE-E-0001`：`TopologyQueryService::face_area` 目标面句柄无效、已删除或已回滚；`InvalidInput`，无面积。
+- `AXM-CORE-E-0004`：Bezier/BSpline/NURBS/Revolved/Swept 面尚无面积实现；`NotImplemented`，无面积。
+- `AXM-TOPO-E-0008`：非平面缺少 PCurve、同一面仅部分定向边绑定 PCurve、曲面包装链/偏置/参数域与拓扑不兼容，或 PCurve 端点映射与定向拓扑顶点不一致；`InvalidTopology`。
+- `AXM-TOPO-E-0003/0004`：外/内 PCurve 环缺失、空、非折线、断裂、未闭合、退化、自交或越出参数域；内环不严格位于外环内，或内环之间相交、重叠、嵌套，使用 `E-0004`。
+- `AXM-GEO-E-0003`：扣除内环后面积非正或数值退化；`DegenerateGeometry`。
+- `AXM-QUERY-E-0003`：解析面积密度积分产生非有限结果；`NumericalInstability`。
+- `AXM-CORE-E-0002`：有限解析结果超出 `Scalar` 范围；`InvalidInput`。
+
+查询不返回部分面积，不写几何/求值/网格缓存，不创建模型对象。未包装 Plane 且完全无 PCurve 时兼容调用 `planar_face_area`，并沿用其既有失败码。
+
+### FR-QUERY-001 闭合多面体拓扑质量属性诊断（第 70 批）
+
+- `AXM-CORE-E-0001`：`shell_mass_properties/body_mass_properties` 目标句柄无效、已删除或已回滚；`InvalidInput`，无部分值。
+- `AXM-CORE-E-0004`：壳含曲面或曲边；`NotImplemented`，不使用弦长、网格或 bbox 近似。
+- `AXM-TOPO-E-0005`：壳为空、开放、非流形，或引用的面/曲面缺失；`InvalidTopology`。
+- `AXM-TOPO-E-0015`：共享边在两个相邻面中同向，或外/内环绕向与平面法向不一致；`InvalidTopology`。
+- `AXM-TOPO-E-0003/0004/0006/0009`：面环、定向边、顶点链或重复壳/面引用损坏；`InvalidTopology`。
+- `AXM-GEO-E-0003`：平面法向、面环面积或闭壳有向体积退化；`DegenerateGeometry`。
+- `AXM-QUERY-E-0003`：单壳积分或多壳汇总产生非有限/越界结果；`NumericalInstability`。
+- `AXM-CORE-E-0002`：顶点坐标或拓扑规模超出可处理范围；`InvalidInput`。
+
+查询从当前真实拓扑重算且不返回部分值；不分配网格、不写缓存、不修改 Eval 状态或事务写计数，仅增加诊断和一次顶层查询审计。
+
+### FR-OPS-001 SweepService 新路径诊断（第 68/70 批）
+
+- `AXM-CORE-E-0001`：`sweep` 轮廓标签为空或导轨句柄无效。
+- `AXM-CORE-E-0002`：`extrude_to_plane` 的轮廓/孔非法、方向或平面非有限/近退化、方向切向或反向、平面接触/相交或舍入塌缩。
+- `AXM-CORE-E-0002`：`revolve` 角度不在 `(0,2π]`、轴非法，或轮廓带孔、跨轴、孤立轴点、近轴、自交、非共面/偏轴；部分角与整周均在分配前完成闭壳、质量和惯性检查。
+- `AXM-CORE-E-0002`：曲线 `sweep` 截面非法或未与导轨起点/切向对齐，样条伪闭合/首尾切向断裂，复合链接缝错位/折角/尖点、嵌套链或含未支持子段，过紧曲率、非局部弦段自靠近，或周期标架/物化/质量积分失败。
+
+上述 Ops 失败允许新增诊断，但在模型/拓扑对象和 ID 分配前完成验证，不改变活动拓扑事务写计数，也不污染求值或网格缓存。
+
+### NFR-DIA-001 精确 B-Rep 文本导入诊断（第 70 批）
+
+- `AXM-IO-E-0004`：AXMJSON、Axiom IGES 元数据子集和 Axiom BREP JSON 子集的空路径、不存在路径、非普通文件/打开失败、文件超过 64 MiB 或短读，分别绑定 `io.import.<format>.input/path/open/read`。
+- `AXM-IO-E-0003`：截断 JSON、缺少或无效必需字段、入口与 `format` 不匹配、`body_kind` 不支持或 BREP 文件头缺失；绑定 `io.import.<format>.parse`。
+- `AXM-VAL-E-0010`：几何元数据含 NaN 或 Inf；返回 `InvalidInput`，绑定 `io.import.<format>.validation`。
+- `AXM-VAL-E-0004`：包围盒反转/无效或轴退化；返回 `DegenerateGeometry`，绑定 `io.import.<format>.validation`。
+
+三种格式的物化前失败都返回可检索 `diagnostic_id`，不写 Body/Mesh store、不推进模型 `next_id`；修复文件后可原位重试。标准 IGES 实体仍沿用 `NotImplemented / AXM-IO-E-0011` 和 `io.import.iges`，不纳入 Axiom 子集的 `.parse/.validation` 承诺。

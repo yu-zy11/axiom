@@ -2,15 +2,21 @@
 
 本文档用于记录 `AxiomKernel` 当前阶段的实际开发状态、已完成内容、当前风险和下一阶段执行重点。
 
+> **第 70 批（NFR-DIA-001 / FR-OPS-001 / FR-QUERY-001）**：AXMJSON、Axiom IGES 元数据与 Axiom BREP JSON 子集在物化前完成普通文件、64 MiB/短读、严格结构和几何验证，失败绑定 `io.import.<format>.input/path/open/read/parse/validation` 且不污染 Body/Mesh/ID；`SweepService` 新增首尾 G1 连续闭合样条、开放/闭合 `CompositeChain` 导轨和部分角多边形旋转的真实多面体闭壳；`TopologyQueryService` 新增 `shell_mass_properties/body_mass_properties`，从平面直边双边流形闭壳的当前拓扑重算单位密度体积、面积、质心和惯性。repair 修正了测试入口误用、早期 AXMJSON 兼容、扫掠弦段局部邻域判定、闭合复合导轨夹具和旋转闭壳绕向翻转后重算。调度器独立完整构建成功，最终 `ctest --test-dir /workspaces/axiom/build-agent --output-on-failure --no-tests=error` **16/16 通过、0 失败、总耗时 1539.20 s**（`axiom_ops_heal_test` 1510.78 s，`axiom_io_workflow_test` 14.96 s，`axiom_query_eval_test` 0.17 s，性能基线 1.90 s）。本批门禁已闭合，第 60/61/62/65 等既有包不再有“待验收”状态。剩余限制：扫掠/旋转仍为保守采样多面体 BRep；带孔旋转、嵌套复合导轨、显式轮廓历史、曲面/曲边质量积分、空腔/相交多壳和标准 IGES 实体仍不支持。
+
+> **第 69 批（FR-GEO-001 / FR-TOPO-001 / NFR-REL-001 / FR-DIAG-001）**：公开曲线全域最近点详细查询与精度/预算/收敛证书；公开跨环有限直线边界冲突预检并补齐共线重叠、容差邻近错误码；拓扑事务新增协作式取消、写者状态和累计取消审计；诊断新增结构化数值证据、证据覆盖审计与 JSON 导出，BOOL 受覆盖失败分支已接入门禁。调度器首次完整 CTest 为 14/16 通过（`axiom_geometry_test`、`axiom_query_eval_test` 失败），repair 以二阶保守距离下界和证书后的剩余预算精修修复两项回归；随后独立完整构建成功，最终 `ctest --test-dir /workspaces/axiom/build-agent --output-on-failure --no-tests=error` **16/16 通过、0 失败、总耗时 126.00 s**（性能基线 1.63 s）。构建日志仍有 `Issue::numeric_evidence` 聚合初始化缺失及一处既有未使用参数告警，但未导致构建或测试失败。本批门禁已闭合。需求仍为受限可用：曲面全域最近点证书、一般曲线跨环求交、抢占式/长流程内部取消，以及 HEAL/IO 全失败分支数值证据尚未闭合。
+
+> **第 68 批（FR-OPS-001 / FR-QUERY-001）**：公开 `SweepService` 新增 `extrude_to_plane`，并完成整周显式多边形 `revolve` 与旋转最小化标架曲线 `sweep` 的真实多面体 BRep 物化；公开 `TopologyQueryService::face_area` 支持 Plane/Cylinder/Cone/Sphere/Torus 及 Trimmed/Offset 的折线 PCurve 修剪面积。故障复验修复了整周旋转的编译错误，并把周期带孔扫掠的互不连通边界正确物化为多个独立闭壳。调度器独立 `build-agent` 完整构建成功，`ctest --test-dir /workspaces/axiom/build-agent --output-on-failure --no-tests=error` **16/16 通过、0 失败、总耗时 136.35 s**（`axiom_ops_heal_test` 111.16 s，`axiom_query_eval_test` 0.15 s，性能基线 1.70 s）。第 60/61/62/65/66 包和第 63/67 包的现有回归也在该次全量门禁中通过，不再标记为“待统一验收”。需求仍为进行中，因为解析扫掠/旋转曲面、通用样条面积、曲边裁剪参数与通用质量属性等尚未闭合。
+
 > **第 58 切片（FR-DIAG-001）**：严重级别检索先收集匹配报告、按 `DiagnosticId` 升序排序，再应用 `max_results`；`report_ids_by_severity` 继承相同语义。`axiom_diagnostics_test` 覆盖多报告限额、重复 issue、空报告/空结果、非法上限、源报告不污染及失败后重试。需求保持受限可用；重量级流程的阶段、实体和数值证据尚未全覆盖。
 
-> **第 57 切片（NFR-REL-001）**：`create_body` 在写入前拒绝壳成员面空或悬空曲面引用，避免有效包围盒掩盖受损拓扑；复用 `AXM-TOPO-E-0005` 并关联壳、面、曲面 ID。`axiom_topology_test` 覆盖故障注入、诊断 JSON、ID/存储/事务计数不污染、修复后重试、回滚和提交。需求仍为受限可用，协作式取消及更广泛 S0/S1 失败注入尚未闭合。
+> **第 57 切片（NFR-REL-001）**：`create_body` 在写入前拒绝壳成员面空或悬空曲面引用，避免有效包围盒掩盖受损拓扑；复用 `AXM-TOPO-E-0005` 并关联壳、面、曲面 ID。`axiom_topology_test` 覆盖故障注入、诊断 JSON、ID/存储/事务计数不污染、修复后重试、回滚和提交。该切片当时尚无协作式取消；拓扑 API 边界取消已由第 69 批闭合，更广泛 S0/S1 失败注入仍待推进。
 
 > **第 50 切片（NFR-DIA-001）**：3MF 导入的物化前输入、路径、打开、读取、解析和网格验证失败绑定 `io.import.3mf.*` 根因阶段；目录输入在读取前结构化拒绝，非法数值与超范围索引不再抛出常规解析异常或被截断。`axiom_io_workflow_test` 覆盖阶段检索、JSON、退化网格、Body/Mesh 不污染及成功重试，`axiom_io_dataset_test` 验证往返；需求保持受限可用。
 
 > **第 49 切片（FR-DIAG-001）**：按相关实体检索先收集命中报告，按 `DiagnosticId` 升序排序，再应用 `max_results`，避免无序存储遍历导致限额结果不稳定。`axiom_diagnostics_test` 覆盖成功、空报告/空结果、重复 issue、限额、非法参数、源报告不污染与失败后重试；`report_ids_by_entity` 继承相同语义。需求保持受限可用；重量级流程的阶段、实体和数值证据尚未全覆盖。
 
-> **第 48 切片（NFR-REL-001）**：`create_shell` 在分配壳 ID 前拒绝成员面悬空或空曲面引用，复用 `AXM-TOPO-E-0005` 并关联面、曲面 ID。`axiom_topology_test` 覆盖受损输入、诊断 JSON、ID/存储/事务计数不污染，以及修复输入后的重试、回滚和提交。需求仍为受限可用，协作式取消与更广泛 S0/S1 失败注入尚未闭合。
+> **第 48 切片（NFR-REL-001）**：`create_shell` 在分配壳 ID 前拒绝成员面悬空或空曲面引用，复用 `AXM-TOPO-E-0005` 并关联面、曲面 ID。`axiom_topology_test` 覆盖受损输入、诊断 JSON、ID/存储/事务计数不污染，以及修复输入后的重试、回滚和提交。该切片当时尚无协作式取消；拓扑 API 边界取消已由第 69 批闭合，更广泛 S0/S1 失败注入仍待推进。
 
 > **第 45 切片（NFR-DIA-001）**：glTF 导入的物化前输入、路径、打开、读取、解析及网格验证失败绑定 `io.import.gltf.*` 根因阶段；非普通文件在读取前结构化拒绝。`axiom_io_workflow_test` 覆盖阶段检索、JSON、越界索引/退化三角形、Body/Mesh 不污染及成功重试；需求保持受限可用。
 
@@ -47,10 +53,10 @@
 
 | 模块 | 一句话 |
 |------|--------|
-| **core / sdk** | 门面与运行时 store/遥测/不变量门禁已显著强于纯骨架，**隔离策略矩阵与事件级 Eval 接入**仍偏薄。 |
-| **diag** | 检索、JSON、阶段字段与批量归档能力较完整，**BOOL/HEAL/IO 全分支阶段化**仍不足。 |
+| **core / sdk** | 门面、运行时 store/遥测、不变量门禁与拓扑取消审计已显著强于纯骨架，**更细隔离策略与事件级 Eval 接入**仍偏薄。 |
+| **diag** | 检索、JSON、阶段/实体/数值证据、批量归档与证据审计已具备，**HEAL/IO 全分支覆盖**仍不足。 |
 | **math** | 本阶段退化/尺度/容差谓词已在 `axiom_math_services_test` 固化，**全链路热点统一入口**仍待持续收敛。 |
-| **geo / topo** | 最小求值与 Strict/trim 等规则持续加严，**工业级样条/trim/完备规则集**仍差。 |
+| **geo / topo** | 曲线全域最近点证书、有限直线跨环冲突、Strict/trim 与可取消事务持续加严，**曲面证书、一般曲线 trim 和完备规则集**仍差。 |
 | **rep / io** | 三角化、报告、子集格式与数据集门禁具备基础，**标准实体级互操作与误差预算工业闭环**仍差。 |
 | **ops** | 布尔/特征仍以过渡与占位为主，**最大工业化缺口**。 |
 | **heal** | 验证/修复/自交/容差等路径可回归且已拆独立测试，**BRep 全场景与可回放工业修复**仍差。 |
@@ -225,10 +231,9 @@
   - **建议测试入口**：`axiom_smoke_test`、`axiom_kernel_runtime_invariant_test`
 
 - **diag（Diagnostics）**
-  - **已具备**：错误码/诊断码常量、诊断报告、JSON 导出（含 `Issue.stage`）、按 related entity 检索；BOOL/HEAL/IO 关键路径已绑定阶段标签并有回归断言；**按 `Issue.stage` 聚合**：`issue_stage_histogram`、`export_grouped_by_stage_txt/json`（空 `stage` 计入 `(unset)`；第 24 切片补齐空路径预校验及写入/关闭失败检测），`axiom_diagnostics_test` 校验分组证据、失败诊断、源报告不变与重试；**全量归档**：`export_all_reports_json` / `export_all_reports_txt`（按 `DiagnosticId` 升序、JSON 与单条 `export_report_json` 结构一致）；**按阶段检索**：`find_by_issue_stage`（`issue.stage` 精确匹配）
+  - **已具备**：错误码/诊断码常量、诊断报告、JSON 导出（含 `Issue.stage` 与 `Issue.numeric_evidence`）、按 related entity 检索；BOOL/HEAL/IO 关键路径已绑定阶段标签并有回归断言；**按 `Issue.stage` 聚合**：`issue_stage_histogram`、`export_grouped_by_stage_txt/json`（空 `stage` 计入 `(unset)`；第 24 切片补齐空路径预校验及写入/关闭失败检测）；**全量归档**：`export_all_reports_json` / `export_all_reports_txt`；**结构化证据门禁**：`audit_evidence` / `export_evidence_audit_json` 按问题码、阶段前缀和最低严重级别审计阶段、实体与有限数值证据，重复报告去重并统计截断明细，BOOL 受覆盖失败分支已接入
   - **主要不足**：
-    - **阶段化诊断全覆盖**：BOOL/HEAL/IO 等高风险链路仍需把**全部**失败分支纳入阶段结构与门禁（当前为关键路径首批绑定）
-    - **批量导出/聚合策略**：面向 CI/回归资产归档的批量导出与检索效率策略仍缺
+    - **证据门禁全覆盖**：HEAL 验证/修复/回滚及 IO 导入导出/后验验证/批处理仍需把**全部**重量级失败分支纳入阶段、实体与数值证据门禁
   - **建议测试入口**：`axiom_diagnostics_test` + 对应 workflow 测试中的失败分支断言
 
 - **math（Tolerance/Predicate/Linear Algebra）**
@@ -239,13 +244,14 @@
   - **建议测试入口**：`axiom_math_services_test`（本阶段 P1 条目已闭合）；跨模块对齐见各 workflow 测试
 
 - **geo（Curves/Surfaces/PCurve/Eval/Closest）**
-  - **已具备**：曲线/曲面/PCurve 的创建与最小 eval/domain/bbox/closest，含批量接口；派生曲面（revolved/swept/trimmed/offset）具备 stage2 minimal 语义；BSpline/NURBS 曲线显式结点已校验严格非减、非零有效参数域和重数不超过 `degree + 1`（含显式/推断次数），合法满重数内部断点的一、二阶导数按右侧分段求值，上端点取左侧分段；`axiom_geometry_test` 覆盖重复结点、非单位域端点/导数、非法结点诊断及失败不污染
+  - **已具备**：曲线/曲面/PCurve 的创建与 eval/domain/bbox/closest，含批量接口；曲线公开 `closest_point_detailed`，解析覆盖 Line/LineSegment/Circle/折线，分支限界覆盖 Ellipse/Parabola/Hyperbola/Bezier/BSpline/NURBS/CompositeChain，返回距离下界、参数不确定度、预算计数与终止原因；样条逐非空结点段覆盖，旧非解析最近参数复用主流程；派生曲面（revolved/swept/trimmed/offset）具备 stage2 minimal 语义
   - **主要不足**：
-    - **高质量样条与曲率**：NURBS/BSpline 的导数/曲率、鲁棒反求（最近点/最近参数）与退化处理未工业化
+    - **曲面全域精度合同**：Bezier/BSpline/NURBS 及派生/修剪曲面尚无覆盖完整参数域和修剪边界的预算与收敛证书；样条曲率与退化处理仍未工业化
     - **真实 Trim 语义**：Trimmed 目前偏“参数域裁剪占位”，缺基于 loop/coedge/PCurve 的修剪边界
   - **建议测试入口**：`axiom_geometry_test`（增加曲率/导数/退化场景后再逐步收紧）
 
 - **topo（Transaction/Query/Validation/Trim Bridge）**
+  - **第 69 批一致性与可靠性增量**：`first_boundary_conflict`、`create_face` 与 `validate_face` 共享有限 Line/LineSegment 最近段流程，统一分类内部相交、端点相接、共线正长度重叠及容差内正距离邻近；新增 `AXM-TOPO-E-0028/0029` 与可查询最近点/距离证据，拒绝不分配 FaceId、不改索引或事务计数。`TopologyCancellationSource/Token`、带令牌事务、显式轮询、状态/写次数查询及累计指标覆盖预取消、写/提交/显式回滚/析构边界，取消恢复完整快照、释放写者槽且不推进版本或成功提交审计。最终完整 CTest 16/16 通过。一般曲线 trim 求交、长耗时流程内部轮询和子事务/保存点仍未实现。
   - **第 56 切片一致性增量**：`create_face` 与 `validate_face` 拒绝不同边界环的非平行直线边在端点相接，`AXM-TOPO-E-0027` 关联两环与两边；`axiom_topology_test` 覆盖外/内及内/内相接、合法面、诊断 JSON、失败不污染和回滚。曲线求交、共线重叠、容差邻近相接、完整 trim bridge 与持久命名仍待覆盖，FR-TOPO-001 保持受限可用。
   - **第 52 切片一致性增量**：`create_face` 与 `validate_face` 检查不同边界环的直线/线段边在三维内部相交，`AXM-TOPO-E-0026` 关联两环与两边；`axiom_topology_test` 覆盖外/内及内/内相交、合法面、诊断 JSON、失败不污染和回滚。曲线边、端点触碰、共线重叠与容差邻近相接仍待覆盖，FR-TOPO-001 保持受限可用。
   - **第 47 切片一致性增量**：`create_face` 与 `validate_face` 拒绝跨环独立顶点的有限三维坐标精确重合，`AXM-TOPO-E-0025` 关联两环与两顶点；`axiom_topology_test` 覆盖外/内、内/内、成功、诊断 JSON、失败不污染及回滚。FR-TOPO-001 仍为受限可用，边段相交、容差邻近相接和完整 trim bridge 尚未闭合。
@@ -281,7 +287,7 @@
   - **已具备**：前置分类、近似求交语义、来源传播、最小物化拓扑骨架与 Strict 回归闭环、部分修改/修复工作流语义；**Modify/Blend 失败与关键告警**在启用诊断时写入 **`Issue.stage`**（如 `modify.offset.self_intersection`、`modify.shell.*`、`blend.fillet.placeholder` / `blend.fillet.multi_edge` 等），`axiom_ops_heal_test` 对典型分支做断言
   - **主要不足（最大缺口）**：
     - **布尔真闭环**：精确求交/切分/分类/重建/验证修复闭环缺失
-    - **特征建模真实构造**：extrude/revolve/sweep/loft/thicken 的真实几何与拓扑生成缺失
+    - **特征建模完整性**：显式多边形的多类 extrude/revolve/sweep 子域已生成真实多面体闭壳，但解析扫掠/旋转曲面、任意放样、thicken 及显式轮廓历史仍缺失
     - **圆角/倒角工业化**：含角区/变半径/失败分类与回归数据集缺失
   - **建议测试入口**：`axiom_boolean_workflow_test`、`axiom_boolean_prep_test`、`axiom_ops_heal_test`
 
@@ -308,15 +314,17 @@
 
 ### 需求 7.1 几何基础对象管理（GeoCore）
 
-- **FR-GEO-001 第 55 切片**：UV 折线 PCurve 最近参数的逐段投影和距离比较使用扩展精度中间量，有限大坐标的距离平方超出 `Scalar` 范围时仍能选中正确分段。`axiom_geometry_test` 覆盖段内最近点、端点、重复点、非法查询/句柄、稳定错误码、失败不污染与重试。未改变公开签名或错误码，其他曲线/曲面最近点的全局精度和收敛语义仍待闭合，需求保持受限可用。
-- **FR-GEO-001 第 51 切片**：线段最近参数的解析投影使用扩展精度中间量，有限大尺度端点和查询点不再因 `Scalar` 长度平方溢出产生非有限参数；保持端点钳制。`axiom_geometry_test` 覆盖段内最近点、端点、退化创建、非法查询/句柄、稳定错误码、几何与缓存不污染及重试。未改变公开签名或错误码，其他曲线/曲面最近点的全局精度和收敛语义仍待闭合，需求保持受限可用。
+- **FR-GEO-001 第 69 批（已通过完整门禁）**：新增 `CurveService::closest_point_detailed`、精度/预算选项和解析/距离容差/参数容差终止结果；解析覆盖 Line/LineSegment/Circle/CompositePolyline，分支限界覆盖 Ellipse/Parabola/Hyperbola/Bezier/BSpline/NURBS/CompositeChain，样条按全部非空结点段独立覆盖并以保守速度/加速度界剪枝。旧非解析 `closest_parameter/closest_point` 复用该流程；预算、非法选项和数值不可表示均结构化失败且不写求值缓存。首次全量测试的椭圆与 NURBS 参数回归经 repair 修复，最终完整 CTest 16/16 通过。曲面详细全域精度入口仍未实现，需求保持受限可用。
+
+- **FR-GEO-001 第 55 切片**：UV 折线 PCurve 最近参数的逐段投影和距离比较使用扩展精度中间量，有限大坐标的距离平方超出 `Scalar` 范围时仍能选中正确分段。`axiom_geometry_test` 覆盖段内最近点、端点、重复点、非法查询/句柄、稳定错误码、失败不污染与重试。该切片未改变公开签名；3D 曲线全域精度合同已由第 69 批闭合，PCurve 详细证书与曲面合同仍待推进。
+- **FR-GEO-001 第 51 切片**：线段最近参数的解析投影使用扩展精度中间量，有限大尺度端点和查询点不再因 `Scalar` 长度平方溢出产生非有限参数；保持端点钳制。`axiom_geometry_test` 覆盖段内最近点、端点、退化创建、非法查询/句柄、稳定错误码、几何与缓存不污染及重试。该切片未改变公开签名；其余 3D 曲线全域精度合同已由第 69 批闭合，PCurve 详细证书与曲面合同仍待推进。
 - **FR-GEO-001 第 46 切片**：3D 复合折线最近参数逐段解析投影并按三维距离比较，有限大坐标用扩展精度中间量防止平方溢出；等距取最早参数，重复控制点按零长度段处理。`axiom_geometry_test` 覆盖窄分支、段内投影、退化段、大坐标、非法查询/句柄、错误码、失败不污染与重试。未改变公开签名或错误码，其他曲线/曲面全局最近点精度仍待定义，需求保持受限可用。
 - **FR-GEO-001 第 41 切片**：UV 折线 PCurve 最近参数逐段投影并比较距离，避免固定全域采样漏掉短分段；重复控制点形成的零长度段可安全参与比较，等距取最早参数。`axiom_geometry_test` 覆盖短分段、段内投影、重复点、非法查询与句柄、错误码、失败不污染及重试。未改变公开签名或错误码，不扩展至任意曲线的全局精度保证，需求保持受限可用。
 - **FR-GEO-001 第 36 切片**：椭圆最近参数以粗采样为初值按三维欧氏距离阻尼细化，周期缝结果归一到 `[0, 2pi)`；创建时拒绝轴长或派生法向长度溢出。回归覆盖解析可知最近点、周期缝、非有限查询、有限但溢出的轴向量及失败不污染。未改变公开签名或错误码，不宣称任意退化椭圆全局最优，需求保持受限可用。
 - **FR-GEO-001 第 31 切片**：BSpline/NURBS 曲面满重数断点、上端点及域外钳制的点值、一二阶偏导和曲率统一使用同一非空单侧片；回归覆盖双轴断点、非单位权重、常值退化、非法结点失败不污染和既有曲面继续求值。未改变公开签名或错误码，不宣称断点全局可微，需求保持受限可用。
 - **FR-GEO-001 第 26 切片**：BSpline/NURBS 曲面最近点初值逐个覆盖非空张量积结点片，修复固定全域网格漏掉极窄、双轴满重数隔离片的问题；回归覆盖多项式与非单位权重有理曲面、非法查询及几何/缓存不污染。未改变公开签名或错误码，不宣称任意曲面全局最优，需求保持受限可用。
 - **FR-GEO-001 第 21 切片**：BSpline/NURBS 曲面 u/v 显式结点现在拒绝零长度有效域和超过 `degree + 1` 的结点重数，复用 `AXM-GEO-E-0002`；回归覆盖两轴、两类曲面、合法满重数断点、失败诊断以及几何/缓存不污染。未改变公开签名或错误码，需求保持受限可用。
-- **FR-GEO-001 第 16 切片**：BSpline/NURBS 最近参数初值搜索逐个覆盖非空结点分段，修复固定全域网格漏掉极窄、满重数断开分支的问题；回归覆盖显式/推断次数、非单位权重、常值退化、非法查询点诊断和失败不污染。未改变公开签名或错误码，不宣称任意曲线全局最优，需求保持受限可用。
+- **FR-GEO-001 第 16 切片**：BSpline/NURBS 最近参数初值搜索逐个覆盖非空结点分段，修复固定全域网格漏掉极窄、满重数断开分支的问题；回归覆盖显式/推断次数、非单位权重、常值退化、非法查询点诊断和失败不污染。该切片当时仅为初值改进；第 69 批已补曲线全域预算与收敛证书，曲面合同仍待推进。
 
 - **FR-GEO-001 第 11 切片**：非夹持 BSpline/NURBS 有效域重复端点按非空单侧分段求值，修复端点及导数结点向量选中零长度分段造成的错误点值/导数/曲率；`axiom_geometry_test` 覆盖二次解析参考（含非单位权重）、显式/推断次数、域外钳制、常值退化和失败不污染。未改变公开签名或错误码，需求保持受限可用。
 
@@ -329,10 +337,12 @@
   - **部分完成（Stage 2 minimal）**：旋转面、扫掠面（线性扫掠）、修剪面（参数域裁剪占位）、偏置面（offset record 占位）
   - **未开始/缺失（按需求文档口径）**：真实修剪面（基于 `PCurve` 的 trim loops + 与 3D 曲线一致性）、高质量偏置面（几何意义上的 surface offset + 自交/退化处理）、高质量扫掠/放样/加厚等特征曲面
 - **求值/查询能力**
-  - **已完成（基础可用）**：eval / bbox / domain（含 analytic 的 ±inf 语义）、closest_point / closest_parameter / closest_uv（含 domain 收敛与角度归一化）
-  - **未开始/缺失**：曲面曲率高质量实现、最近点的全局最优/鲁棒收敛与精度合同、参数域边界与修剪（trim）语义
+  - **已完成（基础可用）**：eval / bbox / domain（含 analytic 的 ±inf 语义）、closest_point / closest_parameter / closest_uv；曲线 `closest_point_detailed` 已提供完整有效域、预算、距离下界/参数分辨率与终止原因合同
+  - **未开始/缺失**：曲面曲率高质量实现；Bezier/BSpline/NURBS 及派生/修剪曲面的完整参数域（含 trim 边界）全域最近点精度、预算与收敛合同
 
 ### 需求 7.2 拓扑结构管理（TopoCore）
+
+- **FR-TOPO-001 第 69 批（已通过完整门禁）**：新增只读 `first_boundary_conflict` 及冲突类别、两环/两边、最近点与距离证据；`create_face` 和 `validate_face` 复用同一有限 Line/LineSegment 最近段流程，除既有内部相交和端点相接外，新增 `AXM-TOPO-E-0028` 共线正长度重叠与 `AXM-TOPO-E-0029` 容差内正距离邻近。失败不分配 FaceId、不改反向索引或事务写计数。一般曲线因边尚无显式 trim 区间仍未覆盖，需求保持受限可用。
 
 - FR-TOPO-001 第 12 切片：`create_face` 在写入前拒绝同一面外环/内环及内环之间复用 EdgeId，复用 `AXM-TOPO-E-0014` 并关联两个冲突环与边。`axiom_topology_test` 覆盖单边共享、完全重合边界、正反共边、内环顺序、诊断 JSON、计数/索引不污染、拒绝后合法双孔面及回滚后重新提交；不同面通过独立共边共享 Edge 仍允许。未增加公开签名或错误码，未扩展 seam/周期修剪支持，需求保持受限可用。 验证：`ctest --test-dir build-agent --output-on-failure` 16/16 通过，总耗时 25.86 秒，性能项 2.64 秒；文档检查通过。
 
@@ -343,17 +353,17 @@
   - **部分完成**：壳闭合/非流形检测（既有告警 + Strict hard；**`validate_shell` 开放边界/非流形告警带壳+边 `related_entities`**）；来源引用一致性 Strict 校验；**面环方向**（无 PCurve：平面/球/圆柱/圆锥侧壁、**环面**管向截面径向）；**环级 `coedge_to_loop` 一致性**；**`validate_loop` 在 `loop_to_faces` 有条目时与面互指**；**定向边级 `validate_coedge`：`edge_to_coedges` 必含本 coedge；若已有 `coedge_to_loop` 则与环成员互指**（未入环中间态不强制）；**面级 `loop_to_faces` 与面外/内环互指**；**`face_to_shells` 有条目时与壳 `faces` 互指**（`validate_face`）；**trim bridge**（UV 闭合、内外环 UV 方向、PCurve↔3D 采样/端点一致性，`validate_face_trim_consistency` 等）
   - **未开始/缺失**：更复杂解析组合面/退化参数域上的绕向规则；悬挂/重复/非流形在「全规则集」意义上的完备覆盖；工业级 **PCurve↔3D** 修复策略与全分支诊断
 - **事务/一致性**
-  - NFR-REL-001 第 43 切片：`create_shell` 在分配 ShellId 前验证成员面所有内环，拒绝缺失及存在但损坏的内环，复用 `AXM-TOPO-E-0005` 并关联面/环。`axiom_topology_test` 覆盖诊断 JSON、失败后 ID/壳存储/事务计数不污染、修复输入后重试、回滚索引恢复与后续提交。无公开签名或错误码变化，需求仍为受限可用；协作式取消和更广泛 S0/S1 失败注入尚未闭合。验证：`ctest --test-dir build-agent -R '^axiom_(topology|kernel_runtime_invariant)_test$' --output-on-failure` 2/2 通过；`python3 scripts/check_docs.py` 通过。
-  - NFR-REL-001 第 38 切片：`create_body` 在包围盒有效性通过后才分配 BodyId，避免受损壳导致的失败消耗全局实体 ID。`axiom_topology_test` 通过受损空壳注入覆盖稳定错误码/JSON、失败后 ID/存储/事务计数不污染、非法句柄退化输入、回滚与后续提交。无公开 API 或错误码变化，需求仍为受限可用；协作式取消与更广泛 S0/S1 失败注入仍待交付。验证：`ctest --test-dir build-agent -R '^axiom_(topology|kernel_runtime_invariant)_test$' --output-on-failure` 2/2 通过；`python3 scripts/check_docs.py` 通过。
-  - NFR-REL-001 第 33 切片：同一内核实例强制单活动拓扑写事务，落实 `SnapshotSerializable` 的单写前提；重叠事务保持关闭，写入/提交/回滚失败且不改变所有者模型，所有者关闭或空事务析构后释放写槽。既有嵌套测试夹具改为在同一事务构造相关拓扑。`axiom_topology_test` 覆盖拒绝、提交、回滚重试和空事务释放；需求仍为受限可用，跨进程隔离与协作式取消未交付。验证：`ctest --test-dir build-agent -R '^axiom_(topology|kernel_runtime_invariant)_test$' --output-on-failure` 2/2 通过。
-  - NFR-REL-001 第 28 切片：修复 `replace_surface` 成功后未递增 `write_operation_count` 的 S0 可靠性缺口；仅替换曲面的活动事务现在会在析构时正确回滚，提交后总写入数与 `replaced_surfaces` 分项一致。`axiom_topology_test` 覆盖非法替换失败不污染、仅替换作用域回滚、显式回滚归零和提交审计。需求仍为受限可用，完整隔离、协作式取消和全量 S0/S1 门禁仍待闭合。验证：`ctest --test-dir build-agent -R '^axiom_(topology|kernel_runtime_invariant)_test$' --output-on-failure` 2/2 通过。
-  - NFR-REL-001 第 23 切片：活动 `TopologyTransaction` 离开作用域时由 `noexcept` 析构自动回滚成功写入，避免未提交的创建、删除和替换污染共享 store；空事务析构不生成额外回滚诊断，已关闭事务与移动后的源对象析构保持 inert。`axiom_topology_test` 覆盖创建、既有面替换、级联删除、空事务、移动所有权、显式提交持久性及索引不变量。需求仍为受限可用，完整隔离、协作式取消和全量 S0/S1 门禁仍待交付。验证：`ctest --test-dir build-agent -R '^axiom_(topology|kernel_runtime_invariant)_test$' --output-on-failure` 2/2 通过。
-  - NFR-REL-001 第 18 切片：`TopologyTransaction` 改为显式唯一所有权；允许移动构造，禁止复制和移动赋值。移动后源对象安全关闭并失去写入、提交和回滚权限，避免默认移动留下 `active_` 而空内部状态导致崩溃，或双重事务权限误撤销已提交模型。`axiom_topology_test` 覆盖编译期约束、移动后失败路径、目标提交/回滚及失败不污染。需求仍为受限可用，完整隔离与取消仍待交付。验证：`ctest --test-dir build-agent -R '^axiom_(topology|kernel_runtime_invariant)_test$' --output-on-failure` 2/2 通过。
-  - NFR-REL-001 第 13 切片：修复同一事务新建面/壳/体被修改或删除后，回滚从快照复活新建实体的问题（S0：回滚污染）。先恢复快照再清理本事务创建的高层拓扑，保留已有快照/触达计数语义。`axiom_topology_test` 覆盖新建面替换曲面、面/壳/体删除、空壳/空体级联删除、已有面与新建共享壳混合快照、重复删除失败不污染、全部新建拓扑句柄失效、原模型/反向索引恢复、空回滚及后续提交。无公开 API 或错误码变化；需求仍为受限可用，完整隔离与取消仍待交付。验证：`ctest --test-dir build-agent -R '^axiom_(topology|kernel_runtime_invariant)_test$' --output-on-failure` 2/2 通过；`python3 scripts/check_docs.py` 通过。
+  - NFR-REL-001 第 43 切片：`create_shell` 在分配 ShellId 前验证成员面所有内环，拒绝缺失及存在但损坏的内环，复用 `AXM-TOPO-E-0005` 并关联面/环。`axiom_topology_test` 覆盖诊断 JSON、失败后 ID/壳存储/事务计数不污染、修复输入后重试、回滚索引恢复与后续提交。该切片未改公开签名；拓扑 API 边界取消已由第 69 批闭合，更广泛 S0/S1 失败注入仍待推进。验证：`ctest --test-dir build-agent -R '^axiom_(topology|kernel_runtime_invariant)_test$' --output-on-failure` 2/2 通过；`python3 scripts/check_docs.py` 通过。
+  - NFR-REL-001 第 38 切片：`create_body` 在包围盒有效性通过后才分配 BodyId，避免受损壳导致的失败消耗全局实体 ID。`axiom_topology_test` 通过受损空壳注入覆盖稳定错误码/JSON、失败后 ID/存储/事务计数不污染、非法句柄退化输入、回滚与后续提交。该切片未改公开 API；拓扑 API 边界取消已由第 69 批闭合，更广泛 S0/S1 失败注入仍待推进。验证：`ctest --test-dir build-agent -R '^axiom_(topology|kernel_runtime_invariant)_test$' --output-on-failure` 2/2 通过；`python3 scripts/check_docs.py` 通过。
+  - NFR-REL-001 第 33 切片：同一内核实例强制单活动拓扑写事务，落实 `SnapshotSerializable` 的单写前提；重叠事务保持关闭，写入、提交和回滚失败且不改变所有者模型，所有者关闭或空事务析构后释放写槽。`axiom_topology_test` 覆盖拒绝、提交、回滚重试和空事务释放；第 69 批已在该隔离语义上补齐拓扑 API 边界协作式取消，跨进程隔离仍未提供。验证：`ctest --test-dir build-agent -R '^axiom_(topology|kernel_runtime_invariant)_test$' --output-on-failure` 2/2 通过。
+  - NFR-REL-001 第 28 切片：修复 `replace_surface` 成功后未递增 `write_operation_count` 的 S0 可靠性缺口；仅替换曲面的活动事务现在会在析构时正确回滚，提交后总写入数与 `replaced_surfaces` 分项一致。`axiom_topology_test` 覆盖非法替换失败不污染、仅替换作用域回滚、显式回滚归零和提交审计；第 69 批已补拓扑 API 边界协作式取消，细粒度隔离和全量 S0/S1 门禁仍待闭合。
+  - NFR-REL-001 第 23 切片：活动 `TopologyTransaction` 离开作用域时由 `noexcept` 析构自动回滚成功写入，避免未提交的创建、删除和替换污染共享 store；空事务析构不生成额外回滚诊断，已关闭事务与移动后的源对象析构保持 inert。`axiom_topology_test` 覆盖创建、既有面替换、级联删除、空事务、移动所有权、显式提交持久性及索引不变量；第 69 批已补拓扑 API 边界协作式取消，细粒度隔离和全量 S0/S1 门禁仍待推进。
+  - NFR-REL-001 第 18 切片：`TopologyTransaction` 改为显式唯一所有权；允许移动构造，禁止复制和移动赋值。移动后源对象安全关闭并失去写入、提交和回滚权限，避免默认移动留下 `active_` 而空内部状态导致崩溃，或双重事务权限误撤销已提交模型。`axiom_topology_test` 覆盖编译期所有权约束、移动后失败路径、目标提交/回滚及失败不污染；第 69 批已补拓扑 API 边界协作式取消，细粒度隔离仍待交付。
+  - NFR-REL-001 第 13 切片：修复同一事务新建面/壳/体被修改或删除后，回滚从快照复活新建实体的问题（S0：回滚污染）。先恢复快照再清理本事务创建的高层拓扑，保留已有快照/触达计数语义。`axiom_topology_test` 覆盖新建面替换曲面、面/壳/体删除、空壳/空体级联删除、已有面与新建共享壳混合快照、重复删除失败不污染、全部新建拓扑句柄失效、原模型/反向索引恢复、空回滚及后续提交。第 69 批已补拓扑 API 边界协作式取消；细粒度隔离仍待交付。验证：`ctest --test-dir build-agent -R '^axiom_(topology|kernel_runtime_invariant)_test$' --output-on-failure` 2/2 通过；`python3 scripts/check_docs.py` 通过。
   - **NFR-REL-001 第 8 切片**：修复活动事务调用 `clear_tracking_records` 丢失撤销记录的问题（S0：回滚后模型污染）。入口现在返回 `OperationFailed` / `AXM-TX-E-0006`，包括空事务；提交或回滚后仍允许重复清理且不改变模型。`axiom_topology_test` 覆盖创建记录、删除体快照及 PCurve 修改快照在拒绝后保留、后续提交/回滚、计数与句柄不变量、诊断 JSON 和关闭后幂等清理。需求保持受限可用，完整事务隔离与取消仍未交付。验证：`ctest --test-dir build-agent -R '^axiom_(topology|kernel_runtime_invariant)_test$' --output-on-failure` 2/2 通过；`python3 scripts/check_docs.py` 通过。
   - **NFR-REL-001 可靠性增量**：`set_coedge_pcurve` 保存首次修改前的绑定，回滚恢复已有共边的原 PCurve（含未绑定状态）；重复绑定/清除不覆盖原快照，无效句柄拒绝不改变绑定、存储数量或事务写计数。`axiom_topology_test` 覆盖提交保留、重复绑定、清除、失败诊断与回滚后共边验证；需求仍为受限可用，尚不代表完整事务隔离或取消能力。
   - **已完成（基础可用）**：begin/commit/rollback；删除面/壳/体支持；回滚后索引恢复回归覆盖
-  - **未开始/缺失**：更细粒度写集/读集、并发/隔离级别定义、事务可观测性（更系统的审计/统计）
+  - **未开始/缺失**：更细粒度写集/读集与隔离级别、子事务/保存点、跨进程并发语义；BOOL/HEAL/IO 长耗时内部阶段取消轮询
 
 ### 需求 7.3 基础建模能力（OpsCore/TopoCore/GeoCore）
 
@@ -362,7 +372,11 @@
   - **未开始/缺失（工业化）**：与工业内核一致的 **全 primitive 精确拓扑面环 + 与曲面参数域严格一致** 的 BRep；楔体/盒体等若仍部分依赖 bbox 占位壳，需升级为完整解析拓扑与几何
 - **特征构造**
   - **部分完成（接口/占位）**：`SweepService` 等接口存在，部分路径产出派生体与工作流语义
-  - **显式多边形拉伸受限可用**：严格凸、共面且非退化的轮廓可物化为三角剖分棱柱壳（两种顶点绕向均可）；不支持的轮廓在物化前结构化拒绝，不静默回退为 bbox 壳。无显式轮廓路径仍为占位语义
+  - **第 70 批 SweepService 扩展（已通过完整门禁）**：端点重合且首尾切向连续的 Bezier/BSpline/NURBS 导轨以 holonomy 校正旋转最小标架，生成无端盖周期闭壳；`CompositeChain` 可连接有界直线/线段、圆/椭圆弧、Bezier/BSpline/NURBS 和 polyline 首段，强制接缝位置与 G1 连续，开放链有端盖、闭合链无端盖；`revolve` 对 `(0,2π)` 显式平面轮廓以每周 48 段的分辨率生成侧壁和约束剖分首尾端盖。三组回归分别覆盖 48、32、48 组成功变体，并覆盖真实拓扑、邻接/bbox、Strict、owned 网格、质量/惯性、失败零污染、活动事务零写入、回滚和重试。完整 CTest 16/16 通过（1539.20 s）。仍不支持解析扫掠/精确旋转、带孔旋转、嵌套复合链、抛物/双曲子段、急弯/自靠近输入和显式轮廓历史。
+  - **第 68 批 SweepService 扩展（已通过完整门禁）**：`extrude_to_plane` 沿射线把显式凹/带孔平面轮廓投影到斜目标面；整周 `revolve` 以 48 站周期分片支持离轴环形体及唯一连续轴边闭合的实心轮廓；曲线 `sweep` 以旋转最小化标架支持 Bezier/BSpline/NURBS 开放导轨和整圆/椭圆周期导轨。三条路径均物化实际三角面、共享边/顶点闭壳并缓存闭合多面体积分质量属性。周期带孔扫掠经故障复验改为外边界与各孔边界分别物化独立闭壳，壳数及 owned 网格连通分量均为 `1 + holes_xyz.size()`；开放带孔导轨仍由端盖连成单壳。回归分别覆盖 240、32、40 组主要变体，以及公开拓扑、bbox、Strict、owned 网格、质量/惯性、退化失败不污染与回滚重试。最终 `build-agent` 完整构建成功，CTest 16/16 通过（136.35 s；`axiom_ops_heal_test` 111.16 s，性能基线 1.70 s）。当前仍是保守浮点剖分/采样多面体 BRep，不是解析扫掠或旋转曲面；带孔旋转、闭合样条/复合导轨、尖点、过紧曲率和自靠近导轨拒绝，部分角旋转仍沿用受限路径。
+  - **等比变截面与尖顶拉伸（第 65/66 包，已纳入第 68 批全量门禁）**：`extrude_scaled` 支持凸/凹及单孔/多孔轮廓的正比例收缩、扩张和等截面；`end_scale=0` 支持无孔三角/凸/凹轮廓收敛到共享尖顶。既有 360 组正比例、72 组矩形/L 形尖顶及 4 组四面体回归随本批 16/16 CTest 通过。带孔尖顶、负比例、任意截面放样和逐壁恒角拔模仍不支持；近退化或极端尺度输入可保守拒绝。
+  - **带孔拉伸与折线平移扫掠（第 61/62 包，已纳入第 68 批全量门禁）**：显式带孔凸/凹多边形拉伸及线段/折线固定方向平移扫掠已由真实闭壳、公开邻接、解析质量属性、Strict、网格、失败不污染和回滚回归覆盖。折线每段仍须沿截面法向严格同向推进，不支持回退、切向或闭合折线；无显式轮廓路径仍为历史占位。第 60 包无孔凹轮廓及 Rep UV/焊接回归同次通过。
+  - **显式多边形线段扫掠受限可用（第 59 切片）**：`sweep` 对有界线段导轨复用真实棱柱拉伸链路，保持轮廓世界坐标并按终点减起点平移；双绕向、反向/斜向、不同轮廓平面均由公开面/边/顶点查询、面面积、质量属性及 Strict 验证回归验收。不支持的轮廓/导轨及退化位移在物化前拒绝，失败不污染；曲线导轨与无显式轮廓路径不属于本轮真实能力范围
   - **未开始/缺失（工业化）**：拉伸/旋转/扫掠/放样/加厚等 **真实几何求交 + 拓扑构造 + 失败可诊断** 的完整实现
 
 ### 需求 7.4 布尔运算能力（OpsCore）
@@ -382,6 +396,14 @@
 
 ### 需求 7.7 查询与分析（Query/Eval/Rep）
 
+- **FR-QUERY-001 第 70 批闭合多面体拓扑质量属性（已通过完整门禁）**：公开 `TopologyQueryService::shell_mass_properties/body_mass_properties`，从当前真实拓扑重算单位密度体积、面积、质心与关于质心的世界坐标惯性张量；支持平面直边的凹/带孔双边流形闭壳和多个独立实体壳的平行轴汇总。`axiom_query_eval_test` 覆盖平移/尺度盒体、凹带孔拉伸、双壳、单位/惯性语义、无效/开壳/曲面/零体积、删除/回滚及对象/网格/缓存/Eval/事务不污染；完整 CTest 16/16 通过（1539.20 s）。曲面/曲边、独立内壳空腔语义、相交/重叠多壳和稳定求交仍未闭合。
+
+- **FR-QUERY-001 第 68 批解析曲面修剪面积（已通过完整门禁）**：公开 `TopologyQueryService::face_area` 通过曲面面积密度的 Green 边界积分计算外环减内环面积，支持 Plane/Cylinder/Cone/Sphere/Torus 及嵌套 Trimmed/Offset；未包装 Plane 完全没有 PCurve 时兼容 `planar_face_area`。`axiom_query_eval_test` 覆盖五类解析面、凹外环/孔/绕向、包装面、参数越域、PCurve 缺失/断裂/自交、删除、事务回滚及缓存/对象不污染；随本批 CTest 16/16 通过。边界目前仅支持完整折线 PCurve，周期缝须由调用方使用同一展开区间；Bezier/BSpline/NURBS/Revolved/Swept 面积仍返回 `NotImplemented`。
+
+- **FR-QUERY-001 第 67 功能包（已纳入第 68 批全量门禁）**：`CurveService::length` 新增椭圆/抛物线/双曲线与 Bezier/BSpline/NURBS 真实导数自适应积分，公开 `CurveLengthOptions` 统一绝对/相对容差及整次查询求值预算。样条按非空结点区间积分，不计满重数断点跳跃；复合链保留子曲线局部 `[0,1]` 合同。预算耗尽、精度停滞或速度不可用使用 `AXM-GEO-E-0011`，失败无部分长度。相关独立参考、尺度/姿态/节点、失败诊断和不污染回归随本批全量门禁通过。
+
+- **FR-QUERY-001 第 63 功能包（已纳入后续全量门禁）**：`CurveService::length` 的直线有限区间、线段、圆、折线和嵌套复合链解析长度，以及 `TopologyQueryService::edge_length/loop_length/face_boundary_length` 直线边长度接口族，已随全量门禁通过。拓扑曲边仍因缺少裁剪参数而明确拒绝；平面直边闭壳的拓扑质量属性已由第 70 批补齐，曲面/曲边与空腔/相交多壳仍待闭合。
+
 - **FR-QUERY-001 第 54 切片**：公开 `TopologyQueryService::planar_face_area` 对平面直线边面片按当前拓扑顶点计算外环减内环的面积，单位为模型长度单位平方；盒体六面的解析面积由 `axiom_query_eval_test` 跨 Ops/Topo 验证。无效或已删除面不返回数值，曲面不支持与非共面拓扑返回结构化失败；替换曲面、删除面及回滚后的查询重算由同一测试验证。仅此受限子域为真实边界计算，不扩大到曲边面积或通用体质量属性。
 - **部分完成**：bbox、点分类、部分距离/近似求交、截面（偏占位）与批量接口雏形；`QueryService::mass_properties` 等已存在，但对多数体仍偏 **bbox 近似**，非工业级物理属性；**基本体**（盒/楔/球/柱/锥/环）已走统一解析路径；**Sweep** 质量口径集中到 `try_sweep_body_mass_properties` 并与查询共用；**布尔**结果体在 `BodyRecord` 中写入 **`has_boolean_op`/`boolean_op`**（`BooleanService::run`）后，`mass_properties` 可区分 **Union/Split** 与 **Subtract/Intersect**：**Intersect**+双盒且结果 bbox≈**AABB 交** 时按交叠长方体解析；**Subtract**+**LhsContainsRhs**+双盒时 **体积差** 与 **质心/惯性差分**（表面积为外+内占位和）；**LhsContainsRhs/RhsContainsLhs** 下取大包络体 **仅 Union/Split**（无 `has_boolean_op` 时保留原兼容启发式）；其余 Disjoint 并集相加、Touching/Overlapping 体积一致性、左体减、Sweep 操作数等规则同前；**Modified** `replace_face` 包围盒不变时继承来源；`axiom_ops_heal_test` 含 **相交体积**、**嵌套减**、面接触并集、包含并集、extrude+盒、`replace_face` 继承
 - **未开始/缺失**：长度/面积/体积/重心/惯性矩的工业级正确性；曲率/厚度分析；稳定的曲线-曲面/曲面-曲面求交
@@ -393,6 +415,10 @@
 
 ### 需求 7.9 数据交换（IO）
 
+- **NFR-DIA-001 第 70 批精确 B-Rep 文本导入诊断（已通过完整门禁）**：`import_axmjson/import_iges/import_brep` 在分配 BodyId 前完成普通文件、64 MiB 上限/短读、严格结构、格式/BodyKind、有限数值、包围盒和轴退化校验；失败绑定 `io.import.<format>.input/path/open/read/parse/validation`，复用 IO/VAL 稳定错误码并返回可检索 `diagnostic_id`。`axiom_io_workflow_test` 覆盖三格式成功、截断/错格式、退化、阶段/错误码/JSON、Body/Mesh/next_id 隔离和修复后原位重试；完整 CTest 16/16 通过（1539.20 s）。AXMJSON 兼容早期身份+bbox 文件，扩展几何字段必须成组完整；标准 IGES 实体仍返回 NotImplemented。
+
+- **NFR-DIA-001 第 64 功能包（已纳入第 68 批全量门禁）**：OBJ/STL/glTF/3MF 网格导出失败绑定 `io.export.<format>.input/path/convert/mesh/open/write/sidecar` 与输入 Body，严格 QA 保留 `io.export.mesh_strict_qa`。主文件和侧车均检查最终写入/关闭状态；失败回滚本次三角化新增网格、ID、体/面缓存及统计，保留已有网格。兼容模式继续允许退化三角形，但在打开目标前拒绝空网格、非法索引、非有限坐标；glTF 另拒绝超出 float32 范围的坐标。`axiom_io_workflow_test` 新增四格式 × 严格/兼容 × 侧车开关、诊断检索/JSON、冷/热/失效缓存、退化、参数失败文件保护、Linux `/dev/full` 主文件及侧车失败、重试和重新导入回归。复用现有错误码，无公开签名变化；故障修复复现并修正 9 处诊断辅助函数调用不匹配，复用 `failed_void` 保留 `InvalidInput`、Body 和阶段；补齐回归拉伸夹具必需的轮廓标签。相关测试随第 68 批最终完整 CTest 16/16 通过。设备写入失败不保证恢复文件，侧车失败时主文件可能已完整写出；不扩大格式或三角化精度承诺，需求保持受限可用。
+
 - **部分完成**：STEP/AXMJSON 导入导出主链路、导入后自动验证与诊断回传；**STL/glTF 导入导出**（网格/内嵌子集）；**IGES/BREP/OBJ/3MF** 的 Axiom 子集路径；**严格导出 + 可选网格验证侧车 JSON**；**Kernel 与 IOService 格式能力、`import_auto`/`export_auto`/`detect_format` 对齐**（`axiom_smoke_test`）；**标准 STEP/IGES 物理文件形态探测**：对含 EXPRESS 实例的 ISO-10303-21 DATA 段、或典型 IGES 80 列/DE 卡片流，在**非** Axiom 子集时返回 **`StatusCode::NotImplemented`** 与 **`AXM-IO-E-0010` / `AXM-IO-E-0011`**（`io.import.step` / `io.import.iges`），并附带 **Info 级物理层扫描摘要** **`AXM-IO-D-0016` / `AXM-IO-D-0017`**（EXPRESS 类型名 / IGES 实体类型号频度，**非**几何物化），避免静默假成功（`tests/data/io/standard_*_stub`、`axiom_io_dataset_test`）；实施路线见 **`docs/plan/AxiomKernel_STEP_IGES_标准交换实施路线.md`**
 - **未开始/缺失**：与 **STEPcode/Open CASCADE** 等集成的**真实实体解析与 BRep 物化**（扫描摘要仅为里程碑 0/1 能力）；工业级 **3MF/OBJ** 全量读写；导出策略与侧车字段的产品化矩阵与大数据集回归
 
@@ -403,8 +429,9 @@
 
 ### 需求 7.11 版本/事务/增量更新（Core/EvalGraph）
 
-- **部分完成**：版本号与事务、EvalGraph 基础失效传播/重算计数/循环依赖保护
-- **未开始/缺失**：结构共享策略细化、跨模块增量重算接入真实建模链路、缓存命中指标体系
+- **NFR-REL-001 第 69 批（已通过完整门禁）**：公开 `TopologyCancellationSource/Token`、带令牌 `begin_transaction`、显式 `poll_cancellation`、取消请求/观察/回滚写次数、活动写者查询及累计取消指标；预取消不占写者槽，取消在拓扑写入、提交、显式回滚和析构边界观察，完整恢复创建/删除/替换及反向索引，不推进版本或成功提交审计；`AXM-TX-E-0007` 可稳定导出，取消审计纳入 `core_runtime_invariants_hold`。
+- **部分完成**：版本号与单写者快照事务、协作式取消与累计审计、EvalGraph 基础失效传播/重算计数/循环依赖保护
+- **未开始/缺失**：单个调用的抢占式取消、BOOL/HEAL/IO 长耗时阶段轮询、子事务/保存点、更细粒度隔离、结构共享策略细化、跨模块增量重算和缓存命中指标体系
 
 ### 需求 7.12 插件扩展（PluginSDK）
 
@@ -412,6 +439,8 @@
 - **未开始/缺失**：**进程外/OS 级隔离**、动态库加载与供应链安全（签名/沙箱）；**完整 SemVer 与多 ABI 并存**（`SameMajor`/`SameMinor` 已支持剥离 `-` 预发布与 `+` 构建元数据后再做核心版本比较；`Exact` 仍为整串相等；多 ABI 并存与完整 SemVer 语义仍不足）；**已闭合（宿主绑定）**：`Kernel` 构造时对 `PluginRegistry::bind_host_kernel_for_plugin_invocation` 绑定 `weak_ptr<KernelState>` 后，**`invoke_registered_importer/exporter/repair/curve`** 在对应策略开关开启时会自动套用与 **`plugin_import_file` / `plugin_export_file` / `plugin_run_repair` / `plugin_create_curve`** 一致的宿主校验语义（未绑定宿主时行为与历史一致：仅调用插件）；**Body** 侧仍可显式 **`validate_after_plugin_mutation`**，**曲线**侧 **`verify_after_plugin_curve`** 与 `plugin_curve_host_consistency_check` 共用实现
 
 ### 需求 7.13 诊断与日志（Diagnostics）
+
+- **FR-DIAG-001 第 69 批（已通过完整门禁）**：公开 `NumericEvidence` / `Issue::numeric_evidence` 与 `DiagnosticEvidencePolicy/Audit/Finding`，新增 `audit_evidence` 和 `export_evidence_audit_json`；单条/批量/全量 TXT/JSON 保留数值证据，非有限 JSON 值安全写为 `null`。审计按问题码、阶段前缀和最低严重级别检查阶段、关联实体与有限数值证据，重复报告去重，finding 限额以 `omitted_findings` 记录。BOOL 主运行的受覆盖失败分支及预处理统计导出失败已补阶段、实体和数值证据并纳入统一门禁；HEAL 与 IO 尚未全面迁移，需求保持受限可用。
 
 - **FR-DIAG-001 第 34 切片**：`export_report` / `export_report_json` 在序列化单条完整诊断后显式关闭并检查输出流，Linux `/dev/full` 等最终写入/关闭失败返回 `OperationFailed` / `AXM-IO-E-0005`，不再误报成功。`axiom_diagnostics_test` 覆盖 TXT/JSON 成功证据、无效 ID、空路径、目录打开失败、设备写入失败、源报告不污染及失败后重试。无公开签名或错误码变化；设备写入失败不保证恢复目标文件，需求仍为受限可用。
 
@@ -438,8 +467,8 @@
 
 - **FR-DIAG-001 本轮增量**：布尔预处理告警 `AXM-BOOL-W-0001/W-0002` 写入报告时保留 `bool.prep` 与输入/输出体 ID；`axiom_boolean_prep_test` 覆盖成功、仅接触退化、无壳级候选、阶段检索与 JSON，以及前置失败不增加几何/拓扑/体计数。需求仍为受限可用，不提升精确布尔能力口径。
 
-- **部分完成**：错误码常量、诊断报告、JSON 导出（含 `Issue.stage`）、按相关实体检索；BOOL/HEAL/IO **关键路径**阶段标签与 workflow 回归断言
-- **未开始/缺失**：覆盖**所有**失败路径的系统化绑定；阶段化诊断**全覆盖**门禁；诊断聚合检索与批量导出策略
+- **部分完成**：错误码常量、诊断报告、TXT/JSON/批量/全量导出（含 `Issue.stage` / `numeric_evidence`）、聚合检索与证据覆盖审计；BOOL 受覆盖失败分支已建立阶段/实体/数值证据门禁
+- **未开始/缺失**：HEAL 验证/修复/回滚与 IO 导入导出/后验验证/批处理**所有重量级失败路径**的结构化数值证据迁移及模块级门禁
 
 ### 需求 7.14 混合表示与转换（RepCore）
 
@@ -452,20 +481,20 @@
 
 ### A) GeoCore：高质量几何与鲁棒查询不足
 
-- **样条与高阶曲面工业化**：B-Spline/NURBS 的高质量求值、导数/曲率、稳定反求（最近点/最近参数）与退化处理仍不足。
+- **样条与高阶曲面工业化**：曲线 B-Spline/NURBS 已有完整有效域的最近点预算与收敛证书，但高质量导数/曲率与退化处理仍不足；高阶及派生/修剪曲面的全域反求尚无同等级合同。
 - **Trim 语义未工业化**：当前 `Trimmed` 更多是参数域裁剪占位；缺少基于 loop/coedge/PCurve 的真实修剪边界、以及与 3D curve 一致性的完整规则与算法闭环。
 - **统一公差与尺度策略的贯通不足**：几何求值/最近点/求交/验证/修复对 tolerance 的一致解释仍需要进一步收敛到“可预测、可回归”的策略中心。
 
 ### B) TopoCore：一致性规则集与 trim bridge 不足
 
-- **拓扑规则集不完整**：面环方向、重复/悬挂/非流形的完整规则与诊断覆盖仍不足，Strict 目前更多聚焦闭合性与来源一致性的一部分。
+- **拓扑规则集不完整**：有限 Line/LineSegment 的跨环相交、相接、重叠与容差邻近已统一覆盖，但一般曲线缺显式 trim 区间；面环方向、重复/悬挂/非流形的完整规则与诊断仍不足。
 - **PCurve-3D 一致性（trim bridge）未闭环**：已有最小校验接口，但缺少可用于工业修剪的强一致性约束与修复策略。
-- **事务可观测性/审计不足**：写集/读集、隔离级别、审计统计等工程化能力未落地。
+- **事务隔离深度不足**：单写者、快照回滚、协作式取消和累计审计已落地；细粒度写集/读集、子事务/保存点、长流程内部轮询与跨进程隔离仍不足。
 
 ### C) OpsCore：工业级建模算法缺失（最大缺口）
 
 - **布尔闭环缺失**：候选对生成 → 精确求交 → 切分 → 分类 → 重建 → 验证/修复闭环未实现；当前更多是前置与近似/占位语义。
-- **特征建模缺失**：extrude/revolve/sweep/loft/thicken 等仍缺真实几何与拓扑构造；目前主要依赖最小物化拓扑骨架支撑工作流回归。
+- **特征建模仍未工业化**：显式多边形 extrude、多类曲线 sweep 和整周/部分角 revolve 已能物化真实多面体闭壳；但解析扫掠/旋转曲面、任意 loft、thicken、带孔旋转和显式轮廓历史仍缺失，其他路径仍可能依赖最小物化骨架。
 - **圆角/倒角缺失**：真实圆角倒角（含角区、变半径）未实现，失败原因细分与回归数据集不足。
 
 ### D) Heal/Validation：工业化验证与修复不足
@@ -484,7 +513,7 @@
 
 ### G) Diagnostics/Eval/Plugin：工程化可观测与扩展不足
 
-- **诊断覆盖率未系统化**：虽然已有诊断服务与导出/检索能力，且 **BOOL/HEAL/IO 关键路径已绑定 `Issue.stage` 并进入 `export_report_json`/`axiom_boolean_workflow_test`/`axiom_diagnostics_test`/`axiom_ops_heal_test` 回归**，但“覆盖所有失败路径与阶段化归类”仍未形成系统门禁。
+- **诊断覆盖率未全面系统化**：已具备 `Issue.numeric_evidence`、覆盖审计与 JSON 门禁，BOOL 受覆盖失败分支已纳入；HEAL/IO 的全部重量级失败路径仍未完成阶段、实体与数值证据迁移。
 - **EvalGraph 未进入参数化求解级**：当前更像状态/依赖治理基础设施，尚未与真实建模/重建深度耦合。
 - **插件工程化不足**：进程内能力发现、宿主策略与诊断闭环已有雏形（见 7.12），**隔离/安全与动态扩展**仍不足以支撑开放生态。
 
@@ -493,8 +522,8 @@
 - 当前 `OpsCore` 仍未进入真实工业算法阶段
 - 当前 `TopoCore` 尚未形成严格拓扑一致性规则集
 - 当前 `TopoCore` 虽已具备基础事务、验证、邻接查询和基础反向索引，但仍缺少更完整的稠密关联结构
-- 当前 `GeoCore` 还没有高质量样条和参数反求实现
-- 诊断码与错误码**已在主链路与多条回归中绑定**，但距离“所有失败路径可检索、可阶段化归类”的工业门禁仍有明显差距
+- 当前 `GeoCore` 已有曲线全有效域最近点证书，但高质量样条曲率、曲面参数反求和修剪边界精度合同仍不足
+- 诊断码、阶段、实体与数值证据已在 BOOL 受覆盖分支形成审计门禁，但 HEAL/IO 全部重量级失败路径尚未完成迁移
 
 ## 5. 下一迭代 Sprint 焦点与本阶段 backlog
 
@@ -504,14 +533,14 @@
 
 ### 5.1 Sprint 焦点（当前迭代 3～5 条，可验收）
 
-1. **diag + ops**：扩展 BOOL 阶段化诊断覆盖与 JSON `stage` 字段在更多失败分支的一致性；布尔真求交子里程碑（面级候选 → 交线 → imprint）按 DoD 切片交付。  
-   **DoD**：对应码可检索；`axiom_boolean_workflow_test` / `axiom_boolean_prep_test` 不回归。  
-2. **math + geo**：**math（P1）**：退化/尺度谓词与容差策略已由 `axiom_math_services_test` 闭环；**geo**：样条导数/曲率或稳定最近点的最小增量等待下一批。  
-   **DoD**：math 以 `axiom_math_services_test` 回归为准；geo 侧失败有稳定错误码且 `axiom_geometry_test` 覆盖新增语义。  
-3. **topo**：Strict 规则逐项加严（面环方向、悬挂/重复等）与 trim bridge 可物化子规则。  
-   **DoD**：`axiom_topology_test` 失败类回归 + 诊断码。  
-4. **heal + io**：导入侧 mesh 格式导入或验证项（自交/流形性）中的下一可闭合条；维持导入后验证/修复诊断与 `related_entities` 可追溯。  
-   **DoD**：`axiom_heal_test` / `axiom_io_workflow_test` / `axiom_ops_heal_test` 增量断言。
+1. **diag + heal/io**：把 HEAL 验证/修复/回滚与 IO 导入导出/后验验证/批处理的重量级失败分支迁移到阶段、实体、数值证据门禁。
+   **DoD**：`audit_evidence` 模块级门禁通过；`axiom_diagnostics_test` / `axiom_heal_test` / `axiom_io_workflow_test` 不回归。
+2. **geo**：把第 69 批曲线全域最近点合同扩展到 Bezier/BSpline/NURBS 与派生/修剪曲面的完整参数域和 trim 边界。
+   **DoD**：公开预算、距离/参数终止证据；`axiom_geometry_test` 覆盖窄参数片、边界和失败不污染。
+3. **topo + reliability**：为拓扑边增加显式 trim 区间并覆盖一般曲线跨环求交；把协作式取消扩展到 BOOL/HEAL/IO 长耗时内部阶段。
+   **DoD**：`axiom_topology_test` / 对应 workflow 测试覆盖取消、回滚、诊断和审计不变量。
+4. **ops**：布尔真求交子里程碑（面级候选 → 交线 → imprint）按 DoD 切片交付。
+   **DoD**：对应码与结构化证据可审计；`axiom_boolean_workflow_test` / `axiom_boolean_prep_test` 不回归。
 
 ### 5.2 本阶段 backlog 表（唯一入口，随迭代刷新）
 
@@ -522,7 +551,9 @@
 | P0 | 已闭合（门禁） | core/io | 门面 IO 能力与 `IOService` 一致 | `axiom_smoke_test` | — |
 | P0～P1 | 已闭合（首批） | diag/ops/io/heal | 工作流 `Issue.stage` + JSON 导出可聚合；Heal 独立门禁 | `axiom_diagnostics_test`、`axiom_boolean_workflow_test`、`axiom_heal_test`、`axiom_ops_heal_test` | core |
 | P1 | 已闭合（本阶段回归） | math | 退化/尺度谓词与容差策略回归（`orient*_effective`、`max_local`/`min_local`、`resolve_*_for_scale` 非有限尺度、大坐标谓词/点等） | `axiom_math_services_test` | core |
-| P1～P2 | 进行中 | geo/topo | trim / trim bridge / Strict 规则 | `axiom_geometry_test`、`axiom_topology_test` | math |
+| P0～P1 | 已闭合（第 69 批） | diag/geo/topo/core | 数值证据审计、曲线最近点证书、有限直线跨环冲突、拓扑协作式取消 | `axiom_diagnostics_test`、`axiom_geometry_test`、`axiom_topology_test`、`axiom_query_eval_test` | math/core |
+| P1～P2 | 进行中 | geo/topo | 曲面全域最近点、一般曲线显式 trim / trim bridge / Strict 规则 | `axiom_geometry_test`、`axiom_topology_test` | math |
+| P1～P2 | 进行中 | diag/heal/io | HEAL/IO 数值证据与模块级审计门禁 | `axiom_diagnostics_test`、`axiom_heal_test`、`axiom_io_workflow_test` | core |
 | P2 | 进行中 | ops | 布尔非 bbox 结果子里程碑 | `axiom_boolean_*` | geo/topo |
 | P2～P3 | 进行中 | eval/rep | 重算指标、Rep 误差预算 | `axiom_query_eval_test`、`axiom_representation_io_test` | ops（部分） |
 
