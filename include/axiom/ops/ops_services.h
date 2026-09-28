@@ -46,18 +46,23 @@ public:
     /// Produces an actual planar closed BRep; touching/crossing planes and numerical degeneracy are rejected.
     Result<BodyId> extrude_to_plane(const ProfileRef& profile, const Vec3& direction, const Plane& end_plane);
     /// Revolve a profile through a positive angle no greater than one full turn.
-    /// Explicit polygons produce owned topology when the axis lies in the profile plane.
-    /// A full turn supports a profile strictly separated from the axis, or a simply
-    /// connected profile whose single boundary edge lies on the axis. Profiles that
-    /// cross the axis, touch it at an isolated point, contain holes or are numerically
-    /// near-degenerate are rejected without creating model objects.
+    /// Explicit planar polygons are conservatively subdivided in angle and produce an
+    /// owned triangulated closed BRep when the axis lies in the profile plane. Partial
+    /// and full turns support a profile strictly separated from the axis, or a simply
+    /// connected profile whose single boundary edge lies on the axis. Concave outlines
+    /// are supported; profiles that cross the axis, touch it at an isolated point,
+    /// contain holes or are numerically near-degenerate are rejected before allocation.
     Result<BodyId> revolve(const ProfileRef& profile, const Axis3& axis, Scalar angle);
     /// Explicit polygons along a bounded rail, producing owned triangulated closed topology.
     /// Line segments and CompositePolyline keep the profile in world space and require every
     /// segment to advance through its plane. Bezier, B-spline and NURBS rails use a sampled
-    /// rotation-minimizing frame; Circle/Ellipse rails are periodic and have no caps. Curve-following profiles
+    /// rotation-minimizing frame. A CompositeChain may join bounded line, circle/ellipse arc,
+    /// Bezier, B-spline and NURBS children when adjacent endpoints and tangent directions agree;
+    /// closed chains, endpoint/tangent-continuous closed splines and Circle/Ellipse rails are
+    /// periodic and have no caps. Curve-following profiles
     /// must start on the rail in a plane normal to its tangent. Concavities and holes are supported;
-    /// cusps, closed splines, excessive curvature and self-approaching rails are rejected.
+    /// gaps, tangent-discontinuous joints, cusps, nested chains, excessive curvature and
+    /// self-approaching rails are rejected without allocating a body or owned topology.
     Result<BodyId> sweep(const ProfileRef& profile, CurveId rail);
     Result<BodyId> loft(std::span<const ProfileRef> profiles);
     Result<BodyId> thicken(FaceId face_id, Scalar distance);

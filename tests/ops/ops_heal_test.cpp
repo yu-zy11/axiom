@@ -858,6 +858,196 @@ bool test_extrusions_to_plane() {
     return true;
 }
 
+bool test_partial_polygon_revolutions() {
+    constexpr double pi = 3.1415926535897932384626433832795;
+    struct Model {
+        std::string label;
+        std::vector<axiom::Point3> meridian;
+        std::size_t axis_vertices;
+    };
+    const std::vector<Model> models {
+        {"partial_annular_rectangle", {{1,0,-1},{3,0,-1},{3,0,2},{1,0,2}}, 0},
+        {"partial_annular_concave", {{1,0,-2},{4,0,-2},{4,0,-1},{2,0,-1},{2,0,2},{1,0,2}}, 0},
+        {"partial_solid_triangle", {{0,0,-1},{3,0,-1},{0,0,2}}, 2},
+        {"partial_solid_step", {{0,0,-2},{3,0,-2},{3,0,-1},{2,0,-1},{2,0,2},{0,0,2}}, 2},
+    };
+    const std::array<axiom::Vec3, 2> axes {{
+        {0,0,1}, {2.0/3.0,-1.0/3.0,2.0/3.0}
+    }};
+    const std::array<axiom::Vec3, 2> radial {{
+        {1,0,0}, {1.0/std::sqrt(5.0),2.0/std::sqrt(5.0),0}
+    }};
+    const std::array<double, 3> angles {{pi/6.0, 2.0*pi/3.0, 3.0*pi/2.0}};
+    const axiom::Point3 origin {-11,7,4};
+    for (const auto& model : models) {
+        double signed_twice_area = 0.0, radial_moment_numerator = 0.0;
+        for (std::size_t i = 0; i < model.meridian.size(); ++i) {
+            const auto& a = model.meridian[i];
+            const auto& b = model.meridian[(i+1)%model.meridian.size()];
+            const double cross = a.x*b.z-b.x*a.z;
+            signed_twice_area += cross;
+            radial_moment_numerator += (a.x+b.x)*cross;
+        }
+        const double profile_area = std::abs(signed_twice_area)/2.0;
+        const double centroid_radius = std::abs(radial_moment_numerator/(3.0*signed_twice_area));
+        for (std::size_t frame = 0; frame < axes.size(); ++frame) {
+            for (std::size_t angle_index = 0; angle_index < angles.size(); ++angle_index) {
+                for (int variant = 0; variant < 2; ++variant) {
+                    axiom::Kernel kernel;
+                    axiom::ProfileRef profile;
+                    profile.label = model.label+"_"+std::to_string(frame)+"_"+
+                                    std::to_string(angle_index)+"_"+std::to_string(variant);
+                    profile.polygon_xyz = model.meridian;
+                    if (variant != 0) {
+                        std::reverse(profile.polygon_xyz.begin(),profile.polygon_xyz.end());
+                        std::rotate(profile.polygon_xyz.begin(),profile.polygon_xyz.begin()+1,
+                                    profile.polygon_xyz.end());
+                    }
+                    for (auto& p : profile.polygon_xyz) {
+                        p = {origin.x+radial[frame].x*p.x+axes[frame].x*p.z,
+                             origin.y+radial[frame].y*p.x+axes[frame].y*p.z,
+                             origin.z+radial[frame].z*p.x+axes[frame].z*p.z};
+                    }
+                    const double direction_sign = variant == 0 ? 4.0 : -3.0;
+                    const axiom::Axis3 axis {origin,{direction_sign*axes[frame].x,
+                                                     direction_sign*axes[frame].y,
+                                                     direction_sign*axes[frame].z}};
+                    const double angle = angles[angle_index];
+                    const auto body = kernel.sweeps().revolve(profile,axis,angle);
+                    if (!body.value || body.status!=axiom::StatusCode::Ok) {
+                        std::cerr << "partial polygon revolution failed: " << profile.label << '\n';
+                        return false;
+                    }
+                    const auto query = kernel.topology().query();
+                    const auto shells = query.shells_of_body(*body.value);
+                    const auto faces = query.faces_of_body(*body.value);
+                    const auto edges = query.edges_of_body(*body.value);
+                    const auto vertices = query.vertices_of_body(*body.value);
+                    const auto mass = kernel.query().mass_properties(*body.value);
+                    const int segments = std::max(1,static_cast<int>(std::ceil(angle/(2.0*pi/48.0))));
+                    const std::size_t off_axis = model.meridian.size()-model.axis_vertices;
+                    const std::size_t expected_vertices = off_axis*static_cast<std::size_t>(segments+1)+
+                                                          model.axis_vertices;
+                    const std::size_t active_edges = model.meridian.size()-(model.axis_vertices==0?0:1);
+                    const std::size_t mixed_edges = model.axis_vertices==0?0:2;
+                    const std::size_t expected_faces = static_cast<std::size_t>(segments)*
+                        (2*active_edges-mixed_edges)+2*(model.meridian.size()-2);
+                    const std::size_t expected_edges = 3*expected_faces/2;
+                    const double exact_volume = profile_area*centroid_radius*angle;
+                    if (!shells.value || shells.value->size()!=1 || !faces.value ||
+                        faces.value->size()!=expected_faces || !edges.value || edges.value->size()!=expected_edges ||
+                        !vertices.value || vertices.value->size()!=expected_vertices || !mass.value ||
+                        std::abs(mass.value->volume-exact_volume)>exact_volume*0.004 ||
+                        mass.value->area<=0 || mass.value->inertia[0]<=0 || mass.value->inertia[4]<=0 ||
+                        mass.value->inertia[8]<=0 ||
+                        std::abs(mass.value->inertia[1]-mass.value->inertia[3])>1e-8 ||
+                        std::abs(mass.value->inertia[2]-mass.value->inertia[6])>1e-8 ||
+                        std::abs(mass.value->inertia[5]-mass.value->inertia[7])>1e-8 ||
+                        kernel.validate().validate_all(*body.value,axiom::ValidationMode::Strict).status!=
+                            axiom::StatusCode::Ok ||
+                        kernel.topology().validate().validate_indices_consistency().status!=axiom::StatusCode::Ok ||
+                        kernel.topology().validate().validate_body_topology_indices(*body.value).status!=
+                            axiom::StatusCode::Ok) {
+                        std::cerr << "partial revolution topology/mass/Strict mismatch: " << profile.label << '\n';
+                        return false;
+                    }
+                    double queried_area = 0.0;
+                    for (const auto face : *faces.value) {
+                        const auto area = query.planar_face_area(face);
+                        const auto owners = query.bodies_of_face(face);
+                        if (!area.value || *area.value<=0 || !owners.value || owners.value->size()!=1 ||
+                            owners.value->front().value!=body.value->value) return false;
+                        queried_area += *area.value;
+                    }
+                    if (std::abs(queried_area-mass.value->area)>1e-8*mass.value->area) return false;
+                    for (const auto edge : *edges.value) {
+                        const auto uses = query.coedge_count_of_edge(edge);
+                        const auto neighbors = query.faces_of_edge(edge);
+                        const auto length = query.edge_length(edge);
+                        if (!uses.value || *uses.value!=2 || !neighbors.value || neighbors.value->size()!=2 ||
+                            !length.value || *length.value<=0) return false;
+                    }
+                    const auto topology_bbox = query.bbox_of_body_from_topology(*body.value);
+                    const auto body_bbox = kernel.representation().bbox_of_body(*body.value);
+                    if (!topology_bbox.value || !body_bbox.value || !topology_bbox.value->is_valid ||
+                        !body_bbox.value->is_valid ||
+                        std::hypot(topology_bbox.value->min.x-body_bbox.value->min.x,
+                                   topology_bbox.value->min.y-body_bbox.value->min.y,
+                                   topology_bbox.value->min.z-body_bbox.value->min.z)>1e-10 ||
+                        std::hypot(topology_bbox.value->max.x-body_bbox.value->max.x,
+                                   topology_bbox.value->max.y-body_bbox.value->max.y,
+                                   topology_bbox.value->max.z-body_bbox.value->max.z)>1e-10) return false;
+                    const auto mesh = kernel.convert().brep_to_mesh(*body.value,{});
+                    const auto inspection = mesh.value ? kernel.convert().inspect_mesh(*mesh.value) :
+                                                        axiom::Result<axiom::MeshInspectionReport>{};
+                    if (!inspection.value || inspection.value->tessellation_strategy!="owned_topo_welded" ||
+                        inspection.value->vertex_count!=expected_vertices ||
+                        inspection.value->triangle_count!=expected_faces ||
+                        inspection.value->connected_components!=1 || inspection.value->has_degenerate_triangles ||
+                        inspection.value->has_out_of_range_indices) return false;
+                }
+            }
+        }
+    }
+
+    axiom::Kernel kernel;
+    axiom::ProfileRef source_profile {"partial_revolution_source",{{0,0,-2},{3,0,-2},{3,0,2},{0,0,2}}};
+    const axiom::Axis3 z_axis {{0,0,0},{0,0,1}};
+    const auto source = kernel.sweeps().revolve(source_profile,z_axis,5.0*pi/4.0);
+    const auto source_mass = source.value ? kernel.query().mass_properties(*source.value) :
+                                            axiom::Result<axiom::MassProperties>{};
+    const auto source_faces = source.value ? kernel.topology().query().faces_of_body(*source.value) :
+                                             axiom::Result<std::vector<axiom::FaceId>>{};
+    if (!source.value || !source_mass.value || !source_faces.value || source_faces.value->empty()) return false;
+    auto transaction = kernel.topology().begin_transaction();
+    const auto temporary = transaction.create_vertex({20,20,20});
+    const auto objects = kernel.object_count_total(), geometry = kernel.geometry_count();
+    const auto bodies = kernel.body_count(), next = kernel.next_object_id();
+    const auto writes = transaction.write_operation_count();
+    const auto runtime = kernel.runtime_store_counts();
+    if (!temporary.value || !objects.value || !geometry.value || !bodies.value || !next.value ||
+        !writes.value || !runtime.value) return false;
+    const auto rejected = [&](const axiom::ProfileRef& profile, const axiom::Axis3& axis, double angle) {
+        const auto result = kernel.sweeps().revolve(profile,axis,angle);
+        const auto diagnostic = kernel.diagnostics().get(result.diagnostic_id);
+        const auto after = kernel.runtime_store_counts();
+        return result.status==axiom::StatusCode::InvalidInput && !result.value && diagnostic.value &&
+            has_issue_code(*diagnostic.value,axiom::diag_codes::kCoreParameterOutOfRange) &&
+            kernel.object_count_total().value==objects.value && kernel.geometry_count().value==geometry.value &&
+            kernel.body_count().value==bodies.value && kernel.next_object_id().value==next.value &&
+            transaction.write_operation_count().value==writes.value && after.value &&
+            after.value->mesh_records==runtime.value->mesh_records &&
+            after.value->tessellation_cache_entries==runtime.value->tessellation_cache_entries &&
+            after.value->face_tessellation_cache_entries==runtime.value->face_tessellation_cache_entries;
+    };
+    if (!rejected({"cross_axis",{{-1,0,-1},{1,0,-1},{1,0,1},{-1,0,1}}},z_axis,pi) ||
+        !rejected({"isolated_axis",{{0,0,0},{2,0,-1},{2,0,1}}},z_axis,pi) ||
+        !rejected({"near_axis",{{1e-9,0,-1},{2,0,-1},{2,0,1},{1e-9,0,1}}},z_axis,pi) ||
+        !rejected({"self_crossing",{{1,0,-1},{3,0,1},{1,0,1},{3,0,-1}}},z_axis,pi) ||
+        !rejected({"nonplanar",{{1,0,-1},{3,0,-1},{3,0,1},{1,0.1,1}}},z_axis,pi) ||
+        !rejected(source_profile,{{0,1,0},{0,0,1}},pi) ||
+        !rejected({"holed",source_profile.polygon_xyz,{{{1,0,-1},{2,0,-1},{2,0,1},{1,0,1}}}},z_axis,pi))
+        return false;
+    if (transaction.rollback().status!=axiom::StatusCode::Ok) return false;
+    const auto remains = kernel.topology().query().has_vertex(*temporary.value);
+    if (!remains.value || *remains.value) return false;
+    auto edit = kernel.topology().begin_transaction();
+    if (edit.delete_face(source_faces.value->front()).status!=axiom::StatusCode::Ok ||
+        edit.rollback().status!=axiom::StatusCode::Ok) return false;
+    const auto restored = kernel.query().mass_properties(*source.value);
+    const auto restored_faces = kernel.topology().query().faces_of_body(*source.value);
+    if (!restored.value || std::abs(restored.value->volume-source_mass.value->volume)>1e-10 ||
+        std::abs(restored.value->area-source_mass.value->area)>1e-10 ||
+        restored.value->inertia!=source_mass.value->inertia || !restored_faces.value ||
+        restored_faces.value->size()!=source_faces.value->size() ||
+        kernel.validate().validate_all(*source.value,axiom::ValidationMode::Strict).status!=axiom::StatusCode::Ok)
+        return false;
+    std::reverse(source_profile.polygon_xyz.begin(),source_profile.polygon_xyz.end());
+    const auto retry = kernel.sweeps().revolve(source_profile,{{0,0,0},{0,0,-9}},pi/3.0);
+    return retry.value &&
+        kernel.validate().validate_all(*retry.value,axiom::ValidationMode::Strict).status==axiom::StatusCode::Ok;
+}
+
 bool test_full_polygon_revolutions() {
     constexpr double pi = 3.1415926535897932384626433832795;
     constexpr int stations = 48;
@@ -1516,11 +1706,416 @@ bool test_curve_frame_sweeps() {
         kernel.validate().validate_all(*source.value,axiom::ValidationMode::Strict).status == axiom::StatusCode::Ok;
 }
 
+bool test_closed_spline_sweeps() {
+    const auto add = [](axiom::Point3 p, axiom::Vec3 a, double x, axiom::Vec3 b, double y) {
+        return axiom::Point3 {p.x+a.x*x+b.x*y, p.y+a.y*x+b.y*y, p.z+a.z*x+b.z*y};
+    };
+    const auto cross = [](axiom::Vec3 a, axiom::Vec3 b) {
+        return axiom::Vec3 {a.y*b.z-a.z*b.y, a.z*b.x-a.x*b.z, a.x*b.y-a.y*b.x};
+    };
+    const auto unit = [](axiom::Vec3 a) {
+        const double length = std::hypot(a.x,a.y,a.z);
+        return axiom::Vec3 {a.x/length,a.y/length,a.z/length};
+    };
+    const auto profile_at = [&](axiom::Point3 origin, axiom::Vec3 tangent, int variant, bool hole,
+                                double scale = 1.0) {
+        tangent = unit(tangent);
+        const auto reference = std::abs(tangent.z) < 0.8 ? axiom::Vec3 {0,0,1} : axiom::Vec3 {0,1,0};
+        const auto u = unit(cross(tangent,reference));
+        const auto v = unit(cross(tangent,u));
+        axiom::ProfileRef profile {"closed_spline_section",
+            {add(origin,u,-0.24*scale,v,-0.18*scale), add(origin,u,0.24*scale,v,-0.18*scale),
+             add(origin,u,0.24*scale,v,0.18*scale), add(origin,u,-0.24*scale,v,0.18*scale)}};
+        if (hole) {
+            profile.polygon_xyz = {
+                add(origin,u,-0.3*scale,v,-0.24*scale), add(origin,u,0.3*scale,v,-0.24*scale),
+                add(origin,u,0.3*scale,v,0.24*scale), add(origin,u,-0.3*scale,v,0.24*scale)};
+            profile.holes_xyz = {{
+                add(origin,u,-0.1*scale,v,-0.08*scale), add(origin,u,0.1*scale,v,-0.08*scale),
+                add(origin,u,0.1*scale,v,0.08*scale), add(origin,u,-0.1*scale,v,0.08*scale)}};
+        }
+        if (variant & 1) std::reverse(profile.polygon_xyz.begin(),profile.polygon_xyz.end());
+        std::rotate(profile.polygon_xyz.begin(),
+                    profile.polygon_xyz.begin()+static_cast<std::ptrdiff_t>(variant%profile.polygon_xyz.size()),
+                    profile.polygon_xyz.end());
+        for (auto& ring : profile.holes_xyz) {
+            if (variant & 2) std::reverse(ring.begin(),ring.end());
+            std::rotate(ring.begin(),ring.begin()+static_cast<std::ptrdiff_t>(variant%ring.size()),ring.end());
+        }
+        return profile;
+    };
+    enum class RailKind { Bezier, BSpline, Nurbs };
+    const std::array<RailKind,3> kinds {RailKind::Bezier,RailKind::BSpline,RailKind::Nurbs};
+    for (const auto kind : kinds) for (const bool spatial : {false,true})
+        for (const bool hole : {false,true}) for (int variant = 0; variant < 4; ++variant) {
+        axiom::Kernel kernel;
+        std::vector<axiom::Point3> poles {
+            {15,0,4}, {15,7,4+(spatial?2:0)}, {8,13,4+(spatial?3:0)},
+            {-2,15,4+(spatial?1:0)}, {-12,8,4-(spatial?2:0)}, {-14,-2,4-(spatial?3:0)},
+            {-8,-12,4-(spatial?1:0)}, {3,-14,4+(spatial?2:0)},
+            {15,-7,4-(spatial?2:0)}, {15,0,4}
+        };
+        axiom::Result<axiom::CurveId> rail;
+        if (kind == RailKind::Bezier) rail = kernel.curves().make_bezier(poles);
+        else if (kind == RailKind::BSpline) rail = kernel.curves().make_bspline({poles,3,{}});
+        else rail = kernel.curves().make_nurbs({poles,{1,0.8,1.2,0.9,1.1,0.85,1.15,0.9,1.05,1},3,{}});
+        if (!rail.value) return false;
+        const auto domain = kernel.curve_service().domain(*rail.value);
+        if (!domain.value) return false;
+        const auto start = kernel.curve_service().eval(*rail.value,domain.value->min,1);
+        const auto end = kernel.curve_service().eval(*rail.value,domain.value->max,1);
+        if (!start.value || !end.value ||
+            std::hypot(start.value->point.x-end.value->point.x,start.value->point.y-end.value->point.y,
+                       start.value->point.z-end.value->point.z) > 1e-10 ||
+            start.value->tangent.x*end.value->tangent.x + start.value->tangent.y*end.value->tangent.y +
+                start.value->tangent.z*end.value->tangent.z < 1.0-1e-8) return false;
+        const auto profile = profile_at(start.value->point,start.value->tangent,variant,hole);
+        const auto body = kernel.sweeps().sweep(profile,*rail.value);
+        if (!body.value || body.status != axiom::StatusCode::Ok) {
+            std::cerr << "closed spline sweep construction failed: kind=" << static_cast<int>(kind)
+                      << " spatial=" << spatial << " hole=" << hole << " variant=" << variant << '\n';
+            return false;
+        }
+        const auto query = kernel.topology().query();
+        const auto faces = query.faces_of_body(*body.value);
+        const auto edges = query.edges_of_body(*body.value);
+        const auto vertices = query.vertices_of_body(*body.value);
+        const auto shells = query.shells_of_body(*body.value);
+        const auto mass = kernel.query().mass_properties(*body.value);
+        const std::size_t section_vertices = profile.polygon_xyz.size() +
+            (hole ? profile.holes_xyz.front().size() : 0);
+        if (!vertices.value || vertices.value->empty() || vertices.value->size()%section_vertices != 0) return false;
+        const std::size_t stations = vertices.value->size()/section_vertices;
+        const std::size_t expected_faces = 2*section_vertices*stations;
+        const std::size_t expected_shells = 1+profile.holes_xyz.size();
+        if (stations < 32 || !faces.value || faces.value->size() != expected_faces || !edges.value ||
+            edges.value->size() != 3*expected_faces/2 || !shells.value || shells.value->size() != expected_shells ||
+            !mass.value || !(mass.value->volume > 0) || !(mass.value->area > 0) ||
+            !std::isfinite(mass.value->centroid.x) ||
+            !std::all_of(mass.value->inertia.begin(),mass.value->inertia.end(),
+                         [](double value) { return std::isfinite(value); }) ||
+            kernel.validate().validate_all(*body.value,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok ||
+            kernel.topology().validate().validate_body_topology_indices(*body.value).status != axiom::StatusCode::Ok) {
+            std::cerr << "closed spline sweep topology/mass/Strict mismatch\n";
+            return false;
+        }
+        double queried_area = 0.0;
+        for (const auto face : *faces.value) {
+            const auto area = query.planar_face_area(face);
+            const auto owners = query.bodies_of_face(face);
+            const auto loops = query.loops_of_face(face);
+            if (!area.value || !(*area.value > 0) || !owners.value || owners.value->size() != 1 ||
+                owners.value->front().value != body.value->value || !loops.value || loops.value->size() != 1) return false;
+            queried_area += *area.value;
+        }
+        for (const auto edge : *edges.value) {
+            const auto uses = query.coedge_count_of_edge(edge);
+            const auto adjacent = query.faces_of_edge(edge);
+            if (!uses.value || *uses.value != 2 || !adjacent.value || adjacent.value->size() != 2) return false;
+        }
+        if (std::abs(queried_area-mass.value->area) > 1e-7*std::max(1.0,mass.value->area)) return false;
+        const auto topo_bbox = query.bbox_of_body_from_topology(*body.value);
+        const auto rep_bbox = kernel.representation().bbox_of_body(*body.value);
+        if (!topo_bbox.value || !rep_bbox.value || !topo_bbox.value->is_valid || !rep_bbox.value->is_valid ||
+            std::hypot(topo_bbox.value->min.x-rep_bbox.value->min.x,
+                       topo_bbox.value->min.y-rep_bbox.value->min.y,
+                       topo_bbox.value->min.z-rep_bbox.value->min.z) > 1e-9 ||
+            std::hypot(topo_bbox.value->max.x-rep_bbox.value->max.x,
+                       topo_bbox.value->max.y-rep_bbox.value->max.y,
+                       topo_bbox.value->max.z-rep_bbox.value->max.z) > 1e-9) return false;
+        const auto mesh = kernel.convert().brep_to_mesh(*body.value,{});
+        const auto inspection = mesh.value ? kernel.convert().inspect_mesh(*mesh.value)
+                                           : axiom::Result<axiom::MeshInspectionReport>{};
+        if (!inspection.value || inspection.value->tessellation_strategy != "owned_topo_welded" ||
+            inspection.value->vertex_count != section_vertices*stations ||
+            inspection.value->triangle_count != expected_faces ||
+            inspection.value->connected_components != expected_shells || inspection.value->has_degenerate_triangles ||
+            inspection.value->has_out_of_range_indices) return false;
+    }
+
+    axiom::Kernel kernel;
+    const std::vector<axiom::Point3> good_poles {
+        {12,0,0},{12,6,1},{6,11,2},{-4,11,-1},{-12,4,-2},
+        {-10,-7,1},{0,-12,2},{10,-7,-1},{12,-6,-1},{12,0,0}
+    };
+    const auto good_rail = kernel.curves().make_bezier(good_poles);
+    const auto discontinuous = kernel.curves().make_bezier(
+        std::vector<axiom::Point3>{{8,0,0},{8,5,0},{0,9,0},{-8,0,0},{4,4,0},{8,0,0}});
+    const auto cusp = kernel.curves().make_bezier(
+        std::vector<axiom::Point3>{{8,0,0},{8,0,0},{0,9,0},{-8,0,0},{8,-5,0},{8,0,0}});
+    if (!good_rail.value || !discontinuous.value || !cusp.value) return false;
+    const auto start = kernel.curve_service().eval(*good_rail.value,0,1);
+    const auto bad_start = kernel.curve_service().eval(*discontinuous.value,0,1);
+    if (!start.value || !bad_start.value) return false;
+    const auto good_profile = profile_at(start.value->point,start.value->tangent,0,true);
+    const auto bad_profile = profile_at(bad_start.value->point,bad_start.value->tangent,0,false);
+    const auto source = kernel.sweeps().sweep(good_profile,*good_rail.value);
+    if (!source.value) return false;
+    auto transaction = kernel.topology().begin_transaction();
+    const auto temporary = transaction.create_vertex({120,121,122});
+    const auto objects = kernel.object_count_total(), geometry = kernel.geometry_count(), bodies = kernel.body_count();
+    const auto next = kernel.next_object_id(), writes = transaction.write_operation_count();
+    const auto runtime = kernel.runtime_store_counts();
+    if (!temporary.value || !objects.value || !geometry.value || !bodies.value || !next.value || !writes.value ||
+        !runtime.value) return false;
+    const auto rejected = [&](const axiom::ProfileRef& profile, axiom::CurveId rail) {
+        const auto result = kernel.sweeps().sweep(profile,rail);
+        const auto diagnostic = kernel.diagnostics().get(result.diagnostic_id);
+        const auto after = kernel.runtime_store_counts();
+        return result.status == axiom::StatusCode::InvalidInput && !result.value && diagnostic.value &&
+            has_issue_code(*diagnostic.value,axiom::diag_codes::kCoreParameterOutOfRange) &&
+            kernel.object_count_total().value == objects.value && kernel.geometry_count().value == geometry.value &&
+            kernel.body_count().value == bodies.value && kernel.next_object_id().value == next.value &&
+            transaction.write_operation_count().value == writes.value && after.value &&
+            after.value->mesh_records == runtime.value->mesh_records &&
+            after.value->tessellation_cache_entries == runtime.value->tessellation_cache_entries &&
+            after.value->curve_eval_cache_entries == runtime.value->curve_eval_cache_entries &&
+            after.value->surface_eval_cache_entries == runtime.value->surface_eval_cache_entries;
+    };
+    auto tilted = good_profile;
+    for (auto& p : tilted.polygon_xyz) p.y += 0.2*p.x;
+    for (auto& ring : tilted.holes_xyz) for (auto& p : ring) p.y += 0.2*p.x;
+    const auto oversized = profile_at(start.value->point,start.value->tangent,0,false,30.0);
+    if (!rejected(bad_profile,*discontinuous.value) || !rejected(good_profile,*cusp.value) ||
+        !rejected(tilted,*good_rail.value) || !rejected(oversized,*good_rail.value)) return false;
+    if (transaction.rollback().status != axiom::StatusCode::Ok) return false;
+    const auto remains = kernel.topology().query().has_vertex(*temporary.value);
+    const auto after_rollback = kernel.object_count_total();
+    if (!remains.value || *remains.value || !after_rollback.value || *after_rollback.value+1 != *objects.value) return false;
+    const auto retry = kernel.sweeps().sweep(good_profile,*good_rail.value);
+    return retry.value &&
+        kernel.validate().validate_all(*retry.value,axiom::ValidationMode::Strict).status == axiom::StatusCode::Ok &&
+        kernel.validate().validate_all(*source.value,axiom::ValidationMode::Strict).status == axiom::StatusCode::Ok;
+}
+
+bool test_composite_chain_sweeps() {
+    const auto add = [](axiom::Point3 p, axiom::Vec3 direction, double amount) {
+        return axiom::Point3 {p.x+direction.x*amount,p.y+direction.y*amount,p.z+direction.z*amount};
+    };
+    const auto unit = [](axiom::Vec3 direction) {
+        const double length = std::hypot(direction.x,direction.y,direction.z);
+        return axiom::Vec3 {direction.x/length,direction.y/length,direction.z/length};
+    };
+    const auto open_profile = [](bool hole, int variant) {
+        axiom::ProfileRef profile {"composite_chain_section",
+            {{0,-0.22,-0.16},{0,0.22,-0.16},{0,0.22,0.16},{0,-0.22,0.16}}};
+        if (hole) profile = {"composite_chain_holed_section",
+            {{0,-0.3,-0.24},{0,0.3,-0.24},{0,0.3,0.24},{0,-0.3,0.24}},
+            {{{0,-0.1,-0.08},{0,0.1,-0.08},{0,0.1,0.08},{0,-0.1,0.08}}}};
+        if (variant&1) std::reverse(profile.polygon_xyz.begin(),profile.polygon_xyz.end());
+        std::rotate(profile.polygon_xyz.begin(),profile.polygon_xyz.begin()+variant%profile.polygon_xyz.size(),
+                    profile.polygon_xyz.end());
+        for (auto& ring : profile.holes_xyz) {
+            if (variant&2) std::reverse(ring.begin(),ring.end());
+            std::rotate(ring.begin(),ring.begin()+variant%ring.size(),ring.end());
+        }
+        return profile;
+    };
+    enum class TailKind { Bezier, BSpline, Nurbs };
+    for (const auto tail_kind : {TailKind::Bezier,TailKind::BSpline,TailKind::Nurbs})
+        for (const bool spatial : {false,true}) for (const bool hole : {false,true})
+            for (int variant = 0; variant < 2; ++variant) {
+        axiom::Kernel kernel;
+        const auto line = kernel.curves().make_line_segment({0,0,0},{4,0,0});
+        const auto arc = kernel.curves().make_ellipse({4,3,0},{0,-3,0},{3,0,0});
+        const axiom::Point3 arc_end {4+3*std::sin(1.0),3-3*std::cos(1.0),0};
+        const auto arc_tangent = unit({3*std::cos(1.0),3*std::sin(1.0),0});
+        std::vector<axiom::Point3> tail {
+            arc_end,add(arc_end,arc_tangent,1.6),
+            add(add(arc_end,arc_tangent,3.3),{0,0,1},spatial?0.5:0.0),
+            add(add(arc_end,arc_tangent,5.2),{0,0,1},spatial?1.1:0.0)};
+        axiom::Result<axiom::CurveId> tail_curve;
+        if (tail_kind == TailKind::Bezier) tail_curve = kernel.curves().make_bezier(tail);
+        else if (tail_kind == TailKind::BSpline) tail_curve = kernel.curves().make_bspline({tail,3,{}});
+        else tail_curve = kernel.curves().make_nurbs({tail,{1,0.85,1.15,1},3,{}});
+        if (!line.value || !arc.value || !tail_curve.value) return false;
+        const std::array<axiom::CurveId,3> children {*line.value,*arc.value,*tail_curve.value};
+        const auto rail = kernel.curves().make_composite_chain(children);
+        if (!rail.value) return false;
+        const auto profile = open_profile(hole,variant);
+        const auto body = kernel.sweeps().sweep(profile,*rail.value);
+        if (!body.value || body.status != axiom::StatusCode::Ok) {
+            std::cerr << "composite chain sweep construction failed: tail=" << static_cast<int>(tail_kind)
+                      << " spatial=" << spatial << " hole=" << hole << " variant=" << variant << '\n';
+            return false;
+        }
+        const auto query = kernel.topology().query();
+        const auto faces = query.faces_of_body(*body.value);
+        const auto edges = query.edges_of_body(*body.value);
+        const auto vertices = query.vertices_of_body(*body.value);
+        const auto shells = query.shells_of_body(*body.value);
+        const auto mass = kernel.query().mass_properties(*body.value);
+        const std::size_t section_vertices = profile.polygon_xyz.size()+(hole?profile.holes_xyz.front().size():0);
+        if (!vertices.value || vertices.value->empty() || vertices.value->size()%section_vertices != 0) return false;
+        const std::size_t stations = vertices.value->size()/section_vertices;
+        const std::size_t cap_triangles = 2*(section_vertices+2*profile.holes_xyz.size()-2);
+        const std::size_t expected_faces = cap_triangles+2*section_vertices*(stations-1);
+        if (stations < 45 || !faces.value || faces.value->size() != expected_faces || !edges.value ||
+            edges.value->size() != 3*expected_faces/2 || !shells.value || shells.value->size() != 1 ||
+            !mass.value || !(mass.value->volume>0) || !(mass.value->area>0) ||
+            !std::isfinite(mass.value->centroid.x) ||
+            !std::all_of(mass.value->inertia.begin(),mass.value->inertia.end(),
+                         [](double value) { return std::isfinite(value); }) ||
+            kernel.validate().validate_all(*body.value,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok ||
+            kernel.topology().validate().validate_body_topology_indices(*body.value).status != axiom::StatusCode::Ok) {
+            std::cerr << "composite chain sweep topology/mass/Strict mismatch\n";
+            return false;
+        }
+        double queried_area = 0.0;
+        for (const auto face : *faces.value) {
+            const auto area = query.planar_face_area(face);
+            const auto owners = query.bodies_of_face(face);
+            const auto loops = query.loops_of_face(face);
+            if (!area.value || !(*area.value>0) || !owners.value || owners.value->size()!=1 ||
+                owners.value->front().value != body.value->value || !loops.value || loops.value->size()!=1) return false;
+            queried_area += *area.value;
+        }
+        for (const auto edge : *edges.value) {
+            const auto uses = query.coedge_count_of_edge(edge);
+            const auto adjacent = query.faces_of_edge(edge);
+            if (!uses.value || *uses.value!=2 || !adjacent.value || adjacent.value->size()!=2) return false;
+        }
+        if (std::abs(queried_area-mass.value->area)>1e-7*std::max(1.0,mass.value->area)) return false;
+        const auto bbox = query.bbox_of_body_from_topology(*body.value);
+        const auto cached_bbox = kernel.representation().bbox_of_body(*body.value);
+        if (!bbox.value || !cached_bbox.value || !bbox.value->is_valid || !cached_bbox.value->is_valid ||
+            std::hypot(bbox.value->min.x-cached_bbox.value->min.x,bbox.value->min.y-cached_bbox.value->min.y,
+                       bbox.value->min.z-cached_bbox.value->min.z)>1e-9 ||
+            std::hypot(bbox.value->max.x-cached_bbox.value->max.x,bbox.value->max.y-cached_bbox.value->max.y,
+                       bbox.value->max.z-cached_bbox.value->max.z)>1e-9) return false;
+        const auto mesh = kernel.convert().brep_to_mesh(*body.value,{});
+        const auto inspection = mesh.value ? kernel.convert().inspect_mesh(*mesh.value)
+                                           : axiom::Result<axiom::MeshInspectionReport>{};
+        if (!inspection.value || inspection.value->tessellation_strategy!="owned_topo_welded" ||
+            inspection.value->vertex_count!=section_vertices*stations ||
+            inspection.value->triangle_count!=expected_faces || inspection.value->connected_components!=1 ||
+            inspection.value->has_degenerate_triangles || inspection.value->has_out_of_range_indices) return false;
+    }
+
+    // Four tangent-continuous cubic children form a periodic composite rail. The
+    // duplicated final endpoint is removed by the sampler, so the owned shell has
+    // walls only and no hidden cap pair at the chain seam.
+    for (const bool hole : {false,true}) for (int variant = 0; variant < 4; ++variant) {
+        axiom::Kernel kernel;
+        constexpr double radius = 10.0;
+        constexpr double handle = 5.522847498307936;
+        const std::array<std::array<axiom::Point3,4>,4> poles {{
+            {{{radius,0,0},{radius,handle,0},{handle,radius,0},{0,radius,0}}},
+            {{{0,radius,0},{-handle,radius,0},{-radius,handle,0},{-radius,0,0}}},
+            {{{-radius,0,0},{-radius,-handle,0},{-handle,-radius,0},{0,-radius,0}}},
+            {{{0,-radius,0},{handle,-radius,0},{radius,-handle,0},{radius,0,0}}}
+        }};
+        std::array<axiom::CurveId,4> children {};
+        for (std::size_t i = 0; i < poles.size(); ++i) {
+            const auto child = kernel.curves().make_bezier(poles[i]);
+            if (!child.value) return false;
+            children[i] = *child.value;
+        }
+        const auto rail = kernel.curves().make_composite_chain(children);
+        if (!rail.value) return false;
+        axiom::ProfileRef profile {"closed_composite_section",
+            {{radius-0.22,0,-0.16},{radius+0.22,0,-0.16},
+             {radius+0.22,0,0.16},{radius-0.22,0,0.16}}};
+        if (hole) profile = {"closed_composite_holed_section",
+            {{radius-0.3,0,-0.24},{radius+0.3,0,-0.24},
+             {radius+0.3,0,0.24},{radius-0.3,0,0.24}},
+            {{{radius-0.1,0,-0.08},{radius+0.1,0,-0.08},
+              {radius+0.1,0,0.08},{radius-0.1,0,0.08}}}};
+        if (variant&1) std::reverse(profile.polygon_xyz.begin(),profile.polygon_xyz.end());
+        std::rotate(profile.polygon_xyz.begin(),profile.polygon_xyz.begin()+variant%profile.polygon_xyz.size(),
+                    profile.polygon_xyz.end());
+        for (auto& ring : profile.holes_xyz) {
+            if (variant&2) std::reverse(ring.begin(),ring.end());
+            std::rotate(ring.begin(),ring.begin()+variant%ring.size(),ring.end());
+        }
+        const auto body = kernel.sweeps().sweep(profile,*rail.value);
+        if (!body.value) return false;
+        const auto vertices = kernel.topology().query().vertices_of_body(*body.value);
+        const auto faces = kernel.topology().query().faces_of_body(*body.value);
+        const auto shells = kernel.topology().query().shells_of_body(*body.value);
+        const auto mass = kernel.query().mass_properties(*body.value);
+        const std::size_t section_vertices = profile.polygon_xyz.size()+(hole?profile.holes_xyz.front().size():0);
+        if (!vertices.value || vertices.value->size()%section_vertices!=0) return false;
+        const std::size_t stations = vertices.value->size()/section_vertices;
+        if (stations<64 || !faces.value || faces.value->size()!=2*section_vertices*stations || !shells.value ||
+            shells.value->size()!=1+profile.holes_xyz.size() || !mass.value || !(mass.value->volume>0) ||
+            kernel.validate().validate_all(*body.value,axiom::ValidationMode::Strict).status!=axiom::StatusCode::Ok ||
+            kernel.topology().validate().validate_body_topology_indices(*body.value).status!=axiom::StatusCode::Ok)
+            return false;
+    }
+
+    axiom::Kernel kernel;
+    const auto a = kernel.curves().make_line_segment({0,0,0},{4,0,0});
+    const auto b = kernel.curves().make_bezier(
+        std::array<axiom::Point3,4>{{{4,0,0},{6,0,0},{8,1,0},{10,2,0}}});
+    if (!a.value || !b.value) return false;
+    const auto good_chain = kernel.curves().make_composite_chain(std::array{*a.value,*b.value});
+    if (!good_chain.value) return false;
+    const auto good_profile = open_profile(true,0);
+    const auto source = kernel.sweeps().sweep(good_profile,*good_chain.value);
+    if (!source.value) return false;
+    const auto gap_child = kernel.curves().make_line_segment({4.1,0,0},{8.1,0,0});
+    const auto kink_child = kernel.curves().make_line_segment({4,0,0},{4,4,0});
+    const auto cusp_child = kernel.curves().make_bezier(
+        std::array<axiom::Point3,4>{{{4,0,0},{4,0,0},{7,1,0},{9,2,0}}});
+    const auto parabola = kernel.curves().make_parabola({4,0,0},{1,0,0},{0,1,0},1);
+    if (!gap_child.value || !kink_child.value || !cusp_child.value || !parabola.value) return false;
+    const auto gap_chain = kernel.curves().make_composite_chain(std::array{*a.value,*gap_child.value});
+    const auto kink_chain = kernel.curves().make_composite_chain(std::array{*a.value,*kink_child.value});
+    const auto cusp_chain = kernel.curves().make_composite_chain(std::array{*a.value,*cusp_child.value});
+    const auto unsupported_chain = kernel.curves().make_composite_chain(std::array{*a.value,*parabola.value});
+    const auto nested_chain = good_chain.value ? kernel.curves().make_composite_chain(std::array{*good_chain.value})
+                                               : axiom::Result<axiom::CurveId>{};
+    if (!gap_chain.value || !kink_chain.value || !cusp_chain.value || !unsupported_chain.value ||
+        !nested_chain.value) return false;
+    auto transaction = kernel.topology().begin_transaction();
+    const auto temporary = transaction.create_vertex({70,71,72});
+    const auto objects = kernel.object_count_total(), geometry = kernel.geometry_count(), bodies = kernel.body_count();
+    const auto next = kernel.next_object_id(), writes = transaction.write_operation_count();
+    const auto runtime = kernel.runtime_store_counts();
+    if (!temporary.value || !objects.value || !geometry.value || !bodies.value || !next.value || !writes.value ||
+        !runtime.value) return false;
+    const auto rejected = [&](const axiom::ProfileRef& profile, axiom::CurveId rail) {
+        const auto result = kernel.sweeps().sweep(profile,rail);
+        const auto diagnostic = kernel.diagnostics().get(result.diagnostic_id);
+        const auto after = kernel.runtime_store_counts();
+        return result.status==axiom::StatusCode::InvalidInput && !result.value && diagnostic.value &&
+            has_issue_code(*diagnostic.value,axiom::diag_codes::kCoreParameterOutOfRange) &&
+            kernel.object_count_total().value==objects.value && kernel.geometry_count().value==geometry.value &&
+            kernel.body_count().value==bodies.value && kernel.next_object_id().value==next.value &&
+            transaction.write_operation_count().value==writes.value && after.value &&
+            after.value->mesh_records==runtime.value->mesh_records &&
+            after.value->tessellation_cache_entries==runtime.value->tessellation_cache_entries &&
+            after.value->curve_eval_cache_entries==runtime.value->curve_eval_cache_entries &&
+            after.value->surface_eval_cache_entries==runtime.value->surface_eval_cache_entries;
+    };
+    auto tilted = good_profile;
+    for (auto& p : tilted.polygon_xyz) p.x += 0.2*p.y;
+    for (auto& ring : tilted.holes_xyz) for (auto& p : ring) p.x += 0.2*p.y;
+    auto oversized = good_profile;
+    for (auto& p : oversized.polygon_xyz) { p.y*=40; p.z*=40; }
+    for (auto& ring : oversized.holes_xyz) for (auto& p : ring) { p.y*=40; p.z*=40; }
+    if (!rejected(good_profile,*gap_chain.value) || !rejected(good_profile,*kink_chain.value) ||
+        !rejected(good_profile,*cusp_chain.value) || !rejected(good_profile,*unsupported_chain.value) ||
+        !rejected(good_profile,*nested_chain.value) || !rejected(tilted,*good_chain.value) ||
+        !rejected(oversized,*good_chain.value)) return false;
+    if (transaction.rollback().status!=axiom::StatusCode::Ok) return false;
+    const auto remains = kernel.topology().query().has_vertex(*temporary.value);
+    const auto after_rollback = kernel.object_count_total();
+    if (!remains.value || *remains.value || !after_rollback.value || *after_rollback.value+1!=*objects.value)
+        return false;
+    const auto retry = kernel.sweeps().sweep(good_profile,*good_chain.value);
+    return retry.value &&
+        kernel.validate().validate_all(*retry.value,axiom::ValidationMode::Strict).status==axiom::StatusCode::Ok &&
+        kernel.validate().validate_all(*source.value,axiom::ValidationMode::Strict).status==axiom::StatusCode::Ok;
+}
+
 }  // namespace
 
 int main() {
-    if (!test_holed_extrusions() || !test_polyline_sweeps() || !test_curve_frame_sweeps() || !test_scaled_extrusions() ||
-        !test_full_polygon_revolutions() ||
+    if (!test_holed_extrusions() || !test_polyline_sweeps() || !test_curve_frame_sweeps() ||
+        !test_closed_spline_sweeps() || !test_composite_chain_sweeps() || !test_scaled_extrusions() ||
+        !test_partial_polygon_revolutions() || !test_full_polygon_revolutions() ||
         !test_extrusions_to_plane()) return 1;
     // Fresh primitive and derived indexing must preserve new and pre-existing
     // adjacency, including cloned source topology and explicit apex topology.
@@ -1985,7 +2580,7 @@ int main() {
         return 1;
     }
 
-    // 子午面多边形 revolve：真实三角化闭壳 BRep（8 面）+ Eberly 体积/表面积/质心/惯性；与 Pappus 解析体积近似一致。
+    // 子午面多边形 revolve：半周按 24 段生成真实三角化闭壳 BRep，并积分质量属性。
     axiom::ProfileRef tri_meridian;
     tri_meridian.label = "tri_meridian";
     tri_meridian.polygon_xyz = {{1.0, 0.0, 0.0}, {3.0, 0.0, 0.0}, {1.0, 0.0, 2.0}};
@@ -2014,8 +2609,8 @@ int main() {
     }
     auto rev_mer_faces = kernel.topology().query().faces_of_shell(rev_mer_shells.value->front());
     if (rev_mer_faces.status != axiom::StatusCode::Ok || !rev_mer_faces.value.has_value() ||
-        rev_mer_faces.value->size() != 8) {
-        std::cerr << "meridian revolve expected 8 triangular faces (2n lateral + 2(n-2) caps)\n";
+        rev_mer_faces.value->size() != 146) {
+        std::cerr << "meridian revolve expected sampled lateral triangles and two caps\n";
         return 1;
     }
     auto rev_mer_mp = kernel.query().mass_properties(*rev_mer.value);
@@ -2036,29 +2631,13 @@ int main() {
         return 1;
     }
 
-    // 非子午面（轮廓平面不含旋转轴）：回退 bbox 壳，质量属性仍用 Pappus。
+    // 非子午面（轮廓平面不含旋转轴）不得伪装成 bbox 壳。
     axiom::ProfileRef tri_xy;
     tri_xy.label = "tri_xy";
     tri_xy.polygon_xyz = {{1.0, 0.0, 0.0}, {3.0, 0.0, 0.0}, {1.0, 2.0, 0.0}};
     auto rev_xy = kernel.sweeps().revolve(tri_xy, axis_z, pi);
-    if (rev_xy.status != axiom::StatusCode::Ok || !rev_xy.value.has_value()) {
-        std::cerr << "non-meridian revolve failed\n";
-        return 1;
-    }
-    auto rev_xy_strict = kernel.validate().validate_topology(*rev_xy.value, axiom::ValidationMode::Strict);
-    if (rev_xy_strict.status != axiom::StatusCode::Ok) {
-        std::cerr << "non-meridian revolve strict topology failed\n";
-        return 1;
-    }
-    auto rev_xy_mp = kernel.query().mass_properties(*rev_xy.value);
-    if (rev_xy_mp.status != axiom::StatusCode::Ok || !rev_xy_mp.value.has_value()) {
-        std::cerr << "non-meridian revolve mass_properties failed\n";
-        return 1;
-    }
-    const double r_bar_xy = std::sqrt((5.0 / 3.0) * (5.0 / 3.0) + (2.0 / 3.0) * (2.0 / 3.0));
-    const double expected_xy_vol = area_m * r_bar_xy * pi;
-    if (std::abs(rev_xy_mp.value->volume - expected_xy_vol) > 1e-5) {
-        std::cerr << "non-meridian revolve volume should follow Pappus\n";
+    if (rev_xy.status != axiom::StatusCode::InvalidInput || rev_xy.value.has_value()) {
+        std::cerr << "non-meridian revolve should be rejected instead of returning bbox topology\n";
         return 1;
     }
 

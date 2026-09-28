@@ -26,13 +26,19 @@ public:
                            const ExportOptions &options);
   Result<void> export_stl(BodyId body_id, std::string_view path,
                           const ExportOptions &options);
+  /// 物化前失败按根因返回 `io.import.axmjson.input/path/open/read/parse/validation` 阶段；
+  /// 截断字段、格式标识错误、非有限几何及反转包围盒均不会分配 BodyId 或污染模型。
   Result<BodyId> import_axmjson(std::string_view path,
                                 const ImportOptions &options);
   /// 物化前失败按根因返回 `io.import.stl.input/path/open/read/parse/validation` 阶段，不写入 Body/Mesh store。
   Result<BodyId> import_stl(std::string_view path, const ImportOptions &options);
   /// 物化前失败按根因返回 `io.import.gltf.input/path/open/read/parse/validation` 阶段，不写入 Body/Mesh store。
   Result<BodyId> import_gltf(std::string_view path, const ImportOptions &options);
+  /// Axiom IGES 元数据子集在物化前完成结构/数值校验；失败阶段为
+  /// `io.import.iges.input/path/open/read/parse/validation`。
   Result<BodyId> import_iges(std::string_view path, const ImportOptions &options);
+  /// Axiom BREP JSON 子集在物化前完成结构/数值校验；失败阶段为
+  /// `io.import.brep.input/path/open/read/parse/validation`。
   Result<BodyId> import_brep(std::string_view path, const ImportOptions &options);
   /// 物化前失败按根因返回 `io.import.obj.input/path/open/parse/validation`阶段，不写入 Body/Mesh store。
   Result<BodyId> import_obj(std::string_view path, const ImportOptions &options);

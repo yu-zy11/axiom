@@ -12,13 +12,15 @@
 
 ### 2.1 `diag + ops`
 
+- **第 70 批 NFR-DIA-001 / FR-OPS-001（已通过完整门禁）**：AXMJSON、Axiom IGES 元数据与 Axiom BREP JSON 子集导入补齐 `input/path/open/read/parse/validation` 阶段、64 MiB/短读和物化前几何验证，失败不污染 Body/Mesh/ID；扫掠新增首尾 G1 连续闭合样条、开放/闭合 `CompositeChain` 导轨和部分角多边形旋转真实闭壳。repair 后调度器独立完整构建成功，CTest 16/16 通过（0 失败，1539.20 s；Ops 1510.78 s、IO 14.96 s、Query/Eval 0.17 s、性能基线 1.90 s）。这些功能包已验收，不再标记为“待统一验收”。剩余限制为标准 IGES 实体、解析扫掠/精确旋转、带孔旋转、嵌套复合链、显式轮廓历史及过大截面/急弯/自靠近输入。
+
 - **FR-DIAG-001 第 69 批（已通过完整门禁）**：新增 `Issue::numeric_evidence`、诊断证据策略/审计/finding 与 `audit_evidence` / `export_evidence_audit_json`；单条、批量和全量 TXT/JSON 保留数值证据，非有限 JSON 值写为 `null`。审计按问题码前缀、阶段前缀和最低严重级别检查阶段、实体与有限数值证据，重复 ID 去重、明细截断计入 `omitted_findings`。BOOL 主运行受覆盖失败分支和预处理统计导出已接入门禁。最终完整 CTest 16/16 通过；HEAL 与 IO 全部重量级失败分支尚未迁移，需求保持受限可用。
 
 - **NFR-DIA-001 第 64 功能包（已纳入第 68 批全量门禁）**：OBJ/STL/glTF/3MF 网格导出失败绑定 `io.export.<format>.input/path/convert/mesh/open/write/sidecar` 与输入 Body，严格 QA 保留 `io.export.mesh_strict_qa`。主文件和侧车均检查最终写入/关闭状态；失败回滚本次三角化新增网格、ID、体/面缓存及统计，保留已有网格。兼容模式继续允许退化三角形，但在打开目标前拒绝空网格、非法索引、非有限坐标；glTF 另拒绝超出 float32 范围的坐标。`axiom_io_workflow_test` 新增四格式 × 严格/兼容 × 侧车开关、诊断检索/JSON、冷/热/失效缓存、退化、参数失败文件保护、Linux `/dev/full` 主文件及侧车失败、重试和重新导入回归。复用现有错误码，无公开签名变化；故障修复复现并修正 9 处诊断辅助函数调用不匹配，复用 `failed_void` 保留 `InvalidInput`、Body 和阶段；补齐回归拉伸夹具必需的轮廓标签。相关测试随第 68 批最终完整 CTest 16/16 通过。设备写入失败不保证恢复文件，侧车失败时主文件可能已完整写出；不扩大格式或三角化精度承诺，需求保持受限可用。
 
 - **FR-DIAG-001 第 58 切片**：严重级别检索在限额前按 `DiagnosticId` 升序排序；`report_ids_by_severity` 继承相同语义。`axiom_diagnostics_test` 覆盖限额、重复 issue、空报告/空结果、非法参数、源报告不污染及重试。需求保持受限可用；下一步继续补齐 BOOL/HEAL/IO 重量级流程的阶段、实体和数值证据。
 
-- **FR-OPS-001 第 68 批（已通过完整门禁）**：新增 `extrude_to_plane`，完成整周显式多边形 `revolve` 与旋转最小化标架曲线 `sweep` 的真实多面体 BRep 物化；周期带孔扫掠经 repair 改为外边界与各孔边界分别物化独立闭壳，开放带孔扫掠仍为单壳。回归分别覆盖 240 组至平面拉伸、32 组整周旋转、40 组曲线扫掠变体，以及真实拓扑/邻接、bbox、Strict、owned 网格、质量惯性、失败不污染与回滚重试。调度器最终完整构建成功，CTest 16/16 通过（136.35 s；Ops 111.16 s、Query/Eval 0.15 s、性能基线 1.70 s）；第 60/61/62/65/66 包既有回归同次通过，不再处于待验收状态。剩余范围为解析扫掠/旋转曲面、带孔旋转、负比例、任意截面放样、逐壁恒角拔模、闭合样条/复合导轨及显式轮廓历史；部分角旋转和无显式轮廓路径仍受限/占位。
+- **FR-OPS-001 第 68 批（已通过完整门禁）**：新增 `extrude_to_plane`，完成整周显式多边形 `revolve` 与旋转最小化标架曲线 `sweep` 的真实多面体 BRep 物化；周期带孔扫掠经 repair 改为外边界与各孔边界分别物化独立闭壳，开放带孔扫掠仍为单壳。回归分别覆盖 240 组至平面拉伸、32 组整周旋转、40 组曲线扫掠变体，并在第 70 批完整门禁中继续通过。第 70 批已进一步闭合闭合样条/复合导轨与部分角旋转子域；仍缺解析扫掠/精确旋转、带孔旋转、负比例、任意截面放样、逐壁恒角拔模、嵌套复合导轨及显式轮廓历史。
 
 - **NFR-DIA-001 第 50 切片**：3MF 导入在物化前按根因绑定 `io.import.3mf.input/path/open/read/parse/validation`；目录输入结构化拒绝，非法坐标与超范围索引返回解析或验证失败，不再泄漏数值转换异常或静默截断索引。`axiom_io_workflow_test` 覆盖正常、退化、路径/ZIP/XML/数值失败、阶段检索、JSON、Body/Mesh 不污染及成功重试；`axiom_io_dataset_test` 验证往返。复用现有 IO/VAL 错误码，需求保持受限可用；其他 BOOL/HEAL/IO 失败出口仍待闭合。
 
@@ -86,6 +88,8 @@
 - `axiom_math_services_test` 与 `axiom_geometry_test` 覆盖新增语义。
 
 ### 2.3 `topo`
+
+- **FR-QUERY-001 第 70 批（已通过完整门禁）**：新增 `shell_mass_properties/body_mass_properties`，从当前真实拓扑重算平面直边双边流形闭壳的单位密度体积、面积、质心和世界坐标惯性，支持凹面、孔与多个独立实体壳的平行轴汇总。查询不分配网格、不写缓存/Eval/事务计数；`axiom_query_eval_test` 覆盖解析盒体、凹带孔拉伸、双壳、失败类、删除和回滚，最终完整 CTest 16/16 通过。曲面/曲边、独立内壳空腔和相交/重叠多壳仍未支持。
 
 - **FR-TOPO-001 / NFR-REL-001 第 69 批（已通过完整门禁）**：公开 `first_boundary_conflict`，统一有限 Line/LineSegment 的内部相交、端点相接、共线正长度重叠与容差内正距离邻近，新增 `AXM-TOPO-E-0028/0029`；公开取消源/令牌、带令牌事务、轮询、状态/写次数、活动写者和累计指标，取消恢复完整快照且不推进版本或成功提交审计，`AXM-TX-E-0007` 与 core runtime invariant 已覆盖。最终完整 CTest 16/16 通过。后续聚焦显式边 trim 区间上的一般曲线求交、BOOL/HEAL/IO 长阶段轮询、子事务/保存点和更细粒度隔离。
 
@@ -158,21 +162,23 @@
 | P0～P1 | 已闭合（第 69 批） | diag/ops | 结构化数值证据、覆盖审计与 BOOL 受覆盖失败门禁 | `axiom_diagnostics_test`、`axiom_boolean_prep_test` | core |
 | P1 | 已闭合（第 69 批） | geo | 曲线全有效域最近点精度、预算和收敛证书 | `axiom_geometry_test`、`axiom_query_eval_test` | math |
 | P1 | 已闭合（第 69 批） | topo/core | 有限直线跨环冲突；拓扑协作式取消与累计审计 | `axiom_topology_test`、`axiom_kernel_runtime_invariant_test` | geo |
+| P1 | 已闭合（第 70 批子域） | ops/topo | 闭合样条/复合导轨扫掠、部分角旋转、平面直边闭壳拓扑质量属性 | `axiom_ops_heal_test`、`axiom_query_eval_test` | geo/topo |
+| P1 | 已闭合（第 70 批子域） | io/diag | AXMJSON/Axiom IGES/Axiom BREP 子集物化前诊断与失败隔离 | `axiom_io_workflow_test` | core |
 | P1～P2 | 进行中 | geo/topo | 曲面全域最近点、一般曲线显式 trim / trim bridge / Strict 规则 | `axiom_geometry_test`、`axiom_topology_test` | math |
 | P1～P2 | 进行中 | diag/heal/io | HEAL/IO 重量级失败数值证据与模块级审计门禁 | `axiom_diagnostics_test`、`axiom_heal_test`、`axiom_io_workflow_test` | core |
 | P2 | 进行中 | ops | 布尔非 `bbox` 结果子里程碑 | `axiom_boolean_*` | geo/topo |
 | P2～P3 | 进行中 | eval/rep | 重算指标、Rep 误差预算 | `axiom_query_eval_test`、`axiom_representation_io_test` | ops（部分） |
 
-- **FR-QUERY-001 第 68 批（已通过完整门禁）**：新增 `TopologyQueryService::face_area`，支持 Plane/Cylinder/Cone/Sphere/Torus 及嵌套 Trimmed/Offset 的完整折线 PCurve 修剪面积，外环减内环；未包装 Plane 无 PCurve 时兼容旧查询。回归覆盖五类解析面、凹外环/孔/绕向、包装、失败语义、事务回滚和缓存/对象不污染；第 63/67 包解析/数值曲线长度及直线拓扑边界长度回归同次通过。当前仍不支持 Bezier/BSpline/NURBS/Revolved/Swept 面积，周期缝不会自动解包裹，拓扑曲边缺少裁剪参数；通用体积/重心/惯性矩和稳定求交仍待闭合。
+- **FR-QUERY-001 第 68/70 批（已通过完整门禁）**：第 68 批 `face_area` 支持 Plane/Cylinder/Cone/Sphere/Torus 及 Trimmed/Offset 的折线 PCurve 修剪面积；第 70 批 `shell_mass_properties/body_mass_properties` 补齐平面直边双边流形闭壳的真实拓扑质量属性及多实体壳汇总。仍不支持高阶/派生曲面修剪面积、曲面/曲边闭壳质量积分、独立内壳空腔、相交/重叠多壳和稳定求交。
 
 ## 4. 下一未闭合批次
 
 1. FR-GEO-001：Bezier/BSpline/NURBS 及派生/修剪曲面的完整参数域（含 trim 边界）最近点精度、预算与收敛证书。
 2. FR-TOPO-001：给拓扑边引入显式 trim 区间，并覆盖圆锥曲线、样条和复合链的跨环求交；继续完整 trim bridge 与持久命名。
-3. FR-DIAG-001：为 HEAL 验证/修复/回滚及 IO 导入导出/后验验证/批处理全部重量级失败分支补齐数值证据和模块级审计门禁。
+3. FR-DIAG-001：在第 70 批精确 B-Rep 文本导入阶段闭环之上，继续为 HEAL 验证/修复/回滚及 IO 后验验证/批处理/其他重量级失败分支补齐数值证据和模块级审计门禁。
 4. NFR-REL-001：在长耗时 BOOL/HEAL/IO 内部阶段轮询取消，并推进子事务/保存点及更细粒度隔离语义。
 5. BOOL 真求交闭环与工业数据集；HEAL 自交/流形性/容差冲突的可回放修复。
-6. IO 标准 IGES/STEP 实体交换或通用 3MF 下一里程碑；EvalGraph 成本门禁与 Plugin 隔离继续按长期树推进。
+6. IO 标准 IGES/STEP 实体交换（不是已验收的 Axiom 元数据子集）或通用 3MF 下一里程碑；EvalGraph 成本门禁与 Plugin 隔离继续按长期树推进。
 
 ## 5. 长期能力树
 

@@ -1370,6 +1370,341 @@ Result<Scalar> TopologyQueryService::face_area(FaceId face_id) const {
                    state_->create_diagnostic("已查询解析曲面修剪面积"));
 }
 
+Result<MassProperties>
+TopologyQueryService::shell_mass_properties(ShellId shell_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
+  const auto shell_it = state_->shells.find(shell_id.value);
+  if (shell_it == state_->shells.end()) {
+    return detail::invalid_input_result<MassProperties>(
+        *state_, diag_codes::kCoreInvalidHandle,
+        "壳质量属性查询失败：目标壳不存在", "壳质量属性查询失败");
+  }
+  if (shell_it->second.faces.empty() ||
+      !detail::validate_closed_shell_edge_usage_for_materialization(*state_, shell_id)) {
+    return detail::failed_result<MassProperties>(
+        *state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
+        "壳质量属性查询失败：壳为空、未闭合或存在非流形边", "壳质量属性查询失败",
+        {shell_id.value});
+  }
+
+  std::vector<Point3> positions;
+  std::vector<std::array<int, 3>> triangles;
+  std::optional<Point3> reference;
+  const Scalar linear_tol = std::max<Scalar>(
+      1e-12, std::abs(detail::resolve_linear_tolerance(
+                 0.0, state_->config.tolerance)));
+  std::unordered_set<std::uint64_t> unique_faces;
+  std::unordered_set<std::uint64_t> measured_edges;
+  std::unordered_map<std::uint64_t, std::array<std::uint64_t, 2>> first_edge_use;
+
+  for (const auto face_id : shell_it->second.faces) {
+    if (!unique_faces.insert(face_id.value).second) {
+      return detail::failed_result<MassProperties>(
+          *state_, StatusCode::InvalidTopology, diag_codes::kTopoInvariantBroken,
+          "壳质量属性查询失败：壳包含重复面引用", "壳质量属性查询失败",
+          {shell_id.value, face_id.value});
+    }
+    const auto face_it = state_->faces.find(face_id.value);
+    if (face_it == state_->faces.end()) {
+      return detail::failed_result<MassProperties>(
+          *state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
+          "壳质量属性查询失败：壳引用的面不存在", "壳质量属性查询失败",
+          {shell_id.value, face_id.value});
+    }
+    const auto surface_it = state_->surfaces.find(face_it->second.surface_id.value);
+    if (surface_it == state_->surfaces.end()) {
+      return detail::failed_result<MassProperties>(
+          *state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
+          "壳质量属性查询失败：面引用的曲面不存在", "壳质量属性查询失败",
+          {shell_id.value, face_id.value, face_it->second.surface_id.value});
+    }
+    if (surface_it->second.kind != detail::SurfaceKind::Plane) {
+      return detail::failed_result<MassProperties>(
+          *state_, StatusCode::NotImplemented, diag_codes::kCoreOperationUnsupported,
+          "壳质量属性查询暂仅支持平面、直线边闭壳", "壳质量属性查询失败",
+          {shell_id.value, face_id.value});
+    }
+    const auto normal_length = detail::norm(surface_it->second.normal);
+    if (!(normal_length > 0.0) || !std::isfinite(normal_length)) {
+      return detail::failed_result<MassProperties>(
+          *state_, StatusCode::DegenerateGeometry, diag_codes::kGeoDegenerateGeometry,
+          "壳质量属性查询失败：平面法向退化", "壳质量属性查询失败",
+          {shell_id.value, face_id.value});
+    }
+    const auto normal = detail::scale(surface_it->second.normal, 1.0 / normal_length);
+
+    std::vector<LoopId> loop_ids{face_it->second.outer_loop};
+    loop_ids.insert(loop_ids.end(), face_it->second.inner_loops.begin(),
+                    face_it->second.inner_loops.end());
+    std::vector<std::vector<Point3>> rings;
+    rings.reserve(loop_ids.size());
+    for (std::size_t loop_index = 0; loop_index < loop_ids.size(); ++loop_index) {
+      const auto loop_id = loop_ids[loop_index];
+      const auto loop_it = state_->loops.find(loop_id.value);
+      std::string reason;
+      if (loop_it == state_->loops.end() ||
+          !validate_loop_record(*state_, loop_it->second, reason) ||
+          loop_it->second.coedges.size() < 3) {
+        return detail::failed_result<MassProperties>(
+            *state_, StatusCode::InvalidTopology,
+            loop_index == 0 ? diag_codes::kTopoFaceOuterLoopInvalid
+                            : diag_codes::kTopoFaceInnerLoopInvalid,
+            "壳质量属性查询失败：面边界环无效" +
+                (reason.empty() ? std::string{} : "（" + reason + "）"),
+            "壳质量属性查询失败", {shell_id.value, face_id.value, loop_id.value});
+      }
+      for (const auto coedge_id : loop_it->second.coedges) {
+        const auto coedge_it = state_->coedges.find(coedge_id.value);
+        if (coedge_it == state_->coedges.end()) {
+          return detail::failed_result<MassProperties>(
+              *state_, StatusCode::InvalidTopology, diag_codes::kTopoInvariantBroken,
+              "壳质量属性查询失败：边界环引用的定向边不存在", "壳质量属性查询失败",
+              {shell_id.value, face_id.value, loop_id.value, coedge_id.value});
+        }
+        const auto edge_id = coedge_it->second.edge_id;
+        const auto oriented = oriented_vertices(*state_, coedge_id);
+        if (!oriented) {
+          return detail::failed_result<MassProperties>(
+              *state_, StatusCode::InvalidTopology, diag_codes::kTopoDanglingEdge,
+              "壳质量属性查询失败：边界边端点无效", "壳质量属性查询失败",
+              {shell_id.value, face_id.value, loop_id.value, edge_id.value});
+        }
+        const std::array<std::uint64_t, 2> direction{
+            (*oriented)[0].value, (*oriented)[1].value};
+        const auto [use_it, inserted] = first_edge_use.emplace(edge_id.value, direction);
+        if (!inserted &&
+            (use_it->second[0] != direction[1] || use_it->second[1] != direction[0])) {
+          return detail::failed_result<MassProperties>(
+              *state_, StatusCode::InvalidTopology,
+              diag_codes::kTopoLoopOrientationMismatch,
+              "壳质量属性查询失败：共享边在相邻面中的方向未相反",
+              "壳质量属性查询失败", {shell_id.value, face_id.value, edge_id.value});
+        }
+        if (measured_edges.insert(edge_id.value).second) {
+          const auto length = edge_length(edge_id);
+          if (!length.value) {
+            return error_result<MassProperties>(length.status, length.diagnostic_id);
+          }
+        }
+      }
+      std::vector<Point3> ring;
+      if (!loop_vertex_chain_3d(*state_, loop_id, ring, reason) || ring.size() < 3) {
+        return detail::failed_result<MassProperties>(
+            *state_, StatusCode::InvalidTopology,
+            loop_index == 0 ? diag_codes::kTopoFaceOuterLoopInvalid
+                            : diag_codes::kTopoFaceInnerLoopInvalid,
+            "壳质量属性查询失败：无法提取完整边界顶点", "壳质量属性查询失败",
+            {shell_id.value, face_id.value, loop_id.value});
+      }
+      const auto raw_normal = newell_normal_unnormalized(ring);
+      const auto ring_normal_length = detail::norm(raw_normal);
+      if (!(ring_normal_length > linear_tol * linear_tol) ||
+          !std::isfinite(ring_normal_length)) {
+        return detail::failed_result<MassProperties>(
+            *state_, StatusCode::DegenerateGeometry, diag_codes::kGeoDegenerateGeometry,
+            "壳质量属性查询失败：面边界环面积退化", "壳质量属性查询失败",
+            {shell_id.value, face_id.value, loop_id.value});
+      }
+      const Scalar alignment = detail::dot(raw_normal, normal);
+      if ((loop_index == 0 && !(alignment > 0.0)) ||
+          (loop_index != 0 && !(alignment < 0.0))) {
+        return detail::failed_result<MassProperties>(
+            *state_, StatusCode::InvalidTopology, diag_codes::kTopoLoopOrientationMismatch,
+            "壳质量属性查询失败：外环/内环绕向与平面法向不一致", "壳质量属性查询失败",
+            {shell_id.value, face_id.value, loop_id.value});
+      }
+      rings.push_back(std::move(ring));
+    }
+
+    std::vector<Point3> face_points;
+    std::vector<std::pair<int, int>> boundary;
+    std::vector<std::array<int, 3>> face_triangles;
+    std::vector<std::vector<Point3>> holes;
+    holes.assign(rings.begin() + 1, rings.end());
+    if (!detail::triangulate_extrude_region(
+            rings.front(), holes, normal, linear_tol, face_points, boundary,
+            face_triangles) || face_triangles.empty()) {
+      return detail::failed_result<MassProperties>(
+          *state_, StatusCode::InvalidTopology, diag_codes::kTopoFaceOuterLoopInvalid,
+          "壳质量属性查询失败：面区域自交、孔无效、非共面或无法三角化",
+          "壳质量属性查询失败", {shell_id.value, face_id.value});
+    }
+    if (!reference.has_value()) reference = face_points.front();
+    if (positions.size() + face_points.size() >
+        static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+      return detail::invalid_input_result<MassProperties>(
+          *state_, diag_codes::kCoreParameterOutOfRange,
+          "壳质量属性查询失败：拓扑规模超出可处理范围", "壳质量属性查询失败");
+    }
+    const int base = static_cast<int>(positions.size());
+    for (const auto &point : face_points) {
+      const auto local = detail::subtract(point, *reference);
+      if (!std::isfinite(local.x) || !std::isfinite(local.y) ||
+          !std::isfinite(local.z)) {
+        return detail::invalid_input_result<MassProperties>(
+            *state_, diag_codes::kCoreParameterOutOfRange,
+            "壳质量属性查询失败：顶点坐标非有限或超出数值范围", "壳质量属性查询失败");
+      }
+      positions.push_back(Point3{local.x, local.y, local.z});
+    }
+    for (const auto &triangle : face_triangles) {
+      triangles.push_back(
+          {triangle[0] + base, triangle[1] + base, triangle[2] + base});
+    }
+  }
+
+  long double signed_volume6 = 0.0L;
+  for (const auto &triangle : triangles) {
+    const auto &a = positions[static_cast<std::size_t>(triangle[0])];
+    const auto &b = positions[static_cast<std::size_t>(triangle[1])];
+    const auto &c = positions[static_cast<std::size_t>(triangle[2])];
+    signed_volume6 += static_cast<long double>(a.x) *
+                          (static_cast<long double>(b.y) * c.z -
+                           static_cast<long double>(b.z) * c.y) +
+                      static_cast<long double>(a.y) *
+                          (static_cast<long double>(b.z) * c.x -
+                           static_cast<long double>(b.x) * c.z) +
+                      static_cast<long double>(a.z) *
+                          (static_cast<long double>(b.x) * c.y -
+                           static_cast<long double>(b.y) * c.x);
+  }
+  const long double volume_tol = std::max<long double>(
+      1e-24L, static_cast<long double>(linear_tol) * linear_tol * linear_tol);
+  if (!std::isfinite(signed_volume6) ||
+      std::abs(signed_volume6) <= 6.0L * volume_tol) {
+    return detail::failed_result<MassProperties>(
+        *state_, StatusCode::DegenerateGeometry, diag_codes::kGeoDegenerateGeometry,
+        "壳质量属性查询失败：闭壳有向体积退化", "壳质量属性查询失败",
+        {shell_id.value});
+  }
+  if (signed_volume6 < 0.0L) {
+    for (auto &triangle : triangles) std::swap(triangle[1], triangle[2]);
+  }
+
+  MassProperties properties{};
+  detail::polyhedral_mass_properties_from_triangles(
+      positions, triangles, properties.volume, properties.centroid,
+      properties.inertia, properties.area);
+  properties.centroid.x += reference->x;
+  properties.centroid.y += reference->y;
+  properties.centroid.z += reference->z;
+  const auto finite_properties = [&]() {
+    if (!(properties.volume > 0.0) || !(properties.area > 0.0) ||
+        !std::isfinite(properties.volume) || !std::isfinite(properties.area) ||
+        !std::isfinite(properties.centroid.x) ||
+        !std::isfinite(properties.centroid.y) ||
+        !std::isfinite(properties.centroid.z)) return false;
+    return std::all_of(properties.inertia.begin(), properties.inertia.end(),
+                       [](Scalar value) { return std::isfinite(value); });
+  };
+  if (!finite_properties()) {
+    return detail::failed_result<MassProperties>(
+        *state_, StatusCode::NumericalInstability,
+        diag_codes::kQueryMassPropertiesFailure,
+        "壳质量属性查询失败：积分结果非有限或不满足正体积", "壳质量属性查询失败",
+        {shell_id.value});
+  }
+  return ok_result(properties,
+                   state_->create_diagnostic("已从闭合多面体壳查询质量属性"));
+}
+
+Result<MassProperties>
+TopologyQueryService::body_mass_properties(BodyId body_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
+  const auto body_it = state_->bodies.find(body_id.value);
+  if (body_it == state_->bodies.end()) {
+    return detail::invalid_input_result<MassProperties>(
+        *state_, diag_codes::kCoreInvalidHandle,
+        "体拓扑质量属性查询失败：目标体不存在", "体拓扑质量属性查询失败");
+  }
+  if (body_it->second.shells.empty()) {
+    return detail::failed_result<MassProperties>(
+        *state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
+        "体拓扑质量属性查询失败：实体不拥有可计算的拓扑壳",
+        "体拓扑质量属性查询失败", {body_id.value});
+  }
+
+  std::vector<MassProperties> components;
+  components.reserve(body_it->second.shells.size());
+  std::unordered_set<std::uint64_t> unique_shells;
+  long double total_volume = 0.0L;
+  long double total_area = 0.0L;
+  long double first_x = 0.0L, first_y = 0.0L, first_z = 0.0L;
+  for (const auto shell_id : body_it->second.shells) {
+    if (!unique_shells.insert(shell_id.value).second) {
+      return detail::failed_result<MassProperties>(
+          *state_, StatusCode::InvalidTopology, diag_codes::kTopoInvariantBroken,
+          "体拓扑质量属性查询失败：实体包含重复壳引用",
+          "体拓扑质量属性查询失败", {body_id.value, shell_id.value});
+    }
+    const auto component = shell_mass_properties(shell_id);
+    if (!component.value)
+      return error_result<MassProperties>(component.status, component.diagnostic_id);
+    components.push_back(*component.value);
+    total_volume += component.value->volume;
+    total_area += component.value->area;
+    first_x += static_cast<long double>(component.value->volume) *
+               component.value->centroid.x;
+    first_y += static_cast<long double>(component.value->volume) *
+               component.value->centroid.y;
+    first_z += static_cast<long double>(component.value->volume) *
+               component.value->centroid.z;
+  }
+  if (!(total_volume > 0.0L) || !std::isfinite(total_volume) ||
+      !std::isfinite(total_area) ||
+      total_volume > std::numeric_limits<Scalar>::max() ||
+      total_area > std::numeric_limits<Scalar>::max()) {
+    return detail::failed_result<MassProperties>(
+        *state_, StatusCode::NumericalInstability,
+        diag_codes::kQueryMassPropertiesFailure,
+        "体拓扑质量属性查询失败：多壳汇总超出数值范围",
+        "体拓扑质量属性查询失败", {body_id.value});
+  }
+
+  MassProperties properties{};
+  properties.volume = static_cast<Scalar>(total_volume);
+  properties.area = static_cast<Scalar>(total_area);
+  properties.centroid = Point3{static_cast<Scalar>(first_x / total_volume),
+                               static_cast<Scalar>(first_y / total_volume),
+                               static_cast<Scalar>(first_z / total_volume)};
+  for (const auto &component : components) {
+    for (std::size_t i = 0; i < properties.inertia.size(); ++i)
+      properties.inertia[i] += component.inertia[i];
+    const long double dx =
+        static_cast<long double>(component.centroid.x) - properties.centroid.x;
+    const long double dy =
+        static_cast<long double>(component.centroid.y) - properties.centroid.y;
+    const long double dz =
+        static_cast<long double>(component.centroid.z) - properties.centroid.z;
+    const long double mass = component.volume;
+    const long double diagonal[3]{mass * (dy * dy + dz * dz),
+                                  mass * (dx * dx + dz * dz),
+                                  mass * (dx * dx + dy * dy)};
+    properties.inertia[0] += static_cast<Scalar>(diagonal[0]);
+    properties.inertia[4] += static_cast<Scalar>(diagonal[1]);
+    properties.inertia[8] += static_cast<Scalar>(diagonal[2]);
+    const Scalar ixy = static_cast<Scalar>(-mass * dx * dy);
+    const Scalar ixz = static_cast<Scalar>(-mass * dx * dz);
+    const Scalar iyz = static_cast<Scalar>(-mass * dy * dz);
+    properties.inertia[1] += ixy; properties.inertia[3] += ixy;
+    properties.inertia[2] += ixz; properties.inertia[6] += ixz;
+    properties.inertia[5] += iyz; properties.inertia[7] += iyz;
+  }
+  if (!std::isfinite(properties.centroid.x) ||
+      !std::isfinite(properties.centroid.y) ||
+      !std::isfinite(properties.centroid.z) ||
+      !std::all_of(properties.inertia.begin(), properties.inertia.end(),
+                   [](Scalar value) { return std::isfinite(value); })) {
+    return detail::failed_result<MassProperties>(
+        *state_, StatusCode::NumericalInstability,
+        diag_codes::kQueryMassPropertiesFailure,
+        "体拓扑质量属性查询失败：质心或惯性张量非有限",
+        "体拓扑质量属性查询失败", {body_id.value});
+  }
+  return ok_result(properties,
+                   state_->create_diagnostic("已从实体闭合拓扑查询质量属性"));
+}
+
 Result<BoundingBox>
 TopologyQueryService::bbox_of_shell(ShellId shell_id) const {
   TopoQueryAuditScope _topo_query_audit{state_};

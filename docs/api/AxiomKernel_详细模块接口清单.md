@@ -419,6 +419,9 @@ public:
   Result<Scalar> planar_face_area(FaceId) const;
   // 解析曲面的折线 PCurve 修剪面积；模型长度单位的平方，外环减内环。
   Result<Scalar> face_area(FaceId) const;
+  // 当前真实拓扑的单壳/实体均匀密度质量属性；不使用 bbox、网格或缓存。
+  Result<MassProperties> shell_mass_properties(ShellId) const;
+  Result<MassProperties> body_mass_properties(BodyId) const;
   Result<Scalar> edge_length(EdgeId) const;
   Result<Scalar> loop_length(LoopId) const;
   Result<Scalar> face_boundary_length(FaceId) const;
@@ -434,6 +437,8 @@ public:
 `face_area` 用曲面面积密度的 Green 边界积分计算完整折线 PCurve 修剪环的外环减内环面积，支持 Plane/Cylinder/Cone/Sphere/Torus 以及嵌套 Trimmed/Offset 包装。未包装 Plane 且所有定向边都没有 PCurve 时兼容回退 `planar_face_area`；其他曲面缺少 PCurve，或同一面上只绑定了部分 PCurve，返回 `InvalidTopology / AXM-TOPO-E-0008`。Bezier/BSpline/NURBS/Revolved/Swept 面目前返回 `NotImplemented / AXM-CORE-E-0004`。
 
 PCurve 必须为至少两点的折线，按 coedge 方向连续闭合，各点位于当前包装后参数域，且 UV 端点在支撑曲面上与定向拓扑顶点的 3D 位置一致。退化、自交、断裂或越域的外/内环分别返回 `InvalidTopology / AXM-TOPO-E-0003/0004`；内环必须严格位于外环内且不得相交、重叠或嵌套。非有限面积返回 `NumericalInstability / AXM-QUERY-E-0003`，扣孔后非正或退化返回 `DegenerateGeometry / AXM-GEO-E-0003`，结果溢出返回 `InvalidInput / AXM-CORE-E-0002`；所有失败均无部分面积。周期参数缝须由调用方在同一展开区间内表达，查询不自动解包裹。每次查询从当前面/环/曲面重算，不写求值或网格缓存；事务内替换/删除即时可见，回滚后恢复。
+
+`shell_mass_properties / body_mass_properties`（FR-QUERY-001 第 70 批）从当前真实拓扑重算单位密度的体积、表面积、质心及关于质心的世界坐标系 3×3 行主序惯性张量。体积、面积、质心和惯性的单位分别是模型长度单位的三次方、平方、一次方和五次方。支持平面、Line/LineSegment 边组成的双边流形闭壳，面可凹且可带孔；`body_mass_properties` 用平行轴定理汇总多个互不重叠的独立实体壳。当前不把独立内壳解释为空腔，也不检测多壳相交/重叠；曲面、曲边、空/开/非流形壳、共享边同向、环绕向错误、非共面或零体积均结构化失败且无部分值。查询不分配网格、不写缓存、不改变 Eval 状态或事务写计数；事务内删除/替换即时可见，回滚后恢复。
 
 `edge_length / loop_length / face_boundary_length`（第 63 包已纳入统一门禁）组成直线边拓扑长度接口族，单位为模型长度单位。边长取当前两个拓扑端点的三维距离；两端点到 Line/LineSegment 的距离、线段端点越界距离不得超过内核线性容差，不投影或修复原模型。零长度或不一致边返回 `InvalidTopology / AXM-TOPO-E-0008`，缺失边引用返回 `InvalidTopology / AXM-TOPO-E-0006`。Edge 没有曲线裁剪参数，曲边明确返回 `NotImplemented / AXM-CORE-E-0004`，不以端点弦长代替弧长。环查询复用边查询，要求闭合且无重复成员；空/损坏/未闭合环返回 `InvalidTopology / AXM-TOPO-E-0002`。面查询复用环查询，返回**外环加全部内环**的长度，方向无关；支撑曲面类型不参与边界长度计算。缺失/重复面边界环返回 `InvalidTopology / AXM-TOPO-E-0003`（内环 `E-0004`），内层失败原样传播，不返回部分和。无效、已删除或已回滚的目标句柄返回 `InvalidInput / AXM-CORE-E-0001`，累加超出 Scalar 范围返回 `InvalidInput / AXM-CORE-E-0002`。所有失败均无数值；每次查询重算，事务内创建可查询、删除即时不可查询，回滚恢复原结果或使临时句柄失效。查询不修改模型、事务写计数、几何/网格缓存或 Eval 状态，只追加诊断和一次顶层查询审计。
 
@@ -669,11 +674,11 @@ public:
 
 第 62 包的公开拓扑/邻接、分段独立解析体积/面积/质心/惯性、`validate_all(Strict)`、`brep_to_mesh` 与回滚重试回归已纳入统一门禁。本轮未扩大既有 Sweep Strict 验证器的网格 SAT 范围，防交叠依靠上述严格单调限制；近退化轮廓与路径保守拒绝，不承诺工业容差或大轮廓性能。
 
-`revolve` 的角度单位为弧度，必须位于 `(0, 2π]`。整周显式多边形路径以 48 站周期分片物化真实三角面、共享边/顶点和闭壳，支持与轴严格分离的凸/凹简单子午面轮廓，以及仅通过一条唯一连续轴边闭合的实心轮廓。轮廓绕向/起点、轴方向反号/缩放和任意空间子午面保持等价；带孔、跨轴、孤立轴点、近轴、自交、非共面或偏轴轮廓在分配前返回 `InvalidInput / AXM-CORE-E-0002`。结果体积、面积、质心和惯性来自闭合多面体积分。整周结果是保守分片多面体 BRep，不是解析圆柱/圆锥/圆环面；部分角旋转仍沿用原有受限路径。
+`revolve` 的角度单位为弧度，必须位于 `(0, 2π]`。显式多边形路径以每周 48 段的角分辨率物化真实三角面、共享边/顶点和闭壳；部分角旋转增加约束剖分的首尾端盖，整周路径无端盖缝。支持与轴严格分离的凸/凹简单子午面轮廓，以及仅通过一条唯一连续轴边闭合的实心轮廓。轮廓绕向/起点、轴方向反号/缩放和任意空间子午面保持等价；带孔、跨轴、孤立轴点、近轴、自交、非共面或偏轴轮廓在分配前返回 `InvalidInput / AXM-CORE-E-0002`。结果体积、面积、质心和惯性来自闭合多面体积分。整周与部分角结果均是保守分片多面体 BRep，不是解析圆柱/圆锥/圆环面。
 
-`sweep` 还支持显式凹多边形或带孔截面沿 Bezier/BSpline/NURBS 开放导轨，以及整圆/椭圆周期导轨扫掠。截面必须位于导轨起点且其平面法向与起始切向对齐；开放样条从 33 站起步并按弦偏差保守细分，截面随旋转最小化标架运动。开放导轨生成两端盖；周期导轨无端盖。周期带孔截面的外边界与每个孔边界是互不连通的闭壳，因此一个 Body 含 `1 + holes_xyz.size()` 个 Shell，`owned_topo_welded` 网格也报告同数量的连通分量；开放带孔导轨由端盖连成单壳，周期无孔也为单壳。
+`sweep` 还支持显式凹多边形或带孔截面沿 Bezier/BSpline/NURBS 开放导轨、显式端点重合且首尾切向连续的闭合样条、整圆/椭圆周期导轨，以及 `CompositeChain` 复合导轨。复合链子段可为有界直线/线段、圆/椭圆弧、Bezier、BSpline、NURBS 或 polyline 首段，按公开链语义的子曲线局部参数 `[0,1]` 取值；接缝必须位置连续且 G1 切向连续。截面必须位于导轨起点且其平面法向与起始切向对齐；开放导轨生成两端盖，闭合样条与闭合复合链生成无端盖周期闭壳。空间闭环使用沿采样弧长分布的旋转最小标架 holonomy 校正，避免首尾截面隐藏扭转缝。周期带孔截面的外边界与每个孔边界是互不连通的闭壳，因此一个 Body 含 `1 + holes_xyz.size()` 个 Shell，`owned_topo_welded` 网格也报告同数量的连通分量；开放带孔导轨由端盖连成单壳，周期无孔也为单壳。
 
-曲线扫掠的尖点、闭合样条、过紧曲率、非局部自靠近、局部不前进、周期标架不闭合及退化物化都以 `InvalidInput / AXM-CORE-E-0002` 拒绝，不产生模型、拓扑、ID、事务写或求值/网格缓存污染。当前仅支持显式平面多边形截面；闭合样条、复合曲线链、无界直线以及其他曲线种类不支持。结果是保守采样多面体 BRep，不是解析扫掠曲面；无显式轮廓仍为历史 bbox 占位路径。
+曲线扫掠的端点伪闭合、首尾切向断裂、接缝错位/折角/尖点、嵌套复合链、抛物线/双曲线复合子段、过紧曲率、非局部弦段自靠近、局部不前进及退化物化都以 `InvalidInput / AXM-CORE-E-0002` 拒绝，不产生模型、拓扑、ID、事务写或求值/网格缓存污染。当前仅支持显式平面多边形截面，不保留显式轮廓历史。结果是保守采样多面体 BRep，不是解析扫掠曲面；无显式轮廓仍为历史 bbox 占位路径。
 
 ### 8.2 布尔操作接口
 
@@ -843,9 +848,14 @@ public:
 class IOService {
 public:
   Result<BodyId> import_step(std::string_view path, const ImportOptions&);
+  Result<BodyId> import_axmjson(std::string_view path, const ImportOptions&);
+  Result<BodyId> import_iges(std::string_view path, const ImportOptions&);
+  Result<BodyId> import_brep(std::string_view path, const ImportOptions&);
   Result<void> export_step(BodyId, std::string_view path, const ExportOptions&);
 };
 ```
+
+`import_axmjson`、`import_iges` 与 `import_brep`（NFR-DIA-001 第 70 批）在分配 `BodyId` 前完成普通文件检查、64 MiB 上限与短读检查、严格结构解析、格式/`BodyKind` 校验，以及有限数值、包围盒顺序和非零轴校验。三者的物化前失败分别绑定 `io.import.<format>.input/path/open/read/parse/validation`；输入/路径/打开/读取失败复用 `AXM-IO-E-0004`，结构/格式失败复用 `AXM-IO-E-0003`，非有限几何复用 `AXM-VAL-E-0010`，包围盒无效或轴退化复用 `AXM-VAL-E-0004`。失败返回可检索 `diagnostic_id`，不写 Body/Mesh store、不推进模型 ID，修复原文件后可用同一路径重试。AXMJSON 兼容既有仅含身份与 bbox 的早期文件；一旦出现扩展几何字段就要求整组完整。BREP 仅接受带 `AXIOM_BREP_INTERCHANGE` 文件头的 `AXIOM_BREP` JSON 子集；IGES 仅物化 Axiom 元数据子集，典型标准 IGES 卡片/DE 实体仍返回既有 `NotImplemented / AXM-IO-E-0011`，并可附 `AXM-IO-D-0017` 扫描摘要。
 
 ## 12. `Diagnostics` 接口清单
 

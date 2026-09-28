@@ -306,9 +306,16 @@ auto body = kernel.sweeps().revolve(meridian, axis, 2 * std::acos(-1.0)); // 弧
 if (!body.value) { handle_error(body); return; }
 auto valid_revolution = kernel.validate().validate_all(*body.value, ValidationMode::Strict);
 auto revolution_mesh = kernel.convert().brep_to_mesh(*body.value, {});
+
+// 部分角使用同一真实闭壳路径，并物化首尾端盖。
+auto quarter = kernel.sweeps().revolve(meridian, axis, std::acos(-1.0) / 2);
+if (quarter.value) {
+    auto quarter_valid = kernel.validate().validate_all(*quarter.value, ValidationMode::Strict);
+    auto quarter_mass = kernel.topology().query().body_mass_properties(*quarter.value);
+}
 ```
 
-整周显式多边形旋转支持与轴分离的环形体，也支持仅有一条连续边位于轴上的实心轮廓。带孔、跨轴、孤立轴点、近轴、自交或偏轴轮廓会被拒绝。结果是 48 站的周期多面体 BRep，不是解析圆柱/圆锥/圆环面。
+整周和部分角显式多边形旋转都支持与轴分离的环形体，也支持仅有一条连续边位于轴上的实心轮廓。角分辨率为每周 48 段；部分角增加约束剖分的两个端盖。带孔、跨轴、孤立轴点、近轴、自交或偏轴轮廓会在分配前被拒绝。结果是保守浮点分片的多面体 BRep，不是解析旋转曲面。
 
 ## 6.3 曲线导轨扫掠
 
@@ -325,7 +332,7 @@ if (rail.value) {
 }
 ```
 
-Bezier/BSpline/NURBS 开放导轨和整圆/椭圆周期导轨使用旋转最小化标架。周期带孔截面的外边界与各孔边界分别物化为独立闭壳，因此壳数和网格连通分量都为 `1 + holes_xyz.size()`；开放带孔导轨由端盖连成单壳。尖点、闭合样条、过紧曲率和自靠近导轨保守拒绝；这是采样多面体 BRep，不是解析扫掠曲面。
+Bezier/BSpline/NURBS 开放导轨、显式端点重合且首尾切向连续的闭合样条，以及整圆/椭圆周期导轨使用旋转最小标架；空间闭环会做 holonomy 校正。`make_composite_chain(children)` 创建的复合导轨也可直接传入，相邻子段必须端点重合且 G1 切向连续；开放链有两个端盖，闭合链无端盖。周期带孔截面的外边界与各孔边界分别物化为独立闭壳，因此壳数和网格连通分量都为 `1 + holes_xyz.size()`；开放带孔导轨由端盖连成单壳。伪闭合、切向断裂、嵌套复合链、抛物/双曲子段、尖点、过紧曲率和自靠近导轨保守拒绝；这是采样多面体 BRep，不是解析扫掠曲面。
 
 ## 6.4 放样
 
@@ -511,6 +518,25 @@ opts.embed_metadata = true;
 
 auto exported = kernel.io().export_step(body_id, "/data/out.step", opts);
 ```
+
+### 精确 B-Rep 文本子集的失败诊断
+
+```cpp
+ImportOptions exact_opts;
+exact_opts.run_validation = false;
+
+auto imported = kernel.io().import_axmjson("/data/part.axmjson", exact_opts);
+// import_iges 和 import_brep 具有相同的物化前失败合同。
+if (!imported.value) {
+    auto report = kernel.diagnostics().get(imported.diagnostic_id);
+    // 可按 io.import.axmjson.input/path/open/read/parse/validation 检索根因。
+    auto same_stage = kernel.diagnostics().find_by_issue_stage_prefix(
+        "io.import.axmjson.", 32);
+    handle_query_error(report);
+}
+```
+
+AXMJSON、Axiom IGES 元数据子集与 Axiom BREP JSON 子集均限 64 MiB，且在分配 `BodyId` 前完成文件、结构、格式、有限数值、包围盒和轴校验。失败不写 Body/Mesh store，修复原文件后可原位重试。AXMJSON 兼容早期仅身份与 bbox 字段的文件，但扩展几何字段一旦出现就必须成组完整。标准 IGES DE 实体仍返回 `NotImplemented`，不会被当成 Axiom 子集物化。
 
 ## 11.3 导入后修复
 
@@ -820,3 +846,20 @@ if (!area.value) {
 ```
 
 `face_area` 返回模型长度单位的平方，支持 Plane/Cylinder/Cone/Sphere/Torus 及嵌套 Trimmed/Offset，外环减去全部内环。未包装 Plane 没有 PCurve 时兼容回退 `planar_face_area`。所有其他支持曲面都要求完整折线 PCurve；UV 端点必须与定向拓扑顶点的 3D 位置一致。周期缝须显式用同一展开区间表达；Bezier/BSpline/NURBS/Revolved/Swept 面暂不支持。查询从当前拓扑和曲面重算，不写求值或网格缓存。
+
+### 闭合多面体拓扑质量属性
+
+```cpp
+auto box = kernel.primitives().box({10, 20, 30}, 2, 3, 4);
+if (box.value) {
+    auto shells = kernel.topology().query().shells_of_body(*box.value);
+    auto body_mass = kernel.topology().query().body_mass_properties(*box.value);
+    if (shells.value && !shells.value->empty()) {
+        auto shell_mass = kernel.topology().query().shell_mass_properties(shells.value->front());
+        // 单位密度：volume=24，centroid=(11,21.5,32)。
+        // inertia 是关于质心、世界坐标系行主序的 3x3 张量。
+    }
+}
+```
+
+这两个入口仅支持平面、Line/LineSegment 边组成的双边流形闭壳，面可凹且可带孔。实体含多个互不重叠的独立实体壳时使用平行轴定理汇总；独立内壳不解释为空腔，相交/重叠多壳也不在支持范围。曲面、曲边、开壳、非流形或零体积壳失败且无部分值。查询每次从当前拓扑重算，不分配网格、不写缓存或改变 Eval 状态。

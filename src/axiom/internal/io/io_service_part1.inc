@@ -206,33 +206,66 @@ Result<void> IOService::export_step(BodyId body_id, std::string_view path, const
 
 Result<BodyId> IOService::import_axmjson(std::string_view path, const ImportOptions& options) {
     if (path.empty()) {
-        return detail::invalid_input_result<BodyId>(
-            *state_, diag_codes::kIoImportFailure,
-            "AXMJSON 导入失败：输入路径为空", "AXMJSON 导入失败");
+        return exact_brep_import_failure(*state_, StatusCode::InvalidInput,
+                                         diag_codes::kIoImportFailure,
+                                         "AXMJSON 导入失败：输入路径为空",
+                                         "AXMJSON 导入失败", "io.import.axmjson.input");
     }
-    if (!std::filesystem::exists(path)) {
-        return detail::failed_result<BodyId>(
-            *state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
-            "AXMJSON 导入失败：输入文件不存在", "AXMJSON 导入失败");
+    std::error_code path_error;
+    if (!std::filesystem::exists(path, path_error) || path_error) {
+        return exact_brep_import_failure(*state_, StatusCode::OperationFailed,
+                                         diag_codes::kIoImportFailure,
+                                         "AXMJSON 导入失败：输入文件不存在或路径不可访问",
+                                         "AXMJSON 导入失败", "io.import.axmjson.path");
     }
-    std::ifstream in {std::string(path)};
+    path_error.clear();
+    if (!std::filesystem::is_regular_file(path, path_error) || path_error) {
+        return exact_brep_import_failure(*state_, StatusCode::OperationFailed,
+                                         diag_codes::kIoImportFailure,
+                                         "AXMJSON 导入失败：输入路径不是可读取的普通文件",
+                                         "AXMJSON 导入失败", "io.import.axmjson.open");
+    }
+    constexpr std::uintmax_t kExactBrepTextMaxBytes = static_cast<std::uintmax_t>(64) * 1024 * 1024;
+    path_error.clear();
+    const auto file_size = std::filesystem::file_size(path, path_error);
+    if (path_error || file_size > kExactBrepTextMaxBytes) {
+        return exact_brep_import_failure(*state_, StatusCode::OperationFailed,
+                                         diag_codes::kIoImportFailure,
+                                         "AXMJSON 导入失败：无法取得完整输入或文件超过 64 MiB 限额",
+                                         "AXMJSON 导入失败", "io.import.axmjson.read");
+    }
+    std::ifstream in {std::string(path), std::ios::binary};
     if (!in) {
-        return detail::failed_result<BodyId>(
-            *state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
-            "AXMJSON 导入失败：无法打开输入文件", "AXMJSON 导入失败");
+        return exact_brep_import_failure(*state_, StatusCode::OperationFailed,
+                                         diag_codes::kIoImportFailure,
+                                         "AXMJSON 导入失败：无法打开输入文件",
+                                         "AXMJSON 导入失败", "io.import.axmjson.open");
     }
     std::string content((std::istreambuf_iterator<char>(in)),
                         std::istreambuf_iterator<char>());
+    if (in.bad() || content.size() != file_size) {
+        return exact_brep_import_failure(*state_, StatusCode::OperationFailed,
+                                         diag_codes::kIoImportFailure,
+                                         "AXMJSON 导入失败：读取输入文件失败",
+                                         "AXMJSON 导入失败", "io.import.axmjson.read");
+    }
 
-    const auto body_id = BodyId {state_->allocate_id()};
     detail::BodyRecord record;
     record.kind = detail::BodyKind::Imported;
     record.rep_kind = RepKind::ExactBRep;
     record.label = std::string(path);
     record.bbox = detail::make_bbox({0.0, 0.0, 0.0}, {1.0, 1.0, 1.0});
+    if (const auto parse_error = parse_exact_brep_json_body_record(content, "AXMJSON", record)) {
+        return exact_brep_import_failure(*state_, StatusCode::OperationFailed,
+                                         diag_codes::kIoCorruptFile, *parse_error,
+                                         "AXMJSON 导入失败", "io.import.axmjson.parse");
+    }
+    if (auto validation_failure = reject_invalid_exact_brep_record(
+            *state_, record, "AXMJSON", "io.import.axmjson.validation")) {
+        return std::move(*validation_failure);
+    }
 
-    fill_body_record_from_axmjson_content(content, record);
-
+    const auto body_id = BodyId {state_->allocate_id()};
     state_->bodies.emplace(body_id.value, record);
 
     std::vector<Issue> issues;
@@ -451,18 +484,46 @@ Result<BodyId> IOService::import_gltf(std::string_view path, const ImportOptions
 
 Result<BodyId> IOService::import_iges(std::string_view path, const ImportOptions& options) {
     if (path.empty()) {
-        return detail::invalid_input_result<BodyId>(*state_, diag_codes::kIoImportFailure, "IGES 导入失败：输入路径为空",
-                                                    "IGES 导入失败");
+        return exact_brep_import_failure(*state_, StatusCode::InvalidInput,
+                                         diag_codes::kIoImportFailure,
+                                         "IGES 导入失败：输入路径为空",
+                                         "IGES 导入失败", "io.import.iges.input");
     }
-    if (!std::filesystem::exists(path)) {
-        return detail::failed_result<BodyId>(*state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
-                                             "IGES 导入失败：输入文件不存在", "IGES 导入失败");
+    std::error_code path_error;
+    if (!std::filesystem::exists(path, path_error) || path_error) {
+        return exact_brep_import_failure(*state_, StatusCode::OperationFailed,
+                                         diag_codes::kIoImportFailure,
+                                         "IGES 导入失败：输入文件不存在或路径不可访问",
+                                         "IGES 导入失败", "io.import.iges.path");
+    }
+    path_error.clear();
+    if (!std::filesystem::is_regular_file(path, path_error) || path_error) {
+        return exact_brep_import_failure(*state_, StatusCode::OperationFailed,
+                                         diag_codes::kIoImportFailure,
+                                         "IGES 导入失败：输入路径不是可读取的普通文件",
+                                         "IGES 导入失败", "io.import.iges.open");
     }
     constexpr std::size_t kStepIgesProbeMaxBytes = static_cast<std::size_t>(64) * 1024 * 1024;
+    path_error.clear();
+    const auto file_size = std::filesystem::file_size(path, path_error);
+    if (path_error || file_size > kStepIgesProbeMaxBytes) {
+        return exact_brep_import_failure(*state_, StatusCode::OperationFailed,
+                                         diag_codes::kIoImportFailure,
+                                         "IGES 导入失败：输入读取不完整或超过 64 MiB 限额",
+                                         "IGES 导入失败", "io.import.iges.read");
+    }
     const auto file_text = read_regular_file_bytes_limited(path, kStepIgesProbeMaxBytes);
     if (!file_text.has_value()) {
-        return detail::failed_result<BodyId>(*state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
-                                             "IGES 导入失败：无法打开输入文件", "IGES 导入失败");
+        return exact_brep_import_failure(*state_, StatusCode::OperationFailed,
+                                         diag_codes::kIoImportFailure,
+                                         "IGES 导入失败：无法打开或读取输入文件",
+                                         "IGES 导入失败", "io.import.iges.open");
+    }
+    if (file_text->size() != file_size) {
+        return exact_brep_import_failure(*state_, StatusCode::OperationFailed,
+                                         diag_codes::kIoImportFailure,
+                                         "IGES 导入失败：读取字节数与输入文件大小不一致",
+                                         "IGES 导入失败", "io.import.iges.read");
     }
     if (iges_file_requires_full_standard_importer(std::string_view(*file_text))) {
         std::vector<Issue> issues;
@@ -482,14 +543,22 @@ Result<BodyId> IOService::import_iges(std::string_view path, const ImportOptions
                                     state_->create_diagnostic("IGES 标准实体交换未实现", std::move(issues)));
     }
 
-    const auto body_id = BodyId {state_->allocate_id()};
     detail::BodyRecord record;
     record.kind = detail::BodyKind::Imported;
     record.rep_kind = RepKind::ExactBRep;
     record.label = std::string(path);
     record.bbox = detail::make_bbox({0.0, 0.0, 0.0}, {1.0, 1.0, 1.0});
-    std::istringstream in(*file_text);
-    parse_axiom_interchange_metadata_lines(in, record);
+    if (const auto parse_error = parse_iges_subset_body_record(*file_text, record)) {
+        return exact_brep_import_failure(*state_, StatusCode::OperationFailed,
+                                         diag_codes::kIoCorruptFile, *parse_error,
+                                         "IGES 导入失败", "io.import.iges.parse");
+    }
+    if (auto validation_failure = reject_invalid_exact_brep_record(
+            *state_, record, "IGES", "io.import.iges.validation")) {
+        return std::move(*validation_failure);
+    }
+
+    const auto body_id = BodyId {state_->allocate_id()};
     state_->bodies.emplace(body_id.value, record);
 
     std::vector<Issue> issues;
@@ -502,28 +571,72 @@ Result<BodyId> IOService::import_iges(std::string_view path, const ImportOptions
 
 Result<BodyId> IOService::import_brep(std::string_view path, const ImportOptions& options) {
     if (path.empty()) {
-        return detail::invalid_input_result<BodyId>(*state_, diag_codes::kIoImportFailure, "BREP 导入失败：输入路径为空",
-                                                    "BREP 导入失败");
+        return exact_brep_import_failure(*state_, StatusCode::InvalidInput,
+                                         diag_codes::kIoImportFailure,
+                                         "BREP 导入失败：输入路径为空",
+                                         "BREP 导入失败", "io.import.brep.input");
     }
-    if (!std::filesystem::exists(path)) {
-        return detail::failed_result<BodyId>(*state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
-                                             "BREP 导入失败：输入文件不存在", "BREP 导入失败");
+    std::error_code path_error;
+    if (!std::filesystem::exists(path, path_error) || path_error) {
+        return exact_brep_import_failure(*state_, StatusCode::OperationFailed,
+                                         diag_codes::kIoImportFailure,
+                                         "BREP 导入失败：输入文件不存在或路径不可访问",
+                                         "BREP 导入失败", "io.import.brep.path");
     }
-    std::ifstream in {std::string(path)};
+    path_error.clear();
+    if (!std::filesystem::is_regular_file(path, path_error) || path_error) {
+        return exact_brep_import_failure(*state_, StatusCode::OperationFailed,
+                                         diag_codes::kIoImportFailure,
+                                         "BREP 导入失败：输入路径不是可读取的普通文件",
+                                         "BREP 导入失败", "io.import.brep.open");
+    }
+    constexpr std::uintmax_t kExactBrepTextMaxBytes = static_cast<std::uintmax_t>(64) * 1024 * 1024;
+    path_error.clear();
+    const auto file_size = std::filesystem::file_size(path, path_error);
+    if (path_error || file_size > kExactBrepTextMaxBytes) {
+        return exact_brep_import_failure(*state_, StatusCode::OperationFailed,
+                                         diag_codes::kIoImportFailure,
+                                         "BREP 导入失败：无法取得完整输入或文件超过 64 MiB 限额",
+                                         "BREP 导入失败", "io.import.brep.read");
+    }
+    std::ifstream in {std::string(path), std::ios::binary};
     if (!in) {
-        return detail::failed_result<BodyId>(*state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
-                                             "BREP 导入失败：无法打开输入文件", "BREP 导入失败");
+        return exact_brep_import_failure(*state_, StatusCode::OperationFailed,
+                                         diag_codes::kIoImportFailure,
+                                         "BREP 导入失败：无法打开输入文件",
+                                         "BREP 导入失败", "io.import.brep.open");
     }
     std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (in.bad() || raw.size() != file_size) {
+        return exact_brep_import_failure(*state_, StatusCode::OperationFailed,
+                                         diag_codes::kIoImportFailure,
+                                         "BREP 导入失败：读取输入文件失败",
+                                         "BREP 导入失败", "io.import.brep.read");
+    }
+    if (raw.find("AXIOM_BREP_INTERCHANGE") == std::string::npos) {
+        return exact_brep_import_failure(*state_, StatusCode::OperationFailed,
+                                         diag_codes::kIoCorruptFile,
+                                         "BREP 导入失败：缺少 AXIOM_BREP_INTERCHANGE 文件头",
+                                         "BREP 导入失败", "io.import.brep.parse");
+    }
     const std::string content = strip_leading_hash_lines(raw);
 
-    const auto body_id = BodyId {state_->allocate_id()};
     detail::BodyRecord record;
     record.kind = detail::BodyKind::Imported;
     record.rep_kind = RepKind::ExactBRep;
     record.label = std::string(path);
     record.bbox = detail::make_bbox({0.0, 0.0, 0.0}, {1.0, 1.0, 1.0});
-    fill_body_record_from_axmjson_content(content, record);
+    if (const auto parse_error = parse_exact_brep_json_body_record(content, "AXIOM_BREP", record)) {
+        return exact_brep_import_failure(*state_, StatusCode::OperationFailed,
+                                         diag_codes::kIoCorruptFile, *parse_error,
+                                         "BREP 导入失败", "io.import.brep.parse");
+    }
+    if (auto validation_failure = reject_invalid_exact_brep_record(
+            *state_, record, "BREP", "io.import.brep.validation")) {
+        return std::move(*validation_failure);
+    }
+
+    const auto body_id = BodyId {state_->allocate_id()};
     state_->bodies.emplace(body_id.value, record);
 
     std::vector<Issue> issues;

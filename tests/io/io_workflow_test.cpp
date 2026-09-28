@@ -280,6 +280,175 @@ bool check_mesh_export_failure_package(const std::filesystem::path& root) {
     return true;
 }
 
+bool check_exact_brep_import_failure_package(const std::filesystem::path& root) {
+    using Importer = axiom::Result<axiom::BodyId> (axiom::IOService::*)(
+        std::string_view, const axiom::ImportOptions&);
+    struct FormatCase {
+        const char* name;
+        Importer import_file;
+        std::string valid;
+        std::string malformed;
+        std::string wrong_kind_or_format;
+        std::string reversed_bounds;
+        std::string zero_axis;
+    };
+    const auto json_payload = [](std::string_view format, std::string_view body_kind,
+                                 std::string_view axis_z, std::string_view min_x,
+                                 std::string_view max_x) {
+        return std::string("{\n  \"format\": \"") + std::string(format) +
+               "\",\n  \"label\": \"exact interchange\",\n  \"body_kind\": \"" +
+               std::string(body_kind) +
+               "\",\n  \"origin_x\": 0,\n  \"origin_y\": 0,\n  \"origin_z\": 0,\n"
+               "  \"axis_x\": 0,\n  \"axis_y\": 0,\n  \"axis_z\": " + std::string(axis_z) +
+               ",\n  \"param_a\": 2,\n  \"param_b\": 3,\n  \"param_c\": 4,\n"
+               "  \"bbox_min_x\": " + std::string(min_x) +
+               ",\n  \"bbox_min_y\": 0,\n  \"bbox_min_z\": 0,\n"
+               "  \"bbox_max_x\": " + std::string(max_x) +
+               ",\n  \"bbox_max_y\": 3,\n  \"bbox_max_z\": 4\n}\n";
+    };
+    const auto iges_payload = [](std::string_view body_kind, std::string_view axis,
+                                 std::string_view bounds) {
+        return std::string("START\n1H,,1HAXIOM,AxiomKernel IGES metadata interchange (subset)\n") +
+               "AXIOM_IGES_ENTITY 186_SUBSET\nAXIOM_LABEL exact interchange\nAXIOM_BODY_KIND " +
+               std::string(body_kind) + "\nAXIOM_ORIGIN 0 0 0\nAXIOM_AXIS " + std::string(axis) +
+               "\nAXIOM_PARAMS 2 3 4\nAXIOM_BBOX " + std::string(bounds) +
+               "\nS 1\nTERMINATE\n";
+    };
+
+    const std::string axm_valid = json_payload("AXMJSON", "Box", "1", "0", "2");
+    const std::string brep_valid =
+        "# AXIOM_BREP_INTERCHANGE v1\n" + json_payload("AXIOM_BREP", "Box", "1", "0", "2");
+    const FormatCase formats[] = {
+        {"axmjson", &axiom::IOService::import_axmjson,
+         axm_valid,
+         "{\"format\":\"AXMJSON\",\"label\":\"truncated\"}",
+         json_payload("WRONG", "Box", "1", "0", "2"),
+         json_payload("AXMJSON", "Box", "1", "5", "2"),
+         json_payload("AXMJSON", "Box", "0", "0", "2")},
+        {"iges", &axiom::IOService::import_iges,
+         iges_payload("Box", "0 0 1", "0 0 0 2 3 4"),
+         iges_payload("Box", "0 0 1", "bad bounds"),
+         iges_payload("FutureBody", "0 0 1", "0 0 0 2 3 4"),
+         iges_payload("Box", "0 0 1", "5 0 0 2 3 4"),
+         iges_payload("Box", "0 0 0", "0 0 0 2 3 4")},
+        {"brep", &axiom::IOService::import_brep,
+         brep_valid,
+         "# AXIOM_BREP_INTERCHANGE v1\n{\"format\":\"AXIOM_BREP\"}",
+         "# AXIOM_BREP_INTERCHANGE v1\n" + json_payload("WRONG", "Box", "1", "0", "2"),
+         "# AXIOM_BREP_INTERCHANGE v1\n" + json_payload("AXIOM_BREP", "Box", "1", "5", "2"),
+         "# AXIOM_BREP_INTERCHANGE v1\n" + json_payload("AXIOM_BREP", "Box", "0", "0", "2")},
+    };
+
+    std::filesystem::create_directories(root);
+    for (const auto& format : formats) {
+        auto state = std::make_shared<axiom::detail::KernelState>(axiom::KernelConfig {});
+        axiom::IOService io {state};
+        axiom::DiagnosticService diagnostics {state};
+        axiom::ImportOptions options;
+        options.run_validation = false;
+        const auto missing = root / (std::string("missing.") + format.name);
+        const auto malformed = root / (std::string("malformed.") + format.name);
+        const auto wrong = root / (std::string("wrong.") + format.name);
+        const auto reversed = root / (std::string("reversed.") + format.name);
+        const auto zero_axis = root / (std::string("zero_axis.") + format.name);
+        const auto oversized = root / (std::string("oversized.") + format.name);
+        const auto valid = root / (std::string("valid.") + format.name);
+        const auto json = root / (std::string("failure.") + format.name + ".json");
+        const auto write = [](const std::filesystem::path& path, const std::string& text) {
+            std::ofstream out {path, std::ios::binary};
+            out.write(text.data(), static_cast<std::streamsize>(text.size()));
+        };
+        write(malformed, format.malformed);
+        write(wrong, format.wrong_kind_or_format);
+        write(reversed, format.reversed_bounds);
+        write(zero_axis, format.zero_axis);
+        write(valid, format.valid);
+        {
+            std::ofstream out {oversized, std::ios::binary};
+            out.seekp(static_cast<std::streamoff>(64) * 1024 * 1024);
+            out.put('\0');
+        }
+
+        const auto next_id_before = state->next_id;
+        const auto body_count_before = state->bodies.size();
+        const auto mesh_count_before = state->meshes.size();
+        const auto empty_result = (io.*format.import_file)("", options);
+        const auto missing_result = (io.*format.import_file)(missing.string(), options);
+        const auto directory_result = (io.*format.import_file)(root.string(), options);
+        const auto malformed_result = (io.*format.import_file)(malformed.string(), options);
+        const auto wrong_result = (io.*format.import_file)(wrong.string(), options);
+        const auto reversed_result = (io.*format.import_file)(reversed.string(), options);
+        const auto zero_axis_result = (io.*format.import_file)(zero_axis.string(), options);
+        const auto oversized_result = (io.*format.import_file)(oversized.string(), options);
+        const auto prefix = std::string("io.import.") + format.name + ".";
+
+        const auto check_failure = [&](const axiom::Result<axiom::BodyId>& result,
+                                       axiom::StatusCode status, std::string_view code,
+                                       const std::string& stage) {
+            const auto report = diagnostics.get(result.diagnostic_id);
+            const auto* issue = report.value ? find_issue(*report.value, code) : nullptr;
+            if (result.status != status || result.value || result.diagnostic_id.value == 0 ||
+                issue == nullptr || issue->severity != axiom::IssueSeverity::Error ||
+                issue->stage != stage || !issue->related_entities.empty()) return false;
+            const auto exact = diagnostics.find_by_issue_stage(stage, 20);
+            const auto by_prefix = diagnostics.find_by_issue_stage_prefix(prefix, 20);
+            const auto by_code = diagnostics.find_by_issue_code(code, 20);
+            return exact.value && std::find(exact.value->begin(), exact.value->end(), result.diagnostic_id) != exact.value->end() &&
+                   by_prefix.value && std::find(by_prefix.value->begin(), by_prefix.value->end(), result.diagnostic_id) != by_prefix.value->end() &&
+                   by_code.value && std::find(by_code.value->begin(), by_code.value->end(), result.diagnostic_id) != by_code.value->end();
+        };
+        if (!check_failure(empty_result, axiom::StatusCode::InvalidInput,
+                           axiom::diag_codes::kIoImportFailure, prefix + "input") ||
+            !check_failure(missing_result, axiom::StatusCode::OperationFailed,
+                           axiom::diag_codes::kIoImportFailure, prefix + "path") ||
+            !check_failure(directory_result, axiom::StatusCode::OperationFailed,
+                           axiom::diag_codes::kIoImportFailure, prefix + "open") ||
+            !check_failure(malformed_result, axiom::StatusCode::OperationFailed,
+                           axiom::diag_codes::kIoCorruptFile, prefix + "parse") ||
+            !check_failure(wrong_result, axiom::StatusCode::OperationFailed,
+                           axiom::diag_codes::kIoCorruptFile, prefix + "parse") ||
+            !check_failure(reversed_result, axiom::StatusCode::DegenerateGeometry,
+                           axiom::diag_codes::kValDegenerateGeometry, prefix + "validation") ||
+            !check_failure(zero_axis_result, axiom::StatusCode::DegenerateGeometry,
+                           axiom::diag_codes::kValDegenerateGeometry, prefix + "validation") ||
+            !check_failure(oversized_result, axiom::StatusCode::OperationFailed,
+                           axiom::diag_codes::kIoImportFailure, prefix + "read")) {
+            std::cerr << format.name << " exact BREP import failure evidence is incomplete\n";
+            return false;
+        }
+
+        if (diagnostics.export_report_json(reversed_result.diagnostic_id, json.string()).status !=
+            axiom::StatusCode::Ok) return false;
+        std::ifstream json_in {json, std::ios::binary};
+        const std::string json_text {std::istreambuf_iterator<char>(json_in), std::istreambuf_iterator<char>()};
+        const auto staged = diagnostics.find_by_issue_stage_prefix(prefix, 20);
+        if (json_text.find("\"stage\":\"" + prefix + "validation\"") == std::string::npos ||
+            json_text.find(std::string(axiom::diag_codes::kValDegenerateGeometry)) == std::string::npos ||
+            !staged.value || staged.value->size() != 8 || state->next_id != next_id_before ||
+            state->bodies.size() != body_count_before || state->meshes.size() != mesh_count_before ||
+            std::filesystem::exists(missing)) {
+            std::cerr << format.name << " exact BREP import failure lookup, JSON, or isolation failed\n";
+            return false;
+        }
+
+        const auto retried = (io.*format.import_file)(valid.string(), options);
+        if (retried.status != axiom::StatusCode::Ok || !retried.value ||
+            retried.value->value != next_id_before || state->next_id != next_id_before + 1 ||
+            state->bodies.size() != body_count_before + 1 || state->meshes.size() != mesh_count_before) {
+            std::cerr << format.name << " exact BREP retry did not materialize exactly one body\n";
+            return false;
+        }
+        const auto& imported = state->bodies.at(retried.value->value);
+        if (imported.kind != axiom::detail::BodyKind::Box || imported.bbox.min.x != 0.0 ||
+            imported.bbox.max.x != 2.0 || imported.bbox.max.y != 3.0 || imported.bbox.max.z != 4.0) {
+            std::cerr << format.name << " exact BREP successful import lost record data\n";
+            return false;
+        }
+    }
+    std::filesystem::remove_all(root);
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -357,6 +526,10 @@ int main() {
     const auto out_gltf_path = tmp / ("axiom_io_workflow_test_" + uniq + ".gltf");
     const auto out_stl_path = tmp / ("axiom_io_workflow_test_" + uniq + ".stl");
 
+    if (!check_exact_brep_import_failure_package(tmp / ("axiom_exact_brep_import_" + uniq))) {
+        std::cerr << "exact BREP import failure package regression failed\n";
+        return 1;
+    }
     if (!check_mesh_export_failure_package(tmp / ("axiom_mesh_export_" + uniq))) {
         std::cerr << "mesh export failure package regression failed\n";
         return 1;

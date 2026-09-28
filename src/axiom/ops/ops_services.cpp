@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <span>
 #include <sstream>
@@ -22,6 +23,74 @@ namespace axiom {
 using namespace ops_internal;
 
 namespace {
+
+Scalar sweep_segment_distance_squared(const Point3& p0, const Point3& p1,
+                                      const Point3& q0, const Point3& q1) {
+    // Closest points of two bounded 3-D segments. Keeping this local to sweep
+    // validation avoids broadening MathCore with an Ops-specific conservative gate.
+    const Vec3 u = detail::subtract(p1, p0);
+    const Vec3 v = detail::subtract(q1, q0);
+    const Vec3 w = detail::subtract(p0, q0);
+    const Scalar a = detail::dot(u, u);
+    const Scalar b = detail::dot(u, v);
+    const Scalar c = detail::dot(v, v);
+    const Scalar d = detail::dot(u, w);
+    const Scalar e = detail::dot(v, w);
+    if (!(a > 0.0) || !(c > 0.0) || !std::isfinite(a) || !std::isfinite(c)) {
+        return std::numeric_limits<Scalar>::infinity();
+    }
+    const Scalar denominator = a * c - b * b;
+    Scalar numerator_s = 0.0, denominator_s = denominator;
+    Scalar numerator_t = 0.0, denominator_t = denominator;
+    const Scalar parallel_tolerance = Scalar(64) * std::numeric_limits<Scalar>::epsilon() * a * c;
+    if (denominator <= parallel_tolerance) {
+        numerator_s = 0.0;
+        denominator_s = 1.0;
+        numerator_t = e;
+        denominator_t = c;
+    } else {
+        numerator_s = b * e - c * d;
+        numerator_t = a * e - b * d;
+        if (numerator_s < 0.0) {
+            numerator_s = 0.0;
+            numerator_t = e;
+            denominator_t = c;
+        } else if (numerator_s > denominator_s) {
+            numerator_s = denominator_s;
+            numerator_t = e + b;
+            denominator_t = c;
+        }
+    }
+    if (numerator_t < 0.0) {
+        numerator_t = 0.0;
+        if (-d < 0.0) {
+            numerator_s = 0.0;
+        } else if (-d > a) {
+            numerator_s = denominator_s;
+        } else {
+            numerator_s = -d;
+            denominator_s = a;
+        }
+    } else if (numerator_t > denominator_t) {
+        numerator_t = denominator_t;
+        const Scalar projection = -d + b;
+        if (projection < 0.0) {
+            numerator_s = 0.0;
+        } else if (projection > a) {
+            numerator_s = denominator_s;
+        } else {
+            numerator_s = projection;
+            denominator_s = a;
+        }
+    }
+    const Scalar s = std::abs(numerator_s) <= parallel_tolerance ? 0.0 : numerator_s / denominator_s;
+    const Scalar t = std::abs(numerator_t) <= parallel_tolerance ? 0.0 : numerator_t / denominator_t;
+    const Vec3 delta {w.x + s * u.x - t * v.x,
+                      w.y + s * u.y - t * v.y,
+                      w.z + s * u.z - t * v.z};
+    const Scalar result = detail::dot(delta, delta);
+    return std::isfinite(result) && result >= 0.0 ? result : std::numeric_limits<Scalar>::infinity();
+}
 
 Result<OpReport> boolean_op_fail_staged(std::shared_ptr<detail::KernelState> state,
                                         bool diagnostics,
@@ -536,7 +605,8 @@ Result<BodyId> SweepService::revolve(const ProfileRef& profile, const Axis3& axi
     if (body.value == 0) {
         return detail::invalid_input_result<BodyId>(
             *state_, diag_codes::kCoreParameterOutOfRange,
-            "整周旋转失败：轮廓须简单共面并位于轴的一侧，且只能与轴保持间隙或以一条连续边接触", "整周旋转失败");
+            "旋转失败：轮廓须简单共面、轴须位于轮廓平面且轮廓位于轴的一侧；轮廓只能与轴保持间隙或以一条连续边接触",
+            "旋转失败");
     }
     return ok_result(body, state_->create_diagnostic("已完成旋转"));
 }
@@ -553,7 +623,8 @@ Result<BodyId> SweepService::sweep(const ProfileRef& profile, CurveId rail) {
                             curve.kind == detail::CurveKind::CompositePolyline;
         const bool curved = curve.kind == detail::CurveKind::Circle || curve.kind == detail::CurveKind::Ellipse ||
                             curve.kind == detail::CurveKind::Bezier ||
-                            curve.kind == detail::CurveKind::BSpline || curve.kind == detail::CurveKind::Nurbs;
+                            curve.kind == detail::CurveKind::BSpline || curve.kind == detail::CurveKind::Nurbs ||
+                            curve.kind == detail::CurveKind::CompositeChain;
         if ((!linear && !curved) || profile.polygon_xyz.size() < 3 || (linear && curve.poles.size() < 2)) {
             return detail::invalid_input_result<BodyId>(
                 *state_, diag_codes::kCoreParameterOutOfRange,
@@ -563,10 +634,10 @@ Result<BodyId> SweepService::sweep(const ProfileRef& profile, CurveId rail) {
             std::vector<Point3> origins;
             std::vector<Vec3> tangents;
             bool closed = false;
-            if (!sample_curved_sweep_rail(curve, origins, tangents, closed)) {
+            if (!sample_curved_sweep_rail(*state_, curve, origins, tangents, closed)) {
                 return detail::invalid_input_result<BodyId>(
                     *state_, diag_codes::kCoreParameterOutOfRange,
-                    "曲线扫掠失败：导轨求值退化、具有尖点或为当前不支持的闭合样条", "曲线扫掠失败");
+                    "曲线扫掠失败：导轨求值退化、具有尖点，或复合导轨接缝的位置/切向不连续", "曲线扫掠失败");
             }
             const auto raw_normal = detail::newell_normal_unnormalized_poly(profile.polygon_xyz);
             const Scalar normal_length = detail::norm(raw_normal);
@@ -652,6 +723,44 @@ Result<BodyId> SweepService::sweep(const ProfileRef& profile, CurveId rail) {
                     }
                 }
             }
+            // Point-to-point separation can miss two long sampled chords that cross
+            // between their endpoints. Check nonlocal rail segments as well, using
+            // arc-midpoint separation to avoid rejecting neighboring pieces of the
+            // same tube. This is especially important for mixed CompositeChain rails.
+            const std::size_t rail_segments = closed ? station_count : station_count - 1;
+            std::vector<Scalar> segment_mid_lengths(rail_segments, 0.0);
+            std::vector<Scalar> segment_lengths(rail_segments, 0.0);
+            for (std::size_t i = 0; i < rail_segments; ++i) {
+                const std::size_t next = (i + 1) % station_count;
+                const Scalar begin = accumulated_length[i];
+                const Scalar step = detail::norm(detail::subtract(origins[next], origins[i]));
+                segment_mid_lengths[i] = begin + 0.5 * step;
+                segment_lengths[i] = step;
+            }
+            const Scalar clearance_squared = 2.25 * profile_radius * 2.25 * profile_radius;
+            for (std::size_t i = 0; i < rail_segments; ++i) {
+                const std::size_t i_next = (i + 1) % station_count;
+                for (std::size_t j = i + 1; j < rail_segments; ++j) {
+                    const std::size_t j_next = (j + 1) % station_count;
+                    if (j == i + 1 || (closed && i == 0 && j + 1 == rail_segments)) continue;
+                    Scalar along = std::abs(segment_mid_lengths[j] - segment_mid_lengths[i]);
+                    if (closed) along = std::min(along, rail_length - along);
+                    // Use the arc gap between the segment intervals, not their
+                    // midpoint separation. Two locally adjacent chords can have
+                    // distant midpoints yet still share the same valid tube
+                    // neighborhood (notably on sampled circles and ellipses).
+                    const Scalar interval_gap = std::max(
+                        Scalar(0.0), along - 0.5 * (segment_lengths[i] + segment_lengths[j]));
+                    if (interval_gap <= 3.0 * profile_radius) continue;
+                    const Scalar distance_squared = sweep_segment_distance_squared(
+                        origins[i], origins[i_next], origins[j], origins[j_next]);
+                    if (distance_squared <= clearance_squared) {
+                        return detail::invalid_input_result<BodyId>(
+                            *state_, diag_codes::kCoreParameterOutOfRange,
+                            "曲线扫掠失败：非相邻导轨弦段相交或过近，截面可能自相交", "曲线扫掠失败");
+                    }
+                }
+            }
 
             Vec3 initial_u = detail::subtract(profile.polygon_xyz.front(), origins.front());
             initial_u = detail::subtract(Point3 {initial_u.x, initial_u.y, initial_u.z},
@@ -695,10 +804,56 @@ Result<BodyId> SweepService::sweep(const ProfileRef& profile, CurveId rail) {
                 frame_u.push_back(transported);
                 frame_v.push_back(detail::normalize(detail::cross(tangent, transported)));
             }
+            if (closed) {
+                // Parallel transport around a spatial loop may return with a finite
+                // holonomy angle.  Transport the last frame across the seam, measure
+                // that residual about the initial tangent, then distribute its inverse
+                // over the sampled arc.  Station zero remains the caller's section
+                // orientation while the final wall becomes twist-continuous.
+                const Vec3 last_tangent = detail::normalize(tangents.back());
+                const Vec3 seam_axis_raw = detail::cross(last_tangent, start_tangent);
+                const Scalar seam_sine = detail::norm(seam_axis_raw);
+                const Scalar seam_cosine = std::clamp(detail::dot(last_tangent, start_tangent), -1.0, 1.0);
+                Vec3 seam_u = frame_u.back();
+                if (seam_sine > 1e-14) {
+                    const Vec3 seam_axis = detail::scale(seam_axis_raw, 1.0 / seam_sine);
+                    const auto first = detail::scale(seam_u, seam_cosine);
+                    const auto second = detail::scale(detail::cross(seam_axis, seam_u), seam_sine);
+                    const auto third = detail::scale(
+                        seam_axis, detail::dot(seam_axis, seam_u) * (1.0 - seam_cosine));
+                    seam_u = detail::normalize({first.x + second.x + third.x,
+                                                first.y + second.y + third.y,
+                                                first.z + second.z + third.z});
+                }
+                const Scalar residual = std::atan2(
+                    detail::dot(start_tangent, detail::cross(seam_u, frame_u.front())),
+                    std::clamp(detail::dot(seam_u, frame_u.front()), -1.0, 1.0));
+                const Scalar correction_length = accumulated_length.back();
+                if (!std::isfinite(residual) || !(correction_length > plane_tol)) {
+                    return detail::invalid_input_result<BodyId>(
+                        *state_, diag_codes::kCoreParameterOutOfRange,
+                        "闭合曲线扫掠失败：无法构造连续的周期截面标架", "闭合曲线扫掠失败");
+                }
+                for (std::size_t i = 1; i < station_count; ++i) {
+                    const Scalar angle = residual * accumulated_length[i] / correction_length;
+                    const Vec3 tangent = detail::normalize(tangents[i]);
+                    const Vec3 u = frame_u[i];
+                    const Scalar cosine = std::cos(angle), sine = std::sin(angle);
+                    const auto first = detail::scale(u, cosine);
+                    const auto second = detail::scale(detail::cross(tangent, u), sine);
+                    const auto third = detail::scale(tangent, detail::dot(tangent, u) * (1.0 - cosine));
+                    frame_u[i] = detail::normalize({first.x + second.x + third.x,
+                                                    first.y + second.y + third.y,
+                                                    first.z + second.z + third.z});
+                    frame_v[i] = detail::normalize(detail::cross(tangent, frame_u[i]));
+                }
+            }
             detail::BodyRecord record;
             record.kind = detail::BodyKind::Sweep;
             record.rep_kind = RepKind::ExactBRep;
-            record.label = closed ? "sweep_curve:periodic:" + profile.label : "sweep_curve:spline:" + profile.label;
+            record.label = closed ? "sweep_curve:periodic:" + profile.label :
+                curve.kind == detail::CurveKind::CompositeChain ? "sweep_curve:composite:" + profile.label :
+                                                                  "sweep_curve:spline:" + profile.label;
             record.axis = start_tangent;
             record.b = rail_length;
             record.extrude_profile_xyz = profile.polygon_xyz;

@@ -334,6 +334,7 @@
 | `AXM-VAL-E-0004` | Error | 检测到退化几何；`validate_geometry` 按根因绑定 `heal.validate_geometry.*` 阶段并关联目标 Body/问题子实体 |
 | `AXM-VAL-E-0005` | Warning | 检测到薄壁高风险区域 |
 | `AXM-VAL-E-0006` | Warning | 检测到高曲率不稳定区域 |
+| `AXM-VAL-E-0010` | Error | 检测到非有限几何；第 70 批精确 B-Rep 文本子集导入绑定 `io.import.<format>.validation` |
 
 `validate_geometry` 的失败阶段包括 `input`、`bbox`、`references`、`surface_domain`、`curve_domain`、
 `vertices_finite`、`near_duplicate_vertices`、`edges`、`face_area` 与 `face_normal`，统一使用
@@ -345,8 +346,8 @@
 |---|---|---|
 | `AXM-IO-E-0001` | Error | 文件不存在（如 `IOService::validate_import_path` 校验时目标路径不存在） |
 | `AXM-IO-E-0002` | Error | 文件格式无法识别 |
-| `AXM-IO-E-0003` | Error | 文件内容损坏 |
-| `AXM-IO-E-0004` | Error | 导入失败；STEP 早期失败绑定 `io.import.step.input/path/open`；OBJ 物化前失败绑定 `io.import.obj.input/path/open/parse`；STL、glTF 与 3MF 物化前失败分别绑定 `io.import.stl.*`、`io.import.gltf.*`、`io.import.3mf.*` 的 `input/path/open/read/parse/validation` 阶段。OBJ/STL/glTF/3MF 退化三角形复用 `AXM-VAL-E-0002` 与各自的 `.validation` 阶段。3MF 非有限顶点在 `.validation` 阶段复用本码，非法数值及索引溢出在 `.parse` 阶段复用本码；物化前无模型实体可关联。 |
+| `AXM-IO-E-0003` | Error | 文件内容损坏；第 70 批 AXMJSON/Axiom IGES 元数据/Axiom BREP JSON 子集的截断结构、缺失必需字段、错误 `format`、不支持的 `body_kind` 或缺失 BREP 文件头均绑定 `io.import.<format>.parse` |
+| `AXM-IO-E-0004` | Error | 导入失败；STEP 早期失败绑定 `io.import.step.input/path/open`；OBJ 物化前失败绑定 `io.import.obj.input/path/open/parse`；STL、glTF 与 3MF 物化前失败分别绑定 `io.import.stl.*`、`io.import.gltf.*`、`io.import.3mf.*` 的 `input/path/open/read/parse/validation` 阶段。第 70 批为 AXMJSON/Axiom IGES 元数据/Axiom BREP JSON 子集补齐 `io.import.<format>.input/path/open/read`：非普通文件在读取前拒绝，超过 64 MiB 或短读归入 `.read`。OBJ/STL/glTF/3MF 退化三角形复用 `AXM-VAL-E-0002` 与各自的 `.validation` 阶段。3MF 非有限顶点在 `.validation` 阶段复用本码，非法数值及索引溢出在 `.parse` 阶段复用本码；物化前无模型实体可关联。 |
 | `AXM-IO-E-0005` | Error | 导出失败 |
 | `AXM-IO-E-0006` | Error | 严格网格导出 QA 失败（越界索引、退化三角形或检查不可用；`Issue.stage=io.export.mesh_strict_qa`，关联输入 Body） |
 | `AXM-IO-E-0007` | Warning | 导入后存在未映射属性 |
@@ -623,11 +624,33 @@
 
 查询不返回部分面积，不写几何/求值/网格缓存，不创建模型对象。未包装 Plane 且完全无 PCurve 时兼容调用 `planar_face_area`，并沿用其既有失败码。
 
-### FR-OPS-001 SweepService 新路径诊断（第 68 批）
+### FR-QUERY-001 闭合多面体拓扑质量属性诊断（第 70 批）
+
+- `AXM-CORE-E-0001`：`shell_mass_properties/body_mass_properties` 目标句柄无效、已删除或已回滚；`InvalidInput`，无部分值。
+- `AXM-CORE-E-0004`：壳含曲面或曲边；`NotImplemented`，不使用弦长、网格或 bbox 近似。
+- `AXM-TOPO-E-0005`：壳为空、开放、非流形，或引用的面/曲面缺失；`InvalidTopology`。
+- `AXM-TOPO-E-0015`：共享边在两个相邻面中同向，或外/内环绕向与平面法向不一致；`InvalidTopology`。
+- `AXM-TOPO-E-0003/0004/0006/0009`：面环、定向边、顶点链或重复壳/面引用损坏；`InvalidTopology`。
+- `AXM-GEO-E-0003`：平面法向、面环面积或闭壳有向体积退化；`DegenerateGeometry`。
+- `AXM-QUERY-E-0003`：单壳积分或多壳汇总产生非有限/越界结果；`NumericalInstability`。
+- `AXM-CORE-E-0002`：顶点坐标或拓扑规模超出可处理范围；`InvalidInput`。
+
+查询从当前真实拓扑重算且不返回部分值；不分配网格、不写缓存、不修改 Eval 状态或事务写计数，仅增加诊断和一次顶层查询审计。
+
+### FR-OPS-001 SweepService 新路径诊断（第 68/70 批）
 
 - `AXM-CORE-E-0001`：`sweep` 轮廓标签为空或导轨句柄无效。
 - `AXM-CORE-E-0002`：`extrude_to_plane` 的轮廓/孔非法、方向或平面非有限/近退化、方向切向或反向、平面接触/相交或舍入塌缩。
-- `AXM-CORE-E-0002`：整周 `revolve` 角度不在 `(0,2π]`、轴非法，或轮廓带孔、跨轴、孤立轴点、近轴、自交、非共面/偏轴。
-- `AXM-CORE-E-0002`：曲线 `sweep` 截面非法或未与导轨起点/切向对齐，导轨为未支持类型、闭合样条、尖点、过紧曲率、自靠近，或周期标架/物化/质量积分失败。
+- `AXM-CORE-E-0002`：`revolve` 角度不在 `(0,2π]`、轴非法，或轮廓带孔、跨轴、孤立轴点、近轴、自交、非共面/偏轴；部分角与整周均在分配前完成闭壳、质量和惯性检查。
+- `AXM-CORE-E-0002`：曲线 `sweep` 截面非法或未与导轨起点/切向对齐，样条伪闭合/首尾切向断裂，复合链接缝错位/折角/尖点、嵌套链或含未支持子段，过紧曲率、非局部弦段自靠近，或周期标架/物化/质量积分失败。
 
 上述 Ops 失败允许新增诊断，但在模型/拓扑对象和 ID 分配前完成验证，不改变活动拓扑事务写计数，也不污染求值或网格缓存。
+
+### NFR-DIA-001 精确 B-Rep 文本导入诊断（第 70 批）
+
+- `AXM-IO-E-0004`：AXMJSON、Axiom IGES 元数据子集和 Axiom BREP JSON 子集的空路径、不存在路径、非普通文件/打开失败、文件超过 64 MiB 或短读，分别绑定 `io.import.<format>.input/path/open/read`。
+- `AXM-IO-E-0003`：截断 JSON、缺少或无效必需字段、入口与 `format` 不匹配、`body_kind` 不支持或 BREP 文件头缺失；绑定 `io.import.<format>.parse`。
+- `AXM-VAL-E-0010`：几何元数据含 NaN 或 Inf；返回 `InvalidInput`，绑定 `io.import.<format>.validation`。
+- `AXM-VAL-E-0004`：包围盒反转/无效或轴退化；返回 `DegenerateGeometry`，绑定 `io.import.<format>.validation`。
+
+三种格式的物化前失败都返回可检索 `diagnostic_id`，不写 Body/Mesh store、不推进模型 `next_id`；修复文件后可原位重试。标准 IGES 实体仍沿用 `NotImplemented / AXM-IO-E-0011` 和 `io.import.iges`，不纳入 Axiom 子集的 `.parse/.validation` 承诺。

@@ -146,6 +146,15 @@ public:
     /// UV 环必须连续闭合、位于当前参数域且内环严格位于外环内；退化/自交/重叠或缺失 PCurve 不返回部分面积。
     /// 每次从当前面、环与曲面记录重算，不写几何求值/网格缓存；事务内替换/删除即时可见，回滚后恢复。
     Result<Scalar> face_area(FaceId face_id) const;
+    /// 从单个闭合多面体壳的当前真实拓扑计算均匀密度质量属性；仅支持平面、直线边面（可凹、可带孔）。
+    /// `volume`/`area`/`centroid` 的单位分别为模型长度单位的三次方、平方和一次方；
+    /// `inertia` 是关于质心、世界坐标系行主序的 3x3 张量，密度取 1，单位为模型长度单位的五次方。
+    /// 壳须为双边流形闭壳，面边界绕向须与平面法向一致；曲面、曲边、开壳、非流形或退化壳失败且不返回部分值。
+    /// 每次从当前拓扑重算，不创建网格或写缓存；事务内删除/替换即时可见，回滚后恢复。
+    Result<MassProperties> shell_mass_properties(ShellId shell_id) const;
+    /// 汇总实体拥有的一个或多个独立闭合多面体壳的均匀密度质量属性。
+    /// 多壳按互不重叠的实体分量相加；当前不把独立内壳解释为空腔。单位及失败/只读语义同 `shell_mass_properties`。
+    Result<MassProperties> body_mass_properties(BodyId body_id) const;
     /// 当前 Line/LineSegment 边的端点距离，单位为模型长度单位；端点须位于支撑曲线范围内。
     /// 曲边缺少裁剪区间，返回 NotImplemented；退化/不一致拓扑返回 InvalidTopology。
     Result<Scalar> edge_length(EdgeId edge_id) const;

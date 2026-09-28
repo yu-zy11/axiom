@@ -72,6 +72,40 @@ Result<void> bind_mesh_export_failure(detail::KernelState& state, Result<void> r
     return result;
 }
 
+Result<BodyId> exact_brep_import_failure(detail::KernelState& state, StatusCode status,
+                                         std::string_view code, std::string message,
+                                         std::string summary, std::string_view stage) {
+    auto issue = detail::make_error_issue(code, std::move(message));
+    issue.stage = std::string(stage);
+    return error_result<BodyId>(status,
+                                state.create_diagnostic(std::move(summary), {std::move(issue)}));
+}
+
+std::optional<Result<BodyId>> reject_invalid_exact_brep_record(
+    detail::KernelState& state, const detail::BodyRecord& record,
+    std::string_view format_name, std::string_view stage) {
+    switch (validate_exact_brep_body_record(record)) {
+        case ExactBrepRecordValidationFailure::None:
+            return std::nullopt;
+        case ExactBrepRecordValidationFailure::NonFinite:
+            return exact_brep_import_failure(
+                state, StatusCode::InvalidInput, diag_codes::kValNonFiniteGeometry,
+                std::string(format_name) + " 导入失败：几何记录包含 NaN 或 Inf",
+                std::string(format_name) + " 导入失败", stage);
+        case ExactBrepRecordValidationFailure::InvalidBounds:
+            return exact_brep_import_failure(
+                state, StatusCode::DegenerateGeometry, diag_codes::kValDegenerateGeometry,
+                std::string(format_name) + " 导入失败：包围盒边界反转或无效",
+                std::string(format_name) + " 导入失败", stage);
+        case ExactBrepRecordValidationFailure::DegenerateAxis:
+            return exact_brep_import_failure(
+                state, StatusCode::DegenerateGeometry, diag_codes::kValDegenerateGeometry,
+                std::string(format_name) + " 导入失败：几何轴方向退化",
+                std::string(format_name) + " 导入失败", stage);
+    }
+    return std::nullopt;
+}
+
 }  // namespace
 
 IOService::IOService(std::shared_ptr<detail::KernelState> state) : state_(std::move(state)) {}

@@ -40,11 +40,15 @@ BodyId make_body(std::shared_ptr<detail::KernelState> state, detail::BodyRecord 
             if (!materialized) {
                 return BodyId {};
             }
-        } else if (record.kind == detail::BodyKind::Sweep && record.revolve_full_turn) {
-            // A requested full turn is an explicit modeling operation. It must
-            // materialize its periodic closed shell instead of silently becoming
-            // a bounding-box proxy when geometric validation fails.
-            if (!detail::try_materialize_sweep_revolve_full_body(*state, record)) {
+        } else if (record.kind == detail::BodyKind::Sweep && !record.revolve_profile_xyz.empty()) {
+            // An explicit revolution is a modeling operation, not a bbox hint.
+            // Both periodic and partial paths validate and integrate the complete
+            // sampled shell before allocating topology; never hide a geometric
+            // failure behind the generic derived-body bbox fallback.
+            const bool materialized = record.revolve_full_turn
+                ? detail::try_materialize_sweep_revolve_full_body(*state, record)
+                : detail::try_materialize_sweep_revolve_meridian_body(*state, record);
+            if (!materialized) {
                 return BodyId {};
             }
         } else {
@@ -679,12 +683,222 @@ bool evaluate_spline_sweep_point(const detail::CurveRecord& curve, Scalar t, Poi
     return finite_sweep_point(point);
 }
 
+bool finite_sweep_vector(const Vec3& value) {
+    return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+}
+
+/// Evaluate the portion of a child curve exposed by CompositeChain's unit interval.
+/// This deliberately mirrors CurveService's chain mapping instead of silently remapping
+/// every child to its complete native domain: a chain child is evaluated at local t in
+/// [0,1].  Lines thereby become bounded segments, analytic conics become arcs, and a
+/// multi-span spline contributes the same first unit interval visible through CurveService.
+bool evaluate_composite_sweep_child(const detail::CurveRecord& curve, Scalar t,
+                                    Point3& point, Vec3& derivative) {
+    if (!std::isfinite(t)) return false;
+    t = std::clamp(t, Scalar(0.0), Scalar(1.0));
+    switch (curve.kind) {
+        case detail::CurveKind::Line: {
+            if (!finite_sweep_point(curve.origin) || !finite_sweep_vector(curve.direction) ||
+                detail::norm(curve.direction) <= 1e-14) return false;
+            derivative = curve.direction;
+            point = detail::add_point_vec(curve.origin, detail::scale(derivative, t));
+            break;
+        }
+        case detail::CurveKind::LineSegment: {
+            if (curve.poles.size() < 2 || !finite_sweep_point(curve.poles[0]) ||
+                !finite_sweep_point(curve.poles[1])) return false;
+            derivative = detail::subtract(curve.poles[1], curve.poles[0]);
+            point = detail::add_point_vec(curve.poles[0], detail::scale(derivative, t));
+            break;
+        }
+        case detail::CurveKind::Circle:
+        case detail::CurveKind::Ellipse: {
+            const bool circle = curve.kind == detail::CurveKind::Circle;
+            if (!finite_sweep_point(curve.origin) || !finite_sweep_vector(curve.axis_u) ||
+                !finite_sweep_vector(curve.axis_v) || detail::norm(curve.axis_u) <= 1e-14 ||
+                detail::norm(curve.axis_v) <= 1e-14 ||
+                detail::norm(detail::cross(curve.axis_u, curve.axis_v)) <= 1e-14 ||
+                (circle && (!std::isfinite(curve.radius) || curve.radius <= 0.0))) return false;
+            const Scalar cosine = std::cos(t), sine = std::sin(t);
+            const Scalar scale = circle ? curve.radius : Scalar(1.0);
+            const Vec3 radial {scale * (curve.axis_u.x * cosine + curve.axis_v.x * sine),
+                               scale * (curve.axis_u.y * cosine + curve.axis_v.y * sine),
+                               scale * (curve.axis_u.z * cosine + curve.axis_v.z * sine)};
+            derivative = {scale * (-curve.axis_u.x * sine + curve.axis_v.x * cosine),
+                          scale * (-curve.axis_u.y * sine + curve.axis_v.y * cosine),
+                          scale * (-curve.axis_u.z * sine + curve.axis_v.z * cosine)};
+            point = detail::add_point_vec(curve.origin, radial);
+            break;
+        }
+        case detail::CurveKind::Bezier: {
+            if (curve.poles.size() < 2 ||
+                !std::all_of(curve.poles.begin(), curve.poles.end(), finite_sweep_point)) return false;
+            point = de_casteljau_sweep_point(curve.poles, t);
+            derivative = de_casteljau_sweep_derivative(curve.poles, t);
+            break;
+        }
+        case detail::CurveKind::BSpline:
+        case detail::CurveKind::Nurbs: {
+            int degree = 0;
+            Scalar domain_min = 0.0, domain_max = 0.0;
+            if (!spline_sweep_degree_and_domain(curve, degree, domain_min, domain_max) ||
+                domain_min > 0.0 || domain_max < 1.0 ||
+                !evaluate_spline_sweep_point(curve, t, point)) return false;
+            const Scalar h = Scalar(1e-6);
+            const Scalar ta = std::max(Scalar(0.0), t - h);
+            const Scalar tb = std::min(Scalar(1.0), t + h);
+            Point3 a {}, b {};
+            if (!(tb > ta) || !evaluate_spline_sweep_point(curve, ta, a) ||
+                !evaluate_spline_sweep_point(curve, tb, b)) return false;
+            derivative = detail::scale(detail::subtract(b, a), 1.0 / (tb - ta));
+            break;
+        }
+        case detail::CurveKind::CompositePolyline: {
+            // CurveService maps a chain child's local [0,1] directly into the
+            // polyline domain, so this interval is exactly its first segment.
+            if (curve.poles.size() < 2 || !finite_sweep_point(curve.poles[0]) ||
+                !finite_sweep_point(curve.poles[1])) return false;
+            derivative = detail::subtract(curve.poles[1], curve.poles[0]);
+            point = detail::add_point_vec(curve.poles[0], detail::scale(derivative, t));
+            break;
+        }
+        default:
+            // Unbounded parabola/hyperbola and nested chains have ambiguous feature
+            // extents/history in the current API and are intentionally rejected.
+            return false;
+    }
+    return finite_sweep_point(point) && finite_sweep_vector(derivative) &&
+           std::isfinite(detail::norm(derivative)) && detail::norm(derivative) > 1e-14;
+}
+
+struct CompositeSweepStation {
+    Scalar parameter {};
+    Point3 point {};
+    Vec3 tangent {};
+};
+
+bool sample_composite_sweep_child(const detail::CurveRecord& child, Scalar coordinate_scale,
+                                  std::vector<CompositeSweepStation>& samples) {
+    constexpr std::size_t kSeedSpans = 16;
+    constexpr int kRefinementPasses = 3;
+    constexpr std::size_t kMaxChildStations = 129;
+    samples.clear();
+    samples.reserve(kSeedSpans + 1);
+    for (std::size_t i = 0; i <= kSeedSpans; ++i) {
+        const Scalar parameter = static_cast<Scalar>(i) / static_cast<Scalar>(kSeedSpans);
+        Point3 point {};
+        Vec3 derivative {};
+        if (!evaluate_composite_sweep_child(child, parameter, point, derivative)) return false;
+        samples.push_back({parameter, point, detail::normalize(derivative)});
+    }
+    for (int pass = 0; pass < kRefinementPasses; ++pass) {
+        bool inserted = false;
+        std::vector<CompositeSweepStation> refined;
+        refined.reserve(std::min(kMaxChildStations, 2 * samples.size()));
+        refined.push_back(samples.front());
+        for (std::size_t i = 0; i + 1 < samples.size(); ++i) {
+            const auto& a = samples[i];
+            const auto& b = samples[i + 1];
+            const Scalar middle_parameter = (a.parameter + b.parameter) * 0.5;
+            Point3 middle {};
+            Vec3 middle_derivative {};
+            if (!evaluate_composite_sweep_child(child, middle_parameter, middle, middle_derivative)) return false;
+            const Vec3 middle_tangent = detail::normalize(middle_derivative);
+            const Point3 chord_middle {(a.point.x + b.point.x) * 0.5,
+                                       (a.point.y + b.point.y) * 0.5,
+                                       (a.point.z + b.point.z) * 0.5};
+            const Scalar chord = detail::norm(detail::subtract(b.point, a.point));
+            const Scalar deviation = detail::norm(detail::subtract(middle, chord_middle));
+            const Scalar tangent_cosine = std::min({detail::dot(a.tangent, middle_tangent),
+                                                    detail::dot(middle_tangent, b.tangent),
+                                                    detail::dot(a.tangent, b.tangent)});
+            const Scalar tolerance = std::max(Scalar(1e-7) * coordinate_scale, Scalar(0.002) * chord);
+            if (!std::isfinite(chord) || !std::isfinite(deviation) || !std::isfinite(tangent_cosine) ||
+                chord <= 1e-14) return false;
+            if ((deviation > tolerance || tangent_cosine < 0.995) && refined.size() + 1 < kMaxChildStations) {
+                refined.push_back({middle_parameter, middle, middle_tangent});
+                inserted = true;
+            }
+            refined.push_back(b);
+        }
+        samples.swap(refined);
+        if (!inserted) break;
+    }
+    return samples.size() >= 2 && samples.size() <= kMaxChildStations;
+}
+
+bool sample_composite_sweep_rail(const detail::KernelState& state, const detail::CurveRecord& curve,
+                                 std::vector<Point3>& points, std::vector<Vec3>& tangents,
+                                 bool& closed) {
+    constexpr std::size_t kMaxChildren = 64;
+    constexpr Scalar kJoinTangentCosine = 1.0 - 1e-5;
+    if (curve.kind != detail::CurveKind::CompositeChain || curve.children.empty() ||
+        curve.children.size() > kMaxChildren) return false;
+
+    Scalar coordinate_scale = 1.0;
+    for (const auto child_id : curve.children) {
+        const auto child_it = state.curves.find(child_id.value);
+        if (child_it == state.curves.end() || child_it->second.kind == detail::CurveKind::CompositeChain) return false;
+        const auto& child = child_it->second;
+        coordinate_scale = std::max({coordinate_scale, std::abs(child.origin.x), std::abs(child.origin.y),
+                                     std::abs(child.origin.z), std::abs(child.radius),
+                                     detail::norm(child.axis_u), detail::norm(child.axis_v)});
+        for (const auto& pole : child.poles) {
+            if (!finite_sweep_point(pole)) return false;
+            coordinate_scale = std::max({coordinate_scale, std::abs(pole.x), std::abs(pole.y), std::abs(pole.z)});
+        }
+    }
+    const Scalar join_tolerance = std::max(Scalar(1e-8), Scalar(512) *
+        std::numeric_limits<Scalar>::epsilon() * coordinate_scale);
+    points.clear();
+    tangents.clear();
+    std::vector<CompositeSweepStation> child_samples;
+    for (std::size_t child_index = 0; child_index < curve.children.size(); ++child_index) {
+        const auto& child = state.curves.at(curve.children[child_index].value);
+        if (!sample_composite_sweep_child(child, coordinate_scale, child_samples)) return false;
+        if (!points.empty()) {
+            const Scalar gap = detail::norm(detail::subtract(child_samples.front().point, points.back()));
+            const Scalar tangent_cosine = detail::dot(tangents.back(), child_samples.front().tangent);
+            if (!std::isfinite(gap) || gap > join_tolerance || tangent_cosine < kJoinTangentCosine) return false;
+            const Vec3 tangent_sum {tangents.back().x + child_samples.front().tangent.x,
+                                    tangents.back().y + child_samples.front().tangent.y,
+                                    tangents.back().z + child_samples.front().tangent.z};
+            if (detail::norm(tangent_sum) <= 1e-14) return false;
+            tangents.back() = detail::normalize(tangent_sum);
+        }
+        const std::size_t first = points.empty() ? 0 : 1;
+        for (std::size_t i = first; i < child_samples.size(); ++i) {
+            if (points.size() >= kMaxChildren * 129) return false;
+            points.push_back(child_samples[i].point);
+            tangents.push_back(child_samples[i].tangent);
+        }
+    }
+    if (points.size() < 3 || points.size() != tangents.size()) return false;
+    const Scalar closure_gap = detail::norm(detail::subtract(points.back(), points.front()));
+    closed = closure_gap <= join_tolerance;
+    if (closed) {
+        if (detail::dot(tangents.back(), tangents.front()) < kJoinTangentCosine) return false;
+        const Vec3 tangent_sum {tangents.back().x + tangents.front().x,
+                                tangents.back().y + tangents.front().y,
+                                tangents.back().z + tangents.front().z};
+        if (detail::norm(tangent_sum) <= 1e-14) return false;
+        tangents.front() = detail::normalize(tangent_sum);
+        points.pop_back();
+        tangents.pop_back();
+    }
+    return points.size() >= 3;
+}
+
 }  // namespace
 
-bool sample_curved_sweep_rail(const detail::CurveRecord& curve, std::vector<Point3>& points,
+bool sample_curved_sweep_rail(const detail::KernelState& state, const detail::CurveRecord& curve,
+                              std::vector<Point3>& points,
                               std::vector<Vec3>& tangents, bool& closed) {
     points.clear();
     tangents.clear();
+    if (curve.kind == detail::CurveKind::CompositeChain) {
+        if (!sample_composite_sweep_rail(state, curve, points, tangents, closed)) return false;
+    } else {
     closed = curve.kind == detail::CurveKind::Circle || curve.kind == detail::CurveKind::Ellipse;
     constexpr std::size_t kOpenStations = 33;
     constexpr std::size_t kCircleStations = 48;
@@ -784,9 +998,9 @@ bool sample_curved_sweep_rail(const detail::CurveRecord& curve, std::vector<Poin
             points.swap(refined_points);
             if (!inserted) break;
         }
-        const Scalar scale = std::max({Scalar(1.0), detail::norm(detail::subtract(points.back(), points.front()))});
-        if (detail::norm(detail::subtract(points.back(), points.front())) <=
-            128.0 * std::numeric_limits<Scalar>::epsilon() * scale) return false;
+        const Scalar endpoint_distance = detail::norm(detail::subtract(points.back(), points.front()));
+        const Scalar closure_tolerance = 256.0 * std::numeric_limits<Scalar>::epsilon() * coordinate_scale;
+        closed = endpoint_distance <= closure_tolerance;
         tangents.resize(points.size());
         for (std::size_t i = 0; i < points.size(); ++i) {
             if (curve.kind == detail::CurveKind::Bezier) {
@@ -805,6 +1019,16 @@ bool sample_curved_sweep_rail(const detail::CurveRecord& curve, std::vector<Poin
             if (!finite_sweep_point({chord.x, chord.y, chord.z}) || detail::norm(chord) <= 1e-14) return false;
             tangents[i] = detail::normalize(chord);
         }
+        if (closed) {
+            // A clamped spline can describe a periodic rail by repeating its endpoint.  The
+            // endpoint derivatives must agree as directions; merely coincident endpoints
+            // would otherwise hide a cusp in the closing wall.  The duplicate sample is
+            // removed because the materializer closes the final station explicitly.
+            if (detail::dot(tangents.front(), tangents.back()) < 1.0 - 1e-6) return false;
+            points.pop_back();
+            tangents.pop_back();
+        }
+    }
     }
     if (points.size() != tangents.size() || points.size() < 3) return false;
     for (std::size_t i = 0; i < points.size(); ++i) {

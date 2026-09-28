@@ -1935,7 +1935,7 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
     return true;
 }
 
-/// 显式平面多边形随采样曲线的旋转最小标架扫掠。开放导轨生成两端盖，整圆导轨周期闭合；
+/// 显式平面多边形随采样曲线的旋转最小标架扫掠。开放导轨生成两端盖，整圆/闭合样条导轨周期闭合；
 /// 凹截面和孔复用约束区域剖分。先验证完整三角闭壳、质量和舍入坐标，再一次性分配对象。
 inline bool try_materialize_sweep_curve_frame_body(KernelState& state, BodyRecord& record) {
     if (record.kind != BodyKind::Sweep || record.rep_kind != RepKind::ExactBRep || !record.bbox.is_valid ||
@@ -2427,81 +2427,184 @@ inline bool try_materialize_sweep_revolve_full_body(KernelState& state, BodyReco
     return true;
 }
 
-/// 子午面闭合多边形绕其平面内轴旋转 `< 2π`：侧壁为直纹面的两三角形剖分 + 两侧平面封盖，闭合流形 BRep。
+/// 子午面闭合多边形绕其平面内轴旋转 `< 2π`。角向按与整周旋转相同的上限分段，
+/// 每段生成真实直纹三角侧壁，首尾用约束多边形剖分封盖。轮廓可与轴分离，或仅以一条
+/// 连续边接触轴；轴上顶点跨站共享，避免产生零长边和退化侧壁。全部几何、流形和质量
+/// 检查均在分配内核对象之前完成，因此拒绝路径不会污染模型或活动事务。
 inline bool try_materialize_sweep_revolve_meridian_body(KernelState& state, BodyRecord& record) {
     if (record.kind != BodyKind::Sweep || record.rep_kind != RepKind::ExactBRep || !record.bbox.is_valid ||
-        !record.shells.empty()) {
+        !record.shells.empty() || record.revolve_full_turn) {
         return false;
     }
     if (record.label.size() < 8 || record.label.compare(0, 8, "revolve:") != 0) {
         return false;
     }
+    constexpr Scalar kPi = 3.1415926535897932384626433832795;
+    constexpr int kFullTurnSegments = 48;
     const auto& poly = record.revolve_profile_xyz;
+    if (poly.size() < 3 || poly.size() > static_cast<std::size_t>(std::numeric_limits<int>::max() /
+                                                                  (kFullTurnSegments + 1))) return false;
     const int n = static_cast<int>(poly.size());
-    if (n < 3) {
-        return false;
-    }
-    constexpr Scalar kPi = 3.14159265358979323846;
     const Scalar ang = record.b;
     const Scalar two_pi = 2.0 * kPi;
-    if (!(ang > 0.0) || ang >= two_pi - 1e-3) {
-        return false;
-    }
+    if (!std::isfinite(ang) || !(ang > 0.0) || ang >= two_pi - 1e-10) return false;
     const auto n_raw = newell_normal_unnormalized_poly(std::span<const Point3>(poly.data(), poly.size()));
-    if (norm(n_raw) <= 1e-14) {
-        return false;
-    }
+    const Scalar normal_length = norm(n_raw);
+    if (!std::isfinite(normal_length) || normal_length <= 1e-14) return false;
     const auto n_unit = normalize(n_raw);
     const auto u = normalize(record.axis);
-    const Scalar axis_in_plane_tol = std::max(1e-7, state.config.tolerance.linear * 10.0);
-    if (std::abs(dot(u, n_unit)) > axis_in_plane_tol) {
-        return false;
-    }
     const Point3 O = record.origin;
-    const Scalar ct = std::cos(ang);
-    const Scalar st = std::sin(ang);
+    if (!std::isfinite(u.x) || !std::isfinite(u.y) || !std::isfinite(u.z) || norm(u) <= 1e-14 ||
+        !std::isfinite(O.x) || !std::isfinite(O.y) || !std::isfinite(O.z)) return false;
+    const Scalar plane_tol = std::max(Scalar(1e-7), state.config.tolerance.linear * Scalar(100.0));
+    if (std::abs(dot(u, n_unit)) > 1e-7 ||
+        std::abs(dot(n_unit, subtract(O, poly.front()))) > plane_tol) return false;
 
-    std::vector<Point3> pos(static_cast<std::size_t>(2 * n));
+    Scalar coordinate_scale = 1.0;
+    for (const auto& p : poly) {
+        if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z) ||
+            std::abs(dot(n_unit, subtract(p, poly.front()))) > plane_tol) return false;
+        coordinate_scale = std::max({coordinate_scale, std::abs(p.x - O.x),
+                                     std::abs(p.y - O.y), std::abs(p.z - O.z)});
+    }
+    std::vector<std::array<int, 3>> cap_triangles;
+    if (!triangulate_extrude_profile(std::span<const Point3>(poly.data(), poly.size()),
+                                     n_unit, cap_triangles)) return false;
+
+    Vec3 radial_direction = normalize(cross(n_unit, u));
+    if (norm(radial_direction) <= 1e-14) return false;
+    const Scalar snap_tol = std::max(Scalar(1e-12), Scalar(128) *
+        std::numeric_limits<Scalar>::epsilon() * coordinate_scale);
+    const Scalar clearance_tol = std::max(Scalar(1e-8), state.config.tolerance.linear * Scalar(10.0));
+    std::vector<Scalar> signed_radius(poly.size());
+    bool positive = false, negative = false;
     for (int i = 0; i < n; ++i) {
-        pos[static_cast<std::size_t>(i)] = poly[static_cast<std::size_t>(i)];
-        pos[static_cast<std::size_t>(n + i)] =
-            rodrigues_rotate_point_revolve(poly[static_cast<std::size_t>(i)], O, u, ct, st);
+        const auto offset = subtract(poly[static_cast<std::size_t>(i)], O);
+        signed_radius[static_cast<std::size_t>(i)] = dot(offset, radial_direction);
+        const auto axial = scale(u, dot(offset, u));
+        const Vec3 radial {offset.x - axial.x, offset.y - axial.y, offset.z - axial.z};
+        const Scalar distance = norm(radial);
+        if (!std::isfinite(distance) ||
+            std::abs(distance - std::abs(signed_radius[static_cast<std::size_t>(i)])) > plane_tol) return false;
+        positive = positive || signed_radius[static_cast<std::size_t>(i)] > snap_tol;
+        negative = negative || signed_radius[static_cast<std::size_t>(i)] < -snap_tol;
+    }
+    if (positive && negative) return false;
+    if (negative) {
+        radial_direction = scale(radial_direction, -1.0);
+        for (auto& radius : signed_radius) radius = -radius;
+    }
+    std::vector<bool> on_axis(poly.size(), false);
+    std::vector<int> axis_vertices;
+    for (int i = 0; i < n; ++i) {
+        const Scalar radius = signed_radius[static_cast<std::size_t>(i)];
+        if (std::abs(radius) <= snap_tol) {
+            on_axis[static_cast<std::size_t>(i)] = true;
+            axis_vertices.push_back(i);
+        } else if (radius < clearance_tol) {
+            return false;
+        }
+    }
+    if (!axis_vertices.empty()) {
+        if (axis_vertices.size() != 2) return false;
+        const int a = axis_vertices[0], b = axis_vertices[1];
+        if ((a + 1) % n != b && (b + 1) % n != a) return false;
+    }
+
+    const int segment_count = std::max(1, static_cast<int>(std::ceil(
+        ang / (two_pi / static_cast<Scalar>(kFullTurnSegments)))));
+    const int station_count = segment_count + 1;
+    std::vector<Point3> pos;
+    pos.reserve(static_cast<std::size_t>(station_count * n));
+    std::vector<int> vertex_at(static_cast<std::size_t>(station_count * n), -1);
+    for (int i = 0; i < n; ++i) {
+        if (!on_axis[static_cast<std::size_t>(i)]) continue;
+        const auto offset = subtract(poly[static_cast<std::size_t>(i)], O);
+        const Point3 projected = add_point_vec(O, scale(u, dot(offset, u)));
+        const int index = static_cast<int>(pos.size());
+        pos.push_back(projected);
+        for (int station = 0; station < station_count; ++station) {
+            vertex_at[static_cast<std::size_t>(station * n + i)] = index;
+        }
+    }
+    for (int station = 0; station < station_count; ++station) {
+        const Scalar station_angle = ang * static_cast<Scalar>(station) / static_cast<Scalar>(segment_count);
+        const Scalar cosine = std::cos(station_angle), sine = std::sin(station_angle);
+        for (int i = 0; i < n; ++i) {
+            if (on_axis[static_cast<std::size_t>(i)]) continue;
+            const auto p = rodrigues_rotate_point_revolve(poly[static_cast<std::size_t>(i)], O, u, cosine, sine);
+            if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) return false;
+            vertex_at[static_cast<std::size_t>(station * n + i)] = static_cast<int>(pos.size());
+            pos.push_back(p);
+        }
     }
 
     std::vector<std::array<int, 3>> tris;
-    tris.reserve(static_cast<std::size_t>(2 * n + 2 * std::max(0, n - 2)));
-    for (int i = 0; i < n; ++i) {
-        const int ip = (i + 1) % n;
-        tris.push_back({i, ip, n + ip});
-        tris.push_back({i, n + ip, n + i});
+    tris.reserve(static_cast<std::size_t>(2 * segment_count * n + 2 * cap_triangles.size()));
+    const Scalar triangle_area_tol = std::max(Scalar(1e-20), snap_tol * snap_tol);
+    const auto append_triangle = [&](int a, int b, int c) {
+        if (a == b || b == c || c == a) return true;
+        const Scalar area2 = norm(cross(subtract(pos[static_cast<std::size_t>(b)], pos[static_cast<std::size_t>(a)]),
+                                        subtract(pos[static_cast<std::size_t>(c)], pos[static_cast<std::size_t>(a)])));
+        if (!std::isfinite(area2) || area2 <= triangle_area_tol) return false;
+        tris.push_back({a, b, c});
+        return true;
+    };
+    for (int station = 0; station < segment_count; ++station) {
+        for (int i = 0; i < n; ++i) {
+            const int next_i = (i + 1) % n;
+            if (on_axis[static_cast<std::size_t>(i)] && on_axis[static_cast<std::size_t>(next_i)]) continue;
+            const int a = vertex_at[static_cast<std::size_t>(station * n + i)];
+            const int b = vertex_at[static_cast<std::size_t>(station * n + next_i)];
+            const int c = vertex_at[static_cast<std::size_t>((station + 1) * n + next_i)];
+            const int d = vertex_at[static_cast<std::size_t>((station + 1) * n + i)];
+            if (!append_triangle(a, b, c) || !append_triangle(a, c, d)) return false;
+        }
     }
-    for (int k = 1; k < n - 1; ++k) {
-        tris.push_back({0, k, k + 1});
+    for (const auto& triangle : cap_triangles) {
+        const int a = vertex_at[static_cast<std::size_t>(triangle[0])];
+        const int b = vertex_at[static_cast<std::size_t>(triangle[1])];
+        const int c = vertex_at[static_cast<std::size_t>(triangle[2])];
+        const int end = segment_count * n;
+        if (!append_triangle(a, c, b) ||
+            !append_triangle(vertex_at[static_cast<std::size_t>(end + triangle[0])],
+                             vertex_at[static_cast<std::size_t>(end + triangle[1])],
+                             vertex_at[static_cast<std::size_t>(end + triangle[2])])) return false;
     }
-    for (int k = 1; k < n - 1; ++k) {
-        tris.push_back({n, n + k + 1, n + k});
+    if (tris.empty()) return false;
+
+    std::map<std::pair<int, int>, int> edge_use_count;
+    for (const auto& triangle : tris) {
+        for (int i = 0; i < 3; ++i) {
+            const int a = triangle[static_cast<std::size_t>(i)];
+            const int b = triangle[static_cast<std::size_t>((i + 1) % 3)];
+            ++edge_use_count[{std::min(a, b), std::max(a, b)}];
+        }
     }
+    if (edge_use_count.empty() || std::any_of(edge_use_count.begin(), edge_use_count.end(),
+        [](const auto& item) { return item.second != 2; })) return false;
 
     Scalar vol_chk = 0.0;
     Point3 cm_tmp {};
     std::array<Scalar, 9> in_tmp {};
     Scalar area_tmp = 0.0;
     polyhedral_mass_properties_from_triangles(pos, tris, vol_chk, cm_tmp, in_tmp, area_tmp);
-    if (vol_chk < 0.0) {
+    if (!(vol_chk > 1e-18)) {
         for (auto& t : tris) {
             std::swap(t[1], t[2]);
         }
         polyhedral_mass_properties_from_triangles(pos, tris, vol_chk, cm_tmp, in_tmp, area_tmp);
     }
-    if (!(vol_chk > 1e-18)) {
-        return false;
-    }
+    if (!(vol_chk > 1e-18) || !std::isfinite(area_tmp) || !(area_tmp > 0.0)) return false;
 
-    std::vector<VertexId> vid(static_cast<std::size_t>(2 * n));
-    for (int i = 0; i < 2 * n; ++i) {
-        vid[static_cast<std::size_t>(i)] = VertexId {state.allocate_id()};
-        state.vertices.emplace(vid[static_cast<std::size_t>(i)].value,
-                               VertexRecord {pos[static_cast<std::size_t>(i)]});
+    BoundingBox bbox {};
+    for (const auto& p : pos) extend_materialization_bbox(bbox, p);
+    if (!bbox.is_valid) return false;
+
+    std::vector<VertexId> vid(pos.size());
+    for (std::size_t i = 0; i < pos.size(); ++i) {
+        vid[i] = VertexId {state.allocate_id()};
+        state.vertices.emplace(vid[i].value, VertexRecord {pos[i]});
     }
 
     std::vector<EdgeId> edges;
@@ -2570,6 +2673,8 @@ inline bool try_materialize_sweep_revolve_meridian_body(KernelState& state, Body
     record.sweep_cached_surface_area = area_tmp;
     record.sweep_polyhedral_centroid = cm_tmp;
     record.sweep_inertia_about_centroid = in_tmp;
+    record.bbox = bbox;
+    record.a = vol_chk;
     return true;
 }
 
