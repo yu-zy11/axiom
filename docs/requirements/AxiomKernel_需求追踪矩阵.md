@@ -4,7 +4,7 @@
 > 责任域：Project
 > 维护者：产品负责人、架构负责人、质量负责人
 > 最后核验：2026-09-29
-> 核验依据：[功能需求](AxiomKernel_几何引擎功能需求文档.md)、[当前进度](../plan/AxiomKernel_当前开发进度.md)、`CMakeLists.txt`、`.axiom-agent/logs/cycle-0070-gates.log`
+> 核验依据：[功能需求](AxiomKernel_几何引擎功能需求文档.md)、[当前进度](../plan/AxiomKernel_当前开发进度.md)、`CMakeLists.txt`、`.axiom-agent/logs/cycle-0071-gates.log`
 
 ## 1. 使用方式
 
@@ -14,13 +14,13 @@
 
 | ID | 需求域 | 责任模块 | 目标阶段 | 当前状态 | 自动化证据 | 主要缺口 / 下一验收点 |
 |---|---|---|---|---|---|---|
-| FR-GEO-001 | 几何对象、求值与变换 | Math, Geo | Stage 2 | 受限可用 | `axiom_math_services_test`, `axiom_geometry_test`, `axiom_query_eval_test`；第 69 批最终完整 CTest 16/16 通过；本批 `axiom_geometry_test` 专项通过 | 曲线与有界曲面均已公开 `closest_point_detailed` 的距离下界、参数不确定度、预算与终止原因；曲面覆盖 Bezier/BSpline/NURBS、Revolved/Swept、Trimmed/Offset、窄结点片和修剪孔边界，失败不写缓存。仍缺无限面自动有限化、工业级高阶界、通用退化曲面与更大模型性能证书 |
+| FR-GEO-001 | 几何对象、求值与变换 | Math, Geo | Stage 2 | 受限可用 | `axiom_math_services_test`, `axiom_geometry_test`, `axiom_query_eval_test`；第 71 批 repair 后完整构建成功、CTest 16/16 通过（0 失败，1865.97 s） | 曲线与有界曲面均已公开 `closest_point_detailed` 的距离下界、参数不确定度、预算与终止原因；曲面覆盖 Bezier/BSpline/NURBS、Revolved/Swept、Trimmed/Offset、窄结点片和修剪孔边界，失败不写缓存。仍缺无限面自动有限化、工业级高阶界、通用退化曲面与更大模型性能证书 |
 | FR-TOPO-001 | 拓扑实体、关系与一致性 | Topo | Stage 2 | 受限可用 | `axiom_topology_test`, `axiom_query_eval_test`, `axiom_kernel_runtime_invariant_test`；第 69 批完整门禁保留，第 72 批专项通过，线性裁剪边跨环回归专项通过 | 第 72 批新增 `create_trimmed_edge` / `edge_curve_interval`，曲边长度及保守 bbox 使用真实区间；跨环冲突检测已精确消费 CompositePolyline 和线性 CompositeChain 的显式区间，包含递减区间与内部折点语义。圆锥曲线/样条误差受控求交、完整 trim bridge 与持久命名待闭合 |
-| FR-OPS-001 | 基础体与特征构造 | Ops, Geo, Topo | Stage 3 | 进行中 | `axiom_smoke_test`, `axiom_ops_heal_test`；第 70 批完整门禁保留；本批带孔旋转与兼容多截面放样隔离矩阵通过，闭合样条 48/48 隔离回归通过，完整长目标待统一门禁 | `revolve` 已支持轴分离孔洞，`loft` 已支持拓扑兼容的凹/带孔显式截面并生成真实闭壳。仍为保守浮点剖分/采样多面体 BRep，不是解析扫掠/精确旋转；缺带孔尖顶、负比例、任意环拓扑匹配、分支/坍塌放样、逐壁恒角拔模、嵌套复合导轨及显式轮廓历史 |
+| FR-OPS-001 | 基础体与特征构造 | Ops, Geo, Topo | Stage 3 | 进行中 | `axiom_smoke_test`, `axiom_ops_heal_test`；第 71 批 repair 后完整构建成功、CTest 16/16 通过（0 失败，`axiom_ops_heal_test` 1838.47 s） | `revolve/revolve_between` 支持轴分离孔洞、偏置/对称起始角、正负部分角与正负整周；`sweep_scaled` 支持开放直线/折线/样条/复合导轨上按弧长线性变化的有限正比例；`loft` 支持拓扑兼容凹/带孔显式截面。仍为保守浮点剖分/采样多面体 BRep，不是解析扫掠/精确旋转；缺带孔尖顶/触轴、零或负比例、非线性比例律、任意环拓扑匹配、分支/坍塌放样、逐壁恒角拔模、嵌套复合导轨及显式轮廓历史 |
 | FR-BOOL-001 | 布尔并/交/差与阶段诊断 | Ops, Heal | Stage 4 | 进行中 | `axiom_boolean_prep_test`, `axiom_boolean_workflow_test` | 工业退化场景、精确切分/分类/重建成功率 |
 | FR-MOD-001 | 偏置、抽壳与直接编辑 | Ops, Heal | Stage 6 | 未开始 | — | 先定义最小输入域、事务和验证门禁 |
 | FR-BLEND-001 | 圆角与倒角 | Ops, Heal | Stage 6 | 未开始 | — | 常半径最小闭环及失败阶段诊断 |
-| FR-QUERY-001 | 几何/拓扑查询与分析 | Geo, Topo, Eval | Stage 3 | 进行中 | `axiom_query_eval_test`；第 70 批完整门禁保留；第 71/72 批专项通过 | 拓扑质量属性支持平面直边闭壳的独立材料、嵌套空腔和材料岛；显式裁剪曲边已支持区间查询、真实弧长和保守拓扑 bbox。仍缺曲面/曲边质量积分、一般曲线稳定求交与大规模壳分类加速；`face_area` 的高阶/派生曲面限制不变 |
+| FR-QUERY-001 | 几何/拓扑查询与分析 | Geo, Topo, Eval | Stage 3 | 进行中 | `axiom_query_eval_test`；第 71 批首次全量曲线求交回归失败，repair 后定向 Geo/Query 复验通过，最终完整 CTest 16/16 通过（`axiom_query_eval_test` 0.32 s）；第 72/73 批专项保留 | `intersect_curve_curve` 支持一般有界 3D 曲线的离散横交/相切/端点、空集和可证明连续重合，并具有容差、有限区间、工作量证据及预算失败合同；拓扑质量属性支持平面直边闭壳的材料/空腔嵌套，显式裁剪曲边支持真实弧长和保守 bbox。仍缺曲面/曲边闭壳质量积分、一般高阶异参连续重合证明、独立内壳空腔/相交多壳扩展、大规模壳分类加速和拓扑曲边裁剪参数模型；`face_area` 的高阶/派生曲面限制不变 |
 | FR-HEAL-001 | 验证与修复 | Heal, Topo, Rep | Stage 5 | 进行中 | `axiom_heal_test`, `axiom_ops_heal_test` | 扩充规则集、修复前后不变量和语料库 |
 | FR-IO-001 | 数据导入导出 | IO, Rep, Heal | Stage 5 | 受限可用 | `axiom_io_workflow_test`, `axiom_io_dataset_test`；第 70 批 AXMJSON/Axiom IGES 元数据/Axiom BREP JSON 子集导入回归随完整 CTest 16/16 通过 | 仅严格支持内核自身导出的精确 B-Rep 文本子集；标准 IGES 实体仍为 NotImplemented，标准 STEP/IGES 深度、兼容矩阵和 round-trip 预算待闭合 |
 | FR-REP-001 | 三角化、表示与转换 | Rep, Geo, Topo | Stage 5 | 受限可用 | `axiom_representation_io_test` | 误差预算、属性保真及局部增量更新 |

@@ -166,7 +166,34 @@ print(closest.value->parameter,
       closest.value->intervals_processed);
 ```
 
-Line、LineSegment、Circle 与折线返回 `Analytic`；Ellipse、Parabola、Hyperbola、Bezier、BSpline、NURBS 和 CompositeChain 对完整有效域做分支限界。该入口目前只适用于曲线；曲面的完整参数域和修剪边界证书尚未实现。
+Line、LineSegment、Circle 与折线返回 `Analytic`；Ellipse、Parabola、Hyperbola、Bezier、BSpline、NURBS 和 CompositeChain 对完整有效域做分支限界。此结果类型只用于曲线；有界曲面可通过 `SurfaceService::closest_point_detailed` 获取对应的二维参数域证据。
+
+## 4.4 有界 3D 曲线-曲线求交
+
+```cpp
+auto arch = kernel.curves().make_bezier(
+    std::array<Point3, 3>{{{0,0,0}, {1,2,0}, {2,0,0}}});
+auto line = kernel.curves().make_line_segment({-1,.5,0}, {3,.5,0});
+
+CurveCurveIntersectionOptions options;
+options.position_tolerance = 1e-7;  // 模型长度单位
+options.parameter_tolerance = 1e-7;
+options.angular_tolerance = 1e-6;
+
+auto hits = kernel.geometry_intersection().intersect_curve_curve(
+    *arch.value, *line.value, options);
+if (!hits.value) { handle_error(hits); return; }
+for (const auto& hit : hits.value->points) {
+    print(hit.point, hit.first_parameter, hit.second_parameter,
+          hit.residual_distance, hit.kind);
+}
+for (const auto& overlap : hits.value->overlaps) {
+    print(overlap.first_interval, overlap.second_interval,
+          overlap.same_direction, overlap.maximum_separation);
+}
+```
+
+空交集会成功返回两个空容器。无限 `Line` 必须在对应的 `first_interval` 或 `second_interval` 中显式给出有限参数窗口。离散交点分为 `Transverse/Tangent/Endpoint`；共线分段直线和可证明同参的高阶曲线返回连续 `overlaps`，一般高阶异参重合尚不作完备证明。非法句柄/区间/容差、无法建界或预算耗尽都不返回部分结果，也不写求值缓存、Intersection/拓扑存储或活动事务计数。
 
 ## 5. 基础体构造样例
 
@@ -252,7 +279,7 @@ if (rail.value) {
 
 ```
 
-孔之间必须分离且不嵌套，不能接触外环；失败不留下部分实体。`revolve/loft` 尚不接受带孔截面。
+孔之间必须分离且不嵌套，不能接触外环；失败不留下部分实体。`revolve/revolve_between` 可接受与轴保持间隙的带孔截面，`loft` 可接受各站环拓扑和顶点数对应的带孔截面；带孔尖顶仍不支持。
 
 ### 等比变截面拉伸（第 65 包，已纳入统一门禁）
 
@@ -313,9 +340,15 @@ if (quarter.value) {
     auto quarter_valid = kernel.validate().validate_all(*quarter.value, ValidationMode::Strict);
     auto quarter_mass = kernel.topology().query().body_mass_properties(*quarter.value);
 }
+
+// 偏置起始角与负向区间；有符号跨度的绝对值不超过一周。
+auto clockwise = kernel.sweeps().revolve_between(
+    meridian, axis, std::acos(-1.0) / 3, -std::acos(-1.0) / 6);
+auto symmetric = kernel.sweeps().revolve_between(
+    meridian, axis, -std::acos(-1.0) / 4, std::acos(-1.0) / 4);
 ```
 
-整周和部分角显式多边形旋转都支持与轴分离的外环及分离孔洞，也支持无孔且仅有一条连续边位于轴上的实心轮廓。角分辨率为每周 48 段；部分角增加约束剖分的两个端盖。带孔区域触轴、跨轴、孤立轴点、近轴、自交或偏轴轮廓会在分配前被拒绝。结果是保守浮点分片的多面体 BRep，不是解析旋转曲面。
+整周和部分角显式多边形旋转都支持与轴分离的外环及分离孔洞，也支持无孔且仅有一条连续边位于轴上的实心轮廓。`revolve_between` 的递减区间使用相反旋转方向，部分角首尾端盖绕向与之匹配；正负整周的几何与起始角无关，保持周期多壳语义。角分辨率为每周 48 段；部分角增加约束剖分的两个端盖。带孔区域触轴、跨轴、孤立轴点、近轴、自交或偏轴轮廓会在分配前被拒绝。结果是保守浮点分片的多面体 BRep，不是解析旋转曲面。
 
 ## 6.3 曲线导轨扫掠
 
@@ -329,10 +362,16 @@ if (rail.value) {
     if (!swept.value) { handle_error(swept); return; }
     auto strict = kernel.validate().validate_all(*swept.value, ValidationMode::Strict);
     auto mesh = kernel.convert().brep_to_mesh(*swept.value, {});
+
+    // 截面比例按采样弧长从 1 线性过渡到 0.65。
+    auto tapered = kernel.sweeps().sweep_scaled(section, *rail.value, 0.65);
+    if (!tapered.value) { handle_error(tapered); return; }
+    auto tapered_strict = kernel.validate().validate_all(
+        *tapered.value, ValidationMode::Strict);
 }
 ```
 
-Bezier/BSpline/NURBS 开放导轨、显式端点重合且首尾切向连续的闭合样条，以及整圆/椭圆周期导轨使用旋转最小标架；空间闭环会做 holonomy 校正。`make_composite_chain(children)` 创建的复合导轨也可直接传入，相邻子段必须端点重合且 G1 切向连续；开放链有两个端盖，闭合链无端盖。周期带孔截面的外边界与各孔边界分别物化为独立闭壳，因此壳数和网格连通分量都为 `1 + holes_xyz.size()`；开放带孔导轨由端盖连成单壳。伪闭合、切向断裂、嵌套复合链、抛物/双曲子段、尖点、过紧曲率和自靠近导轨保守拒绝；这是采样多面体 BRep，不是解析扫掠曲面。
+Bezier/BSpline/NURBS 开放导轨、显式端点重合且首尾切向连续的闭合样条，以及整圆/椭圆周期导轨使用旋转最小标架；空间闭环会做 holonomy 校正。`make_composite_chain(children)` 创建的复合导轨也可直接传入，相邻子段必须端点重合且 G1 切向连续；开放链有两个端盖，闭合链无端盖。周期带孔截面的外边界与各孔边界分别物化为独立闭壳，因此壳数和网格连通分量都为 `1 + holes_xyz.size()`；开放带孔导轨由端盖连成单壳。`sweep_scaled` 对直线、CompositePolyline 和上述开放曲线/复合导轨支持正比例收缩与扩张，`end_scale=1` 与 `sweep` 兼容。非单位比例不适用于周期导轨；零/负比例、非线性比例律、过小比例、伪闭合、切向断裂、嵌套复合链、抛物/双曲子段、尖点、过紧曲率和自靠近导轨保守拒绝；这是采样多面体 BRep，不是解析扫掠曲面。
 
 ## 6.4 放样
 
@@ -858,7 +897,7 @@ if (box.value) {
 }
 ```
 
-曲线长度对直线有限区间、线段、圆和折线使用解析计算，对椭圆、抛物线、双曲线、Bezier、BSpline 和 NURBS 使用可配置自适应积分。复合链沿用 eval 的子曲线局部 `[0,1]`，不自动取子曲线全域。拓扑长度目前支持直线边，曲边因缺少裁剪参数返回不支持；不以弦长冒充曲边弧长。
+曲线长度对直线有限区间、线段、圆和折线使用解析计算，对椭圆、抛物线、双曲线、Bezier、BSpline 和 NURBS 使用可配置自适应积分。复合链沿用 eval 的子曲线局部 `[0,1]`，不自动取子曲线全域。显式通过 `create_trimmed_edge` 保存区间的曲边使用真实区间弧长；旧 `create_edge` 创建且未携带区间的曲边仍返回不支持，不以弦长冒充曲边弧长。
 
 ### 解析曲面 PCurve 修剪面积
 

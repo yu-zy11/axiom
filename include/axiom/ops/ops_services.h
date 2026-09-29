@@ -45,7 +45,7 @@ public:
     /// Direction must be transverse to both planes; normal sign and vector magnitudes are immaterial.
     /// Produces an actual planar closed BRep; touching/crossing planes and numerical degeneracy are rejected.
     Result<BodyId> extrude_to_plane(const ProfileRef& profile, const Vec3& direction, const Plane& end_plane);
-    /// Revolve a profile through a positive angle no greater than one full turn.
+    /// Revolve a profile from its current position through a positive angle no greater than one full turn.
     /// Explicit planar polygons are conservatively subdivided in angle and produce an
     /// owned triangulated closed BRep when the axis lies in the profile plane. Partial
     /// and full turns support a profile strictly separated from the axis, including
@@ -54,6 +54,14 @@ public:
     /// at an isolated point, have a holed region touching the axis, or are numerically
     /// near-degenerate are rejected before allocation.
     Result<BodyId> revolve(const ProfileRef& profile, const Axis3& axis, Scalar angle);
+    /// Revolve an explicit profile over the directed angular interval [start_angle, end_angle].
+    /// Angles are radians about axis.direction. The finite, nonzero signed span must have magnitude
+    /// no greater than one full turn; decreasing intervals sweep in the opposite direction. This
+    /// supports offset and symmetric feature placement without pre-rotating or copying the profile.
+    /// The same planar-region, axis-clearance, conservative subdivision and transactional guarantees
+    /// as revolve apply. A full-turn interval is independent of its start angle.
+    Result<BodyId> revolve_between(const ProfileRef& profile, const Axis3& axis,
+                                   Scalar start_angle, Scalar end_angle);
     /// Explicit polygons along a bounded rail, producing owned triangulated closed topology.
     /// Line segments and CompositePolyline keep the profile in world space and require every
     /// segment to advance through its plane. Bezier, B-spline and NURBS rails use a sampled
@@ -65,6 +73,14 @@ public:
     /// gaps, tangent-discontinuous joints, cusps, nested chains, excessive curvature and
     /// self-approaching rails are rejected without allocating a body or owned topology.
     Result<BodyId> sweep(const ProfileRef& profile, CurveId rail);
+    /// Sweep an explicit polygon along a supported rail while uniformly scaling each transported
+    /// section from 1 at the rail start to end_scale at the rail end. Non-unit scaling requires
+    /// an open rail, is linear in sampled arc length and is centered on the rail. Line and CompositePolyline
+    /// rails require their start point to lie in the profile plane; curved rails retain the
+    /// rotation-minimizing frame contract of sweep. The terminal scale must be finite and
+    /// strictly positive. Periodic rails only accept 1 because unequal seam sections cannot
+    /// form a closed shell; zero/apex and negative/reflected sections are not supported.
+    Result<BodyId> sweep_scaled(const ProfileRef& profile, CurveId rail, Scalar end_scale);
     /// Loft two or more explicit planar polygon sections into an owned triangulated closed BRep.
     /// Sections may be concave and may carry corresponding disjoint holes. Outer rings and each
     /// same-index hole must keep the same vertex count, because vertices define the ruled-wall

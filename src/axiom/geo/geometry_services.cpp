@@ -30,6 +30,7 @@ using namespace geo_internal;
 #include "axiom/internal/geo/geometry_services_surface_eval.inc"
 #include "axiom/internal/geo/geometry_services_surface_closest.inc"
 #include "axiom/internal/geo/geometry_services_surface_domain_bbox.inc"
+#include "axiom/internal/geo/geometry_services_curve_intersect.inc"
 #include "axiom/internal/geo/geometry_services_transform_intersect.inc"
 
 }  // namespace axiom

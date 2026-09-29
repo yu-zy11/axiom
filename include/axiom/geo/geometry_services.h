@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <utility>
 #include <vector>
@@ -241,9 +242,75 @@ struct CurveSurfaceIntersection {
     Scalar surface_v{0.0};
 };
 
+/// 两条有界曲线的离散交点类型。重合区间不伪装成若干离散点，见
+/// `CurveCurveIntersectionResult::overlaps`。
+enum class CurveCurveIntersectionKind : std::uint8_t {
+    /// 两条曲线在交点处具有非平行切向。
+    Transverse = 0,
+    /// 两条曲线在交点处切向平行或至少一侧速度退化。
+    Tangent = 1,
+    /// 交点位于任一请求参数区间的端点；优先于切向分类。
+    Endpoint = 2,
+};
+
+struct CurveCurveIntersectionPoint {
+    /// 两侧求值点的中点，单位为模型长度单位。
+    Point3 point {};
+    Scalar first_parameter {};
+    Scalar second_parameter {};
+    /// 两侧求值点间距；不大于请求的 `position_tolerance`。
+    Scalar residual_distance {};
+    CurveCurveIntersectionKind kind {CurveCurveIntersectionKind::Transverse};
+};
+
+/// 连续重合曲线段。两个区间均按参数递增顺序返回；`same_direction`
+/// 描述参数递增时几何方向是否一致。
+struct CurveCurveOverlap {
+    Range1D first_interval {};
+    Range1D second_interval {};
+    bool same_direction {true};
+    /// 已验证对应点的最大分离距离；解析分段直线路径通常为 0。
+    Scalar maximum_separation {};
+};
+
+struct CurveCurveIntersectionOptions {
+    /// 模型长度单位下的相交/重合判定容差；必须有限且大于零。
+    Scalar position_tolerance {1e-8};
+    /// 每条曲线自身参数单位下的细分终止宽度；必须有限且大于零。
+    Scalar parameter_tolerance {1e-8};
+    /// 归一化切向叉积阈值，用于区分横交和相切；范围为 [0, 1]。
+    Scalar angular_tolerance {1e-7};
+    /// 无缓存点值求值总预算；预算耗尽时失败且不返回部分结果。
+    std::uint32_t max_evaluations {200000};
+    /// 候选参数矩形处理预算；用于限制相切、近重合等困难输入。
+    std::uint32_t max_subdivisions {100000};
+    /// 未指定时使用曲线完整定义域；无限定义域（Line）必须显式指定有限区间。
+    std::optional<Range1D> first_interval;
+    std::optional<Range1D> second_interval;
+};
+
+struct CurveCurveIntersectionResult {
+    std::vector<CurveCurveIntersectionPoint> points;
+    std::vector<CurveCurveOverlap> overlaps;
+    std::uint32_t evaluations {};
+    std::uint32_t parameter_rectangles_processed {};
+};
+
 class GeometryIntersectionService {
 public:
     explicit GeometryIntersectionService(std::shared_ptr<detail::KernelState> state);
+
+    /// 查询两条曲线在有限参数区间内的全部离散交点与连续重合段。
+    /// Line/LineSegment/CompositePolyline 的各线性参数段使用解析 3D 求交；
+    /// Bezier、B-spline、NURBS、圆锥曲线和 CompositeChain 按连续参数片进行
+    /// 保守包围、确定性细分及阻尼 Gauss-Newton 精化。样条满重数断点两侧独立处理。
+    /// 空交集是成功的空结果；非法句柄/区间、退化数值界或预算耗尽返回结构化失败，
+    /// 不返回部分结果，也不写曲线求值缓存、拓扑、Intersection 存储或事务状态。
+    /// 同一曲线同参区间及分段直线共线覆盖返回 `overlaps`；一般高阶曲线的连续
+    /// 重合仅在记录可证明相同且参数对应一致时返回，避免把密集离散命中误报为重合。
+    Result<CurveCurveIntersectionResult> intersect_curve_curve(
+        CurveId first_curve, CurveId second_curve,
+        const CurveCurveIntersectionOptions& options = {}) const;
 
     // Minimal intersection service for Stage 2/3: analytic pairs first (Line/Segment/Circle with Plane/Sphere/Cylinder).
     Result<std::vector<CurveSurfaceIntersection>> intersect_curve_surface(CurveId curve_id, SurfaceId surface_id) const;

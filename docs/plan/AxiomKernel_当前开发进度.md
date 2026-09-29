@@ -4,11 +4,11 @@
 
 > **第 72 批（FR-TOPO-001 / FR-QUERY-001，专项门禁闭合）**：公开 `create_trimmed_edge` 与 `edge_curve_interval`，在 EdgeId 分配前校验参数有限非零、曲线定义域和参数端点与 v0/v1 的容差一致性；显式裁剪曲边的长度查询复用真实曲线区间，解析区间极值或样条控制点凸包进入拓扑 bbox。旧 `create_edge` 兼容，未携带区间的曲边继续拒绝弦长冒充弧长；失败不写事务计数或几何求值缓存。完整构建与文档检查通过；除既有超长 `axiom_ops_heal_test` 外的 CTest **15/15 通过、0 失败、总耗时 29.61 s**，该 Ops 长矩阵未因本批重跑。
 
-> **第 71 批（FR-GEO-001 / FR-OPS-001 / FR-QUERY-001，验收中）**：公开曲面 `closest_point_detailed` 的完整有界域精度/预算/下界合同，覆盖样条结点片、修剪孔、派生/偏置面并为可认证平面路径增加无缓存快路；`revolve` 支持轴分离孔洞，`loft` 支持拓扑兼容的凹/带孔多截面真实闭壳；新增 `body_shell_regions`，多壳质量属性按材料/空腔包含深度加减，并以 `AXM-QUERY-E-0006` 拒绝相交、重叠或容差接触。修复验收中发现的窄 knot 最近点精修、修剪平面预算耗尽和单壳重复空间分类。当前构建、`axiom_geometry_test`、`axiom_query_eval_test` 通过；闭合样条 48/48 与新增放样/带孔旋转隔离矩阵通过。完整 `axiom_ops_heal_test` 因既有大矩阵累计耗时在 10 分钟审计窗口内未完成，故本批尚未宣称全量门禁闭合。
+> **第 71 批（FR-GEO-001 / FR-OPS-001 / FR-QUERY-001，已通过完整门禁）**：在已公开的有界曲面 `closest_point_detailed`、带孔 `revolve`、拓扑兼容凹/带孔 `loft` 及 `body_shell_regions` 基础上，新增 `SweepService::revolve_between` 的偏置/对称起始角、顺逆时针不超过一周区间和正负整周语义；新增 `sweep_scaled`，支持开放直线、CompositePolyline、Bezier、BSpline、NURBS 与 CompositeChain 导轨上从 1 按采样弧长线性变化到有限正终端比例；新增 `GeometryIntersectionService::intersect_curve_curve`，返回离散横交/相切/端点、连续重合区间、残差和工作量证据。首次全量 CTest 为 15/16，曲线求交回归失败；repair 以相对端点弦的保守偏差终止 Bezier 相切邻域重复细分，并修正非连续 CompositeChain 子片首尾的右/左极限包围。随后 Geo/Query 定向复验通过，调度器最终独立完整构建成功，`ctest --test-dir /workspaces/axiom/build-agent --output-on-failure --no-tests=error` **16/16 通过、0 失败、总耗时 1865.97 s**（`axiom_ops_heal_test` 1838.47 s，`axiom_query_eval_test` 0.32 s，`axiom_geometry_test` 0.75 s，性能基线 2.40 s）。构建日志仍有既有聚合初始化、未使用参数和测试窄化转换告警，未导致构建或测试失败。本批及第 60/61/62/65 等既有包均无“待验收/待统一门禁”状态。
 
 本文档用于记录 `AxiomKernel` 当前阶段的实际开发状态、已完成内容、当前风险和下一阶段执行重点。
 
-> **第 70 批（NFR-DIA-001 / FR-OPS-001 / FR-QUERY-001）**：AXMJSON、Axiom IGES 元数据与 Axiom BREP JSON 子集在物化前完成普通文件、64 MiB/短读、严格结构和几何验证，失败绑定 `io.import.<format>.input/path/open/read/parse/validation` 且不污染 Body/Mesh/ID；`SweepService` 新增首尾 G1 连续闭合样条、开放/闭合 `CompositeChain` 导轨和部分角多边形旋转的真实多面体闭壳；`TopologyQueryService` 新增 `shell_mass_properties/body_mass_properties`，从平面直边双边流形闭壳的当前拓扑重算单位密度体积、面积、质心和惯性。repair 修正了测试入口误用、早期 AXMJSON 兼容、扫掠弦段局部邻域判定、闭合复合导轨夹具和旋转闭壳绕向翻转后重算。调度器独立完整构建成功，最终 `ctest --test-dir /workspaces/axiom/build-agent --output-on-failure --no-tests=error` **16/16 通过、0 失败、总耗时 1539.20 s**（`axiom_ops_heal_test` 1510.78 s，`axiom_io_workflow_test` 14.96 s，`axiom_query_eval_test` 0.17 s，性能基线 1.90 s）。本批门禁已闭合，第 60/61/62/65 等既有包不再有“待验收”状态。剩余限制：扫掠/旋转仍为保守采样多面体 BRep；带孔旋转、嵌套复合导轨、显式轮廓历史、曲面/曲边质量积分、空腔/相交多壳和标准 IGES 实体仍不支持。
+> **第 70 批（NFR-DIA-001 / FR-OPS-001 / FR-QUERY-001）**：AXMJSON、Axiom IGES 元数据与 Axiom BREP JSON 子集在物化前完成普通文件、64 MiB/短读、严格结构和几何验证，失败绑定 `io.import.<format>.input/path/open/read/parse/validation` 且不污染 Body/Mesh/ID；`SweepService` 新增首尾 G1 连续闭合样条、开放/闭合 `CompositeChain` 导轨和部分角多边形旋转的真实多面体闭壳；`TopologyQueryService` 新增 `shell_mass_properties/body_mass_properties`，从平面直边双边流形闭壳的当前拓扑重算单位密度体积、面积、质心和惯性。repair 修正了测试入口误用、早期 AXMJSON 兼容、扫掠弦段局部邻域判定、闭合复合导轨夹具和旋转闭壳绕向翻转后重算。调度器独立完整构建成功，最终 `ctest --test-dir /workspaces/axiom/build-agent --output-on-failure --no-tests=error` **16/16 通过、0 失败、总耗时 1539.20 s**（`axiom_ops_heal_test` 1510.78 s，`axiom_io_workflow_test` 14.96 s，`axiom_query_eval_test` 0.17 s，性能基线 1.90 s）。本批门禁已闭合，第 60/61/62/65 等既有包不再有“待验收”状态。当批尚缺的带孔旋转、空腔多壳与有向区间/变截面扫掠已由第 71 批部分闭合；当前仍为保守采样多面体 BRep，并且嵌套复合导轨、显式轮廓历史、曲面/曲边质量积分、相交多壳和标准 IGES 实体仍不支持。
 
 > **第 69 批（FR-GEO-001 / FR-TOPO-001 / NFR-REL-001 / FR-DIAG-001）**：公开曲线全域最近点详细查询与精度/预算/收敛证书；公开跨环有限直线边界冲突预检并补齐共线重叠、容差邻近错误码；拓扑事务新增协作式取消、写者状态和累计取消审计；诊断新增结构化数值证据、证据覆盖审计与 JSON 导出，BOOL 受覆盖失败分支已接入门禁。调度器首次完整 CTest 为 14/16 通过（`axiom_geometry_test`、`axiom_query_eval_test` 失败），repair 以二阶保守距离下界和证书后的剩余预算精修修复两项回归；随后独立完整构建成功，最终 `ctest --test-dir /workspaces/axiom/build-agent --output-on-failure --no-tests=error` **16/16 通过、0 失败、总耗时 126.00 s**（性能基线 1.63 s）。构建日志仍有 `Issue::numeric_evidence` 聚合初始化缺失及一处既有未使用参数告警，但未导致构建或测试失败。本批门禁已闭合。需求仍为受限可用：曲面全域最近点证书、一般曲线跨环求交、抢占式/长流程内部取消，以及 HEAL/IO 全失败分支数值证据尚未闭合。
 
@@ -384,7 +384,7 @@ Stage 3 已有多条可回归的子路径，但统一支持矩阵、跨模块一
   - **未开始/缺失（工业化）**：与工业内核一致的 **全 primitive 精确拓扑面环 + 与曲面参数域严格一致** 的 BRep；楔体/盒体等若仍部分依赖 bbox 占位壳，需升级为完整解析拓扑与几何
 - **特征构造**
   - **部分完成（接口/占位）**：`SweepService` 等接口存在，部分路径产出派生体与工作流语义
-  - **第 71 批 SweepService 增量（验收中）**：`revolve` 的整周/部分角显式子午面支持轴分离凹外环及多个分离孔洞；`loft` 以相同外环/孔环顶点数定义站间对应，支持倾斜、凹/带孔三截面并物化真实单闭壳，质量/惯性来自闭合多面体积分。新增矩阵覆盖绕向/起点/孔序、姿态、Strict、邻接、bbox、owned 网格、失败零污染、活动事务和回滚重试；隔离回归已通过，完整长目标待统一门禁。不同环拓扑自动匹配、分支/尖顶/坍塌截面仍不支持。
+  - **第 71 批 SweepService 增量（已通过完整门禁）**：`revolve` 的整周/部分角显式子午面支持轴分离凹外环及多个分离孔洞；`revolve_between` 增加偏置/对称起始角、顺逆时针不超过一周的有向区间及正负整周，部分角首尾端盖绕向与方向匹配；`sweep_scaled` 将开放线/折线/样条/复合导轨上的截面比例按采样弧长从 1 线性变到有限正终端比例，支持凹外环与孔；`loft` 以相同外环/孔环顶点数定义站间对应，支持倾斜、凹/带孔多截面真实单闭壳。回归覆盖拓扑/质量/角向位置/邻接/bbox/owned mesh/Strict、非法输入零污染、活动事务、回滚和重试；最终完整 CTest 16/16 通过（1865.97 s）。当前仍为每周 48 段/导轨采样的保守浮点多面体 BRep；带孔触轴、零/负比例、非线性比例律、不同环拓扑自动匹配、分支/尖顶/坍塌截面、嵌套复合导轨及显式轮廓历史仍不支持。
   - **第 70 批 SweepService 扩展（已通过完整门禁）**：端点重合且首尾切向连续的 Bezier/BSpline/NURBS 导轨以 holonomy 校正旋转最小标架，生成无端盖周期闭壳；`CompositeChain` 可连接有界直线/线段、圆/椭圆弧、Bezier/BSpline/NURBS 和 polyline 首段，强制接缝位置与 G1 连续，开放链有端盖、闭合链无端盖；`revolve` 对 `(0,2π)` 显式平面轮廓以每周 48 段的分辨率生成侧壁和约束剖分首尾端盖。三组回归分别覆盖 48、32、48 组成功变体，并覆盖真实拓扑、邻接/bbox、Strict、owned 网格、质量/惯性、失败零污染、活动事务零写入、回滚和重试。完整 CTest 16/16 通过（1539.20 s）。仍不支持解析扫掠/精确旋转、带孔旋转、嵌套复合链、抛物/双曲子段、急弯/自靠近输入和显式轮廓历史。
   - **第 68 批 SweepService 扩展（已通过完整门禁）**：`extrude_to_plane` 沿射线把显式凹/带孔平面轮廓投影到斜目标面；整周 `revolve` 以 48 站周期分片支持离轴环形体及唯一连续轴边闭合的实心轮廓；曲线 `sweep` 以旋转最小化标架支持 Bezier/BSpline/NURBS 开放导轨和整圆/椭圆周期导轨。三条路径均物化实际三角面、共享边/顶点闭壳并缓存闭合多面体积分质量属性。周期带孔扫掠经故障复验改为外边界与各孔边界分别物化独立闭壳，壳数及 owned 网格连通分量均为 `1 + holes_xyz.size()`；开放带孔导轨仍由端盖连成单壳。回归分别覆盖 240、32、40 组主要变体，以及公开拓扑、bbox、Strict、owned 网格、质量/惯性、退化失败不污染与回滚重试。最终 `build-agent` 完整构建成功，CTest 16/16 通过（136.35 s；`axiom_ops_heal_test` 111.16 s，性能基线 1.70 s）。当前仍是保守浮点剖分/采样多面体 BRep，不是解析扫掠或旋转曲面；带孔旋转、闭合样条/复合导轨、尖点、过紧曲率和自靠近导轨拒绝，部分角旋转仍沿用受限路径。
   - **等比变截面与尖顶拉伸（第 65/66 包，已纳入第 68 批全量门禁）**：`extrude_scaled` 支持凸/凹及单孔/多孔轮廓的正比例收缩、扩张和等截面；`end_scale=0` 支持无孔三角/凸/凹轮廓收敛到共享尖顶。既有 360 组正比例、72 组矩形/L 形尖顶及 4 组四面体回归随本批 16/16 CTest 通过。带孔尖顶、负比例、任意截面放样和逐壁恒角拔模仍不支持；近退化或极端尺度输入可保守拒绝。
@@ -411,7 +411,9 @@ Stage 3 已有多条可回归的子路径，但统一支持矩阵、跨模块一
 
 - **FR-QUERY-001 第 72 批曲边区间长度（专项门禁闭合）**：显式裁剪曲边由 `edge_length` 调用 `CurveService::length(curve,t0,t1)`，环和面边界长度自然复用；闭合双半圆、NURBS/Bezier 子域、递增/递减区间、越域/零区间/端点错配、区间查询、曲边 bbox、缓存/对象/事务不污染及回滚均进入 `axiom_query_eval_test`。旧无区间曲边继续 `NotImplemented`，不扩大到曲边面积或质量积分。
 
-- **FR-QUERY-001 第 71 批多闭壳空间层级（验收中）**：公开 `body_shell_regions`，以严格包含深度给出 Material/Void 和直接父壳；`body_mass_properties` 对独立材料相加、空腔相减、材料岛再相加，边界面积全部保留。壳相交、重叠或容差接触返回 `InvalidTopology / AXM-QUERY-E-0006`，查询仍不发布 MeshId、不写缓存。单壳直接复用质量积分，三角面临时边界走直取快路；`axiom_query_eval_test` 专项通过，完整门禁待闭合。
+- **FR-QUERY-001 第 71 批一般有界 3D 曲线求交（已通过完整门禁）**：公开 `GeometryIntersectionService::intersect_curve_curve` 及位置/参数/角容差、可选有限区间和求值/细分预算；返回横交/相切/端点、残差、连续重合区间和工作量证据。分段线性子域走解析 3D 路径，Bezier/BSpline/NURBS/圆锥曲线/CompositeChain 走保守包围、确定性细分和阻尼精化；无限 Line 须显式有限窗口，空集成功。回归覆盖反向重合、常值退化、Bezier 双交/相切、样条、周期缝、复合链、预算失败和只读事务。首次全量失败后修正相切终止与 CompositeChain 子片单侧端点语义，最终 `axiom_query_eval_test` 通过且完整 CTest 16/16 通过。一般高阶异参连续重合、无限曲线自动搜索窗口及拓扑曲边调用模型仍未闭合。
+
+- **FR-QUERY-001 第 71 批多闭壳空间层级（已通过完整门禁）**：公开 `body_shell_regions`，以严格包含深度给出 Material/Void 和直接父壳；`body_mass_properties` 对独立材料相加、空腔相减、材料岛再相加，边界面积全部保留。壳相交、重叠或容差接触返回 `InvalidTopology / AXM-QUERY-E-0006`，查询仍不发布 MeshId、不写缓存。单壳直接复用质量积分，三角面临时边界走直取快路；随第 71 批最终完整 CTest 16/16 通过。
 
 - **FR-QUERY-001 第 70 批闭合多面体拓扑质量属性（已通过完整门禁）**：公开 `TopologyQueryService::shell_mass_properties/body_mass_properties`，从当前真实拓扑重算单位密度体积、面积、质心与关于质心的世界坐标惯性张量；支持平面直边的凹/带孔双边流形闭壳和多个独立实体壳的平行轴汇总。`axiom_query_eval_test` 覆盖平移/尺度盒体、凹带孔拉伸、双壳、单位/惯性语义、无效/开壳/曲面/零体积、删除/回滚及对象/网格/缓存/Eval/事务不污染；完整 CTest 16/16 通过（1539.20 s）。曲面/曲边、独立内壳空腔语义、相交/重叠多壳和稳定求交仍未闭合。
 
@@ -511,7 +513,7 @@ Stage 3 已有多条可回归的子路径，但统一支持矩阵、跨模块一
 ### C) OpsCore：工业级建模算法缺失（最大缺口）
 
 - **布尔闭环缺失**：候选对生成 → 精确求交 → 切分 → 分类 → 重建 → 验证/修复闭环未实现；当前更多是前置与近似/占位语义。
-- **特征建模仍未工业化**：显式多边形 extrude、多类曲线 sweep 和整周/部分角 revolve 已能物化真实多面体闭壳；但解析扫掠/旋转曲面、任意 loft、thicken、带孔旋转和显式轮廓历史仍缺失，其他路径仍可能依赖最小物化骨架。
+- **特征建模仍未工业化**：显式多边形 extrude、多类开放/周期曲线 sweep、正比例变截面 `sweep_scaled` 和带孔整周/有向部分角 revolve 已能物化真实多面体闭壳；但解析扫掠/精确旋转曲面、零/负/非线性比例律、任意环匹配 loft、thicken 和显式轮廓历史仍缺失，其他路径仍可能依赖最小物化骨架。
 - **圆角/倒角缺失**：真实圆角倒角（含角区、变半径）未实现，失败原因细分与回归数据集不足。
 
 ### D) Heal/Validation：工业化验证与修复不足

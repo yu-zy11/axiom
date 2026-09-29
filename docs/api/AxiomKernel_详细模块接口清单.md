@@ -390,6 +390,61 @@ public:
 };
 ```
 
+### 5.4 曲线-曲线求交接口
+
+```cpp
+enum class CurveCurveIntersectionKind : std::uint8_t {
+  Transverse,
+  Tangent,
+  Endpoint
+};
+
+struct CurveCurveIntersectionPoint {
+  Point3 point;
+  Scalar first_parameter;
+  Scalar second_parameter;
+  Scalar residual_distance;
+  CurveCurveIntersectionKind kind;
+};
+
+struct CurveCurveOverlap {
+  Range1D first_interval;
+  Range1D second_interval;
+  bool same_direction;
+  Scalar maximum_separation;
+};
+
+struct CurveCurveIntersectionOptions {
+  Scalar position_tolerance{1e-8};
+  Scalar parameter_tolerance{1e-8};
+  Scalar angular_tolerance{1e-7};
+  std::uint32_t max_evaluations{200000};
+  std::uint32_t max_subdivisions{100000};
+  std::optional<Range1D> first_interval;
+  std::optional<Range1D> second_interval;
+};
+
+struct CurveCurveIntersectionResult {
+  std::vector<CurveCurveIntersectionPoint> points;
+  std::vector<CurveCurveOverlap> overlaps;
+  std::uint32_t evaluations;
+  std::uint32_t parameter_rectangles_processed;
+};
+
+class GeometryIntersectionService {
+public:
+  Result<CurveCurveIntersectionResult> intersect_curve_curve(
+      CurveId first, CurveId second,
+      const CurveCurveIntersectionOptions& options = {}) const;
+};
+```
+
+`intersect_curve_curve` 只搜索有限参数域。未显式指定区间时使用曲线完整定义域；无限 `Line` 必须通过 `first_interval/second_interval` 提供有限窗口。区间可以为零宽点查询，输入的递减端点会按无向搜索域规范化。空交集是成功的空 `points/overlaps`，不是失败。
+
+Line、LineSegment、CompositePolyline 及可证明为线性的样条/复合子段使用解析 3D 最近线段与共线覆盖路径；Bezier、BSpline、NURBS、圆锥曲线及 CompositeChain 按连续参数片建立保守包围，进行确定性参数矩形细分和阻尼 Gauss-Newton 精化；满重数结点两侧独立处理。离散交点返回双侧参数、两求值点中点、残差距离及 `Transverse/Tangent/Endpoint`（端点分类优先）；连续重合单独返回 `overlaps`，区间均按参数递增排列，`same_direction` 说明几何方向。一般高阶曲线仅在记录可证明同参时报告连续重合；异参同轨不做完备证明。
+
+`position_tolerance` 和 `parameter_tolerance` 必须有限且大于零，`angular_tolerance` 必须位于 `[0,1]`，求值预算至少为 6，细分预算必须非零。无效句柄、非法/越域区间、无法建立有限数值界或预算耗尽均结构化失败且不返回部分结果。该查询不写曲线求值缓存、Intersection/拓扑存储或活动事务计数。位置容差内的近交按容差命中；无限曲线不自动推断搜索窗口。
+
 ## 6. `TopoCore` 接口清单
 
 ### 6.1 拓扑只读查询接口
@@ -674,7 +729,10 @@ public:
                                 const Point3& center, Scalar end_scale);
   Result<BodyId> extrude_to_plane(const ProfileRef&, const Vec3& direction, const Plane& end_plane);
   Result<BodyId> revolve(const ProfileRef&, const Axis3&, Scalar angle);
+  Result<BodyId> revolve_between(const ProfileRef&, const Axis3&,
+                                 Scalar start_angle, Scalar end_angle);
   Result<BodyId> sweep(const ProfileRef&, CurveId rail);
+  Result<BodyId> sweep_scaled(const ProfileRef&, CurveId rail, Scalar end_scale);
   Result<BodyId> loft(std::span<const ProfileRef> profiles);
   Result<BodyId> thicken(FaceId, Scalar distance);
 };
@@ -702,9 +760,15 @@ public:
 
 `revolve` 的角度单位为弧度，必须位于 `(0, 2π]`。显式多边形路径以每周 48 段的角分辨率物化真实三角面、共享边/顶点和闭壳；部分角旋转增加约束剖分的首尾端盖，整周路径无端盖缝。支持与轴严格分离的凸/凹外环及分离孔洞；无孔轮廓还可仅通过一条唯一连续轴边闭合。轮廓/孔绕向、起点、孔序、轴方向反号/缩放和任意空间子午面保持等价；带孔区域触轴、跨轴、孤立轴点、近轴、自交、非共面或偏轴轮廓在分配前返回 `InvalidInput / AXM-CORE-E-0002`。结果体积、面积、质心和惯性来自闭合多面体积分。整周与部分角结果均是保守分片多面体 BRep，不是解析圆柱/圆锥/圆环面。
 
+`revolve_between` 以弧度解释有向区间 `[start_angle,end_angle]`，有符号跨度必须有限、非零且绝对值不超过 `2π`。递增/递减区间分别按轴方向的正向/反向旋转，支持偏置起始角和对称区间；部分角结果的首尾端盖绕向与方向匹配。正负整周保留周期多壳语义且几何与起始角无关。`revolve(profile,axis,angle)` 的正角合同不变，等价委托 `[0,angle]`。轮廓、轴分离和数值退化限制与 `revolve` 相同。
+
 `loft` 要求至少两个显式平面多边形截面。各站外环以及同索引孔环必须保持相同顶点数，以顶点顺序定义直纹侧壁对应关系；环绕向可独立变化。截面须沿共同横向严格有序，站间插值区域不得退化、翻折或相交。成功时生成真实共享面边点的单闭壳并缓存闭合多面体质量属性；不同环拓扑、自动顶点匹配、分支、尖顶/坍塌截面和无显式轮廓路径拒绝，不再返回 bbox 占位体。
 
 `sweep` 还支持显式凹多边形或带孔截面沿 Bezier/BSpline/NURBS 开放导轨、显式端点重合且首尾切向连续的闭合样条、整圆/椭圆周期导轨，以及 `CompositeChain` 复合导轨。复合链子段可为有界直线/线段、圆/椭圆弧、Bezier、BSpline、NURBS 或 polyline 首段，按公开链语义的子曲线局部参数 `[0,1]` 取值；接缝必须位置连续且 G1 切向连续。截面必须位于导轨起点且其平面法向与起始切向对齐；开放导轨生成两端盖，闭合样条与闭合复合链生成无端盖周期闭壳。空间闭环使用沿采样弧长分布的旋转最小标架 holonomy 校正，避免首尾截面隐藏扭转缝。周期带孔截面的外边界与每个孔边界是互不连通的闭壳，因此一个 Body 含 `1 + holes_xyz.size()` 个 Shell，`owned_topo_welded` 网格也报告同数量的连通分量；开放带孔导轨由端盖连成单壳，周期无孔也为单壳。
+
+`sweep_scaled` 在上述路径上把截面统一缩放比从起点的 1 按采样弧长线性插值到有限且严格为正的 `end_scale`。直线与 CompositePolyline 以导轨起点为截面平面内缩放中心；曲线导轨在旋转最小标架中逐站缩放。凹轮廓和带孔轮廓均生成真实共享面边点闭壳；物化前检查比例、截面平面、前向非折叠、端盖、流形边和质量属性。非单位比例仅支持开放导轨；周期导轨仅接受 1，因为缝两侧截面必须一致。`sweep(profile,rail)` 与 `sweep_scaled(profile,rail,1)` 兼容。
+
+当前只有常量正终端比例与线性弧长插值；不支持零比例尖顶、负比例/反射、非线性比例律和嵌套复合导轨。过小比例或相对曲率过大的截面可因数值退化/自交风险被保守拒绝。结果仍是采样多面体 BRep，不是解析扫掠曲面。
 
 曲线扫掠的端点伪闭合、首尾切向断裂、接缝错位/折角/尖点、嵌套复合链、抛物线/双曲线复合子段、过紧曲率、非局部弦段自靠近、局部不前进及退化物化都以 `InvalidInput / AXM-CORE-E-0002` 拒绝，不产生模型、拓扑、ID、事务写或求值/网格缓存污染。当前仅支持显式平面多边形截面，不保留显式轮廓历史。结果是保守采样多面体 BRep，不是解析扫掠曲面；无显式轮廓仍为历史 bbox 占位路径。
 

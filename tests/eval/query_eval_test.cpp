@@ -1224,9 +1224,249 @@ bool topology_mass_properties_regression() {
     return true;
 }
 
+bool curve_curve_intersection_regression() {
+    axiom::Kernel kernel;
+    auto& intersections = kernel.geometry_intersection();
+    const auto close = [](double actual, double expected, double tolerance = 2e-6) {
+        return std::abs(actual - expected) <= tolerance;
+    };
+    const auto failed = [&](const axiom::Result<axiom::CurveCurveIntersectionResult>& result,
+                            axiom::StatusCode status, std::string_view code) {
+        const auto report = kernel.diagnostics().get(result.diagnostic_id);
+        return result.status == status && !result.value && report.value &&
+               has_issue_code(*report.value, code);
+    };
+    axiom::CurveCurveIntersectionOptions accurate;
+    accurate.position_tolerance = 1e-7;
+    accurate.parameter_tolerance = 1e-7;
+    accurate.angular_tolerance = 1e-6;
+
+    // The piecewise-linear path is analytic in 3D and keeps point, endpoint,
+    // skew-empty and reversed-overlap semantics separate.
+    const auto horizontal = kernel.curves().make_line_segment({-2, 0, 0}, {2, 0, 0});
+    const auto vertical = kernel.curves().make_line_segment({0, -3, 0}, {0, 3, 0});
+    const auto endpoint = kernel.curves().make_line_segment({2, 0, 0}, {3, 2, 0});
+    const auto skew = kernel.curves().make_line_segment({0, -3, 1}, {0, 3, 1});
+    const auto overlap_forward = kernel.curves().make_line_segment({0, 0, 0}, {4, 0, 0});
+    const auto overlap_reverse = kernel.curves().make_line_segment({3, 0, 0}, {1, 0, 0});
+    if (!horizontal.value || !vertical.value || !endpoint.value || !skew.value ||
+        !overlap_forward.value || !overlap_reverse.value) return false;
+    const auto crossing = intersections.intersect_curve_curve(
+        *horizontal.value, *vertical.value, accurate);
+    const auto at_endpoint = intersections.intersect_curve_curve(
+        *horizontal.value, *endpoint.value, accurate);
+    const auto empty = intersections.intersect_curve_curve(
+        *horizontal.value, *skew.value, accurate);
+    const auto overlap = intersections.intersect_curve_curve(
+        *overlap_forward.value, *overlap_reverse.value, accurate);
+    if (!crossing.value || crossing.value->points.size() != 1 ||
+        !crossing.value->overlaps.empty() ||
+        crossing.value->points.front().kind !=
+            axiom::CurveCurveIntersectionKind::Transverse ||
+        !close(crossing.value->points.front().point.x, 0) ||
+        !close(crossing.value->points.front().point.y, 0) ||
+        !close(crossing.value->points.front().first_parameter, .5) ||
+        !close(crossing.value->points.front().second_parameter, .5) ||
+        !at_endpoint.value || at_endpoint.value->points.size() != 1 ||
+        at_endpoint.value->points.front().kind !=
+            axiom::CurveCurveIntersectionKind::Endpoint ||
+        !empty.value || !empty.value->points.empty() ||
+        !empty.value->overlaps.empty() ||
+        !overlap.value || !overlap.value->points.empty() ||
+        overlap.value->overlaps.size() != 1 ||
+        overlap.value->overlaps.front().same_direction ||
+        !close(overlap.value->overlaps.front().first_interval.min, .25) ||
+        !close(overlap.value->overlaps.front().first_interval.max, .75) ||
+        !close(overlap.value->overlaps.front().second_interval.min, 0) ||
+        !close(overlap.value->overlaps.front().second_interval.max, 1)) return false;
+
+    // A constant (zero-speed) Bezier is a point-set query, not a numerical
+    // failure and not eight duplicate hits from the initial Bezier partition.
+    const auto constant_on = kernel.curves().make_bezier(
+        std::array<axiom::Point3, 1>{{{0,0,0}}});
+    const auto constant_off = kernel.curves().make_bezier(
+        std::array<axiom::Point3, 1>{{{0,2,0}}});
+    if (!constant_on.value || !constant_off.value) return false;
+    const auto constant_hit = intersections.intersect_curve_curve(
+        *constant_on.value, *horizontal.value, accurate);
+    const auto constant_empty = intersections.intersect_curve_curve(
+        *constant_off.value, *horizontal.value, accurate);
+    if (!constant_hit.value || constant_hit.value->points.size() != 1 ||
+        !close(constant_hit.value->points.front().point.x, 0) ||
+        !close(constant_hit.value->points.front().point.y, 0) ||
+        !constant_empty.value || !constant_empty.value->points.empty() ||
+        !constant_empty.value->overlaps.empty()) return false;
+
+    // A quadratic Bezier crosses y=.5 twice and is tangent to y=1 once.
+    // Both queries use the general conservative parameter-rectangle path.
+    const auto arch = kernel.curves().make_bezier(
+        std::array<axiom::Point3, 3>{{{0,0,0}, {1,2,0}, {2,0,0}}});
+    const auto half_height = kernel.curves().make_line_segment({-1,.5,0}, {3,.5,0});
+    const auto tangent_line = kernel.curves().make_line_segment({-1,1,0}, {3,1,0});
+    const auto off_plane = kernel.curves().make_line_segment({-1,.5,.01}, {3,.5,.01});
+    if (!arch.value || !half_height.value || !tangent_line.value || !off_plane.value)
+        return false;
+    const auto bezier_crossings = intersections.intersect_curve_curve(
+        *arch.value, *half_height.value, accurate);
+    const auto bezier_tangent = intersections.intersect_curve_curve(
+        *arch.value, *tangent_line.value, accurate);
+    const auto bezier_empty = intersections.intersect_curve_curve(
+        *arch.value, *off_plane.value, accurate);
+    const double root0 = (1.0 - std::sqrt(.5)) * .5;
+    const double root1 = (1.0 + std::sqrt(.5)) * .5;
+    if (!bezier_crossings.value || bezier_crossings.value->points.size() != 2 ||
+        !close(bezier_crossings.value->points[0].first_parameter, root0, 2e-5) ||
+        !close(bezier_crossings.value->points[1].first_parameter, root1, 2e-5) ||
+        bezier_crossings.value->points[0].kind !=
+            axiom::CurveCurveIntersectionKind::Transverse ||
+        bezier_crossings.value->points[1].kind !=
+            axiom::CurveCurveIntersectionKind::Transverse ||
+        !bezier_tangent.value || bezier_tangent.value->points.size() != 1 ||
+        !close(bezier_tangent.value->points.front().first_parameter, .5, 2e-5) ||
+        bezier_tangent.value->points.front().kind !=
+            axiom::CurveCurveIntersectionKind::Tangent ||
+        !bezier_empty.value || !bezier_empty.value->points.empty() ||
+        !bezier_empty.value->overlaps.empty()) return false;
+
+    // The same geometric record (including a separately allocated exact copy)
+    // is represented as one continuous overlap rather than sampled point spam.
+    const auto arch_copy = kernel.curves().make_bezier(
+        std::array<axiom::Point3, 3>{{{0,0,0}, {1,2,0}, {2,0,0}}});
+    if (!arch_copy.value) return false;
+    auto restricted_overlap_options = accurate;
+    restricted_overlap_options.first_interval = axiom::Range1D{.2, .8};
+    restricted_overlap_options.second_interval = axiom::Range1D{.4, 1.0};
+    const auto curved_overlap = intersections.intersect_curve_curve(
+        *arch.value, *arch_copy.value, restricted_overlap_options);
+    if (!curved_overlap.value || curved_overlap.value->overlaps.size() != 1 ||
+        !close(curved_overlap.value->overlaps.front().first_interval.min, .4) ||
+        !close(curved_overlap.value->overlaps.front().first_interval.max, .8) ||
+        !close(curved_overlap.value->overlaps.front().second_interval.min, .4) ||
+        !close(curved_overlap.value->overlaps.front().second_interval.max, .8) ||
+        !curved_overlap.value->overlaps.front().same_direction ||
+        curved_overlap.value->overlaps.front().maximum_separation != 0) return false;
+
+    // B-spline and positive-weight NURBS use independent knot-span bounds.  A
+    // full circle and a composite chain exercise periodic and child domains.
+    axiom::BSplineCurveDesc bspline_desc;
+    bspline_desc.poles = {{0,0,0}, {1,2,0}, {2,0,0}};
+    bspline_desc.degree = 2;
+    const auto bspline = kernel.curves().make_bspline(bspline_desc);
+    axiom::NURBSCurveDesc nurbs_desc;
+    nurbs_desc.poles = {{0,0,0}, {1,2,0}, {2,0,0}};
+    nurbs_desc.weights = {1, 2, 1};
+    nurbs_desc.degree = 2;
+    const auto nurbs = kernel.curves().make_nurbs(nurbs_desc);
+    const auto circle = kernel.curves().make_circle({0,0,0}, {0,0,1}, 2);
+    const auto diameter = kernel.curves().make_line_segment({-3,0,0}, {3,0,0});
+    const auto chain = kernel.curves().make_composite_chain(
+        std::array{*vertical.value, *endpoint.value});
+    if (!bspline.value || !nurbs.value || !circle.value || !diameter.value ||
+        !chain.value) return false;
+    const auto bspline_hits = intersections.intersect_curve_curve(
+        *bspline.value, *half_height.value, accurate);
+    const auto nurbs_hits = intersections.intersect_curve_curve(
+        *nurbs.value, *half_height.value, accurate);
+    const auto circle_hits = intersections.intersect_curve_curve(
+        *circle.value, *diameter.value, accurate);
+    const auto chain_hits = intersections.intersect_curve_curve(
+        *chain.value, *horizontal.value, accurate);
+    if (!bspline_hits.value || bspline_hits.value->points.size() != 2 ||
+        bspline_hits.value->evaluations == 0 ||
+        bspline_hits.value->parameter_rectangles_processed == 0 ||
+        !nurbs_hits.value || nurbs_hits.value->points.size() != 2 ||
+        nurbs_hits.value->evaluations == 0 ||
+        !circle_hits.value || circle_hits.value->points.size() != 2 ||
+        !close(std::abs(circle_hits.value->points[0].point.x), 2, 2e-5) ||
+        !close(std::abs(circle_hits.value->points[1].point.x), 2, 2e-5) ||
+        circle_hits.value->points[0].point.x * circle_hits.value->points[1].point.x >= 0 ||
+        !chain_hits.value || chain_hits.value->points.size() != 2) return false;
+
+    // Infinite defaults, out-of-domain ranges, invalid tolerances and a tiny
+    // evaluation budget all fail structurally and never leak partial results.
+    const auto infinite_line = kernel.curves().make_line({0,0,0}, {1,0,0});
+    if (!infinite_line.value) return false;
+    auto bounded_line = accurate;
+    bounded_line.first_interval = axiom::Range1D{-3, 3};
+    const auto bounded_line_hits = intersections.intersect_curve_curve(
+        *infinite_line.value, *vertical.value, bounded_line);
+    auto outside = accurate;
+    outside.first_interval = axiom::Range1D{-1, .5};
+    auto invalid_tolerance = accurate;
+    invalid_tolerance.position_tolerance = 0;
+    auto exhausted = accurate;
+    exhausted.max_evaluations = 6;
+    exhausted.max_subdivisions = 100000;
+    if (!bounded_line_hits.value || bounded_line_hits.value->points.size() != 1 ||
+        !failed(intersections.intersect_curve_curve(
+                    *infinite_line.value, *vertical.value, accurate),
+                axiom::StatusCode::InvalidInput,
+                axiom::diag_codes::kCoreParameterOutOfRange) ||
+        !failed(intersections.intersect_curve_curve(
+                    *arch.value, *vertical.value, outside),
+                axiom::StatusCode::InvalidInput,
+                axiom::diag_codes::kGeoParameterOutOfDomain) ||
+        !failed(intersections.intersect_curve_curve(
+                    *arch.value, *vertical.value, invalid_tolerance),
+                axiom::StatusCode::InvalidInput,
+                axiom::diag_codes::kCoreParameterOutOfRange) ||
+        !failed(intersections.intersect_curve_curve(
+                    *arch.value, *half_height.value, exhausted),
+                axiom::StatusCode::OperationFailed,
+                axiom::diag_codes::kGeoIntersectionFailure) ||
+        !failed(intersections.intersect_curve_curve(
+                    axiom::CurveId{999999}, *vertical.value, accurate),
+                axiom::StatusCode::InvalidInput,
+                axiom::diag_codes::kCoreInvalidHandle)) return false;
+
+    // Query success and failure are read-only even during an active topology
+    // transaction; rollback restores the sole deliberate vertex allocation.
+    const auto objects_before = kernel.object_count_total();
+    const auto geometry_before = kernel.geometry_count();
+    const auto topology_before = kernel.topology_count();
+    const auto intersections_before = kernel.intersection_count();
+    const auto runtime_before = kernel.runtime_store_counts();
+    if (!objects_before.value || !geometry_before.value || !topology_before.value ||
+        !intersections_before.value || !runtime_before.value) return false;
+    auto txn = kernel.topology().begin_transaction();
+    const auto vertex = txn.create_vertex({7,8,9});
+    const auto writes_before_queries = txn.write_operation_count();
+    if (!vertex.value || !writes_before_queries.value ||
+        !intersections.intersect_curve_curve(
+             *arch.value, *half_height.value, accurate).value ||
+        !failed(intersections.intersect_curve_curve(
+                    *infinite_line.value, *vertical.value, accurate),
+                axiom::StatusCode::InvalidInput,
+                axiom::diag_codes::kCoreParameterOutOfRange) ||
+        txn.write_operation_count().value != writes_before_queries.value ||
+        txn.rollback().status != axiom::StatusCode::Ok) return false;
+    const auto runtime_after = kernel.runtime_store_counts();
+    if (!runtime_after.value ||
+        kernel.object_count_total().value != objects_before.value ||
+        kernel.geometry_count().value != geometry_before.value ||
+        kernel.topology_count().value != topology_before.value ||
+        kernel.intersection_count().value != intersections_before.value ||
+        runtime_after.value->curve_eval_cache_entries !=
+            runtime_before.value->curve_eval_cache_entries ||
+        runtime_after.value->surface_eval_cache_entries !=
+            runtime_before.value->surface_eval_cache_entries ||
+        runtime_after.value->mesh_records != runtime_before.value->mesh_records ||
+        runtime_after.value->tessellation_cache_entries !=
+            runtime_before.value->tessellation_cache_entries ||
+        runtime_after.value->face_tessellation_cache_entries !=
+            runtime_before.value->face_tessellation_cache_entries ||
+        runtime_after.value->intersection_records !=
+            runtime_before.value->intersection_records) return false;
+    return true;
+}
+
 }  // namespace
 
 int main() {
+    if (!curve_curve_intersection_regression()) {
+        std::cerr << "curve-curve intersection regression failed\n";
+        return 1;
+    }
     if (!topology_mass_properties_regression()) {
         std::cerr << "topology mass properties regression failed\n";
         return 1;

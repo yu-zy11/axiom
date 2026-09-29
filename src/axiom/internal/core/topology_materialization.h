@@ -1678,6 +1678,15 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
     if (offsets.empty()) offsets = {{0, 0, 0}, scale(D, h)};
     if (offsets.size() < 2 || norm(offsets.front()) != 0.0 ||
         base.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()) / offsets.size()) return false;
+    std::vector<Scalar> station_scales(offsets.size(), 1.0);
+    const bool scaled_stations = !record.sweep_station_scales.empty();
+    if (scaled_stations) {
+        if (record.sweep_station_offsets.empty() || record.sweep_station_scales.size() != offsets.size()) return false;
+        station_scales = record.sweep_station_scales;
+        if (std::any_of(station_scales.begin(), station_scales.end(), [](Scalar value) {
+                return !std::isfinite(value) || !(value > 0.0);
+            }) || std::abs(station_scales.front() - 1.0) > 1e-12) return false;
+    }
     const Scalar sign = dot(n_unit, D) < 0.0 ? -1.0 : 1.0;
     for (std::size_t k = 1; k < offsets.size(); ++k) {
         const Vec3 step {offsets[k].x - offsets[k-1].x, offsets[k].y - offsets[k-1].y,
@@ -1694,7 +1703,10 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
     const bool apex = end_scale == 0.0;
     if (!std::isfinite(end_scale) || end_scale < 0.0 ||
         (apex && !record.extrude_holes_xyz.empty()) ||
-        (end_scale != 1.0 && !record.sweep_station_offsets.empty())) return false;
+        (end_scale != 1.0 && !record.sweep_station_offsets.empty()) ||
+        (scaled_stations && end_scale != 1.0)) return false;
+    if (scaled_stations &&
+        std::abs(dot(n_unit, subtract(record.extrude_scale_center, p0r))) > plane_tol) return false;
     const bool to_plane = record.extrude_end_plane.has_value();
     Vec3 end_normal = n_unit;
     Scalar plane_direction = 1.0;
@@ -1705,13 +1717,14 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
         if (!std::isfinite(plane_direction) || std::abs(plane_direction) < 1e-6) return false;
         if (plane_direction * sign < 0.0) end_normal = scale(end_normal, -1.0);
     }
+    const Scalar final_scale = scaled_stations ? station_scales.back() : end_scale;
     const auto end_point = [&](const Point3& p) {
         if (to_plane) {
             const auto& plane = *record.extrude_end_plane;
             return add_point_vec(p, scale(D, dot(plane.normal, subtract(plane.origin, p)) / plane_direction));
         }
         return add_point_vec(add_point_vec(record.extrude_scale_center,
-            scale(subtract(p, record.extrude_scale_center), end_scale)), offsets.back());
+            scale(subtract(p, record.extrude_scale_center), final_scale)), offsets.back());
     };
     std::vector<Point3> pos;
     pos.reserve(base.size() * offsets.size());
@@ -1735,8 +1748,9 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
                 pos.push_back(top);
                 continue;
             }
-            const auto section_point = k == 0 || end_scale == 1.0 ? p :
-                add_point_vec(record.extrude_scale_center, scale(subtract(p, record.extrude_scale_center), end_scale));
+            const Scalar section_scale = scaled_stations ? station_scales[k] : (k == 0 ? 1.0 : end_scale);
+            const auto section_point = section_scale == 1.0 ? p : add_point_vec(
+                record.extrude_scale_center, scale(subtract(p, record.extrude_scale_center), section_scale));
             pos.push_back(add_point_vec(section_point, offsets[k]));
         }
     }
@@ -1765,7 +1779,7 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
     for (const auto& p : pos) {
         if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) return false;
     }
-    if (!record.sweep_station_offsets.empty() || end_scale != 1.0 || to_plane) {
+    if (!record.sweep_station_offsets.empty() || end_scale != 1.0 || scaled_stations || to_plane) {
         // Check the actual rounded coordinates too: sections (including a final
         // apex) must retain their order, even for planarity within tolerance.
         Scalar previous_max = -std::numeric_limits<Scalar>::infinity();
@@ -1782,7 +1796,7 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
             previous_max = high;
         }
     }
-    if ((end_scale != 1.0 && !apex) || to_plane) {
+    if ((final_scale != 1.0 && !apex) || to_plane) {
         // In exact arithmetic a positive homothety preserves the entire planar
         // region. Recheck rounded end coordinates to reject collapsed gaps/edges
         // at extreme scales or world offsets, before allocating model objects.
@@ -1918,19 +1932,16 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
     record.sweep_inertia_about_centroid = in_tmp;
     record.a = vol_chk;
     record.extrude_poly_cap_area = vol_chk / (align * h);
-    if (end_scale != 1.0 || to_plane) {
+    if (final_scale != 1.0 || to_plane) {
         record.extrude_poly_cap_area = 0.0;
         for (const auto& cap : caps) record.extrude_poly_cap_area += 0.5 * norm(
             cross(subtract(pos[cap[1]], pos[cap[0]]), subtract(pos[cap[2]], pos[cap[0]])));
     }
-    record.extrude_lateral_area = area_tmp - (1 + end_scale * end_scale) * record.extrude_poly_cap_area;
-    if (to_plane) {
-        Scalar end_area = 0.0;
-        for (const auto& cap : caps) end_area += 0.5 * norm(cross(
-            subtract(pos[last + cap[1]], pos[last + cap[0]]),
-            subtract(pos[last + cap[2]], pos[last + cap[0]])));
-        record.extrude_lateral_area = area_tmp - record.extrude_poly_cap_area - end_area;
-    }
+    Scalar end_area = 0.0;
+    if (!apex) for (const auto& cap : caps) end_area += 0.5 * norm(cross(
+        subtract(pos[last + cap[1]], pos[last + cap[0]]),
+        subtract(pos[last + cap[2]], pos[last + cap[0]])));
+    record.extrude_lateral_area = area_tmp - record.extrude_poly_cap_area - end_area;
     record.extrude_mass_centroid = cm_tmp;
     return true;
 }
@@ -2229,6 +2240,17 @@ inline bool try_materialize_sweep_curve_frame_body(KernelState& state, BodyRecor
     }
     const std::size_t stations = record.sweep_frame_origins.size();
     if (base.empty() || base.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()) / stations) return false;
+    std::vector<Scalar> station_scales(stations, 1.0);
+    if (!record.sweep_frame_scales.empty()) {
+        if (record.sweep_frame_scales.size() != stations) return false;
+        station_scales = record.sweep_frame_scales;
+        if (std::any_of(station_scales.begin(), station_scales.end(), [](Scalar value) {
+                return !std::isfinite(value) || !(value > 0.0);
+            }) || std::abs(station_scales.front() - 1.0) > 1e-12) return false;
+    }
+    if (record.sweep_frame_closed && std::any_of(station_scales.begin(), station_scales.end(), [](Scalar value) {
+            return std::abs(value - 1.0) > 1e-12;
+        })) return false;
     const Vec3 u0 = normalize(record.sweep_frame_u.front());
     const Vec3 v0 = normalize(record.sweep_frame_v.front());
     const Vec3 tangent0 = normalize(cross(u0, v0));
@@ -2255,8 +2277,11 @@ inline bool try_materialize_sweep_curve_frame_body(KernelState& state, BodyRecor
         for (const auto& p : base) {
             const Vec3 offset = subtract(p, record.sweep_frame_origins.front());
             const Scalar x = dot(offset, u0), y = dot(offset, v0);
+            const Scalar section_scale = station_scales[station];
             const auto transformed = add_point_vec(origin,
-                Vec3 {u.x * x + v.x * y, u.y * x + v.y * y, u.z * x + v.z * y});
+                Vec3 {section_scale * (u.x * x + v.x * y),
+                      section_scale * (u.y * x + v.y * y),
+                      section_scale * (u.z * x + v.z * y)});
             if (!std::isfinite(transformed.x) || !std::isfinite(transformed.y) ||
                 !std::isfinite(transformed.z)) return false;
             positions.push_back(transformed);
@@ -2469,14 +2494,18 @@ inline bool try_materialize_sweep_curve_frame_body(KernelState& state, BodyRecor
     record.sweep_inertia_about_centroid = inertia;
     record.a = volume;
     record.extrude_poly_cap_area = 0.0;
+    Scalar end_cap_area = 0.0;
     if (!record.sweep_frame_closed) {
         for (const auto& cap : caps) {
             record.extrude_poly_cap_area += 0.5 * norm(cross(
                 subtract(positions[cap[1]], positions[cap[0]]),
                 subtract(positions[cap[2]], positions[cap[0]])));
+            end_cap_area += 0.5 * norm(cross(
+                subtract(positions[last + cap[1]], positions[last + cap[0]]),
+                subtract(positions[last + cap[2]], positions[last + cap[0]])));
         }
     }
-    record.extrude_lateral_area = surface_area - 2.0 * record.extrude_poly_cap_area;
+    record.extrude_lateral_area = surface_area - record.extrude_poly_cap_area - end_cap_area;
     record.extrude_mass_centroid = centroid;
     return true;
 }
@@ -2609,6 +2638,7 @@ inline bool try_materialize_sweep_revolve_full_body(KernelState& state, BodyReco
     constexpr Scalar kPi = 3.1415926535897932384626433832795;
     constexpr int kStations = 48;
     const Vec3 u = normalize(record.axis);
+    const Scalar directed_turn = record.revolve_signed_angle < 0.0 ? -2.0 * kPi : 2.0 * kPi;
     RevolveProfileRegion region;
     if (!prepare_revolve_profile_region(state, record, kStations, region)) return false;
     const auto& points = region.points;
@@ -2630,7 +2660,9 @@ inline bool try_materialize_sweep_revolve_full_body(KernelState& state, BodyReco
         }
     }
     for (int station = 0; station < kStations; ++station) {
-        const Scalar angle = 2.0 * kPi * static_cast<Scalar>(station) / static_cast<Scalar>(kStations);
+        // A full turn is start-angle invariant. Preserve only its direction so
+        // clockwise and counter-clockwise requests share the same closed seam.
+        const Scalar angle = directed_turn * static_cast<Scalar>(station) / static_cast<Scalar>(kStations);
         const Scalar cosine = std::cos(angle), sine = std::sin(angle);
         for (int i = 0; i < n; ++i) {
             if (on_axis[static_cast<std::size_t>(i)]) continue;
@@ -2792,7 +2824,8 @@ inline bool try_materialize_sweep_revolve_meridian_body(KernelState& state, Body
     }
     constexpr Scalar kPi = 3.1415926535897932384626433832795;
     constexpr int kFullTurnSegments = 48;
-    const Scalar ang = record.b;
+    const Scalar signed_angle = record.revolve_signed_angle == 0.0 ? record.b : record.revolve_signed_angle;
+    const Scalar ang = std::abs(signed_angle);
     const Scalar two_pi = 2.0 * kPi;
     if (!std::isfinite(ang) || !(ang > 0.0) || ang >= two_pi - 1e-10) return false;
     const auto u = normalize(record.axis);
@@ -2823,7 +2856,8 @@ inline bool try_materialize_sweep_revolve_meridian_body(KernelState& state, Body
         }
     }
     for (int station = 0; station < station_count; ++station) {
-        const Scalar station_angle = ang * static_cast<Scalar>(station) / static_cast<Scalar>(segment_count);
+        const Scalar station_angle = record.revolve_start_angle +
+            signed_angle * static_cast<Scalar>(station) / static_cast<Scalar>(segment_count);
         const Scalar cosine = std::cos(station_angle), sine = std::sin(station_angle);
         for (int i = 0; i < n; ++i) {
             if (on_axis[static_cast<std::size_t>(i)]) continue;
@@ -2861,10 +2895,14 @@ inline bool try_materialize_sweep_revolve_meridian_body(KernelState& state, Body
         const int b = vertex_at[static_cast<std::size_t>(triangle[1])];
         const int c = vertex_at[static_cast<std::size_t>(triangle[2])];
         const int end = segment_count * n;
-        if (!append_triangle(a, c, b) ||
-            !append_triangle(vertex_at[static_cast<std::size_t>(end + triangle[0])],
-                             vertex_at[static_cast<std::size_t>(end + triangle[1])],
-                             vertex_at[static_cast<std::size_t>(end + triangle[2])])) return false;
+        const int end_a = vertex_at[static_cast<std::size_t>(end + triangle[0])];
+        const int end_b = vertex_at[static_cast<std::size_t>(end + triangle[1])];
+        const int end_c = vertex_at[static_cast<std::size_t>(end + triangle[2])];
+        if (signed_angle > 0.0) {
+            if (!append_triangle(a, c, b) || !append_triangle(end_a, end_b, end_c)) return false;
+        } else {
+            if (!append_triangle(a, b, c) || !append_triangle(end_a, end_c, end_b)) return false;
+        }
     }
     if (tris.empty()) return false;
 
