@@ -112,6 +112,37 @@ struct CurveClosestPointResult {
     CurveClosestPointConvergence convergence {CurveClosestPointConvergence::Analytic};
 };
 
+/// 有界曲面最近点全域搜索的终止原因。两种成功终止都覆盖完整有效参数域，
+/// 包括多边形修剪的外环、孔边界以及样条的每个非空结点片。
+enum class SurfaceClosestPointConvergence : std::uint8_t {
+    DistanceTolerance,
+    ParameterTolerance
+};
+
+struct SurfaceClosestPointOptions {
+    /// 模型长度单位下的全域最小距离上下界允许差；有限且非负。
+    Scalar distance_tolerance {1e-8};
+    /// 距离界不能提前证明时，候选参数矩形的 u/v 边长须分别细分到此阈值。
+    Scalar parameter_tolerance {1e-4};
+    /// 无缓存点值求值总预算；须至少为 5。预算耗尽时失败且不返回部分结果。
+    std::uint32_t max_evaluations {250000};
+};
+
+struct SurfaceClosestPointResult {
+    Scalar u {};
+    Scalar v {};
+    Point3 point {};
+    Scalar distance {};
+    /// 完整有效域上最小距离的保守下界。
+    Scalar distance_lower_bound {};
+    /// 参数容差终止时仍未由距离界排除矩形的最大 u/v 边长；其他终止类型为 0。
+    Scalar u_uncertainty {};
+    Scalar v_uncertainty {};
+    std::uint32_t evaluations {};
+    std::uint32_t patches_processed {};
+    SurfaceClosestPointConvergence convergence {SurfaceClosestPointConvergence::DistanceTolerance};
+};
+
 class CurveService {
 public:
     explicit CurveService(std::shared_ptr<detail::KernelState> state);
@@ -168,9 +199,15 @@ public:
     Result<SurfaceEvalResult> eval(SurfaceId surface_id, Scalar u, Scalar v, int deriv_order) const;
     Result<std::vector<SurfaceEvalResult>> eval_batch(
         SurfaceId surface_id, std::span<const std::pair<Scalar, Scalar>> uvs, int deriv_order) const;
+    /// 对完整有界参数域执行确定性分支限界搜索。Bezier/BSpline/NURBS、旋转/线性扫掠、
+    /// 偏置及修剪包装均受支持；样条按非空结点片覆盖，修剪多边形的外环和孔边界均参与搜索。
+    /// 无限参数域须先修剪；预算耗尽、选项非法或数值界不可建立时失败，不写 surface eval 缓存。
+    Result<SurfaceClosestPointResult> closest_point_detailed(
+        SurfaceId surface_id, const Point3& point,
+        const SurfaceClosestPointOptions& options = {}) const;
     Result<Point3> closest_point(SurfaceId surface_id, const Point3& point) const;
     Result<std::vector<Point3>> closest_points_batch(SurfaceId surface_id, std::span<const Point3> points) const;
-    /// BSpline/NURBS 会从每个非空结点片启动局部求解；结果仍不承诺任意曲面的全局最优。
+    /// 有界复杂曲面复用 `closest_point_detailed` 的完整参数域搜索和默认预算。
     Result<std::pair<Scalar, Scalar>> closest_uv(SurfaceId surface_id, const Point3& point) const;
     Result<std::vector<std::pair<Scalar, Scalar>>> closest_uv_batch(
         SurfaceId surface_id, std::span<const Point3> points) const;

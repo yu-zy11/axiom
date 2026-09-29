@@ -2302,6 +2302,222 @@ int main() {
         }
     }
 
+    // Complete-domain surface closest point: tensor splines, knot patches, trims and
+    // derived surfaces share explicit accuracy, budget and no-cache failure semantics.
+    {
+        axiom::SurfaceClosestPointOptions accurate;
+        accurate.distance_tolerance = 1e-6;
+        accurate.parameter_tolerance = 2e-4;
+        accurate.max_evaluations = 180000;
+
+        std::vector<axiom::Point3> bezier_poles;
+        for (int i = 0; i < 4; ++i) {
+            for (int j = 0; j < 4; ++j) {
+                bezier_poles.push_back({static_cast<double>(i), static_cast<double>(j), 0.0});
+            }
+        }
+        const auto bezier = kernel.surfaces().make_bezier(bezier_poles);
+        if (!bezier.value) {
+            std::cerr << "failed to create Bezier surface for global closest point\n";
+            return 1;
+        }
+        const auto bezier_global = kernel.surface_service().closest_point_detailed(
+            *bezier.value, {2.1, 0.6, 2.0}, accurate);
+        if (!bezier_global.value || !approx(bezier_global.value->u, 0.7, 4e-4) ||
+            !approx(bezier_global.value->v, 0.2, 4e-4) ||
+            !approx(bezier_global.value->point.x, 2.1, 1.5e-3) ||
+            !approx(bezier_global.value->point.y, 0.6, 1.5e-3) ||
+            !approx(bezier_global.value->distance, 2.0, 2e-6) ||
+            bezier_global.value->distance_lower_bound > bezier_global.value->distance ||
+            bezier_global.value->evaluations == 0 ||
+            bezier_global.value->patches_processed == 0 ||
+            (bezier_global.value->convergence ==
+                 axiom::SurfaceClosestPointConvergence::DistanceTolerance &&
+             bezier_global.value->distance - bezier_global.value->distance_lower_bound >
+                 accurate.distance_tolerance + 1e-12) ||
+             (bezier_global.value->convergence ==
+                 axiom::SurfaceClosestPointConvergence::ParameterTolerance &&
+             (bezier_global.value->u_uncertainty > accurate.parameter_tolerance + 1e-12 ||
+              bezier_global.value->v_uncertainty > accurate.parameter_tolerance + 1e-12))) {
+            std::cerr << "Bezier complete-domain closest point evidence is invalid\n";
+            return 1;
+        }
+
+        axiom::BSplineSurfaceDesc narrow_desc;
+        narrow_desc.degree_u = 1;
+        narrow_desc.degree_v = 1;
+        narrow_desc.knots_u = {0.0, 0.0, 0.0001, 1.8, 2.0, 2.0};
+        narrow_desc.knots_v = {0.0, 0.0, 0.2, 1.2, 2.0, 2.0};
+        for (int i = 0; i < 4; ++i) {
+            for (int j = 0; j < 4; ++j) {
+                narrow_desc.poles.push_back(
+                    {1000.0 + i * 3.0, -2000.0 + j * 2.0, 0.0});
+            }
+        }
+        const auto narrow = kernel.surfaces().make_bspline(narrow_desc);
+        if (!narrow.value) {
+            std::cerr << "failed to create narrow-knot BSpline surface\n";
+            return 1;
+        }
+        const auto narrow_known = kernel.surface_service().eval(*narrow.value, 0.000075, 0.31, 1);
+        if (!narrow_known.value) {
+            std::cerr << "failed to evaluate narrow-knot BSpline reference\n";
+            return 1;
+        }
+        const auto narrow_query = axiom::Point3{narrow_known.value->point.x,
+                                                 narrow_known.value->point.y,
+                                                 narrow_known.value->point.z + 0.8};
+        const auto narrow_global = kernel.surface_service().closest_point_detailed(
+            *narrow.value, narrow_query, accurate);
+        if (!narrow_global.value || narrow_global.value->u > 0.001 ||
+            std::abs(narrow_global.value->point.x - narrow_known.value->point.x) > 0.02 ||
+            std::abs(narrow_global.value->point.y - narrow_known.value->point.y) > 0.02) {
+            std::cerr << "narrow knot patch was omitted from global surface search\n";
+            return 1;
+        }
+
+        axiom::NURBSSurfaceDesc nurbs_desc;
+        nurbs_desc.degree_u = 2;
+        nurbs_desc.degree_v = 2;
+        nurbs_desc.weights = {1.0, 0.8, 1.2, 1.1, 0.9, 1.3, 0.7, 1.4, 1.0};
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) {
+                nurbs_desc.poles.push_back({10.0 + i, 20.0 + j, 4.0});
+            }
+        }
+        const auto nurbs = kernel.surfaces().make_nurbs(nurbs_desc);
+        const auto nurbs_known = nurbs.value
+                                     ? kernel.surface_service().eval(*nurbs.value, 1.91, 0.43, 0)
+                                     : axiom::Result<axiom::SurfaceEvalResult>{};
+        if (!nurbs.value || !nurbs_known.value) {
+            std::cerr << "failed to create/evaluate rational surface reference\n";
+            return 1;
+        }
+        const auto cache_clear = kernel.clear_surface_eval_cache();
+        const auto runtime_before = kernel.runtime_store_counts();
+        const auto geometry_before = kernel.geometry_count();
+        const auto nurbs_global = kernel.surface_service().closest_point_detailed(
+            *nurbs.value,
+            {nurbs_known.value->point.x, nurbs_known.value->point.y, 4.75}, accurate);
+        const auto runtime_after_success = kernel.runtime_store_counts();
+        if (cache_clear.status != axiom::StatusCode::Ok || !runtime_before.value ||
+            !runtime_after_success.value || !geometry_before.value || !nurbs_global.value ||
+            std::abs(nurbs_global.value->point.x - nurbs_known.value->point.x) > 0.003 ||
+            std::abs(nurbs_global.value->point.y - nurbs_known.value->point.y) > 0.003 ||
+            !approx(nurbs_global.value->distance, 0.75, 2e-5) ||
+            runtime_before.value->surface_eval_cache_entries !=
+                runtime_after_success.value->surface_eval_cache_entries ||
+            kernel.geometry_count().value != geometry_before.value) {
+            std::cerr << "NURBS global closest point wrote cache or lost accuracy\n";
+            return 1;
+        }
+
+        const std::vector<axiom::Point2> outer{{0.0, 0.0}, {4.0, 0.0},
+                                                {4.0, 4.0}, {0.0, 4.0}};
+        const std::vector<std::vector<axiom::Point2>> holes{
+            {{1.0, 1.0}, {3.0, 1.0}, {3.0, 3.0}, {1.0, 3.0}}};
+        const auto plane = kernel.surfaces().make_plane({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0});
+        const auto trimmed = plane.value
+                                 ? kernel.surfaces().make_trimmed_polygon_with_holes(
+                                       *plane.value, 0.0, 4.0, 0.0, 4.0, outer, holes)
+                                 : axiom::Result<axiom::SurfaceId>{};
+        axiom::SurfaceClosestPointOptions trim_options = accurate;
+        trim_options.parameter_tolerance = 5e-4;
+        const auto trim_global = trimmed.value
+                                     ? kernel.surface_service().closest_point_detailed(
+                                           *trimmed.value, {2.0, 2.0, 2.0}, trim_options)
+                                     : axiom::Result<axiom::SurfaceClosestPointResult>{};
+        if (!trim_global.value || !approx(trim_global.value->distance, std::sqrt(5.0), 0.002) ||
+            !(approx(trim_global.value->u, 1.0, 0.002) ||
+              approx(trim_global.value->u, 3.0, 0.002) ||
+              approx(trim_global.value->v, 1.0, 0.002) ||
+              approx(trim_global.value->v, 3.0, 0.002))) {
+            std::cerr << "trim-hole boundary did not participate in global closest search\n";
+            return 1;
+        }
+
+        const std::array<axiom::Point3, 2> rail_points{{{0.0, 0.0, 0.0},
+                                                        {2.0, 0.0, 0.0}}};
+        const auto rail = kernel.curves().make_line_segment(rail_points[0], rail_points[1]);
+        const auto swept = rail.value
+                               ? kernel.surfaces().make_swept_linear(*rail.value, {0.0, 1.0, 0.0}, 3.0)
+                               : axiom::Result<axiom::SurfaceId>{};
+        const auto swept_global = swept.value
+                                      ? kernel.surface_service().closest_point_detailed(
+                                            *swept.value, {1.2, 2.2, 4.0}, accurate)
+                                      : axiom::Result<axiom::SurfaceClosestPointResult>{};
+        const auto sphere = kernel.surfaces().make_sphere({0.0, 0.0, 0.0}, 2.0);
+        const auto offset = sphere.value ? kernel.surfaces().make_offset(*sphere.value, 0.5)
+                                         : axiom::Result<axiom::SurfaceId>{};
+        const auto offset_global = offset.value
+                                       ? kernel.surface_service().closest_point_detailed(
+                                             *offset.value, {3.0, 0.0, 0.0}, accurate)
+                                       : axiom::Result<axiom::SurfaceClosestPointResult>{};
+        if (!swept_global.value || !approx(swept_global.value->point.x, 1.2, 0.002) ||
+            !approx(swept_global.value->point.y, 2.2, 0.002) ||
+            !approx(swept_global.value->distance, 4.0, 2e-5) ||
+            !offset_global.value || !approx(offset_global.value->point.x, 2.5, 0.002) ||
+            !approx(offset_global.value->distance, 0.5, 2e-5)) {
+            std::cerr << "derived surface global closest point failed\n";
+            return 1;
+        }
+
+        const std::array<axiom::Point3, 4> constant_poles{{{7.0, 8.0, 9.0},
+                                                           {7.0, 8.0, 9.0},
+                                                           {7.0, 8.0, 9.0},
+                                                           {7.0, 8.0, 9.0}}};
+        const auto constant_surface = kernel.surfaces().make_bezier(constant_poles);
+        const auto constant_global = constant_surface.value
+                                         ? kernel.surface_service().closest_point_detailed(
+                                               *constant_surface.value, {7.0, 8.0, 14.0}, accurate)
+                                         : axiom::Result<axiom::SurfaceClosestPointResult>{};
+        if (!constant_global.value || !approx(constant_global.value->distance, 5.0, 1e-12) ||
+            constant_global.value->convergence !=
+                axiom::SurfaceClosestPointConvergence::DistanceTolerance) {
+            std::cerr << "constant degenerate surface closest point failed\n";
+            return 1;
+        }
+
+        axiom::SurfaceClosestPointOptions exhausted_options;
+        exhausted_options.distance_tolerance = 0.0;
+        exhausted_options.parameter_tolerance = 1e-14;
+        exhausted_options.max_evaluations = 5;
+        const auto stores_before_failure = kernel.runtime_store_counts();
+        const auto exhausted = kernel.surface_service().closest_point_detailed(
+            *bezier.value, {0.31, 2.27, 1.0}, exhausted_options);
+        const auto invalid = kernel.surface_service().closest_point_detailed(
+            *bezier.value, {0.0, 0.0, 0.0},
+            axiom::SurfaceClosestPointOptions{1e-6, 0.0, 100});
+        const auto unbounded = kernel.surface_service().closest_point_detailed(
+            *plane.value, {0.0, 0.0, 1.0}, accurate);
+        const auto stores_after_failure = kernel.runtime_store_counts();
+        if (exhausted.status != axiom::StatusCode::OperationFailed || exhausted.value ||
+            invalid.status != axiom::StatusCode::InvalidInput || invalid.value ||
+            unbounded.status != axiom::StatusCode::InvalidInput || unbounded.value ||
+            !stores_before_failure.value || !stores_after_failure.value ||
+            stores_before_failure.value->surface_eval_cache_entries !=
+                stores_after_failure.value->surface_eval_cache_entries) {
+            std::cerr << "surface closest failure/budget contract is invalid\n";
+            return 1;
+        }
+
+        const auto objects_before_transaction = kernel.object_count_total();
+        const auto geometry_before_transaction = kernel.geometry_count();
+        auto transaction = kernel.topology().begin_transaction();
+        const auto temporary_vertex = transaction.create_vertex({99.0, 98.0, 97.0});
+        const auto during_transaction = kernel.surface_service().closest_point_detailed(
+            *bezier.value, {2.1, 0.6, 2.0}, accurate);
+        const auto rollback = transaction.rollback();
+        if (!objects_before_transaction.value || !geometry_before_transaction.value ||
+            !temporary_vertex.value ||
+            !during_transaction.value || rollback.status != axiom::StatusCode::Ok ||
+            kernel.object_count_total().value != objects_before_transaction.value ||
+            kernel.geometry_count().value != geometry_before_transaction.value) {
+            std::cerr << "surface closest query disturbed topology transaction rollback\n";
+            return 1;
+        }
+    }
+
     // ---- Stage 3 (minimal): curve-surface intersection (analytic pairs) ----
     {
         auto& isect = kernel.geometry_intersection();

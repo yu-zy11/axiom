@@ -365,6 +365,8 @@ struct SurfaceEvalResult {
 class SurfaceService {
 public:
   Result<SurfaceEvalResult> eval(SurfaceId, Scalar u, Scalar v, int deriv_order) const;
+  Result<SurfaceClosestPointResult> closest_point_detailed(
+      SurfaceId, const Point3&, const SurfaceClosestPointOptions& = {}) const;
   Result<Point3> closest_point(SurfaceId, const Point3&) const;
   Result<std::pair<Scalar, Scalar>> closest_uv(SurfaceId, const Point3&) const;
   Result<Range2D> domain(SurfaceId) const;
@@ -372,7 +374,7 @@ public:
 };
 ```
 
-`closest_uv` 对 BSpline/NURBS 会覆盖每个非空结点片的初值采样，包含极窄片和满重数隔离片；随后仍采用局部迭代，因此不承诺任意曲面的全局最优或工业级精度。
+`closest_point_detailed` 对有界参数域返回最近 UV/点、距离、保守距离下界、参数不确定度、求值/片计数和终止原因。Bezier/BSpline/NURBS、Revolved/Swept、Trimmed/Offset 走完整域分支限界，样条逐个非空结点片覆盖，修剪外环与孔边界参与搜索；平面包装、共面张量面及直线轮廓线性扫掠在可认证时走解析/支撑平面快路径。无限域须先修剪；非法选项、预算耗尽或无法建立有限变化界时失败且不返回部分值，不写 surface eval 缓存。旧 `closest_uv/closest_point` 对复杂有界曲面复用该流程。
 
 ### 5.3 几何变换接口
 
@@ -406,6 +408,14 @@ struct FaceBoundaryConflict {
   Point3 second_point;
   Scalar distance;
 };
+
+enum class BodyShellRole : std::uint8_t { Material, Void };
+struct BodyShellRegion {
+  ShellId shell;
+  BodyShellRole role;
+  std::uint32_t nesting_depth;
+  std::optional<ShellId> parent_shell;
+};
 ```
 
 ```cpp
@@ -421,6 +431,7 @@ public:
   Result<Scalar> face_area(FaceId) const;
   // 当前真实拓扑的单壳/实体均匀密度质量属性；不使用 bbox、网格或缓存。
   Result<MassProperties> shell_mass_properties(ShellId) const;
+  Result<std::vector<BodyShellRegion>> body_shell_regions(BodyId) const;
   Result<MassProperties> body_mass_properties(BodyId) const;
   Result<Scalar> edge_length(EdgeId) const;
   Result<Scalar> loop_length(LoopId) const;
@@ -438,7 +449,7 @@ public:
 
 PCurve 必须为至少两点的折线，按 coedge 方向连续闭合，各点位于当前包装后参数域，且 UV 端点在支撑曲面上与定向拓扑顶点的 3D 位置一致。退化、自交、断裂或越域的外/内环分别返回 `InvalidTopology / AXM-TOPO-E-0003/0004`；内环必须严格位于外环内且不得相交、重叠或嵌套。非有限面积返回 `NumericalInstability / AXM-QUERY-E-0003`，扣孔后非正或退化返回 `DegenerateGeometry / AXM-GEO-E-0003`，结果溢出返回 `InvalidInput / AXM-CORE-E-0002`；所有失败均无部分面积。周期参数缝须由调用方在同一展开区间内表达，查询不自动解包裹。每次查询从当前面/环/曲面重算，不写求值或网格缓存；事务内替换/删除即时可见，回滚后恢复。
 
-`shell_mass_properties / body_mass_properties`（FR-QUERY-001 第 70 批）从当前真实拓扑重算单位密度的体积、表面积、质心及关于质心的世界坐标系 3×3 行主序惯性张量。体积、面积、质心和惯性的单位分别是模型长度单位的三次方、平方、一次方和五次方。支持平面、Line/LineSegment 边组成的双边流形闭壳，面可凹且可带孔；`body_mass_properties` 用平行轴定理汇总多个互不重叠的独立实体壳。当前不把独立内壳解释为空腔，也不检测多壳相交/重叠；曲面、曲边、空/开/非流形壳、共享边同向、环绕向错误、非共面或零体积均结构化失败且无部分值。查询不分配网格、不写缓存、不改变 Eval 状态或事务写计数；事务内删除/替换即时可见，回滚后恢复。
+`shell_mass_properties / body_shell_regions / body_mass_properties` 从当前真实拓扑重算单位密度的体积、表面积、质心及关于质心的世界坐标系 3×3 行主序惯性张量。体积、面积、质心和惯性的单位分别是模型长度单位的三次方、平方、一次方和五次方。支持平面、Line/LineSegment 边组成的双边流形闭壳，面可凹且可带孔。`body_shell_regions` 以严格包含深度给出 Material/Void 和直接父壳；`body_mass_properties` 用平行轴定理累加偶数深度材料壳、扣除奇数深度空腔壳，面积保留全部边界面积。多壳相交、重叠或在建模容差内接触返回 `InvalidTopology / AXM-QUERY-E-0006`；曲面、曲边、空/开/非流形壳、共享边同向、环绕向错误、非共面或零体积均结构化失败且无部分值。查询不发布网格、不写缓存、不改变 Eval 状态或事务写计数；事务内删除/替换即时可见，回滚后恢复。
 
 `edge_length / loop_length / face_boundary_length`（第 63 包已纳入统一门禁）组成直线边拓扑长度接口族，单位为模型长度单位。边长取当前两个拓扑端点的三维距离；两端点到 Line/LineSegment 的距离、线段端点越界距离不得超过内核线性容差，不投影或修复原模型。零长度或不一致边返回 `InvalidTopology / AXM-TOPO-E-0008`，缺失边引用返回 `InvalidTopology / AXM-TOPO-E-0006`。Edge 没有曲线裁剪参数，曲边明确返回 `NotImplemented / AXM-CORE-E-0004`，不以端点弦长代替弧长。环查询复用边查询，要求闭合且无重复成员；空/损坏/未闭合环返回 `InvalidTopology / AXM-TOPO-E-0002`。面查询复用环查询，返回**外环加全部内环**的长度，方向无关；支撑曲面类型不参与边界长度计算。缺失/重复面边界环返回 `InvalidTopology / AXM-TOPO-E-0003`（内环 `E-0004`），内层失败原样传播，不返回部分和。无效、已删除或已回滚的目标句柄返回 `InvalidInput / AXM-CORE-E-0001`，累加超出 Scalar 范围返回 `InvalidInput / AXM-CORE-E-0002`。所有失败均无数值；每次查询重算，事务内创建可查询、删除即时不可查询，回滚恢复原结果或使临时句柄失效。查询不修改模型、事务写计数、几何/网格缓存或 Eval 状态，只追加诊断和一次顶层查询审计。
 
@@ -666,7 +677,7 @@ public:
 
 防自交依赖内部截面的正比例等比变换及严格法向推进；无孔尖顶是简单边界的锥顶，实际顶点须严格位于整个底面之外的法向半空间。正比例末端另复查末端环合法性、复用端盖三角形方向和实际截面不交叠；未扩大既有 Sweep Strict 网格 SAT 范围。沿用保守浮点剖分，近退化或极端尺度可拒绝，不承诺工业容差或大轮廓性能。
 
-第 61 包新增 `ProfileRef::holes_xyz`（末尾可选 `std::vector<std::vector<Point3>>` 字段，已有聚合初始化仍有效）。外环与各孔可独立选择绕向、起点；孔必须与外环共面、严格位于外环内且彼此分离，不允许接触、相交、重合或嵌套。外环和孔均可为凹多边形。带孔端盖通过边界约束的非交叉平面图剖分，内外侧壁均物化为平面三角面；总计 n 个环顶点、h 个孔生成 2n 个顶点、6n+6h−6 条边、4n+4h−4 个面，欧拉特征为 2−2h。剖分不增加几何顶点，保留真实贯通孔，不是曲面或网格近似；端盖可能由多个共面 Face 组成。质量属性（含质心惯性张量）由闭壳三角面积分给出。边界验证、端盖数量/面积核对、非有限/坍塌三角片及质量积分检查均在实体分配前完成；复用 `InvalidInput / AXM-CORE-E-0002`。无外环却提供孔也拒绝。线段扫掠继承相同语义；`revolve/loft` 当前明确拒绝非空 `holes_xyz`，不会静默填孔。带孔平面图构造为保守浮点算法，近退化输入可拒绝，最坏时间为三次量级，不承诺任意大轮廓的性能或工业容差完备性。
+第 61 包新增 `ProfileRef::holes_xyz`（末尾可选 `std::vector<std::vector<Point3>>` 字段，已有聚合初始化仍有效）。外环与各孔可独立选择绕向、起点；孔必须与外环共面、严格位于外环内且彼此分离，不允许接触、相交、重合或嵌套。外环和孔均可为凹多边形。带孔端盖通过边界约束的非交叉平面图剖分，内外侧壁均物化为平面三角面；总计 n 个环顶点、h 个孔生成 2n 个顶点、6n+6h−6 条边、4n+4h−4 个面，欧拉特征为 2−2h。剖分不增加几何顶点，保留真实贯通孔，不是曲面或网格近似；端盖可能由多个共面 Face 组成。质量属性（含质心惯性张量）由闭壳三角面积分给出。边界验证、端盖数量/面积核对、非有限/坍塌三角片及质量积分检查均在实体分配前完成；复用 `InvalidInput / AXM-CORE-E-0002`。无外环却提供孔也拒绝。线段扫掠、轴分离旋转和拓扑兼容放样继承带孔语义；带孔尖顶仍拒绝。带孔平面图构造为保守浮点算法，近退化输入可拒绝，最坏时间为三次量级，不承诺任意大轮廓的性能或工业容差完备性。
 
 `sweep` 的显式多边形路径支持 `make_line_segment(a, b)` 和 `make_composite_polyline(points)`：保持轮廓世界坐标与方向，导轨第 k 个点给出相对起点的位移 `points[k]-points[0]`。不自动将截面移到导轨起点，也不旋转截面。第 62 包新增折线平移扫掠：每一段沿轮廓法向须严格同向推进，允许斜向、反向及共线的中间段；切向段、回退、闭合、重复点、近退化段及坐标溢出拒绝。这里的折线是实际分段直线导轨，不将圆弧或样条离散后冒充精确曲线扫掠。
 
@@ -674,7 +685,9 @@ public:
 
 第 62 包的公开拓扑/邻接、分段独立解析体积/面积/质心/惯性、`validate_all(Strict)`、`brep_to_mesh` 与回滚重试回归已纳入统一门禁。本轮未扩大既有 Sweep Strict 验证器的网格 SAT 范围，防交叠依靠上述严格单调限制；近退化轮廓与路径保守拒绝，不承诺工业容差或大轮廓性能。
 
-`revolve` 的角度单位为弧度，必须位于 `(0, 2π]`。显式多边形路径以每周 48 段的角分辨率物化真实三角面、共享边/顶点和闭壳；部分角旋转增加约束剖分的首尾端盖，整周路径无端盖缝。支持与轴严格分离的凸/凹简单子午面轮廓，以及仅通过一条唯一连续轴边闭合的实心轮廓。轮廓绕向/起点、轴方向反号/缩放和任意空间子午面保持等价；带孔、跨轴、孤立轴点、近轴、自交、非共面或偏轴轮廓在分配前返回 `InvalidInput / AXM-CORE-E-0002`。结果体积、面积、质心和惯性来自闭合多面体积分。整周与部分角结果均是保守分片多面体 BRep，不是解析圆柱/圆锥/圆环面。
+`revolve` 的角度单位为弧度，必须位于 `(0, 2π]`。显式多边形路径以每周 48 段的角分辨率物化真实三角面、共享边/顶点和闭壳；部分角旋转增加约束剖分的首尾端盖，整周路径无端盖缝。支持与轴严格分离的凸/凹外环及分离孔洞；无孔轮廓还可仅通过一条唯一连续轴边闭合。轮廓/孔绕向、起点、孔序、轴方向反号/缩放和任意空间子午面保持等价；带孔区域触轴、跨轴、孤立轴点、近轴、自交、非共面或偏轴轮廓在分配前返回 `InvalidInput / AXM-CORE-E-0002`。结果体积、面积、质心和惯性来自闭合多面体积分。整周与部分角结果均是保守分片多面体 BRep，不是解析圆柱/圆锥/圆环面。
+
+`loft` 要求至少两个显式平面多边形截面。各站外环以及同索引孔环必须保持相同顶点数，以顶点顺序定义直纹侧壁对应关系；环绕向可独立变化。截面须沿共同横向严格有序，站间插值区域不得退化、翻折或相交。成功时生成真实共享面边点的单闭壳并缓存闭合多面体质量属性；不同环拓扑、自动顶点匹配、分支、尖顶/坍塌截面和无显式轮廓路径拒绝，不再返回 bbox 占位体。
 
 `sweep` 还支持显式凹多边形或带孔截面沿 Bezier/BSpline/NURBS 开放导轨、显式端点重合且首尾切向连续的闭合样条、整圆/椭圆周期导轨，以及 `CompositeChain` 复合导轨。复合链子段可为有界直线/线段、圆/椭圆弧、Bezier、BSpline、NURBS 或 polyline 首段，按公开链语义的子曲线局部参数 `[0,1]` 取值；接缝必须位置连续且 G1 切向连续。截面必须位于导轨起点且其平面法向与起始切向对齐；开放导轨生成两端盖，闭合样条与闭合复合链生成无端盖周期闭壳。空间闭环使用沿采样弧长分布的旋转最小标架 holonomy 校正，避免首尾截面隐藏扭转缝。周期带孔截面的外边界与每个孔边界是互不连通的闭壳，因此一个 Body 含 `1 + holes_xyz.size()` 个 Shell，`owned_topo_welded` 网格也报告同数量的连通分量；开放带孔导轨由端盖连成单壳，周期无孔也为单壳。
 

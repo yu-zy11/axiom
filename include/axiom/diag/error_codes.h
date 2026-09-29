@@ -110,6 +110,8 @@ inline constexpr std::string_view kModShellValidateFailed = "AXM-MOD-E-0008";
 inline constexpr std::string_view kQueryClosestPointFailure = "AXM-QUERY-E-0001";
 inline constexpr std::string_view kQuerySectionFailure = "AXM-QUERY-E-0002";
 inline constexpr std::string_view kQueryMassPropertiesFailure = "AXM-QUERY-E-0003";
+/// 多闭壳之间相交、重叠或容差接触，无法建立唯一的材料/空腔包含层级。
+inline constexpr std::string_view kQueryShellArrangementInvalid = "AXM-QUERY-E-0006";
 
 inline constexpr std::string_view kHealSewFailure = "AXM-HEAL-E-0001";
 inline constexpr std::string_view kHealSmallEdgeFailure = "AXM-HEAL-E-0002";

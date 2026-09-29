@@ -48,10 +48,11 @@ public:
     /// Revolve a profile through a positive angle no greater than one full turn.
     /// Explicit planar polygons are conservatively subdivided in angle and produce an
     /// owned triangulated closed BRep when the axis lies in the profile plane. Partial
-    /// and full turns support a profile strictly separated from the axis, or a simply
-    /// connected profile whose single boundary edge lies on the axis. Concave outlines
-    /// are supported; profiles that cross the axis, touch it at an isolated point,
-    /// contain holes or are numerically near-degenerate are rejected before allocation.
+    /// and full turns support a profile strictly separated from the axis, including
+    /// concave outlines and disjoint interior holes. A hole-free profile may instead
+    /// meet the axis along one boundary edge. Profiles that cross the axis, touch it
+    /// at an isolated point, have a holed region touching the axis, or are numerically
+    /// near-degenerate are rejected before allocation.
     Result<BodyId> revolve(const ProfileRef& profile, const Axis3& axis, Scalar angle);
     /// Explicit polygons along a bounded rail, producing owned triangulated closed topology.
     /// Line segments and CompositePolyline keep the profile in world space and require every
@@ -64,6 +65,12 @@ public:
     /// gaps, tangent-discontinuous joints, cusps, nested chains, excessive curvature and
     /// self-approaching rails are rejected without allocating a body or owned topology.
     Result<BodyId> sweep(const ProfileRef& profile, CurveId rail);
+    /// Loft two or more explicit planar polygon sections into an owned triangulated closed BRep.
+    /// Sections may be concave and may carry corresponding disjoint holes. Outer rings and each
+    /// same-index hole must keep the same vertex count, because vertices define the ruled-wall
+    /// correspondence; winding is independent. Sections must be strictly ordered along a common
+    /// transverse direction and retain a valid interpolated region. Unlike ring topology,
+    /// automatic vertex matching, branching and collapsed/apex sections are rejected before allocation.
     Result<BodyId> loft(std::span<const ProfileRef> profiles);
     Result<BodyId> thicken(FaceId face_id, Scalar distance);
 

@@ -31,7 +31,13 @@ BodyId make_body(std::shared_ptr<detail::KernelState> state, detail::BodyRecord 
         // Derived materializers create or clone owned topology, without sharing
         // shells/faces/loops/coedges with their provenance sources.
         fresh_topology = record.rep_kind == RepKind::ExactBRep && record.bbox.is_valid && record.shells.empty();
-        if (record.kind == detail::BodyKind::Sweep && !record.extrude_profile_xyz.empty()) {
+        if (record.kind == detail::BodyKind::Sweep && !record.loft_profiles_xyz.empty()) {
+            // Compatible explicit sections are a real ruled polyhedral loft. The
+            // materializer validates the complete shell before allocating any IDs.
+            if (!detail::try_materialize_sweep_loft_body(*state, record)) {
+                return BodyId {};
+            }
+        } else if (record.kind == detail::BodyKind::Sweep && !record.extrude_profile_xyz.empty()) {
             // Explicit polygon sweeps must never fall back to a bbox shell. Both
             // materializers finish validation before allocating topology.
             const bool materialized = record.sweep_frame_origins.empty()
@@ -1308,6 +1314,13 @@ bool try_sweep_body_mass_properties(const detail::BodyRecord& body, MassProperti
             const auto bboxp = bbox_mass_properties(body.bbox);
             props.area = bboxp.area;
         }
+        return true;
+    }
+    if (body.label == "loft:polygon" && body.sweep_polyhedral_mass_valid) {
+        props.volume = body.sweep_polyhedral_volume;
+        props.area = body.sweep_cached_surface_area;
+        props.centroid = body.sweep_polyhedral_centroid;
+        props.inertia = body.sweep_inertia_about_centroid;
         return true;
     }
     if (body.label.size() >= 6 && body.label.compare(0, 6, "sweep:") == 0 && body.a > 0.0) {

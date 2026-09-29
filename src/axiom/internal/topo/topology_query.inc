@@ -271,6 +271,350 @@ bool rings_touch_or_cross(const std::vector<Point2> &a,
   return false;
 }
 
+struct QueryShellMesh {
+  ShellId shell{};
+  std::vector<Point3> points;
+  std::vector<std::array<int, 3>> triangles;
+  BoundingBox bbox{};
+};
+
+struct BodyShellAnalysis {
+  std::vector<BodyShellRegion> regions;
+  std::vector<MassProperties> properties;
+};
+
+void extend_query_bbox(BoundingBox &bbox, const Point3 &point) {
+  if (!bbox.is_valid) {
+    bbox.min = bbox.max = point;
+    bbox.is_valid = true;
+    return;
+  }
+  bbox.min.x = std::min(bbox.min.x, point.x);
+  bbox.min.y = std::min(bbox.min.y, point.y);
+  bbox.min.z = std::min(bbox.min.z, point.z);
+  bbox.max.x = std::max(bbox.max.x, point.x);
+  bbox.max.y = std::max(bbox.max.y, point.y);
+  bbox.max.z = std::max(bbox.max.z, point.z);
+}
+
+/// `shell_mass_properties` has already performed the detailed topology,
+/// straight-edge and face-orientation validation.  This extraction deliberately
+/// rebuilds only the transient world-space triangles required for shell-to-shell
+/// classification; it never publishes a MeshId or populates a tessellation cache.
+bool extract_query_shell_mesh(const detail::KernelState &state, ShellId shell_id,
+                              Scalar tolerance, QueryShellMesh &mesh) {
+  const auto shell_it = state.shells.find(shell_id.value);
+  if (shell_it == state.shells.end()) return false;
+  mesh = {};
+  mesh.shell = shell_id;
+  for (const auto face_id : shell_it->second.faces) {
+    const auto face_it = state.faces.find(face_id.value);
+    if (face_it == state.faces.end()) return false;
+    const auto surface_it = state.surfaces.find(face_it->second.surface_id.value);
+    if (surface_it == state.surfaces.end() ||
+        surface_it->second.kind != detail::SurfaceKind::Plane) return false;
+    const auto normal = detail::normalize(surface_it->second.normal);
+    if (!(detail::norm(normal) > 0.0)) return false;
+
+    std::vector<LoopId> loops{face_it->second.outer_loop};
+    loops.insert(loops.end(), face_it->second.inner_loops.begin(),
+                 face_it->second.inner_loops.end());
+    std::vector<std::vector<Point3>> rings;
+    rings.reserve(loops.size());
+    for (const auto loop_id : loops) {
+      std::vector<Point3> ring;
+      std::string reason;
+      if (!loop_vertex_chain_3d(state, loop_id, ring, reason) || ring.size() < 3)
+        return false;
+      rings.push_back(std::move(ring));
+    }
+    if (rings.size() == 1 && rings.front().size() == 3) {
+      if (mesh.points.size() + 3 >
+          static_cast<std::size_t>(std::numeric_limits<int>::max())) return false;
+      const int base = static_cast<int>(mesh.points.size());
+      for (const auto &point : rings.front()) {
+        extend_query_bbox(mesh.bbox, point);
+        mesh.points.push_back(point);
+      }
+      mesh.triangles.push_back({base, base + 1, base + 2});
+      continue;
+    }
+    std::vector<Point3> face_points;
+    std::vector<std::pair<int, int>> boundary;
+    std::vector<std::array<int, 3>> face_triangles;
+    std::vector<std::vector<Point3>> holes(rings.begin() + 1, rings.end());
+    if (!detail::triangulate_extrude_region(
+            rings.front(), holes, normal, tolerance, face_points, boundary,
+            face_triangles) || face_triangles.empty() ||
+        mesh.points.size() + face_points.size() >
+            static_cast<std::size_t>(std::numeric_limits<int>::max())) return false;
+    const int base = static_cast<int>(mesh.points.size());
+    for (const auto &point : face_points) {
+      extend_query_bbox(mesh.bbox, point);
+      mesh.points.push_back(point);
+    }
+    for (const auto &triangle : face_triangles)
+      mesh.triangles.push_back(
+          {triangle[0] + base, triangle[1] + base, triangle[2] + base});
+  }
+  return mesh.bbox.is_valid && !mesh.triangles.empty();
+}
+
+Vec3 query_vector(const Point3 &from, const Point3 &to) {
+  return Vec3{to.x - from.x, to.y - from.y, to.z - from.z};
+}
+
+long double query_dot(const Vec3 &a, const Vec3 &b) {
+  return static_cast<long double>(a.x) * b.x +
+         static_cast<long double>(a.y) * b.y +
+         static_cast<long double>(a.z) * b.z;
+}
+
+Vec3 query_cross(const Vec3 &a, const Vec3 &b) {
+  return Vec3{a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z,
+              a.x * b.y - a.y * b.x};
+}
+
+long double query_length(const Vec3 &vector) {
+  return std::sqrt(std::max(0.0L, query_dot(vector, vector)));
+}
+
+bool query_bbox_overlap(const BoundingBox &a, const BoundingBox &b,
+                        long double tolerance) {
+  return a.is_valid && b.is_valid &&
+         static_cast<long double>(a.max.x) >= b.min.x - tolerance &&
+         static_cast<long double>(b.max.x) >= a.min.x - tolerance &&
+         static_cast<long double>(a.max.y) >= b.min.y - tolerance &&
+         static_cast<long double>(b.max.y) >= a.min.y - tolerance &&
+         static_cast<long double>(a.max.z) >= b.min.z - tolerance &&
+         static_cast<long double>(b.max.z) >= a.min.z - tolerance;
+}
+
+BoundingBox query_triangle_bbox(const std::array<Point3, 3> &triangle) {
+  BoundingBox bbox;
+  for (const auto &point : triangle) extend_query_bbox(bbox, point);
+  return bbox;
+}
+
+void query_project_triangle(const std::array<Point3, 3> &triangle,
+                            const Vec3 &unit_axis, long double &minimum,
+                            long double &maximum) {
+  minimum = maximum = static_cast<long double>(triangle[0].x) * unit_axis.x +
+                      static_cast<long double>(triangle[0].y) * unit_axis.y +
+                      static_cast<long double>(triangle[0].z) * unit_axis.z;
+  for (std::size_t i = 1; i < triangle.size(); ++i) {
+    const long double value =
+        static_cast<long double>(triangle[i].x) * unit_axis.x +
+        static_cast<long double>(triangle[i].y) * unit_axis.y +
+        static_cast<long double>(triangle[i].z) * unit_axis.z;
+    minimum = std::min(minimum, value);
+    maximum = std::max(maximum, value);
+  }
+}
+
+/// Complete separating-axis test for two filled triangles.  In addition to
+/// face normals and the nine edge cross-products, the six in-plane edge-normal
+/// axes are retained so disjoint coplanar triangles are not reported as hits.
+bool query_triangles_touch(const std::array<Point3, 3> &a,
+                           const std::array<Point3, 3> &b,
+                           long double tolerance) {
+  if (!query_bbox_overlap(query_triangle_bbox(a), query_triangle_bbox(b), tolerance))
+    return false;
+  const std::array<Vec3, 3> a_edges{
+      query_vector(a[0], a[1]), query_vector(a[1], a[2]),
+      query_vector(a[2], a[0])};
+  const std::array<Vec3, 3> b_edges{
+      query_vector(b[0], b[1]), query_vector(b[1], b[2]),
+      query_vector(b[2], b[0])};
+  const auto a_normal = query_cross(a_edges[0], a_edges[1]);
+  const auto b_normal = query_cross(b_edges[0], b_edges[1]);
+  std::array<Vec3, 17> axes{};
+  std::size_t count = 0;
+  axes[count++] = a_normal;
+  axes[count++] = b_normal;
+  for (const auto &a_edge : a_edges)
+    for (const auto &b_edge : b_edges)
+      axes[count++] = query_cross(a_edge, b_edge);
+  for (const auto &edge : a_edges) axes[count++] = query_cross(a_normal, edge);
+  for (const auto &edge : b_edges) axes[count++] = query_cross(b_normal, edge);
+
+  for (std::size_t i = 0; i < count; ++i) {
+    const long double length = query_length(axes[i]);
+    if (!(length > 1e-24L)) continue;
+    const Vec3 unit{static_cast<Scalar>(axes[i].x / length),
+                    static_cast<Scalar>(axes[i].y / length),
+                    static_cast<Scalar>(axes[i].z / length)};
+    long double a_min{}, a_max{}, b_min{}, b_max{};
+    query_project_triangle(a, unit, a_min, a_max);
+    query_project_triangle(b, unit, b_min, b_max);
+    if (a_max < b_min - tolerance || b_max < a_min - tolerance) return false;
+  }
+  return true;
+}
+
+std::array<Point3, 3> query_triangle(const QueryShellMesh &mesh,
+                                     const std::array<int, 3> &indices) {
+  return {mesh.points[static_cast<std::size_t>(indices[0])],
+          mesh.points[static_cast<std::size_t>(indices[1])],
+          mesh.points[static_cast<std::size_t>(indices[2])]};
+}
+
+bool query_shell_boundaries_touch(const QueryShellMesh &a,
+                                  const QueryShellMesh &b,
+                                  long double tolerance) {
+  if (!query_bbox_overlap(a.bbox, b.bbox, tolerance)) return false;
+  std::vector<BoundingBox> b_boxes;
+  b_boxes.reserve(b.triangles.size());
+  for (const auto &indices : b.triangles)
+    b_boxes.push_back(query_triangle_bbox(query_triangle(b, indices)));
+  for (const auto &a_indices : a.triangles) {
+    const auto a_triangle = query_triangle(a, a_indices);
+    const auto a_bbox = query_triangle_bbox(a_triangle);
+    for (std::size_t j = 0; j < b.triangles.size(); ++j) {
+      if (!query_bbox_overlap(a_bbox, b_boxes[j], tolerance)) continue;
+      if (query_triangles_touch(a_triangle, query_triangle(b, b.triangles[j]),
+                                tolerance)) return true;
+    }
+  }
+  return false;
+}
+
+/// Generalized winding number for an oriented closed triangle set.  The
+/// absolute solid-angle sum makes classification independent of whether the
+/// whole shell was authored inward or outward.  Pairwise boundary rejection is
+/// performed first, so the representative point cannot lie on this shell.
+bool query_point_inside_shell(const Point3 &point, const QueryShellMesh &mesh) {
+  const long double pi = std::acos(-1.0L);
+  long double solid_angle = 0.0L;
+  for (const auto &indices : mesh.triangles) {
+    const auto triangle = query_triangle(mesh, indices);
+    const auto va = query_vector(point, triangle[0]);
+    const auto vb = query_vector(point, triangle[1]);
+    const auto vc = query_vector(point, triangle[2]);
+    const long double la = query_length(va);
+    const long double lb = query_length(vb);
+    const long double lc = query_length(vc);
+    if (!(la > 0.0L && lb > 0.0L && lc > 0.0L)) return true;
+    const long double numerator = query_dot(va, query_cross(vb, vc));
+    const long double denominator =
+        la * lb * lc + query_dot(va, vb) * lc +
+        query_dot(vb, vc) * la + query_dot(vc, va) * lb;
+    solid_angle += 2.0L * std::atan2(numerator, denominator);
+  }
+  return std::abs(solid_angle) > 2.0L * pi;
+}
+
+template <class MeasureShell>
+Result<BodyShellAnalysis> analyze_body_shells(detail::KernelState &state,
+                                              BodyId body_id,
+                                              MeasureShell measure_shell) {
+  const auto body_it = state.bodies.find(body_id.value);
+  if (body_it == state.bodies.end()) {
+    return detail::invalid_input_result<BodyShellAnalysis>(
+        state, diag_codes::kCoreInvalidHandle,
+        "体闭壳空间关系查询失败：目标体不存在", "体闭壳空间关系查询失败");
+  }
+  BodyShellAnalysis analysis;
+  if (body_it->second.shells.empty()) {
+    return ok_result(std::move(analysis),
+                     state.create_diagnostic("已查询空实体闭壳空间关系"));
+  }
+
+  // A lone closed shell is necessarily a material region.  Measuring it is
+  // sufficient; transient triangulation and pairwise spatial classification
+  // only add work when another shell can establish a nesting relationship.
+  if (body_it->second.shells.size() == 1) {
+    const auto shell_id = body_it->second.shells.front();
+    const auto properties = measure_shell(shell_id);
+    if (!properties.value)
+      return error_result<BodyShellAnalysis>(properties.status,
+                                             properties.diagnostic_id);
+    BodyShellRegion region;
+    region.shell = shell_id;
+    region.role = BodyShellRole::Material;
+    analysis.regions.push_back(region);
+    analysis.properties.push_back(*properties.value);
+    return ok_result(std::move(analysis),
+                     state.create_diagnostic("已查询单一材料闭壳空间关系"));
+  }
+
+  const Scalar linear_tolerance = std::max<Scalar>(
+      1e-12, std::abs(detail::resolve_linear_tolerance(
+                 0.0, state.config.tolerance)));
+  std::unordered_set<std::uint64_t> unique_shells;
+  std::vector<QueryShellMesh> meshes;
+  meshes.reserve(body_it->second.shells.size());
+  analysis.properties.reserve(body_it->second.shells.size());
+  for (const auto shell_id : body_it->second.shells) {
+    if (!unique_shells.insert(shell_id.value).second) {
+      return detail::failed_result<BodyShellAnalysis>(
+          state, StatusCode::InvalidTopology, diag_codes::kTopoInvariantBroken,
+          "体闭壳空间关系查询失败：实体包含重复壳引用",
+          "体闭壳空间关系查询失败", {body_id.value, shell_id.value});
+    }
+    const auto properties = measure_shell(shell_id);
+    if (!properties.value)
+      return error_result<BodyShellAnalysis>(properties.status,
+                                             properties.diagnostic_id);
+    QueryShellMesh mesh;
+    if (!extract_query_shell_mesh(state, shell_id, linear_tolerance, mesh)) {
+      return detail::failed_result<BodyShellAnalysis>(
+          state, StatusCode::InvalidTopology, diag_codes::kTopoInvariantBroken,
+          "体闭壳空间关系查询失败：已验证壳无法重建临时三角边界",
+          "体闭壳空间关系查询失败", {body_id.value, shell_id.value});
+    }
+    analysis.properties.push_back(*properties.value);
+    meshes.push_back(std::move(mesh));
+  }
+
+  const std::size_t shell_count = meshes.size();
+  std::vector<std::vector<bool>> inside(shell_count,
+                                        std::vector<bool>(shell_count, false));
+  for (std::size_t i = 0; i < shell_count; ++i) {
+    for (std::size_t j = i + 1; j < shell_count; ++j) {
+      if (query_shell_boundaries_touch(meshes[i], meshes[j], linear_tolerance)) {
+        return detail::failed_result<BodyShellAnalysis>(
+            state, StatusCode::InvalidTopology,
+            diag_codes::kQueryShellArrangementInvalid,
+            "体闭壳空间关系查询失败：两个壳相交、重叠或在建模容差内接触",
+            "体闭壳空间关系查询失败",
+            {body_id.value, meshes[i].shell.value, meshes[j].shell.value});
+      }
+      inside[i][j] = query_point_inside_shell(meshes[i].points.front(), meshes[j]);
+      inside[j][i] = query_point_inside_shell(meshes[j].points.front(), meshes[i]);
+      if (inside[i][j] && inside[j][i]) {
+        return detail::failed_result<BodyShellAnalysis>(
+            state, StatusCode::InvalidTopology,
+            diag_codes::kQueryShellArrangementInvalid,
+            "体闭壳空间关系查询失败：壳包含关系矛盾或边界重合",
+            "体闭壳空间关系查询失败",
+            {body_id.value, meshes[i].shell.value, meshes[j].shell.value});
+      }
+    }
+  }
+
+  analysis.regions.reserve(shell_count);
+  for (std::size_t i = 0; i < shell_count; ++i) {
+    std::uint32_t depth = 0;
+    std::optional<std::size_t> parent;
+    for (std::size_t j = 0; j < shell_count; ++j) {
+      if (!inside[i][j]) continue;
+      ++depth;
+      if (!parent || analysis.properties[j].volume <
+                         analysis.properties[*parent].volume) parent = j;
+    }
+    BodyShellRegion region;
+    region.shell = meshes[i].shell;
+    region.nesting_depth = depth;
+    region.role = depth % 2 == 0 ? BodyShellRole::Material
+                                 : BodyShellRole::Void;
+    if (parent) region.parent_shell = meshes[*parent].shell;
+    analysis.regions.push_back(region);
+  }
+  return ok_result(std::move(analysis),
+                   state.create_diagnostic("已查询实体闭壳空间关系"));
+}
+
 }  // namespace
 
 TopologyQueryService::TopologyQueryService(
@@ -1608,47 +1952,48 @@ TopologyQueryService::shell_mass_properties(ShellId shell_id) const {
                    state_->create_diagnostic("已从闭合多面体壳查询质量属性"));
 }
 
+Result<std::vector<BodyShellRegion>>
+TopologyQueryService::body_shell_regions(BodyId body_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
+  const auto analysis = analyze_body_shells(
+      *state_, body_id,
+      [this](ShellId shell_id) { return shell_mass_properties(shell_id); });
+  if (!analysis.value)
+    return error_result<std::vector<BodyShellRegion>>(analysis.status,
+                                                      analysis.diagnostic_id);
+  return ok_result(analysis.value->regions, analysis.diagnostic_id);
+}
+
 Result<MassProperties>
 TopologyQueryService::body_mass_properties(BodyId body_id) const {
   TopoQueryAuditScope _topo_query_audit{state_};
-  const auto body_it = state_->bodies.find(body_id.value);
-  if (body_it == state_->bodies.end()) {
-    return detail::invalid_input_result<MassProperties>(
-        *state_, diag_codes::kCoreInvalidHandle,
-        "体拓扑质量属性查询失败：目标体不存在", "体拓扑质量属性查询失败");
-  }
-  if (body_it->second.shells.empty()) {
+  const auto analysis = analyze_body_shells(
+      *state_, body_id,
+      [this](ShellId shell_id) { return shell_mass_properties(shell_id); });
+  if (!analysis.value)
+    return error_result<MassProperties>(analysis.status, analysis.diagnostic_id);
+  if (analysis.value->regions.empty()) {
     return detail::failed_result<MassProperties>(
         *state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
         "体拓扑质量属性查询失败：实体不拥有可计算的拓扑壳",
         "体拓扑质量属性查询失败", {body_id.value});
   }
 
-  std::vector<MassProperties> components;
-  components.reserve(body_it->second.shells.size());
-  std::unordered_set<std::uint64_t> unique_shells;
   long double total_volume = 0.0L;
   long double total_area = 0.0L;
   long double first_x = 0.0L, first_y = 0.0L, first_z = 0.0L;
-  for (const auto shell_id : body_it->second.shells) {
-    if (!unique_shells.insert(shell_id.value).second) {
-      return detail::failed_result<MassProperties>(
-          *state_, StatusCode::InvalidTopology, diag_codes::kTopoInvariantBroken,
-          "体拓扑质量属性查询失败：实体包含重复壳引用",
-          "体拓扑质量属性查询失败", {body_id.value, shell_id.value});
-    }
-    const auto component = shell_mass_properties(shell_id);
-    if (!component.value)
-      return error_result<MassProperties>(component.status, component.diagnostic_id);
-    components.push_back(*component.value);
-    total_volume += component.value->volume;
-    total_area += component.value->area;
-    first_x += static_cast<long double>(component.value->volume) *
-               component.value->centroid.x;
-    first_y += static_cast<long double>(component.value->volume) *
-               component.value->centroid.y;
-    first_z += static_cast<long double>(component.value->volume) *
-               component.value->centroid.z;
+  for (std::size_t i = 0; i < analysis.value->properties.size(); ++i) {
+    const auto &component = analysis.value->properties[i];
+    const long double sign = analysis.value->regions[i].role ==
+                                     BodyShellRole::Material
+                                 ? 1.0L
+                                 : -1.0L;
+    const long double signed_volume = sign * component.volume;
+    total_volume += signed_volume;
+    total_area += component.area;
+    first_x += signed_volume * component.centroid.x;
+    first_y += signed_volume * component.centroid.y;
+    first_z += signed_volume * component.centroid.z;
   }
   if (!(total_volume > 0.0L) || !std::isfinite(total_volume) ||
       !std::isfinite(total_area) ||
@@ -1667,16 +2012,22 @@ TopologyQueryService::body_mass_properties(BodyId body_id) const {
   properties.centroid = Point3{static_cast<Scalar>(first_x / total_volume),
                                static_cast<Scalar>(first_y / total_volume),
                                static_cast<Scalar>(first_z / total_volume)};
-  for (const auto &component : components) {
+  for (std::size_t component_index = 0;
+       component_index < analysis.value->properties.size(); ++component_index) {
+    const auto &component = analysis.value->properties[component_index];
+    const long double sign = analysis.value->regions[component_index].role ==
+                                     BodyShellRole::Material
+                                 ? 1.0L
+                                 : -1.0L;
     for (std::size_t i = 0; i < properties.inertia.size(); ++i)
-      properties.inertia[i] += component.inertia[i];
+      properties.inertia[i] += static_cast<Scalar>(sign * component.inertia[i]);
     const long double dx =
         static_cast<long double>(component.centroid.x) - properties.centroid.x;
     const long double dy =
         static_cast<long double>(component.centroid.y) - properties.centroid.y;
     const long double dz =
         static_cast<long double>(component.centroid.z) - properties.centroid.z;
-    const long double mass = component.volume;
+    const long double mass = sign * component.volume;
     const long double diagonal[3]{mass * (dy * dy + dz * dz),
                                   mass * (dx * dx + dz * dz),
                                   mass * (dx * dx + dy * dy)};
@@ -1702,7 +2053,7 @@ TopologyQueryService::body_mass_properties(BodyId body_id) const {
         "体拓扑质量属性查询失败", {body_id.value});
   }
   return ok_result(properties,
-                   state_->create_diagnostic("已从实体闭合拓扑查询质量属性"));
+                   state_->create_diagnostic("已按材料/空腔闭壳层级查询实体质量属性"));
 }
 
 Result<BoundingBox>

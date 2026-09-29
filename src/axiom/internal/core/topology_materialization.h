@@ -1935,6 +1935,269 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
     return true;
 }
 
+/// 多个兼容平面多边形截面的直纹放样。外环和同序孔环的顶点逐一对应，截面间的
+/// 线性插值仍须形成简单平面区域。完整三角闭壳、质量属性和包围盒都在分配 ID 前验证。
+inline bool try_materialize_sweep_loft_body(KernelState& state, BodyRecord& record) {
+    if (record.kind != BodyKind::Sweep || record.rep_kind != RepKind::ExactBRep || !record.bbox.is_valid ||
+        !record.shells.empty() || record.label != "loft:polygon" || record.loft_profiles_xyz.size() < 2 ||
+        record.loft_profiles_xyz.size() != record.loft_holes_xyz.size()) return false;
+    const std::size_t stations = record.loft_profiles_xyz.size();
+    const std::size_t hole_count = record.loft_holes_xyz.front().size();
+    const std::size_t outer_count = record.loft_profiles_xyz.front().size();
+    if (outer_count < 3 || outer_count > static_cast<std::size_t>(std::numeric_limits<int>::max() / 64)) return false;
+    std::vector<std::size_t> ring_counts {outer_count};
+    for (const auto& hole : record.loft_holes_xyz.front()) {
+        if (hole.size() < 3) return false;
+        ring_counts.push_back(hole.size());
+    }
+    std::size_t section_size = 0;
+    for (const auto count : ring_counts) {
+        if (count > static_cast<std::size_t>(std::numeric_limits<int>::max()) - section_size) return false;
+        section_size += count;
+    }
+    if (section_size > static_cast<std::size_t>(std::numeric_limits<int>::max()) / stations) return false;
+
+    const auto ring_center = [](std::span<const Point3> ring) {
+        Point3 center {};
+        for (const auto& p : ring) {
+            center.x += p.x;
+            center.y += p.y;
+            center.z += p.z;
+        }
+        const Scalar inverse = 1.0 / static_cast<Scalar>(ring.size());
+        return Point3 {center.x * inverse, center.y * inverse, center.z * inverse};
+    };
+    const Point3 first_center = ring_center(record.loft_profiles_xyz.front());
+    const Point3 last_center = ring_center(record.loft_profiles_xyz.back());
+    const Vec3 center_span = subtract(last_center, first_center);
+    const Scalar center_span_length = norm(center_span);
+    if (!std::isfinite(center_span_length) || center_span_length <= 1e-14) return false;
+    const Vec3 first_raw_normal = newell_normal_unnormalized_poly(record.loft_profiles_xyz.front());
+    const Scalar first_normal_length = norm(first_raw_normal);
+    if (!std::isfinite(first_normal_length) || first_normal_length <= 1e-14) return false;
+    Vec3 loft_axis = scale(first_raw_normal, 1.0 / first_normal_length);
+    if (dot(loft_axis, center_span) < 0.0) loft_axis = scale(loft_axis, -1.0);
+    const Scalar transverse_span = dot(center_span, loft_axis);
+    if (!std::isfinite(transverse_span) || transverse_span <= 1e-14) return false;
+    const Scalar plane_tol = std::max(Scalar(1e-7), state.config.tolerance.linear * Scalar(100.0));
+
+    std::vector<std::vector<Point3>> sections;
+    std::vector<std::vector<std::pair<int, int>>> section_boundaries;
+    std::vector<std::vector<std::array<int, 3>>> section_caps;
+    std::vector<Vec3> section_normals;
+    sections.reserve(stations);
+    section_boundaries.reserve(stations);
+    section_caps.reserve(stations);
+    section_normals.reserve(stations);
+    Scalar previous_high = -std::numeric_limits<Scalar>::infinity();
+    for (std::size_t station = 0; station < stations; ++station) {
+        const auto& outer = record.loft_profiles_xyz[station];
+        const auto& holes = record.loft_holes_xyz[station];
+        if (outer.size() != outer_count || holes.size() != hole_count) return false;
+        for (std::size_t hole = 0; hole < hole_count; ++hole) {
+            if (holes[hole].size() != ring_counts[hole + 1]) return false;
+        }
+        const Vec3 raw_normal = newell_normal_unnormalized_poly(outer);
+        const Scalar normal_length = norm(raw_normal);
+        if (!std::isfinite(normal_length) || normal_length <= 1e-14) return false;
+        Vec3 normal = scale(raw_normal, 1.0 / normal_length);
+        Scalar alignment = dot(normal, loft_axis);
+        if (!std::isfinite(alignment) || std::abs(alignment) < 0.25) return false;
+        if (alignment < 0.0) normal = scale(normal, -1.0);
+        std::vector<Point3> points;
+        std::vector<std::pair<int, int>> boundary;
+        std::vector<std::array<int, 3>> caps;
+        if (!triangulate_extrude_region(outer, holes, normal, plane_tol, points, boundary, caps) ||
+            points.size() != section_size || boundary.size() != section_size || caps.empty()) return false;
+        if (!section_boundaries.empty() && boundary != section_boundaries.front()) return false;
+        Scalar low = std::numeric_limits<Scalar>::infinity();
+        Scalar high = -low;
+        for (const auto& p : points) {
+            const Scalar level = dot(subtract(p, first_center), loft_axis);
+            if (!std::isfinite(level)) return false;
+            low = std::min(low, level);
+            high = std::max(high, level);
+        }
+        // Order sections along the first section's transverse normal, not the
+        // center-to-center vector: a valid loft may translate or shear laterally.
+        // Nonoverlapping slabs still conservatively reject reversed/crossing stations.
+        if (station != 0 && low <= previous_high + plane_tol) return false;
+        previous_high = high;
+        sections.push_back(std::move(points));
+        section_boundaries.push_back(std::move(boundary));
+        section_caps.push_back(std::move(caps));
+        section_normals.push_back(normal);
+    }
+
+    // Check three interior sections of every ruled interval. This admits coherent
+    // translation/scale/rotation and concave or holed morphs while rejecting the
+    // common correspondence twists that only look valid at their endpoints.
+    for (std::size_t station = 0; station + 1 < stations; ++station) {
+        for (const Scalar t : {Scalar(0.25), Scalar(0.5), Scalar(0.75)}) {
+            std::vector<std::vector<Point3>> rings(ring_counts.size());
+            std::size_t offset = 0;
+            for (std::size_t ring = 0; ring < ring_counts.size(); ++ring) {
+                rings[ring].reserve(ring_counts[ring]);
+                for (std::size_t i = 0; i < ring_counts[ring]; ++i) {
+                    const auto& a = sections[station][offset + i];
+                    const auto& b = sections[station + 1][offset + i];
+                    rings[ring].push_back({a.x + t * (b.x - a.x),
+                                           a.y + t * (b.y - a.y),
+                                           a.z + t * (b.z - a.z)});
+                }
+                offset += ring_counts[ring];
+            }
+            const Vec3 blended_normal {
+                (1.0 - t) * section_normals[station].x + t * section_normals[station + 1].x,
+                (1.0 - t) * section_normals[station].y + t * section_normals[station + 1].y,
+                (1.0 - t) * section_normals[station].z + t * section_normals[station + 1].z};
+            if (norm(blended_normal) <= 1e-14) return false;
+            std::vector<std::vector<Point3>> holes(rings.begin() + 1, rings.end());
+            std::vector<Point3> points;
+            std::vector<std::pair<int, int>> boundary;
+            std::vector<std::array<int, 3>> caps;
+            if (!triangulate_extrude_region(rings.front(), holes, normalize(blended_normal), plane_tol,
+                                            points, boundary, caps) ||
+                points.size() != section_size || boundary != section_boundaries.front()) return false;
+        }
+    }
+
+    std::vector<Point3> positions;
+    positions.reserve(section_size * stations);
+    for (const auto& section : sections) positions.insert(positions.end(), section.begin(), section.end());
+    const int last = static_cast<int>((stations - 1) * section_size);
+    std::vector<std::array<int, 3>> triangles;
+    triangles.reserve(section_caps.front().size() + section_caps.back().size() +
+                      2 * section_size * (stations - 1));
+    for (const auto& cap : section_caps.front()) triangles.push_back({cap[0], cap[2], cap[1]});
+    for (const auto& cap : section_caps.back()) triangles.push_back({last + cap[0], last + cap[1], last + cap[2]});
+    for (std::size_t station = 0; station + 1 < stations; ++station) {
+        const int lo = static_cast<int>(station * section_size);
+        const int hi = static_cast<int>((station + 1) * section_size);
+        for (const auto& [i, j] : section_boundaries.front()) {
+            triangles.push_back({lo + i, lo + j, hi + j});
+            triangles.push_back({lo + i, hi + j, hi + i});
+        }
+    }
+    Scalar coordinate_scale = 1.0;
+    for (const auto& p : positions) {
+        if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) return false;
+        coordinate_scale = std::max({coordinate_scale, std::abs(p.x), std::abs(p.y), std::abs(p.z)});
+    }
+    const Scalar triangle_tol = std::max(Scalar(1e-20), Scalar(256) *
+        std::numeric_limits<Scalar>::epsilon() * coordinate_scale * coordinate_scale);
+    std::map<std::pair<int, int>, int> edge_use_count;
+    for (const auto& triangle : triangles) {
+        const Scalar area2 = norm(cross(subtract(positions[triangle[1]], positions[triangle[0]]),
+                                        subtract(positions[triangle[2]], positions[triangle[0]])));
+        if (!std::isfinite(area2) || area2 <= triangle_tol) return false;
+        for (int i = 0; i < 3; ++i) {
+            const int a = triangle[static_cast<std::size_t>(i)];
+            const int b = triangle[static_cast<std::size_t>((i + 1) % 3)];
+            ++edge_use_count[{std::min(a, b), std::max(a, b)}];
+        }
+    }
+    if (triangles.empty() || edge_use_count.empty() ||
+        std::any_of(edge_use_count.begin(), edge_use_count.end(),
+                    [](const auto& item) { return item.second != 2; })) return false;
+
+    std::vector<Point3> local_positions;
+    local_positions.reserve(positions.size());
+    for (const auto& p : positions) {
+        const Vec3 local = subtract(p, first_center);
+        local_positions.push_back({local.x, local.y, local.z});
+    }
+    Scalar volume = 0.0, surface_area = 0.0;
+    Point3 centroid {};
+    std::array<Scalar, 9> inertia {};
+    polyhedral_mass_properties_from_triangles(local_positions, triangles, volume, centroid, inertia, surface_area);
+    if (!(volume > 1e-18)) {
+        for (auto& triangle : triangles) std::swap(triangle[1], triangle[2]);
+        polyhedral_mass_properties_from_triangles(local_positions, triangles, volume, centroid, inertia, surface_area);
+    }
+    centroid = add_point_vec(first_center, {centroid.x, centroid.y, centroid.z});
+    if (!(volume > 1e-18) || !std::isfinite(volume) || !(surface_area > 0.0) ||
+        !std::isfinite(surface_area) || !std::isfinite(centroid.x) || !std::isfinite(centroid.y) ||
+        !std::isfinite(centroid.z) ||
+        !std::all_of(inertia.begin(), inertia.end(), [](Scalar value) { return std::isfinite(value); })) return false;
+    const Scalar inertia_scale = std::max({Scalar(1.0), std::abs(inertia[0]), std::abs(inertia[4]), std::abs(inertia[8])});
+    const Scalar inertia_tol = Scalar(1024) * std::numeric_limits<Scalar>::epsilon() * inertia_scale;
+    if (inertia[0] < -inertia_tol || inertia[4] < -inertia_tol || inertia[8] < -inertia_tol ||
+        std::abs(inertia[1] - inertia[3]) > inertia_tol ||
+        std::abs(inertia[2] - inertia[6]) > inertia_tol ||
+        std::abs(inertia[5] - inertia[7]) > inertia_tol) return false;
+
+    BoundingBox bbox {};
+    for (const auto& p : positions) extend_materialization_bbox(bbox, p);
+    if (!bbox.is_valid) return false;
+    const Scalar bbox_tol = Scalar(256) * std::numeric_limits<Scalar>::epsilon() * coordinate_scale;
+    if (centroid.x < bbox.min.x - bbox_tol || centroid.x > bbox.max.x + bbox_tol ||
+        centroid.y < bbox.min.y - bbox_tol || centroid.y > bbox.max.y + bbox_tol ||
+        centroid.z < bbox.min.z - bbox_tol || centroid.z > bbox.max.z + bbox_tol) return false;
+
+    std::vector<VertexId> vertices(positions.size());
+    for (std::size_t i = 0; i < positions.size(); ++i) {
+        vertices[i] = VertexId {state.allocate_id()};
+        state.vertices.emplace(vertices[i].value, VertexRecord {positions[i]});
+    }
+    std::vector<EdgeId> edges;
+    std::map<std::pair<int, int>, int> edge_to_index;
+    const auto edge_index_for_pair = [&](int a, int b) -> int {
+        const auto key = std::make_pair(std::min(a, b), std::max(a, b));
+        if (const auto found = edge_to_index.find(key); found != edge_to_index.end()) return found->second;
+        const auto curve = create_materialized_line(state, positions[static_cast<std::size_t>(key.first)],
+                                                    positions[static_cast<std::size_t>(key.second)]);
+        const auto edge = EdgeId {state.allocate_id()};
+        state.edges.emplace(edge.value, EdgeRecord {curve, vertices[static_cast<std::size_t>(key.first)],
+                                                    vertices[static_cast<std::size_t>(key.second)]});
+        const int index = static_cast<int>(edges.size());
+        edges.push_back(edge);
+        edge_to_index.emplace(key, index);
+        return index;
+    };
+    const auto source_faces = std::span<const FaceId>(record.source_faces);
+    std::vector<FaceId> faces;
+    faces.reserve(triangles.size());
+    for (const auto& triangle : triangles) {
+        std::array<std::pair<int, bool>, 3> refs {};
+        for (int i = 0; i < 3; ++i) {
+            const int a = triangle[static_cast<std::size_t>(i)];
+            const int b = triangle[static_cast<std::size_t>((i + 1) % 3)];
+            refs[static_cast<std::size_t>(i)] = {edge_index_for_pair(a, b), a > b};
+        }
+        const Vec3 normal = cross(subtract(positions[triangle[1]], positions[triangle[0]]),
+                                  subtract(positions[triangle[2]], positions[triangle[0]]));
+        faces.push_back(create_materialized_polygon_face(
+            state, edges, std::span<const std::pair<int, bool>>(refs), normal, source_faces));
+    }
+    const auto shell_id = ShellId {state.allocate_id()};
+    ShellRecord shell;
+    shell.faces = std::move(faces);
+    shell.source_shells = record.source_shells;
+    shell.source_faces = record.source_faces.empty() ? shell.faces : record.source_faces;
+    state.shells.emplace(shell_id.value, std::move(shell));
+    record.shells.push_back(shell_id);
+    record.bbox = bbox;
+    record.axis = loft_axis;
+    record.b = transverse_span;
+    record.sweep_polyhedral_mass_valid = true;
+    record.sweep_polyhedral_volume = volume;
+    record.sweep_cached_surface_area = surface_area;
+    record.sweep_polyhedral_centroid = centroid;
+    record.sweep_inertia_about_centroid = inertia;
+    record.a = volume;
+    record.extrude_mass_centroid = centroid;
+    record.extrude_poly_cap_area = 0.0;
+    for (const auto& cap : section_caps.front()) record.extrude_poly_cap_area += 0.5 * norm(cross(
+        subtract(positions[cap[1]], positions[cap[0]]), subtract(positions[cap[2]], positions[cap[0]])));
+    Scalar end_area = 0.0;
+    for (const auto& cap : section_caps.back()) end_area += 0.5 * norm(cross(
+        subtract(positions[last + cap[1]], positions[last + cap[0]]),
+        subtract(positions[last + cap[2]], positions[last + cap[0]])));
+    record.extrude_lateral_area = surface_area - record.extrude_poly_cap_area - end_area;
+    return true;
+}
+
 /// 显式平面多边形随采样曲线的旋转最小标架扫掠。开放导轨生成两端盖，整圆/闭合样条导轨周期闭合；
 /// 凹截面和孔复用约束区域剖分。先验证完整三角闭壳、质量和舍入坐标，再一次性分配对象。
 inline bool try_materialize_sweep_curve_frame_body(KernelState& state, BodyRecord& record) {
@@ -2218,7 +2481,124 @@ inline bool try_materialize_sweep_curve_frame_body(KernelState& state, BodyRecor
     return true;
 }
 
-/// 简单子午面多边形的整周旋转。轮廓与轴分离时形成环形闭壳；轮廓仅有一条边在轴上时，
+struct RevolveProfileRegion {
+    Vec3 normal {};
+    Vec3 radial_direction {};
+    std::vector<Point3> points;
+    std::vector<std::pair<int, int>> boundary;
+    std::vector<std::array<int, 3>> caps;
+    std::vector<Scalar> signed_radius;
+    std::vector<bool> on_axis;
+    Scalar snap_tolerance {0.0};
+};
+
+/// Validate and flatten a meridian polygonal region before a revolution allocates
+/// topology. Hole winding is immaterial; the region triangulator normalizes the
+/// outer/hole orientations and rejects intersections, nesting and touching rings.
+/// A holed region must remain wholly off axis. The axis-edge solid special case is
+/// retained for a single outer ring only.
+inline bool prepare_revolve_profile_region(const KernelState& state, const BodyRecord& record,
+                                           std::size_t station_limit, RevolveProfileRegion& region) {
+    region = {};
+    const auto& outer = record.revolve_profile_xyz;
+    if (outer.size() < 3 || station_limit == 0 ||
+        outer.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()) / station_limit) {
+        return false;
+    }
+    const Vec3 axis = normalize(record.axis);
+    if (!std::isfinite(axis.x) || !std::isfinite(axis.y) || !std::isfinite(axis.z) || norm(axis) <= 1e-14 ||
+        !std::isfinite(record.origin.x) || !std::isfinite(record.origin.y) || !std::isfinite(record.origin.z)) {
+        return false;
+    }
+    const auto raw_normal = newell_normal_unnormalized_poly(
+        std::span<const Point3>(outer.data(), outer.size()));
+    const Scalar normal_length = norm(raw_normal);
+    if (!std::isfinite(normal_length) || normal_length <= 1e-14) return false;
+    region.normal = scale(raw_normal, 1.0 / normal_length);
+    const Scalar plane_tol = std::max(Scalar(1e-7), state.config.tolerance.linear * Scalar(100.0));
+    if (std::abs(dot(axis, region.normal)) > 1e-7 ||
+        std::abs(dot(region.normal, subtract(record.origin, outer.front()))) > plane_tol) {
+        return false;
+    }
+
+    if (record.revolve_holes_xyz.empty()) {
+        region.points = outer;
+        if (!triangulate_extrude_profile(
+                std::span<const Point3>(outer.data(), outer.size()), region.normal, region.caps)) {
+            return false;
+        }
+        for (int i = 0; i < static_cast<int>(outer.size()); ++i) {
+            region.boundary.emplace_back(i, (i + 1) % static_cast<int>(outer.size()));
+        }
+    } else if (!triangulate_extrude_region(outer, record.revolve_holes_xyz, region.normal, plane_tol,
+                                           region.points, region.boundary, region.caps)) {
+        return false;
+    }
+    if (region.points.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()) / station_limit) {
+        return false;
+    }
+
+    Scalar coordinate_scale = 1.0;
+    for (const auto& point : region.points) {
+        if (!std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z) ||
+            std::abs(dot(region.normal, subtract(point, outer.front()))) > plane_tol) {
+            return false;
+        }
+        coordinate_scale = std::max({coordinate_scale, std::abs(point.x - record.origin.x),
+                                     std::abs(point.y - record.origin.y),
+                                     std::abs(point.z - record.origin.z)});
+    }
+    region.radial_direction = normalize(cross(region.normal, axis));
+    if (norm(region.radial_direction) <= 1e-14) return false;
+    region.snap_tolerance = std::max(
+        Scalar(1e-12), Scalar(128) * std::numeric_limits<Scalar>::epsilon() * coordinate_scale);
+    const Scalar clearance_tol = std::max(Scalar(1e-8), state.config.tolerance.linear * Scalar(10.0));
+    region.signed_radius.resize(region.points.size());
+    bool positive = false;
+    bool negative = false;
+    for (std::size_t i = 0; i < region.points.size(); ++i) {
+        const Vec3 offset = subtract(region.points[i], record.origin);
+        region.signed_radius[i] = dot(offset, region.radial_direction);
+        const auto axial = scale(axis, dot(offset, axis));
+        const Vec3 radial {offset.x - axial.x, offset.y - axial.y, offset.z - axial.z};
+        const Scalar distance = norm(radial);
+        if (!std::isfinite(distance) ||
+            std::abs(distance - std::abs(region.signed_radius[i])) > plane_tol) {
+            return false;
+        }
+        positive = positive || region.signed_radius[i] > region.snap_tolerance;
+        negative = negative || region.signed_radius[i] < -region.snap_tolerance;
+    }
+    if (positive && negative) return false;
+    if (negative) {
+        region.radial_direction = scale(region.radial_direction, -1.0);
+        for (auto& radius : region.signed_radius) radius = -radius;
+    }
+
+    region.on_axis.assign(region.points.size(), false);
+    std::vector<int> axis_vertices;
+    for (std::size_t i = 0; i < region.points.size(); ++i) {
+        if (std::abs(region.signed_radius[i]) <= region.snap_tolerance) {
+            region.on_axis[i] = true;
+            axis_vertices.push_back(static_cast<int>(i));
+        } else if (region.signed_radius[i] < clearance_tol) {
+            return false;
+        }
+    }
+    if (!axis_vertices.empty()) {
+        if (!record.revolve_holes_xyz.empty() || axis_vertices.size() != 2) return false;
+        const int a = axis_vertices[0];
+        const int b = axis_vertices[1];
+        const bool has_axis_edge = std::any_of(
+            region.boundary.begin(), region.boundary.end(), [a, b](const auto& edge) {
+                return (edge.first == a && edge.second == b) || (edge.first == b && edge.second == a);
+            });
+        if (!has_axis_edge) return false;
+    }
+    return !region.points.empty() && !region.boundary.empty() && !region.caps.empty();
+}
+
+/// 子午面多边形区域的整周旋转。轮廓与轴分离时形成环形闭壳；轮廓仅有一条边在轴上时，
 /// 轴上端点在所有角向站共享，该零面积旋转边不生成面。全部验证、剖分和质量积分都在分配对象前完成。
 inline bool try_materialize_sweep_revolve_full_body(KernelState& state, BodyRecord& record) {
     if (record.kind != BodyKind::Sweep || record.rep_kind != RepKind::ExactBRep || !record.bbox.is_valid ||
@@ -2228,82 +2608,20 @@ inline bool try_materialize_sweep_revolve_full_body(KernelState& state, BodyReco
     }
     constexpr Scalar kPi = 3.1415926535897932384626433832795;
     constexpr int kStations = 48;
-    const auto& poly = record.revolve_profile_xyz;
-    if (poly.size() < 3 || poly.size() > static_cast<std::size_t>(std::numeric_limits<int>::max() / kStations)) {
-        return false;
-    }
     const Vec3 u = normalize(record.axis);
-    if (!std::isfinite(u.x) || !std::isfinite(u.y) || !std::isfinite(u.z) || norm(u) <= 1e-14 ||
-        !std::isfinite(record.origin.x) || !std::isfinite(record.origin.y) || !std::isfinite(record.origin.z)) {
-        return false;
-    }
-    const auto raw_normal = newell_normal_unnormalized_poly(std::span<const Point3>(poly.data(), poly.size()));
-    const auto normal_length = norm(raw_normal);
-    if (!std::isfinite(normal_length) || normal_length <= 1e-14) return false;
-    const Vec3 profile_normal = scale(raw_normal, 1.0 / normal_length);
-    const Scalar plane_tol = std::max(Scalar(1e-7), state.config.tolerance.linear * Scalar(100.0));
-    if (std::abs(dot(u, profile_normal)) > 1e-7 ||
-        std::abs(dot(profile_normal, subtract(record.origin, poly.front()))) > plane_tol) {
-        return false;
-    }
-    Scalar coordinate_scale = 1.0;
-    for (const auto& p : poly) {
-        if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z) ||
-            std::abs(dot(profile_normal, subtract(p, poly.front()))) > plane_tol) return false;
-        coordinate_scale = std::max({coordinate_scale, std::abs(p.x - record.origin.x),
-                                     std::abs(p.y - record.origin.y), std::abs(p.z - record.origin.z)});
-    }
-    std::vector<std::array<int, 3>> profile_triangles;
-    if (!triangulate_extrude_profile(std::span<const Point3>(poly.data(), poly.size()),
-                                     profile_normal, profile_triangles)) return false;
+    RevolveProfileRegion region;
+    if (!prepare_revolve_profile_region(state, record, kStations, region)) return false;
+    const auto& points = region.points;
+    const auto& on_axis = region.on_axis;
+    const Scalar snap_tol = region.snap_tolerance;
 
-    Vec3 radial_direction = normalize(cross(profile_normal, u));
-    if (norm(radial_direction) <= 1e-14) return false;
-    const Scalar snap_tol = std::max(Scalar(1e-12), Scalar(128) * std::numeric_limits<Scalar>::epsilon() * coordinate_scale);
-    const Scalar clearance_tol = std::max(Scalar(1e-8), state.config.tolerance.linear * Scalar(10.0));
-    std::vector<Scalar> signed_radius(poly.size());
-    bool positive = false, negative = false;
-    for (std::size_t i = 0; i < poly.size(); ++i) {
-        const auto offset = subtract(poly[i], record.origin);
-        signed_radius[i] = dot(offset, radial_direction);
-        const auto axial = scale(u, dot(offset, u));
-        const Vec3 radial {offset.x - axial.x, offset.y - axial.y, offset.z - axial.z};
-        const auto distance = norm(radial);
-        if (!std::isfinite(distance) || std::abs(distance - std::abs(signed_radius[i])) > plane_tol) return false;
-        positive = positive || signed_radius[i] > snap_tol;
-        negative = negative || signed_radius[i] < -snap_tol;
-    }
-    if (positive && negative) return false;
-    if (negative) {
-        radial_direction = scale(radial_direction, -1.0);
-        for (auto& r : signed_radius) r = -r;
-    }
-    std::vector<bool> on_axis(poly.size(), false);
-    std::vector<int> axis_vertices;
-    for (std::size_t i = 0; i < poly.size(); ++i) {
-        if (std::abs(signed_radius[i]) <= snap_tol) {
-            on_axis[i] = true;
-            axis_vertices.push_back(static_cast<int>(i));
-        } else if (signed_radius[i] < clearance_tol) {
-            // Do not turn a near-axis sliver into a periodic shell whose angular
-            // edges collapse at the modeling tolerance.
-            return false;
-        }
-    }
-    if (!axis_vertices.empty()) {
-        if (axis_vertices.size() != 2) return false;
-        const int a = axis_vertices[0], b = axis_vertices[1];
-        const int count = static_cast<int>(poly.size());
-        if ((a + 1) % count != b && (b + 1) % count != a) return false;
-    }
-
-    const int n = static_cast<int>(poly.size());
+    const int n = static_cast<int>(points.size());
     std::vector<Point3> positions;
     positions.reserve(static_cast<std::size_t>(kStations * n));
     std::vector<int> vertex_at(static_cast<std::size_t>(kStations * n), -1);
     for (int i = 0; i < n; ++i) {
         if (!on_axis[static_cast<std::size_t>(i)]) continue;
-        const auto offset = subtract(poly[static_cast<std::size_t>(i)], record.origin);
+        const auto offset = subtract(points[static_cast<std::size_t>(i)], record.origin);
         const auto projected = add_point_vec(record.origin, scale(u, dot(offset, u)));
         const int index = static_cast<int>(positions.size());
         positions.push_back(projected);
@@ -2316,7 +2634,7 @@ inline bool try_materialize_sweep_revolve_full_body(KernelState& state, BodyReco
         const Scalar cosine = std::cos(angle), sine = std::sin(angle);
         for (int i = 0; i < n; ++i) {
             if (on_axis[static_cast<std::size_t>(i)]) continue;
-            const auto p = rodrigues_rotate_point_revolve(poly[static_cast<std::size_t>(i)], record.origin,
+            const auto p = rodrigues_rotate_point_revolve(points[static_cast<std::size_t>(i)], record.origin,
                                                           u, cosine, sine);
             if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) return false;
             vertex_at[static_cast<std::size_t>(station * n + i)] = static_cast<int>(positions.size());
@@ -2325,7 +2643,7 @@ inline bool try_materialize_sweep_revolve_full_body(KernelState& state, BodyReco
     }
 
     std::vector<std::array<int, 3>> triangles;
-    triangles.reserve(static_cast<std::size_t>(2 * kStations * n));
+    triangles.reserve(2 * static_cast<std::size_t>(kStations) * region.boundary.size());
     const Scalar triangle_area_tol = std::max(Scalar(1e-20), snap_tol * snap_tol);
     const auto append_triangle = [&](int a, int b, int c, std::vector<std::array<int, 3>>& output) {
         if (a == b || b == c || c == a) return true;
@@ -2337,8 +2655,7 @@ inline bool try_materialize_sweep_revolve_full_body(KernelState& state, BodyReco
     };
     for (int station = 0; station < kStations; ++station) {
         const int next_station = (station + 1) % kStations;
-        for (int i = 0; i < n; ++i) {
-            const int next_i = (i + 1) % n;
+        for (const auto& [i, next_i] : region.boundary) {
             if (on_axis[static_cast<std::size_t>(i)] && on_axis[static_cast<std::size_t>(next_i)]) continue;
             const int a = vertex_at[static_cast<std::size_t>(station * n + i)];
             const int b = vertex_at[static_cast<std::size_t>(station * n + next_i)];
@@ -2410,13 +2727,47 @@ inline bool try_materialize_sweep_revolve_full_body(KernelState& state, BodyReco
         faces.push_back(create_materialized_polygon_face(
             state, edges, std::span<const std::pair<int, bool>>(refs), normal, source_faces));
     }
-    const auto shell_id = ShellId {state.allocate_id()};
-    ShellRecord shell;
-    shell.faces = std::move(faces);
-    shell.source_shells = record.source_shells;
-    shell.source_faces = record.source_faces.empty() ? shell.faces : record.source_faces;
-    state.shells.emplace(shell_id.value, std::move(shell));
-    record.shells.push_back(shell_id);
+    // With no start/end cap, each revolved boundary ring is a separate closed
+    // shell. Keep that ownership explicit instead of placing disconnected face
+    // components in one shell record.
+    std::vector<std::size_t> component_parent(triangles.size());
+    for (std::size_t i = 0; i < component_parent.size(); ++i) component_parent[i] = i;
+    const auto component_root = [&](std::size_t face) {
+        while (component_parent[face] != face) {
+            component_parent[face] = component_parent[component_parent[face]];
+            face = component_parent[face];
+        }
+        return face;
+    };
+    std::map<std::pair<int, int>, std::size_t> first_face_of_edge;
+    for (std::size_t face = 0; face < triangles.size(); ++face) {
+        const auto& triangle = triangles[face];
+        for (int i = 0; i < 3; ++i) {
+            const int a = triangle[static_cast<std::size_t>(i)];
+            const int b = triangle[static_cast<std::size_t>((i + 1) % 3)];
+            const auto key = std::make_pair(std::min(a, b), std::max(a, b));
+            const auto [it, inserted] = first_face_of_edge.emplace(key, face);
+            if (!inserted) {
+                const auto lhs = component_root(face);
+                const auto rhs = component_root(it->second);
+                if (lhs != rhs) component_parent[rhs] = lhs;
+            }
+        }
+    }
+    std::map<std::size_t, std::vector<FaceId>> shell_faces;
+    for (std::size_t face = 0; face < faces.size(); ++face) {
+        shell_faces[component_root(face)].push_back(faces[face]);
+    }
+    for (auto& [component, connected_faces] : shell_faces) {
+        (void)component;
+        const auto shell_id = ShellId {state.allocate_id()};
+        ShellRecord shell;
+        shell.faces = std::move(connected_faces);
+        shell.source_shells = record.source_shells;
+        shell.source_faces = record.source_faces.empty() ? shell.faces : record.source_faces;
+        state.shells.emplace(shell_id.value, std::move(shell));
+        record.shells.push_back(shell_id);
+    }
     record.bbox = bbox;
     record.sweep_polyhedral_mass_valid = true;
     record.sweep_polyhedral_volume = volume;
@@ -2427,8 +2778,8 @@ inline bool try_materialize_sweep_revolve_full_body(KernelState& state, BodyReco
     return true;
 }
 
-/// 子午面闭合多边形绕其平面内轴旋转 `< 2π`。角向按与整周旋转相同的上限分段，
-/// 每段生成真实直纹三角侧壁，首尾用约束多边形剖分封盖。轮廓可与轴分离，或仅以一条
+/// 子午面闭合多边形区域绕其平面内轴旋转 `< 2π`。角向按与整周旋转相同的上限分段，
+/// 每段生成真实直纹三角侧壁，首尾用约束带孔区域剖分封盖。轮廓可与轴分离，或仅以一条
 /// 连续边接触轴；轴上顶点跨站共享，避免产生零长边和退化侧壁。全部几何、流形和质量
 /// 检查均在分配内核对象之前完成，因此拒绝路径不会污染模型或活动事务。
 inline bool try_materialize_sweep_revolve_meridian_body(KernelState& state, BodyRecord& record) {
@@ -2441,85 +2792,29 @@ inline bool try_materialize_sweep_revolve_meridian_body(KernelState& state, Body
     }
     constexpr Scalar kPi = 3.1415926535897932384626433832795;
     constexpr int kFullTurnSegments = 48;
-    const auto& poly = record.revolve_profile_xyz;
-    if (poly.size() < 3 || poly.size() > static_cast<std::size_t>(std::numeric_limits<int>::max() /
-                                                                  (kFullTurnSegments + 1))) return false;
-    const int n = static_cast<int>(poly.size());
     const Scalar ang = record.b;
     const Scalar two_pi = 2.0 * kPi;
     if (!std::isfinite(ang) || !(ang > 0.0) || ang >= two_pi - 1e-10) return false;
-    const auto n_raw = newell_normal_unnormalized_poly(std::span<const Point3>(poly.data(), poly.size()));
-    const Scalar normal_length = norm(n_raw);
-    if (!std::isfinite(normal_length) || normal_length <= 1e-14) return false;
-    const auto n_unit = normalize(n_raw);
     const auto u = normalize(record.axis);
     const Point3 O = record.origin;
-    if (!std::isfinite(u.x) || !std::isfinite(u.y) || !std::isfinite(u.z) || norm(u) <= 1e-14 ||
-        !std::isfinite(O.x) || !std::isfinite(O.y) || !std::isfinite(O.z)) return false;
-    const Scalar plane_tol = std::max(Scalar(1e-7), state.config.tolerance.linear * Scalar(100.0));
-    if (std::abs(dot(u, n_unit)) > 1e-7 ||
-        std::abs(dot(n_unit, subtract(O, poly.front()))) > plane_tol) return false;
-
-    Scalar coordinate_scale = 1.0;
-    for (const auto& p : poly) {
-        if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z) ||
-            std::abs(dot(n_unit, subtract(p, poly.front()))) > plane_tol) return false;
-        coordinate_scale = std::max({coordinate_scale, std::abs(p.x - O.x),
-                                     std::abs(p.y - O.y), std::abs(p.z - O.z)});
-    }
-    std::vector<std::array<int, 3>> cap_triangles;
-    if (!triangulate_extrude_profile(std::span<const Point3>(poly.data(), poly.size()),
-                                     n_unit, cap_triangles)) return false;
-
-    Vec3 radial_direction = normalize(cross(n_unit, u));
-    if (norm(radial_direction) <= 1e-14) return false;
-    const Scalar snap_tol = std::max(Scalar(1e-12), Scalar(128) *
-        std::numeric_limits<Scalar>::epsilon() * coordinate_scale);
-    const Scalar clearance_tol = std::max(Scalar(1e-8), state.config.tolerance.linear * Scalar(10.0));
-    std::vector<Scalar> signed_radius(poly.size());
-    bool positive = false, negative = false;
-    for (int i = 0; i < n; ++i) {
-        const auto offset = subtract(poly[static_cast<std::size_t>(i)], O);
-        signed_radius[static_cast<std::size_t>(i)] = dot(offset, radial_direction);
-        const auto axial = scale(u, dot(offset, u));
-        const Vec3 radial {offset.x - axial.x, offset.y - axial.y, offset.z - axial.z};
-        const Scalar distance = norm(radial);
-        if (!std::isfinite(distance) ||
-            std::abs(distance - std::abs(signed_radius[static_cast<std::size_t>(i)])) > plane_tol) return false;
-        positive = positive || signed_radius[static_cast<std::size_t>(i)] > snap_tol;
-        negative = negative || signed_radius[static_cast<std::size_t>(i)] < -snap_tol;
-    }
-    if (positive && negative) return false;
-    if (negative) {
-        radial_direction = scale(radial_direction, -1.0);
-        for (auto& radius : signed_radius) radius = -radius;
-    }
-    std::vector<bool> on_axis(poly.size(), false);
-    std::vector<int> axis_vertices;
-    for (int i = 0; i < n; ++i) {
-        const Scalar radius = signed_radius[static_cast<std::size_t>(i)];
-        if (std::abs(radius) <= snap_tol) {
-            on_axis[static_cast<std::size_t>(i)] = true;
-            axis_vertices.push_back(i);
-        } else if (radius < clearance_tol) {
-            return false;
-        }
-    }
-    if (!axis_vertices.empty()) {
-        if (axis_vertices.size() != 2) return false;
-        const int a = axis_vertices[0], b = axis_vertices[1];
-        if ((a + 1) % n != b && (b + 1) % n != a) return false;
-    }
-
     const int segment_count = std::max(1, static_cast<int>(std::ceil(
         ang / (two_pi / static_cast<Scalar>(kFullTurnSegments)))));
     const int station_count = segment_count + 1;
+    RevolveProfileRegion region;
+    if (!prepare_revolve_profile_region(state, record, static_cast<std::size_t>(station_count), region)) {
+        return false;
+    }
+    const auto& points = region.points;
+    const auto& on_axis = region.on_axis;
+    const auto& cap_triangles = region.caps;
+    const Scalar snap_tol = region.snap_tolerance;
+    const int n = static_cast<int>(points.size());
     std::vector<Point3> pos;
     pos.reserve(static_cast<std::size_t>(station_count * n));
     std::vector<int> vertex_at(static_cast<std::size_t>(station_count * n), -1);
     for (int i = 0; i < n; ++i) {
         if (!on_axis[static_cast<std::size_t>(i)]) continue;
-        const auto offset = subtract(poly[static_cast<std::size_t>(i)], O);
+        const auto offset = subtract(points[static_cast<std::size_t>(i)], O);
         const Point3 projected = add_point_vec(O, scale(u, dot(offset, u)));
         const int index = static_cast<int>(pos.size());
         pos.push_back(projected);
@@ -2532,7 +2827,7 @@ inline bool try_materialize_sweep_revolve_meridian_body(KernelState& state, Body
         const Scalar cosine = std::cos(station_angle), sine = std::sin(station_angle);
         for (int i = 0; i < n; ++i) {
             if (on_axis[static_cast<std::size_t>(i)]) continue;
-            const auto p = rodrigues_rotate_point_revolve(poly[static_cast<std::size_t>(i)], O, u, cosine, sine);
+            const auto p = rodrigues_rotate_point_revolve(points[static_cast<std::size_t>(i)], O, u, cosine, sine);
             if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) return false;
             vertex_at[static_cast<std::size_t>(station * n + i)] = static_cast<int>(pos.size());
             pos.push_back(p);
@@ -2540,7 +2835,8 @@ inline bool try_materialize_sweep_revolve_meridian_body(KernelState& state, Body
     }
 
     std::vector<std::array<int, 3>> tris;
-    tris.reserve(static_cast<std::size_t>(2 * segment_count * n + 2 * cap_triangles.size()));
+    tris.reserve(2 * static_cast<std::size_t>(segment_count) * region.boundary.size() +
+                 2 * cap_triangles.size());
     const Scalar triangle_area_tol = std::max(Scalar(1e-20), snap_tol * snap_tol);
     const auto append_triangle = [&](int a, int b, int c) {
         if (a == b || b == c || c == a) return true;
@@ -2551,8 +2847,7 @@ inline bool try_materialize_sweep_revolve_meridian_body(KernelState& state, Body
         return true;
     };
     for (int station = 0; station < segment_count; ++station) {
-        for (int i = 0; i < n; ++i) {
-            const int next_i = (i + 1) % n;
+        for (const auto& [i, next_i] : region.boundary) {
             if (on_axis[static_cast<std::size_t>(i)] && on_axis[static_cast<std::size_t>(next_i)]) continue;
             const int a = vertex_at[static_cast<std::size_t>(station * n + i)];
             const int b = vertex_at[static_cast<std::size_t>(station * n + next_i)];
