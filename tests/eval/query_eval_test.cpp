@@ -809,6 +809,179 @@ bool topology_mass_properties_regression() {
                     axiom::diag_codes::kCoreInvalidHandle)) return false;
     }
 
+    // Strict nesting alternates material, void and material-island roles.  The
+    // shell order is intentionally not spatial order, proving that depth is
+    // derived from geometry rather than body insertion order or shell winding.
+    const auto nesting_outer = kernel.primitives().box({0, 0, 0}, 10, 10, 10);
+    const auto nesting_void = kernel.primitives().box({2, 2, 2}, 6, 6, 6);
+    const auto nesting_island = kernel.primitives().box({4, 4, 4}, 2, 2, 2);
+    const auto outer_shells = nesting_outer.value
+        ? topo.shells_of_body(*nesting_outer.value)
+        : axiom::Result<std::vector<axiom::ShellId>>{};
+    const auto void_shells = nesting_void.value
+        ? topo.shells_of_body(*nesting_void.value)
+        : axiom::Result<std::vector<axiom::ShellId>>{};
+    const auto island_shells = nesting_island.value
+        ? topo.shells_of_body(*nesting_island.value)
+        : axiom::Result<std::vector<axiom::ShellId>>{};
+    if (!outer_shells.value || !void_shells.value || !island_shells.value ||
+        outer_shells.value->size() != 1 || void_shells.value->size() != 1 ||
+        island_shells.value->size() != 1) return false;
+    {
+        auto txn = kernel.topology().begin_transaction();
+        const std::array nested_shells{island_shells.value->front(),
+                                       outer_shells.value->front(),
+                                       void_shells.value->front()};
+        const auto nested = txn.create_body(nested_shells);
+        if (!nested.value) return false;
+        const auto regions = topo.body_shell_regions(*nested.value);
+        const auto properties = topo.body_mass_properties(*nested.value);
+        if (!regions.value || regions.value->size() != 3 || !properties.value ||
+            (*regions.value)[0].shell.value != island_shells.value->front().value ||
+            (*regions.value)[0].role != axiom::BodyShellRole::Material ||
+            (*regions.value)[0].nesting_depth != 2 ||
+            !(*regions.value)[0].parent_shell ||
+            (*regions.value)[0].parent_shell->value != void_shells.value->front().value ||
+            (*regions.value)[1].role != axiom::BodyShellRole::Material ||
+            (*regions.value)[1].nesting_depth != 0 ||
+            (*regions.value)[1].parent_shell ||
+            (*regions.value)[2].role != axiom::BodyShellRole::Void ||
+            (*regions.value)[2].nesting_depth != 1 ||
+            !(*regions.value)[2].parent_shell ||
+            (*regions.value)[2].parent_shell->value != outer_shells.value->front().value ||
+            !close(properties.value->volume, 792) ||
+            !close(properties.value->area, 840) ||
+            !close(properties.value->centroid.x, 5) ||
+            !close(properties.value->centroid.y, 5) ||
+            !close(properties.value->centroid.z, 5) ||
+            !close(properties.value->inertia[0], 15376, 15376) ||
+            !close(properties.value->inertia[4], 15376, 15376) ||
+            !close(properties.value->inertia[8], 15376, 15376)) return false;
+        for (const auto index : std::array<std::size_t, 6>{1, 2, 3, 5, 6, 7})
+            if (!close(properties.value->inertia[index], 0)) return false;
+
+        const auto writes = txn.write_operation_count();
+        const auto regions_again = topo.body_shell_regions(*nested.value);
+        if (!writes.value || !regions_again.value ||
+            txn.write_operation_count().value != writes.value ||
+            txn.commit().status != axiom::StatusCode::Ok) return false;
+        auto delete_txn = kernel.topology().begin_transaction();
+        const auto deletion = delete_txn.delete_body(*nested.value);
+        const auto deleted_mass = topo.body_mass_properties(*nested.value);
+        if (deletion.status != axiom::StatusCode::Ok ||
+            !failed(deleted_mass, axiom::StatusCode::InvalidInput,
+                    axiom::diag_codes::kCoreInvalidHandle) ||
+            delete_txn.rollback().status != axiom::StatusCode::Ok ||
+            !topo.body_mass_properties(*nested.value).value) return false;
+    }
+
+    // An eccentric cavity exercises signed first moments, the signed
+    // parallel-axis theorem and non-zero products of inertia.
+    const auto eccentric_void = kernel.primitives().box({1, 2, 3}, 2, 3, 4);
+    const auto eccentric_shells = eccentric_void.value
+        ? topo.shells_of_body(*eccentric_void.value)
+        : axiom::Result<std::vector<axiom::ShellId>>{};
+    if (!eccentric_shells.value || eccentric_shells.value->size() != 1) return false;
+    {
+        auto txn = kernel.topology().begin_transaction();
+        const std::array hollow_shells{outer_shells.value->front(),
+                                       eccentric_shells.value->front()};
+        const auto hollow = txn.create_body(hollow_shells);
+        if (!hollow.value) return false;
+        const auto properties = topo.body_mass_properties(*hollow.value);
+        const auto regions = topo.body_shell_regions(*hollow.value);
+        const double volume = 1000.0 - 24.0;
+        const axiom::Point3 expected_centroid{
+            (5000.0 - 24.0 * 2.0) / volume,
+            (5000.0 - 24.0 * 3.5) / volume,
+            (5000.0 - 24.0 * 5.0) / volume};
+        const auto shift_tensor = [](double mass, const axiom::Point3& from,
+                                     const axiom::Point3& to) {
+            const double x = from.x - to.x;
+            const double y = from.y - to.y;
+            const double z = from.z - to.z;
+            return std::array<double, 9>{
+                mass * (y*y + z*z), -mass*x*y, -mass*x*z,
+                -mass*x*y, mass * (x*x + z*z), -mass*y*z,
+                -mass*x*z, -mass*y*z, mass * (x*x + y*y)};
+        };
+        std::array<double, 9> expected_inertia{
+            1000.0 * 200.0 / 12.0, 0, 0,
+            0, 1000.0 * 200.0 / 12.0, 0,
+            0, 0, 1000.0 * 200.0 / 12.0};
+        const std::array<double, 9> cavity_centroidal{
+            24.0 * 25.0 / 12.0, 0, 0,
+            0, 24.0 * 20.0 / 12.0, 0,
+            0, 0, 24.0 * 13.0 / 12.0};
+        const auto outer_shift = shift_tensor(1000, {5,5,5}, expected_centroid);
+        const auto cavity_shift = shift_tensor(24, {2,3.5,5}, expected_centroid);
+        for (std::size_t i = 0; i < expected_inertia.size(); ++i)
+            expected_inertia[i] += outer_shift[i] - cavity_centroidal[i] - cavity_shift[i];
+        if (!properties.value || !regions.value || regions.value->size() != 2 ||
+            (*regions.value)[1].role != axiom::BodyShellRole::Void ||
+            !close(properties.value->volume, volume) ||
+            !close(properties.value->area, 652) ||
+            !close(properties.value->centroid.x, expected_centroid.x) ||
+            !close(properties.value->centroid.y, expected_centroid.y) ||
+            !close(properties.value->centroid.z, expected_centroid.z)) return false;
+        for (std::size_t i = 0; i < expected_inertia.size(); ++i)
+            if (!close(properties.value->inertia[i], expected_inertia[i], 20000)) return false;
+        if (txn.rollback().status != axiom::StatusCode::Ok) return false;
+    }
+
+    // Independent shells remain additive and have no parent.
+    {
+        auto txn = kernel.topology().begin_transaction();
+        const std::array disjoint_shells{left_shells.value->front(),
+                                         right_shells.value->front()};
+        const auto disjoint = txn.create_body(disjoint_shells);
+        if (!disjoint.value) return false;
+        const auto disjoint_regions = topo.body_shell_regions(*disjoint.value);
+        if (!disjoint_regions.value || disjoint_regions.value->size() != 2 ||
+            (*disjoint_regions.value)[0].role != axiom::BodyShellRole::Material ||
+            (*disjoint_regions.value)[0].nesting_depth != 0 ||
+            (*disjoint_regions.value)[0].parent_shell ||
+            (*disjoint_regions.value)[1].role != axiom::BodyShellRole::Material ||
+            (*disjoint_regions.value)[1].nesting_depth != 0 ||
+            (*disjoint_regions.value)[1].parent_shell ||
+            txn.rollback().status != axiom::StatusCode::Ok) return false;
+    }
+
+    // Crossing, face-touching and coincident shell boundaries are ambiguous:
+    // neither relationship nor mass query may return a partial answer.
+    const auto crossing_box = kernel.primitives().box({9, 4, 4}, 2, 2, 2);
+    const auto touching_box = kernel.primitives().box({10, 2, 2}, 1, 1, 1);
+    const auto coincident_box = kernel.primitives().box({0, 0, 0}, 10, 10, 10);
+    const auto crossing_shells = crossing_box.value
+        ? topo.shells_of_body(*crossing_box.value)
+        : axiom::Result<std::vector<axiom::ShellId>>{};
+    const auto touching_shells = touching_box.value
+        ? topo.shells_of_body(*touching_box.value)
+        : axiom::Result<std::vector<axiom::ShellId>>{};
+    const auto coincident_shells = coincident_box.value
+        ? topo.shells_of_body(*coincident_box.value)
+        : axiom::Result<std::vector<axiom::ShellId>>{};
+    if (!crossing_shells.value || !touching_shells.value || !coincident_shells.value)
+        return false;
+    for (const auto conflicting_shell : std::array{
+             crossing_shells.value->front(), touching_shells.value->front(),
+             coincident_shells.value->front()}) {
+        auto txn = kernel.topology().begin_transaction();
+        const std::array ambiguous_shells{outer_shells.value->front(), conflicting_shell};
+        const auto ambiguous = txn.create_body(ambiguous_shells);
+        if (!ambiguous.value) return false;
+        const auto regions = topo.body_shell_regions(*ambiguous.value);
+        const auto properties = topo.body_mass_properties(*ambiguous.value);
+        const auto regions_report = kernel.diagnostics().get(regions.diagnostic_id);
+        if (regions.status != axiom::StatusCode::InvalidTopology || regions.value ||
+            !regions_report.value ||
+            !has_issue_code(*regions_report.value,
+                            axiom::diag_codes::kQueryShellArrangementInvalid) ||
+            !failed(properties, axiom::StatusCode::InvalidTopology,
+                    axiom::diag_codes::kQueryShellArrangementInvalid) ||
+            txn.rollback().status != axiom::StatusCode::Ok) return false;
+    }
+
     const auto reference_box = kernel.primitives().box({10, 20, 30}, 2, 3, 4);
     const auto reference_shells = reference_box.value
         ? topo.shells_of_body(*reference_box.value)

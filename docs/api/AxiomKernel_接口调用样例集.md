@@ -315,7 +315,7 @@ if (quarter.value) {
 }
 ```
 
-整周和部分角显式多边形旋转都支持与轴分离的环形体，也支持仅有一条连续边位于轴上的实心轮廓。角分辨率为每周 48 段；部分角增加约束剖分的两个端盖。带孔、跨轴、孤立轴点、近轴、自交或偏轴轮廓会在分配前被拒绝。结果是保守浮点分片的多面体 BRep，不是解析旋转曲面。
+整周和部分角显式多边形旋转都支持与轴分离的外环及分离孔洞，也支持无孔且仅有一条连续边位于轴上的实心轮廓。角分辨率为每周 48 段；部分角增加约束剖分的两个端盖。带孔区域触轴、跨轴、孤立轴点、近轴、自交或偏轴轮廓会在分配前被拒绝。结果是保守浮点分片的多面体 BRep，不是解析旋转曲面。
 
 ## 6.3 曲线导轨扫掠
 
@@ -344,7 +344,13 @@ std::vector<ProfileRef> profiles = {
 };
 
 auto loft = kernel.sweeps().loft(profiles);
+if (loft.value) {
+    auto strict = kernel.validate().validate_all(*loft.value, ValidationMode::Strict);
+    auto regions = kernel.topology().query().body_shell_regions(*loft.value);
+}
 ```
+
+各截面必须提供显式共面多边形；外环及同索引孔环在所有站保持相同顶点数，顶点顺序定义直纹侧壁对应关系。允许凹外环、分离孔洞、独立环绕向和倾斜截面；不同环拓扑、自动顶点匹配、分支或坍塌截面会在分配前拒绝。
 
 ## 7. 布尔操作样例
 

@@ -397,7 +397,9 @@ struct ProfileRef {
   std::vector<Point3> polygon_xyz;
   /// Optional coplanar holes strictly inside polygon_xyz, implicitly closed, with independent winding.
   /// Rings must be simple, disjoint and non-nested; touching boundaries are rejected.
-  /// Supported by extrude and explicit polygon sweep; revolve/loft reject nonempty holes.
+  /// Supported by extrude, explicit polygon sweep, axis-separated polygon revolve and
+  /// compatible-section loft. Loft hole order and ring vertex counts define correspondence
+  /// between stations; automatic matching of unlike ring topology is not performed.
   std::vector<std::vector<Point3>> holes_xyz;
 };
 

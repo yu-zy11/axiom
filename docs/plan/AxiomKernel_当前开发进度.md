@@ -1,5 +1,7 @@
 # AxiomKernel 当前开发进度
 
+> **第 71 批（FR-GEO-001 / FR-OPS-001 / FR-QUERY-001，验收中）**：公开曲面 `closest_point_detailed` 的完整有界域精度/预算/下界合同，覆盖样条结点片、修剪孔、派生/偏置面并为可认证平面路径增加无缓存快路；`revolve` 支持轴分离孔洞，`loft` 支持拓扑兼容的凹/带孔多截面真实闭壳；新增 `body_shell_regions`，多壳质量属性按材料/空腔包含深度加减，并以 `AXM-QUERY-E-0006` 拒绝相交、重叠或容差接触。修复验收中发现的窄 knot 最近点精修、修剪平面预算耗尽和单壳重复空间分类。当前构建、`axiom_geometry_test`、`axiom_query_eval_test` 通过；闭合样条 48/48 与新增放样/带孔旋转隔离矩阵通过。完整 `axiom_ops_heal_test` 因既有大矩阵累计耗时在 10 分钟审计窗口内未完成，故本批尚未宣称全量门禁闭合。
+
 本文档用于记录 `AxiomKernel` 当前阶段的实际开发状态、已完成内容、当前风险和下一阶段执行重点。
 
 > **第 70 批（NFR-DIA-001 / FR-OPS-001 / FR-QUERY-001）**：AXMJSON、Axiom IGES 元数据与 Axiom BREP JSON 子集在物化前完成普通文件、64 MiB/短读、严格结构和几何验证，失败绑定 `io.import.<format>.input/path/open/read/parse/validation` 且不污染 Body/Mesh/ID；`SweepService` 新增首尾 G1 连续闭合样条、开放/闭合 `CompositeChain` 导轨和部分角多边形旋转的真实多面体闭壳；`TopologyQueryService` 新增 `shell_mass_properties/body_mass_properties`，从平面直边双边流形闭壳的当前拓扑重算单位密度体积、面积、质心和惯性。repair 修正了测试入口误用、早期 AXMJSON 兼容、扫掠弦段局部邻域判定、闭合复合导轨夹具和旋转闭壳绕向翻转后重算。调度器独立完整构建成功，最终 `ctest --test-dir /workspaces/axiom/build-agent --output-on-failure --no-tests=error` **16/16 通过、0 失败、总耗时 1539.20 s**（`axiom_ops_heal_test` 1510.78 s，`axiom_io_workflow_test` 14.96 s，`axiom_query_eval_test` 0.17 s，性能基线 1.90 s）。本批门禁已闭合，第 60/61/62/65 等既有包不再有“待验收”状态。剩余限制：扫掠/旋转仍为保守采样多面体 BRep；带孔旋转、嵌套复合导轨、显式轮廓历史、曲面/曲边质量积分、空腔/相交多壳和标准 IGES 实体仍不支持。
@@ -244,9 +246,9 @@
   - **建议测试入口**：`axiom_math_services_test`（本阶段 P1 条目已闭合）；跨模块对齐见各 workflow 测试
 
 - **geo（Curves/Surfaces/PCurve/Eval/Closest）**
-  - **已具备**：曲线/曲面/PCurve 的创建与 eval/domain/bbox/closest，含批量接口；曲线公开 `closest_point_detailed`，解析覆盖 Line/LineSegment/Circle/折线，分支限界覆盖 Ellipse/Parabola/Hyperbola/Bezier/BSpline/NURBS/CompositeChain，返回距离下界、参数不确定度、预算计数与终止原因；样条逐非空结点段覆盖，旧非解析最近参数复用主流程；派生曲面（revolved/swept/trimmed/offset）具备 stage2 minimal 语义
+  - **已具备**：曲线/曲面/PCurve 的创建与 eval/domain/bbox/closest，含批量接口；曲线与有界曲面均公开 `closest_point_detailed`，返回距离下界、参数不确定度、预算计数与终止原因；曲面覆盖 Bezier/BSpline/NURBS、Revolved/Swept、Trimmed/Offset、非空结点片和修剪孔边界，可认证平面包装/共面张量面/直线轮廓扫掠走解析或支撑平面快路；旧复杂曲面最近参数复用主流程且不写 eval 缓存
   - **主要不足**：
-    - **曲面全域精度合同**：Bezier/BSpline/NURBS 及派生/修剪曲面尚无覆盖完整参数域和修剪边界的预算与收敛证书；样条曲率与退化处理仍未工业化
+    - **曲面全域精度合同后续**：无限域仍须先修剪；高阶变化界、通用退化曲面、极端尺度与大模型性能仍未工业化
     - **真实 Trim 语义**：Trimmed 目前偏“参数域裁剪占位”，缺基于 loop/coedge/PCurve 的修剪边界
   - **建议测试入口**：`axiom_geometry_test`（增加曲率/导数/退化场景后再逐步收紧）
 
@@ -372,6 +374,7 @@
   - **未开始/缺失（工业化）**：与工业内核一致的 **全 primitive 精确拓扑面环 + 与曲面参数域严格一致** 的 BRep；楔体/盒体等若仍部分依赖 bbox 占位壳，需升级为完整解析拓扑与几何
 - **特征构造**
   - **部分完成（接口/占位）**：`SweepService` 等接口存在，部分路径产出派生体与工作流语义
+  - **第 71 批 SweepService 增量（验收中）**：`revolve` 的整周/部分角显式子午面支持轴分离凹外环及多个分离孔洞；`loft` 以相同外环/孔环顶点数定义站间对应，支持倾斜、凹/带孔三截面并物化真实单闭壳，质量/惯性来自闭合多面体积分。新增矩阵覆盖绕向/起点/孔序、姿态、Strict、邻接、bbox、owned 网格、失败零污染、活动事务和回滚重试；隔离回归已通过，完整长目标待统一门禁。不同环拓扑自动匹配、分支/尖顶/坍塌截面仍不支持。
   - **第 70 批 SweepService 扩展（已通过完整门禁）**：端点重合且首尾切向连续的 Bezier/BSpline/NURBS 导轨以 holonomy 校正旋转最小标架，生成无端盖周期闭壳；`CompositeChain` 可连接有界直线/线段、圆/椭圆弧、Bezier/BSpline/NURBS 和 polyline 首段，强制接缝位置与 G1 连续，开放链有端盖、闭合链无端盖；`revolve` 对 `(0,2π)` 显式平面轮廓以每周 48 段的分辨率生成侧壁和约束剖分首尾端盖。三组回归分别覆盖 48、32、48 组成功变体，并覆盖真实拓扑、邻接/bbox、Strict、owned 网格、质量/惯性、失败零污染、活动事务零写入、回滚和重试。完整 CTest 16/16 通过（1539.20 s）。仍不支持解析扫掠/精确旋转、带孔旋转、嵌套复合链、抛物/双曲子段、急弯/自靠近输入和显式轮廓历史。
   - **第 68 批 SweepService 扩展（已通过完整门禁）**：`extrude_to_plane` 沿射线把显式凹/带孔平面轮廓投影到斜目标面；整周 `revolve` 以 48 站周期分片支持离轴环形体及唯一连续轴边闭合的实心轮廓；曲线 `sweep` 以旋转最小化标架支持 Bezier/BSpline/NURBS 开放导轨和整圆/椭圆周期导轨。三条路径均物化实际三角面、共享边/顶点闭壳并缓存闭合多面体积分质量属性。周期带孔扫掠经故障复验改为外边界与各孔边界分别物化独立闭壳，壳数及 owned 网格连通分量均为 `1 + holes_xyz.size()`；开放带孔导轨仍由端盖连成单壳。回归分别覆盖 240、32、40 组主要变体，以及公开拓扑、bbox、Strict、owned 网格、质量/惯性、退化失败不污染与回滚重试。最终 `build-agent` 完整构建成功，CTest 16/16 通过（136.35 s；`axiom_ops_heal_test` 111.16 s，性能基线 1.70 s）。当前仍是保守浮点剖分/采样多面体 BRep，不是解析扫掠或旋转曲面；带孔旋转、闭合样条/复合导轨、尖点、过紧曲率和自靠近导轨拒绝，部分角旋转仍沿用受限路径。
   - **等比变截面与尖顶拉伸（第 65/66 包，已纳入第 68 批全量门禁）**：`extrude_scaled` 支持凸/凹及单孔/多孔轮廓的正比例收缩、扩张和等截面；`end_scale=0` 支持无孔三角/凸/凹轮廓收敛到共享尖顶。既有 360 组正比例、72 组矩形/L 形尖顶及 4 组四面体回归随本批 16/16 CTest 通过。带孔尖顶、负比例、任意截面放样和逐壁恒角拔模仍不支持；近退化或极端尺度输入可保守拒绝。
@@ -395,6 +398,8 @@
 - **未开始/缺失**：真实圆角/倒角几何生成（含角区）、变半径、失败原因细分与回归数据集
 
 ### 需求 7.7 查询与分析（Query/Eval/Rep）
+
+- **FR-QUERY-001 第 71 批多闭壳空间层级（验收中）**：公开 `body_shell_regions`，以严格包含深度给出 Material/Void 和直接父壳；`body_mass_properties` 对独立材料相加、空腔相减、材料岛再相加，边界面积全部保留。壳相交、重叠或容差接触返回 `InvalidTopology / AXM-QUERY-E-0006`，查询仍不发布 MeshId、不写缓存。单壳直接复用质量积分，三角面临时边界走直取快路；`axiom_query_eval_test` 专项通过，完整门禁待闭合。
 
 - **FR-QUERY-001 第 70 批闭合多面体拓扑质量属性（已通过完整门禁）**：公开 `TopologyQueryService::shell_mass_properties/body_mass_properties`，从当前真实拓扑重算单位密度体积、面积、质心与关于质心的世界坐标惯性张量；支持平面直边的凹/带孔双边流形闭壳和多个独立实体壳的平行轴汇总。`axiom_query_eval_test` 覆盖平移/尺度盒体、凹带孔拉伸、双壳、单位/惯性语义、无效/开壳/曲面/零体积、删除/回滚及对象/网格/缓存/Eval/事务不污染；完整 CTest 16/16 通过（1539.20 s）。曲面/曲边、独立内壳空腔语义、相交/重叠多壳和稳定求交仍未闭合。
 

@@ -531,13 +531,10 @@ Result<BodyId> SweepService::extrude_to_plane(const ProfileRef& profile, const V
 }
 
 Result<BodyId> SweepService::revolve(const ProfileRef& profile, const Axis3& axis, Scalar angle) {
-    if (!profile.holes_xyz.empty()) {
-        return detail::invalid_input_result<BodyId>(
-            *state_, diag_codes::kCoreParameterOutOfRange, "旋转失败：当前不支持带孔轮廓", "旋转失败");
-    }
     constexpr Scalar kTwoPi = 6.283185307179586476925286766559;
     const auto axis_length = std::hypot(axis.direction.x, axis.direction.y, axis.direction.z);
-    if (profile.label.empty() || !std::isfinite(angle) || angle <= 0.0 ||
+    if (profile.label.empty() || (profile.polygon_xyz.empty() && !profile.holes_xyz.empty()) ||
+        !std::isfinite(angle) || angle <= 0.0 ||
         angle > kTwoPi + 1e-10 || !std::isfinite(axis.origin.x) ||
         !std::isfinite(axis.origin.y) || !std::isfinite(axis.origin.z) ||
         !std::isfinite(axis_length) || axis_length <= 1e-14) {
@@ -561,6 +558,7 @@ Result<BodyId> SweepService::revolve(const ProfileRef& profile, const Axis3& axi
                 "旋转失败：polygon 轮廓点数不足（至少 3 个点）", "旋转失败");
         }
         record.revolve_profile_xyz = profile.polygon_xyz;
+        record.revolve_holes_xyz = profile.holes_xyz;
         record.revolve_full_turn = std::abs(angle - kTwoPi) <= 1e-10;
         const auto ct = std::cos(angle);
         const auto st = std::sin(angle);
@@ -605,7 +603,7 @@ Result<BodyId> SweepService::revolve(const ProfileRef& profile, const Axis3& axi
     if (body.value == 0) {
         return detail::invalid_input_result<BodyId>(
             *state_, diag_codes::kCoreParameterOutOfRange,
-            "旋转失败：轮廓须简单共面、轴须位于轮廓平面且轮廓位于轴的一侧；轮廓只能与轴保持间隙或以一条连续边接触",
+            "旋转失败：轮廓须为有效共面多边形区域、轴须位于轮廓平面且区域位于轴的一侧；带孔区域须与轴保持间隙，无孔轮廓也可仅以一条连续边接触轴",
             "旋转失败");
     }
     return ok_result(body, state_->create_diagnostic("已完成旋转"));
@@ -920,24 +918,34 @@ Result<BodyId> SweepService::sweep(const ProfileRef& profile, CurveId rail) {
 }
 
 Result<BodyId> SweepService::loft(std::span<const ProfileRef> profiles) {
-    if (std::any_of(profiles.begin(), profiles.end(), [](const ProfileRef& p) { return !p.holes_xyz.empty(); })) {
-        return detail::invalid_input_result<BodyId>(
-            *state_, diag_codes::kCoreParameterOutOfRange, "放样失败：当前不支持带孔轮廓", "放样失败");
-    }
-    if (profiles.size() < 2 || std::any_of(profiles.begin(), profiles.end(), [](const ProfileRef& profile) { return profile.label.empty(); })) {
+    if (profiles.size() < 2 ||
+        std::any_of(profiles.begin(), profiles.end(), [](const ProfileRef& profile) {
+            return profile.label.empty() || profile.polygon_xyz.size() < 3;
+        })) {
         return detail::invalid_input_result<BodyId>(
             *state_, diag_codes::kCoreParameterOutOfRange,
-            "放样失败：至少需要两个有效截面", "放样失败");
+            "放样失败：至少需要两个带显式平面多边形的有效截面", "放样失败");
     }
     detail::BodyRecord record;
     record.kind = detail::BodyKind::Sweep;
     record.rep_kind = RepKind::ExactBRep;
-    record.label = "loft";
-    // minimal loft bbox: size scales with profile count
-    const auto extent = std::max<Scalar>(2.0, static_cast<Scalar>(profiles.size()));
-    record.bbox = detail::make_bbox({0.0, 0.0, 0.0}, {extent, extent, extent});
-    record.a = extent * extent * extent;
-    return ok_result(make_body(state_, record, "已完成放样"), state_->create_diagnostic("已完成放样"));
+    record.label = "loft:polygon";
+    record.loft_profiles_xyz.reserve(profiles.size());
+    record.loft_holes_xyz.reserve(profiles.size());
+    for (const auto& profile : profiles) {
+        record.loft_profiles_xyz.push_back(profile.polygon_xyz);
+        record.loft_holes_xyz.push_back(profile.holes_xyz);
+    }
+    // A valid sentinel is required by the generic body construction gate. The
+    // loft materializer replaces it with the bounds of every actual section.
+    record.bbox = detail::make_bbox(profiles.front().polygon_xyz.front(), profiles.front().polygon_xyz.front());
+    const auto body = make_body(state_, std::move(record), "已完成兼容多边形截面放样");
+    if (body.value == 0) {
+        return detail::invalid_input_result<BodyId>(
+            *state_, diag_codes::kCoreParameterOutOfRange,
+            "放样失败：截面须简单共面、拓扑兼容、严格有序，且截面间插值不得退化或折叠", "放样失败");
+    }
+    return ok_result(body, state_->create_diagnostic("已完成兼容多边形截面放样"));
 }
 
 Result<BodyId> SweepService::thicken(FaceId face_id, Scalar distance) {

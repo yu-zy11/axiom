@@ -91,6 +91,24 @@ struct FaceBoundaryConflict {
     Scalar distance {};
 };
 
+/// 实体中闭壳相对于实体材料区域的角色。角色由严格几何包含深度决定，与壳自身绕向无关。
+enum class BodyShellRole : std::uint8_t {
+    /// 偶数包含深度：外部材料边界，或位于空腔中的独立材料岛。
+    Material = 0,
+    /// 奇数包含深度：从最近材料区域扣除的封闭空腔边界。
+    Void = 1,
+};
+
+/// `body_shell_regions` 返回的稳定壳空间关系。
+struct BodyShellRegion {
+    ShellId shell {};
+    BodyShellRole role {BodyShellRole::Material};
+    /// 严格包含该壳的祖先壳数量；0 表示最外层独立材料分量。
+    std::uint32_t nesting_depth {};
+    /// 最近的直接包含壳；最外层壳为空。
+    std::optional<ShellId> parent_shell;
+};
+
 class TopologyQueryService {
 public:
     explicit TopologyQueryService(std::shared_ptr<detail::KernelState> state);
@@ -152,8 +170,13 @@ public:
     /// 壳须为双边流形闭壳，面边界绕向须与平面法向一致；曲面、曲边、开壳、非流形或退化壳失败且不返回部分值。
     /// 每次从当前拓扑重算，不创建网格或写缓存；事务内删除/替换即时可见，回滚后恢复。
     Result<MassProperties> shell_mass_properties(ShellId shell_id) const;
-    /// 汇总实体拥有的一个或多个独立闭合多面体壳的均匀密度质量属性。
-    /// 多壳按互不重叠的实体分量相加；当前不把独立内壳解释为空腔。单位及失败/只读语义同 `shell_mass_properties`。
+    /// 查询实体闭壳的严格空间包含层级。互不相交的最外层壳是独立材料分量；奇数深度壳为空腔，偶数深度壳为材料岛。
+    /// 壳面相交、重叠或在容差内接触会返回 InvalidTopology，不给出部分层级；空实体成功返回空集合。
+    /// 当前与质量属性相同，仅支持平面、直线边的双边流形闭壳。每次重算，不写缓存，事务修改与回滚即时可见。
+    Result<std::vector<BodyShellRegion>> body_shell_regions(BodyId body_id) const;
+    /// 汇总实体一个或多个闭合多面体壳的均匀密度质量属性。
+    /// 独立最外层壳相加，奇数包含深度空腔相减，偶数深度材料岛再相加；壳接触/相交/重叠失败。
+    /// `area` 为所有材料/空腔边界面积之和；其余单位及失败/只读语义同 `shell_mass_properties`。
     Result<MassProperties> body_mass_properties(BodyId body_id) const;
     /// 当前 Line/LineSegment 边的端点距离，单位为模型长度单位；端点须位于支撑曲线范围内。
     /// 曲边缺少裁剪区间，返回 NotImplemented；退化/不一致拓扑返回 InvalidTopology。
