@@ -8,6 +8,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include "axiom/geo/geometry_services.h"
+#include "axiom/internal/geo/geo_service_internal.h"
 #include "axiom/internal/math/math_internal_utils.h"
 
 namespace axiom {
@@ -54,31 +56,46 @@ bool extend_bbox(BoundingBox &bbox, const Point3 &point) {
   return true;
 }
 
-bool append_edge_bbox(const detail::KernelState &state, EdgeId edge_id,
+bool append_edge_bbox(const std::shared_ptr<detail::KernelState> &state,
+                      EdgeId edge_id,
                       BoundingBox &bbox) {
-  const auto edge_it = state.edges.find(edge_id.value);
-  if (edge_it == state.edges.end()) {
+  if (!state) return false;
+  const auto edge_it = state->edges.find(edge_id.value);
+  if (edge_it == state->edges.end()) {
     return false;
   }
-  const auto v0_it = state.vertices.find(edge_it->second.v0.value);
-  const auto v1_it = state.vertices.find(edge_it->second.v1.value);
-  if (v0_it == state.vertices.end() || v1_it == state.vertices.end()) {
+  const auto v0_it = state->vertices.find(edge_it->second.v0.value);
+  const auto v1_it = state->vertices.find(edge_it->second.v1.value);
+  if (v0_it == state->vertices.end() || v1_it == state->vertices.end()) {
     return false;
   }
   extend_bbox(bbox, v0_it->second.point);
   extend_bbox(bbox, v1_it->second.point);
+  if (edge_it->second.has_parameter_interval) {
+    const CurveService curves(state);
+    const auto curve_bbox = curves.bbox(
+        edge_it->second.curve_id, edge_it->second.start_parameter,
+        edge_it->second.end_parameter);
+    if (!curve_bbox.value || !curve_bbox.value->is_valid) {
+      return false;
+    }
+    extend_bbox(bbox, curve_bbox.value->min);
+    extend_bbox(bbox, curve_bbox.value->max);
+  }
   return true;
 }
 
-bool append_loop_bbox(const detail::KernelState &state, LoopId loop_id,
+bool append_loop_bbox(const std::shared_ptr<detail::KernelState> &state,
+                      LoopId loop_id,
                       BoundingBox &bbox) {
-  const auto loop_it = state.loops.find(loop_id.value);
-  if (loop_it == state.loops.end() || loop_it->second.coedges.empty()) {
+  if (!state) return false;
+  const auto loop_it = state->loops.find(loop_id.value);
+  if (loop_it == state->loops.end() || loop_it->second.coedges.empty()) {
     return false;
   }
   for (const auto coedge_id : loop_it->second.coedges) {
-    const auto coedge_it = state.coedges.find(coedge_id.value);
-    if (coedge_it == state.coedges.end() ||
+    const auto coedge_it = state->coedges.find(coedge_id.value);
+    if (coedge_it == state->coedges.end() ||
         !append_edge_bbox(state, coedge_it->second.edge_id, bbox)) {
       return false;
     }
@@ -86,10 +103,12 @@ bool append_loop_bbox(const detail::KernelState &state, LoopId loop_id,
   return true;
 }
 
-bool append_face_bbox(const detail::KernelState &state, FaceId face_id,
+bool append_face_bbox(const std::shared_ptr<detail::KernelState> &state,
+                      FaceId face_id,
                       BoundingBox &bbox) {
-  const auto face_it = state.faces.find(face_id.value);
-  if (face_it == state.faces.end()) {
+  if (!state) return false;
+  const auto face_it = state->faces.find(face_id.value);
+  if (face_it == state->faces.end()) {
     return false;
   }
   if (!append_loop_bbox(state, face_it->second.outer_loop, bbox)) {
@@ -103,12 +122,13 @@ bool append_face_bbox(const detail::KernelState &state, FaceId face_id,
   return true;
 }
 
-BoundingBox compute_body_bbox(const detail::KernelState &state,
+BoundingBox compute_body_bbox(const std::shared_ptr<detail::KernelState> &state,
                               std::span<const ShellId> shells) {
+  if (!state) return {};
   BoundingBox bbox{};
   for (const auto shell_id : shells) {
-    const auto shell_it = state.shells.find(shell_id.value);
-    if (shell_it == state.shells.end()) {
+    const auto shell_it = state->shells.find(shell_id.value);
+    if (shell_it == state->shells.end()) {
       return {};
     }
     for (const auto face_id : shell_it->second.faces) {
@@ -365,6 +385,8 @@ std::optional<FaceBoundaryConflict> face_cross_loop_boundary_conflict(
     EdgeId edge;
     WidePoint start;
     WidePoint end;
+    bool start_is_edge_endpoint {true};
+    bool end_is_edge_endpoint {true};
   };
   std::vector<Segment> seen;
   const auto subtract = [](const WidePoint &a, const WidePoint &b) {
@@ -442,9 +464,12 @@ std::optional<FaceBoundaryConflict> face_cross_loop_boundary_conflict(
     return ClosestPair{s, t, p, q, std::max(0.0L, dot(delta, delta))};
   };
 
-  const auto endpoint_parameter = [](long double value,
+  const auto endpoint_parameter = [](const Segment &segment,
+                                     long double value,
                                      long double parameter_epsilon) {
-    return value <= parameter_epsilon || value >= 1.0L - parameter_epsilon;
+    return (segment.start_is_edge_endpoint && value <= parameter_epsilon) ||
+           (segment.end_is_edge_endpoint &&
+            value >= 1.0L - parameter_epsilon);
   };
 
   const auto inspect_pair = [&](const Segment &first,
@@ -499,9 +524,18 @@ std::optional<FaceBoundaryConflict> face_cross_loop_boundary_conflict(
               positive_length ? (overlap_start + overlap_end) * 0.5L
                               : clamp01((overlap_start + overlap_end) * 0.5L);
           const auto point = add_scaled(first.start, d1, first_parameter);
+          const long double second_parameter =
+              clamp01(dot(subtract(point, second.start), d2) / e);
+          const bool endpoint =
+              endpoint_parameter(first, first_parameter,
+                                 parameter_epsilon) ||
+              endpoint_parameter(second, second_parameter,
+                                 parameter_epsilon);
           return FaceBoundaryConflict{
               positive_length ? FaceBoundaryConflictKind::CollinearOverlap
-                              : FaceBoundaryConflictKind::EndpointTouch,
+                              : (endpoint
+                                     ? FaceBoundaryConflictKind::EndpointTouch
+                                     : FaceBoundaryConflictKind::ProperIntersection),
               first.loop, second.loop, first.edge, second.edge,
               to_point3(point), to_point3(point), 0.0};
         }
@@ -525,10 +559,12 @@ std::optional<FaceBoundaryConflict> face_cross_loop_boundary_conflict(
       if (std::abs(residual) > roundoff) coincident_points = false;
     }
     if (coincident_points) {
-      const bool endpoint = endpoint_parameter(closest.first_parameter,
-                                               parameter_epsilon) ||
-                            endpoint_parameter(closest.second_parameter,
-                                               parameter_epsilon);
+      const bool endpoint = endpoint_parameter(
+                                first, closest.first_parameter,
+                                parameter_epsilon) ||
+                            endpoint_parameter(
+                                second, closest.second_parameter,
+                                parameter_epsilon);
       return FaceBoundaryConflict{
           endpoint ? FaceBoundaryConflictKind::EndpointTouch
                    : FaceBoundaryConflictKind::ProperIntersection,
@@ -544,6 +580,89 @@ std::optional<FaceBoundaryConflict> face_cross_loop_boundary_conflict(
     return std::nullopt;
   };
 
+  struct LinearPiece {
+    Point3 start;
+    Point3 end;
+  };
+  const auto append_linear_curve_pieces =
+      [&](auto &&self, CurveId curve_id, Scalar start_parameter,
+          Scalar end_parameter, std::vector<LinearPiece> &pieces,
+          std::size_t depth) -> bool {
+    if (depth > 16 || !std::isfinite(start_parameter) ||
+        !std::isfinite(end_parameter)) {
+      return false;
+    }
+    const auto curve_it = state.curves.find(curve_id.value);
+    if (curve_it == state.curves.end()) return false;
+    const auto &curve = curve_it->second;
+    const auto append_evaluated_piece = [&](Scalar first, Scalar second) {
+      Point3 start{};
+      Point3 end{};
+      if (!geo_internal::evaluate_curve_point_no_cache(
+              state, curve_id, first, start) ||
+          !geo_internal::evaluate_curve_point_no_cache(
+              state, curve_id, second, end)) {
+        return false;
+      }
+      pieces.push_back({start, end});
+      return true;
+    };
+
+    if (curve.kind == detail::CurveKind::Line ||
+        curve.kind == detail::CurveKind::LineSegment) {
+      return append_evaluated_piece(start_parameter, end_parameter);
+    }
+
+    std::vector<Scalar> parameters{start_parameter};
+    const auto append_internal_breaks = [&](std::size_t count) {
+      if (start_parameter < end_parameter) {
+        for (std::size_t i = 1; i < count; ++i) {
+          const auto value = static_cast<Scalar>(i);
+          if (value > start_parameter && value < end_parameter)
+            parameters.push_back(value);
+        }
+      } else {
+        for (std::size_t i = count; i-- > 1;) {
+          const auto value = static_cast<Scalar>(i);
+          if (value < start_parameter && value > end_parameter)
+            parameters.push_back(value);
+        }
+      }
+      parameters.push_back(end_parameter);
+    };
+
+    if (curve.kind == detail::CurveKind::CompositePolyline) {
+      if (curve.poles.size() < 2) return false;
+      append_internal_breaks(curve.poles.size() - 1);
+      for (std::size_t i = 0; i + 1 < parameters.size(); ++i) {
+        if (!append_evaluated_piece(parameters[i], parameters[i + 1]))
+          return false;
+      }
+      return true;
+    }
+
+    if (curve.kind != detail::CurveKind::CompositeChain ||
+        curve.children.empty()) {
+      return false;
+    }
+    append_internal_breaks(curve.children.size());
+    for (std::size_t i = 0; i + 1 < parameters.size(); ++i) {
+      const auto midpoint =
+          (parameters[i] + parameters[i + 1]) * Scalar{0.5};
+      const auto child_index = std::min<std::size_t>(
+          static_cast<std::size_t>(
+              std::max<Scalar>(0.0, std::floor(midpoint))),
+          curve.children.size() - 1);
+      const auto offset = static_cast<Scalar>(child_index);
+      if (!self(self, curve.children[child_index],
+                parameters[i] - offset, parameters[i + 1] - offset,
+                pieces, depth + 1)) {
+        return false;
+      }
+    }
+    return true;
+  };
+
   for (std::size_t i = 0; i <= inner_loops.size(); ++i) {
     const auto loop_id = i == 0 ? outer_loop : inner_loops[i - 1];
     const auto loop_it = state.loops.find(loop_id.value);
@@ -555,9 +674,7 @@ std::optional<FaceBoundaryConflict> face_cross_loop_boundary_conflict(
       const auto edge_it = state.edges.find(edge_id.value);
       if (edge_it == state.edges.end()) continue;
       const auto curve_it = state.curves.find(edge_it->second.curve_id.value);
-      if (curve_it == state.curves.end() ||
-          (curve_it->second.kind != detail::CurveKind::Line &&
-           curve_it->second.kind != detail::CurveKind::LineSegment)) continue;
+      if (curve_it == state.curves.end()) continue;
       const auto v0 = state.vertices.find(edge_it->second.v0.value);
       const auto v1 = state.vertices.find(edge_it->second.v1.value);
       if (v0 == state.vertices.end() || v1 == state.vertices.end()) continue;
@@ -566,15 +683,33 @@ std::optional<FaceBoundaryConflict> face_cross_loop_boundary_conflict(
       if (!std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(a.z) ||
           !std::isfinite(b.x) || !std::isfinite(b.y) || !std::isfinite(b.z))
         continue;
-      const Segment current{loop_id, edge_id, {a.x, a.y, a.z},
-                            {b.x, b.y, b.z}};
-      for (const auto &prior : seen) {
-        if (prior.loop.value == loop_id.value) continue;
-        if (auto conflict = inspect_pair(prior, current)) {
-          return conflict;
-        }
+      std::vector<LinearPiece> pieces;
+      if (curve_it->second.kind == detail::CurveKind::Line ||
+          curve_it->second.kind == detail::CurveKind::LineSegment) {
+        pieces.push_back({a, b});
+      } else if (!edge_it->second.has_parameter_interval ||
+                 !append_linear_curve_pieces(
+                     append_linear_curve_pieces, edge_it->second.curve_id,
+                     edge_it->second.start_parameter,
+                     edge_it->second.end_parameter, pieces, 0)) {
+        continue;
       }
-      seen.push_back(current);
+      for (std::size_t piece_index = 0; piece_index < pieces.size();
+           ++piece_index) {
+        const auto &piece = pieces[piece_index];
+        const Segment current{
+            loop_id, edge_id,
+            {piece.start.x, piece.start.y, piece.start.z},
+            {piece.end.x, piece.end.y, piece.end.z},
+            piece_index == 0, piece_index + 1 == pieces.size()};
+        for (const auto &prior : seen) {
+          if (prior.loop.value == loop_id.value) continue;
+          if (auto conflict = inspect_pair(prior, current)) {
+            return conflict;
+          }
+        }
+        seen.push_back(current);
+      }
     }
   }
   return std::nullopt;

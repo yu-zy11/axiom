@@ -52,16 +52,19 @@ bool validate_source_bodies_exist(const detail::KernelState &state,
 
 bool extend_bbox(BoundingBox &bbox, const Point3 &point);
 
-bool append_edge_bbox(const detail::KernelState &state, EdgeId edge_id,
+bool append_edge_bbox(const std::shared_ptr<detail::KernelState> &state,
+                      EdgeId edge_id,
                       BoundingBox &bbox);
 
-bool append_loop_bbox(const detail::KernelState &state, LoopId loop_id,
+bool append_loop_bbox(const std::shared_ptr<detail::KernelState> &state,
+                      LoopId loop_id,
                       BoundingBox &bbox);
 
-bool append_face_bbox(const detail::KernelState &state, FaceId face_id,
+bool append_face_bbox(const std::shared_ptr<detail::KernelState> &state,
+                      FaceId face_id,
                       BoundingBox &bbox);
 
-BoundingBox compute_body_bbox(const detail::KernelState &state,
+BoundingBox compute_body_bbox(const std::shared_ptr<detail::KernelState> &state,
                               std::span<const ShellId> shells);
 
 std::optional<std::array<VertexId, 2>>
@@ -93,9 +96,11 @@ face_cross_loop_coincident_vertices(const detail::KernelState &state,
                                     LoopId outer_loop,
                                     std::span<const LoopId> inner_loops);
 
-// Returns the first conflict between finite Line/LineSegment boundary edges in
-// distinct loops.  Exact intersections, endpoint touches, collinear overlap,
-// and positive-distance contacts within `linear_tolerance` are distinguished.
+// Returns the first conflict between finite linear boundary pieces in distinct
+// loops.  In addition to Line/LineSegment edges, explicitly trimmed
+// CompositePolyline and linear-only CompositeChain edges are expanded exactly.
+// Exact intersections, endpoint touches, collinear overlap, and
+// positive-distance contacts within `linear_tolerance` are distinguished.
 std::optional<FaceBoundaryConflict> face_cross_loop_boundary_conflict(
     const detail::KernelState &state, LoopId outer_loop,
     std::span<const LoopId> inner_loops, Scalar linear_tolerance);

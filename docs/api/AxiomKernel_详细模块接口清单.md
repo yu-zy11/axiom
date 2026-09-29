@@ -321,6 +321,7 @@ struct CurveClosestPointResult {
 class CurveService {
 public:
   Result<CurveEvalResult> eval(CurveId, Scalar t, int deriv_order) const;
+  Result<Point3> point_at_parameter(CurveId, Scalar t) const;
   Result<CurveClosestPointResult> closest_point_detailed(
       CurveId, const Point3&, const CurveClosestPointOptions& = {}) const;
   Result<Scalar> closest_parameter(CurveId, const Point3&) const;
@@ -331,8 +332,11 @@ public:
   Result<Scalar> length(CurveId, const CurveLengthOptions&) const;
   Result<Scalar> length(CurveId, Scalar t0, Scalar t1, const CurveLengthOptions&) const;
   Result<BoundingBox> bbox(CurveId) const;
+  Result<BoundingBox> bbox(CurveId, Scalar t0, Scalar t1) const;
 };
 ```
+
+`point_at_parameter` 与区间 `bbox` 是第 72 批为拓扑 trim bridge 提供的公开只读查询：两者都要求有限且位于定义域的参数，不写曲线求值缓存。区间 bbox 允许递减和零宽区间；解析圆锥曲线包含区间内坐标极值，Bezier/BSpline/NURBS 使用保守控制点凸包，复合链按涉及的子曲线保守合并。无效句柄、非有限参数和越域分别使用 `AXM-CORE-E-0001/0002` 与 `AXM-GEO-E-0004`。
 
 `closest_point_detailed`（FR-GEO-001 第 69 批）对完整有效参数域给出最近参数、最近点、距离、保守距离下界、参数不确定度、求值/区间计数及终止原因。Line、LineSegment、Circle 与 CompositePolyline 走解析路径（`Analytic`，不消耗点值预算）；Ellipse、Parabola、Hyperbola、Bezier、BSpline、NURBS 与 CompositeChain 走确定性分支限界，样条的每个非空结点段独立覆盖，并用保守速度/加速度界剪枝。`DistanceTolerance` 保证 `distance - distance_lower_bound` 不超过请求的距离容差；`ParameterTolerance` 表示仍可能改进区间的最大宽度不超过请求的参数容差。非解析的旧 `closest_parameter/closest_point` 复用该主流程，并在全域证书收敛后用剩余预算做下降式参数精修。
 
@@ -416,6 +420,11 @@ struct BodyShellRegion {
   std::uint32_t nesting_depth;
   std::optional<ShellId> parent_shell;
 };
+
+struct EdgeCurveInterval {
+  Scalar start_parameter;  // 对应 v0
+  Scalar end_parameter;    // 对应 v1，可小于 start_parameter
+};
 ```
 
 ```cpp
@@ -433,6 +442,7 @@ public:
   Result<MassProperties> shell_mass_properties(ShellId) const;
   Result<std::vector<BodyShellRegion>> body_shell_regions(BodyId) const;
   Result<MassProperties> body_mass_properties(BodyId) const;
+  Result<std::optional<EdgeCurveInterval>> edge_curve_interval(EdgeId) const;
   Result<Scalar> edge_length(EdgeId) const;
   Result<Scalar> loop_length(LoopId) const;
   Result<Scalar> face_boundary_length(FaceId) const;
@@ -451,7 +461,9 @@ PCurve 必须为至少两点的折线，按 coedge 方向连续闭合，各点�
 
 `shell_mass_properties / body_shell_regions / body_mass_properties` 从当前真实拓扑重算单位密度的体积、表面积、质心及关于质心的世界坐标系 3×3 行主序惯性张量。体积、面积、质心和惯性的单位分别是模型长度单位的三次方、平方、一次方和五次方。支持平面、Line/LineSegment 边组成的双边流形闭壳，面可凹且可带孔。`body_shell_regions` 以严格包含深度给出 Material/Void 和直接父壳；`body_mass_properties` 用平行轴定理累加偶数深度材料壳、扣除奇数深度空腔壳，面积保留全部边界面积。多壳相交、重叠或在建模容差内接触返回 `InvalidTopology / AXM-QUERY-E-0006`；曲面、曲边、空/开/非流形壳、共享边同向、环绕向错误、非共面或零体积均结构化失败且无部分值。查询不发布网格、不写缓存、不改变 Eval 状态或事务写计数；事务内删除/替换即时可见，回滚后恢复。
 
-`edge_length / loop_length / face_boundary_length`（第 63 包已纳入统一门禁）组成直线边拓扑长度接口族，单位为模型长度单位。边长取当前两个拓扑端点的三维距离；两端点到 Line/LineSegment 的距离、线段端点越界距离不得超过内核线性容差，不投影或修复原模型。零长度或不一致边返回 `InvalidTopology / AXM-TOPO-E-0008`，缺失边引用返回 `InvalidTopology / AXM-TOPO-E-0006`。Edge 没有曲线裁剪参数，曲边明确返回 `NotImplemented / AXM-CORE-E-0004`，不以端点弦长代替弧长。环查询复用边查询，要求闭合且无重复成员；空/损坏/未闭合环返回 `InvalidTopology / AXM-TOPO-E-0002`。面查询复用环查询，返回**外环加全部内环**的长度，方向无关；支撑曲面类型不参与边界长度计算。缺失/重复面边界环返回 `InvalidTopology / AXM-TOPO-E-0003`（内环 `E-0004`），内层失败原样传播，不返回部分和。无效、已删除或已回滚的目标句柄返回 `InvalidInput / AXM-CORE-E-0001`，累加超出 Scalar 范围返回 `InvalidInput / AXM-CORE-E-0002`。所有失败均无数值；每次查询重算，事务内创建可查询、删除即时不可查询，回滚恢复原结果或使临时句柄失效。查询不修改模型、事务写计数、几何/网格缓存或 Eval 状态，只追加诊断和一次顶层查询审计。
+`edge_curve_interval / edge_length / loop_length / face_boundary_length` 组成拓扑边界长度接口族，单位为模型长度单位。`create_trimmed_edge` 创建的边保存有向参数区间，`edge_length` 调用同一支撑曲线的区间弧长实现，覆盖圆/椭圆/抛物线/双曲线、Bezier/BSpline/NURBS、折线和复合链；递减区间合法，区间起止必须分别对应 v0/v1。旧 `create_edge` 保持兼容：Line/LineSegment 继续按端点真实距离计算，未携带区间的曲边仍返回 `NotImplemented / AXM-CORE-E-0004`，绝不以弦长冒充弧长。显式曲边还会把解析区间极值或控制点凸包纳入面/壳/体拓扑包围盒，避免半圆等边界只取端点而低估范围。
+
+裁剪参数越域在创建时返回 `InvalidInput / AXM-GEO-E-0004`；参数非有限/相同返回 `InvalidInput / AXM-CORE-E-0002`；参数求值与拓扑端点超出线性容差返回 `InvalidTopology / AXM-TOPO-E-0008`，诊断携带两端距离和容差。失败发生在 EdgeId 分配前，不增加事务写计数或几何缓存。零长度或存量不一致边同样返回 `AXM-TOPO-E-0008`，缺失边引用返回 `AXM-TOPO-E-0006`。环查询要求闭合且无重复成员；面查询返回**外环加全部内环**的长度，方向无关。所有失败均无部分数值；查询从当前拓扑重算，不修改模型、事务写计数、几何/网格缓存或 Eval 状态。
 
 ### 6.2 拓扑事务接口
 
@@ -491,6 +503,9 @@ public:
   // 坐标必须为有限值；NaN/±Inf 返回 InvalidInput / AXM-CORE-E-0002，拓扑与事务写计数不变。
   Result<VertexId> create_vertex(const Point3&);
   Result<EdgeId> create_edge(CurveId, VertexId, VertexId);
+  Result<EdgeId> create_trimmed_edge(CurveId, Scalar start_parameter,
+                                     Scalar end_parameter,
+                                     VertexId v0, VertexId v1);
   // validate_edge 要求两个拓扑端点在引用的 3D Curve 上（采用内核线性容差）；不一致返回 InvalidTopology / AXM-TOPO-E-0008。
   Result<CoedgeId> create_coedge(EdgeId, bool reversed);
   // 按定向端点 ID 首尾闭合，单共边不豁免；未闭合返回 AXM-TOPO-E-0002，闭合前重复经过顶点返回 AXM-TOPO-E-0023，失败不写入环或事务计数。
@@ -543,7 +558,7 @@ public:
 };
 ```
 
-`first_boundary_conflict` 返回不同边界环间按稳定遍历顺序遇到的首个冲突及两环、两边、两最近点和距离；无冲突是成功的空 `optional`。当前仅检测 Line/LineSegment 支撑的有限拓扑边，分类为 `ProperIntersection`、`EndpointTouch`、`CollinearOverlap` 或 `NearContact`。默认 `linear_tolerance == 0` 使用内核线性容差；有限正值按策略上下限钳制，负值或非有限值返回 `InvalidInput`。`create_face` 与 `validate_face` 复用同一流程；共线正长度重叠和容差内正距离邻近分别使用 `AXM-TOPO-E-0028/0029`。预检和验证均为只读，不分配 `FaceId`、不修改反向索引或事务写计数。一般曲线尚无显式边 trim 区间，因此圆锥曲线、样条和复合链跨环求交仍不在支持范围内。
+`first_boundary_conflict` 返回不同边界环间按稳定遍历顺序遇到的首个冲突及两环、两边、两最近点和距离；无冲突是成功的空 `optional`。精确检测覆盖 Line/LineSegment，以及带显式裁剪区间的 CompositePolyline 和仅含线性子曲线的 CompositeChain，分类为 `ProperIntersection`、`EndpointTouch`、`CollinearOverlap` 或 `NearContact`。复合曲线内部分段点保持为拓扑边内部，不会误分类为边端点相接；递减裁剪区间同样支持。默认 `linear_tolerance == 0` 使用内核线性容差；有限正值按策略上下限钳制，负值或非有限值返回 `InvalidInput`。`create_face` 与 `validate_face` 复用同一流程；共线正长度重叠和容差内正距离邻近分别使用 `AXM-TOPO-E-0028/0029`。预检和验证均为只读，不分配 `FaceId`、不修改反向索引或事务写计数。圆锥曲线和样条的误差受控跨环求交仍是下一子里程碑。
 
 ## 7. `RepCore` 接口清单
 

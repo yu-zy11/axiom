@@ -628,7 +628,27 @@ if (cancelled.status == StatusCode::OperationFailed) {
 
 取消只在 API 边界协作式观察，不抢占单个正在执行的拓扑调用。预取消事务不会取得写者槽；移动事务唯一转移取消权限；被单写者规则拒绝的重叠事务不能借取消影响所有者。
 
-## 13.4 建面前检查跨环边界冲突
+## 13.4 创建带显式参数区间的曲边
+
+```cpp
+const double pi = std::acos(-1.0);
+auto circle = kernel.curves().make_circle({0, 0, 0}, {0, 0, 1}, 5.0);
+auto p0 = kernel.curve_service().point_at_parameter(*circle.value, 0.0);
+auto p1 = kernel.curve_service().point_at_parameter(*circle.value, pi / 2.0);
+
+auto txn = kernel.topology().begin_transaction();
+auto v0 = txn.create_vertex(*p0.value);
+auto v1 = txn.create_vertex(*p1.value);
+auto arc = txn.create_trimmed_edge(*circle.value, 0.0, pi / 2.0,
+                                   *v0.value, *v1.value);
+
+auto interval = kernel.topology().query().edge_curve_interval(*arc.value);
+auto length = kernel.topology().query().edge_length(*arc.value); // 5*pi/2
+```
+
+参数端点与拓扑顶点须在内核线性容差内一致，且参数位于曲线定义域；创建失败不会分配 EdgeId 或增加事务写计数。旧 `create_edge` 创建的曲边没有显式区间，长度查询仍结构化拒绝，不使用弦长近似。
+
+## 13.5 建面前检查跨环边界冲突
 
 ```cpp
 auto conflict = kernel.topology().validate().first_boundary_conflict(
@@ -647,7 +667,7 @@ if (conflict.value->has_value()) {
 }
 ```
 
-当前预检只覆盖 Line/LineSegment 的有限边段，可区分内部相交、端点相接、共线正长度重叠和容差内正距离邻近；一般曲线需等待显式边 trim 区间。
+当前预检精确覆盖 Line/LineSegment，以及带显式 trim 区间的 CompositePolyline 和线性 CompositeChain，可区分内部相交、真实拓扑边端点相接、共线正长度重叠和容差内正距离邻近；圆锥曲线与样条的误差受控求交仍待接入。
 
 ## 14. 诊断与错误处理样例
 

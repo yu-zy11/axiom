@@ -1250,13 +1250,32 @@ Result<BoundingBox> TopologyQueryService::bbox_of_face(FaceId face_id) const {
         "面包围盒查询失败：目标面不存在", "面包围盒查询失败");
   }
   BoundingBox bbox{};
-  if (!append_face_bbox(*state_, face_id, bbox) || !bbox.is_valid) {
+  if (!topo_internal::append_face_bbox(state_, face_id, bbox) || !bbox.is_valid) {
     return detail::failed_result<BoundingBox>(
         *state_, StatusCode::InvalidTopology,
         diag_codes::kTopoFaceOuterLoopInvalid, "面包围盒查询失败：面拓扑不完整",
         "面包围盒查询失败");
   }
   return ok_result(bbox, state_->create_diagnostic("已查询面包围盒"));
+}
+
+Result<std::optional<EdgeCurveInterval>>
+TopologyQueryService::edge_curve_interval(EdgeId edge_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
+  const auto edge = state_->edges.find(edge_id.value);
+  if (edge == state_->edges.end()) {
+    return detail::invalid_input_result<std::optional<EdgeCurveInterval>>(
+        *state_, diag_codes::kCoreInvalidHandle,
+        "边裁剪区间查询失败：目标边不存在", "边裁剪区间查询失败");
+  }
+  if (!edge->second.has_parameter_interval) {
+    return ok_result(std::optional<EdgeCurveInterval>{},
+                     state_->create_diagnostic("目标边未携带显式曲线裁剪区间"));
+  }
+  return ok_result(
+      std::optional<EdgeCurveInterval>{EdgeCurveInterval{
+          edge->second.start_parameter, edge->second.end_parameter}},
+      state_->create_diagnostic("已查询边曲线裁剪区间"));
 }
 
 Result<Scalar> TopologyQueryService::edge_length(EdgeId edge_id) const {
@@ -1275,6 +1294,55 @@ Result<Scalar> TopologyQueryService::edge_length(EdgeId edge_id) const {
         "边长度查询失败：曲线或顶点引用无效", "边长度查询失败");
   }
   const auto &c = curve->second;
+  if (edge->second.has_parameter_interval) {
+    Point3 expected_start{};
+    Point3 expected_end{};
+    const auto invalid_trim = [&]() {
+      return detail::failed_result<Scalar>(
+          *state_, StatusCode::InvalidTopology,
+          diag_codes::kTopoCurveTopologyMismatch,
+          "边长度查询失败：显式裁剪区间、支撑曲线或拓扑端点不一致",
+          "边长度查询失败", {edge_id.value, edge->second.curve_id.value});
+    };
+    const CurveService curve_service(state_);
+    const auto domain = curve_service.domain(edge->second.curve_id);
+    if (!domain.value || edge->second.start_parameter < domain.value->min ||
+        edge->second.start_parameter > domain.value->max ||
+        edge->second.end_parameter < domain.value->min ||
+        edge->second.end_parameter > domain.value->max ||
+        edge->second.start_parameter == edge->second.end_parameter) {
+      return invalid_trim();
+    }
+    const auto start_point = curve_service.point_at_parameter(
+        edge->second.curve_id, edge->second.start_parameter);
+    const auto end_point = curve_service.point_at_parameter(
+        edge->second.curve_id, edge->second.end_parameter);
+    if (!start_point.value || !end_point.value) return invalid_trim();
+    expected_start = *start_point.value;
+    expected_end = *end_point.value;
+    const auto point_distance = [](const Point3 &a, const Point3 &b) {
+      return std::hypot(static_cast<long double>(a.x) - b.x,
+                        static_cast<long double>(a.y) - b.y,
+                        static_cast<long double>(a.z) - b.z);
+    };
+    const auto tolerance = detail::resolve_linear_tolerance(
+        0.0, state_->config.tolerance);
+    if (point_distance(expected_start, v0->second.point) > tolerance ||
+        point_distance(expected_end, v1->second.point) > tolerance) {
+      return invalid_trim();
+    }
+    const auto measured = curve_service.length(
+        edge->second.curve_id, edge->second.start_parameter,
+        edge->second.end_parameter);
+    if (!measured.value) {
+      return error_result<Scalar>(measured.status, measured.diagnostic_id);
+    }
+    if (!std::isfinite(*measured.value) || *measured.value <= 0.0) {
+      return invalid_trim();
+    }
+    return ok_result(*measured.value,
+                     state_->create_diagnostic("已查询显式裁剪边弧长"));
+  }
   if (c.kind != detail::CurveKind::Line && c.kind != detail::CurveKind::LineSegment) {
     return detail::failed_result<Scalar>(
         *state_, StatusCode::NotImplemented, diag_codes::kCoreOperationUnsupported,
@@ -2067,7 +2135,7 @@ TopologyQueryService::bbox_of_shell(ShellId shell_id) const {
   }
   BoundingBox bbox{};
   for (const auto face_id : shell_it->second.faces) {
-    if (!append_face_bbox(*state_, face_id, bbox)) {
+    if (!topo_internal::append_face_bbox(state_, face_id, bbox)) {
       return detail::failed_result<BoundingBox>(
           *state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
           "壳包围盒查询失败：壳面拓扑不完整", "壳包围盒查询失败");
@@ -2090,7 +2158,7 @@ TopologyQueryService::bbox_of_body_from_topology(BodyId body_id) const {
         *state_, diag_codes::kCoreInvalidHandle,
         "体拓扑包围盒查询失败：目标体不存在", "体拓扑包围盒查询失败");
   }
-  const auto bbox = compute_body_bbox(*state_, body_it->second.shells);
+  const auto bbox = compute_body_bbox(state_, body_it->second.shells);
   if (!bbox.is_valid) {
     return detail::failed_result<BoundingBox>(
         *state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,

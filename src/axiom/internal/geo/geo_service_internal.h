@@ -13,6 +13,18 @@ namespace geo_internal {
 inline constexpr Scalar kEpsilon = 1e-12;
 inline constexpr int kClosestParamRefineIters = 8;
 
+/// 无诊断、无缓存的内部曲线点求值，供允许依赖 GeoCore 的上层模块校验拓扑裁剪参数。
+/// 返回 false 表示曲线/子曲线引用无效或结果包含非有限数值。
+bool evaluate_curve_point_no_cache(const detail::KernelState& state,
+                                   CurveId curve_id, Scalar parameter,
+                                   Point3& point);
+
+/// 计算曲线裁剪区间的保守包围盒；解析圆锥曲线包含区间内坐标极值，
+/// Bezier/样条使用控制点凸包，CompositeChain 使用相关子曲线全域包围盒。
+bool curve_interval_bbox_no_cache(const detail::KernelState& state,
+                                  CurveId curve_id, Scalar start_parameter,
+                                  Scalar end_parameter, BoundingBox& bbox);
+
 template <typename F>
 Vec3 surface_partial_u_from_eval(const F &eval_fn, Scalar cu, Scalar cv,
                                  const Range2D &domain) {

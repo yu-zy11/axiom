@@ -4911,12 +4911,84 @@ int main() {
             return result;
         };
 
+        const auto piecewise_triangle =
+            [&](std::array<axiom::Point3, 3> points,
+                axiom::Point3 first_edge_middle, bool use_chain,
+                bool reverse_interval = false)
+            -> std::optional<Triangle> {
+            Triangle result{};
+            std::array<axiom::CoedgeId, 3> coedges;
+            for (std::size_t i = 0; i < 3; ++i) {
+                const auto vertex = setup.create_vertex(points[i]);
+                if (!vertex.value) return {};
+                result.vertices[i] = *vertex.value;
+            }
+            const std::array<axiom::Point3, 3> first_poles =
+                reverse_interval
+                    ? std::array<axiom::Point3, 3>{
+                          points[1], first_edge_middle, points[0]}
+                    : std::array<axiom::Point3, 3>{
+                          points[0], first_edge_middle, points[1]};
+            axiom::Result<axiom::CurveId> first_curve;
+            if (use_chain) {
+                const auto child0 = curves.make_line_segment(
+                    first_poles[0], first_poles[1]);
+                const auto child1 = curves.make_line_segment(
+                    first_poles[1], first_poles[2]);
+                if (!child0.value || !child1.value) return {};
+                first_curve = curves.make_composite_chain(
+                    std::array<axiom::CurveId, 2>{*child0.value, *child1.value});
+            } else {
+                first_curve = curves.make_composite_polyline(first_poles);
+            }
+            if (!first_curve.value) return {};
+            const auto first_edge = setup.create_trimmed_edge(
+                *first_curve.value, reverse_interval ? 2.0 : 0.0,
+                reverse_interval ? 0.0 : 2.0, result.vertices[0],
+                result.vertices[1]);
+            if (!first_edge.value) return {};
+            result.edges[0] = *first_edge.value;
+            const auto first_coedge =
+                setup.create_coedge(*first_edge.value, false);
+            if (!first_coedge.value) return {};
+            coedges[0] = *first_coedge.value;
+            for (std::size_t i = 1; i < 3; ++i) {
+                const auto next = (i + 1) % 3;
+                const auto curve = curves.make_line_segment(points[i], points[next]);
+                if (!curve.value) return {};
+                const auto edge = setup.create_edge(
+                    *curve.value, result.vertices[i], result.vertices[next]);
+                if (!edge.value) return {};
+                result.edges[i] = *edge.value;
+                const auto coedge = setup.create_coedge(*edge.value, false);
+                if (!coedge.value) return {};
+                coedges[i] = *coedge.value;
+            }
+            const auto loop = setup.create_loop(coedges);
+            if (!loop.value) return {};
+            result.loop = *loop.value;
+            return result;
+        };
+
         const auto outer = triangle({{{0, 0, 0}, {10, 0, 0}, {0, 10, 0}}});
         const auto overlap = triangle({{{2, 0, 0}, {4, 0, 0}, {3, 1, 0}}});
         const auto near = triangle({{{2, 5e-7, 0}, {4, 5e-7, 0}, {3, 1, 0}}});
         const auto separated = triangle({{{2, 2e-6, 0}, {4, 2e-6, 0}, {3, 1, 0}}});
         const auto safe = triangle({{{6, 1, 0}, {7, 1, 0}, {6, 2, 0}}});
+        const auto piecewise_outer = piecewise_triangle(
+            {{{0, 0, 0}, {10, 0, 0}, {0, 10, 0}}}, {5, 0, 0}, false);
+        const auto chain_outer = piecewise_triangle(
+            {{{0, 0, 0}, {10, 0, 0}, {0, 10, 0}}}, {5, 0, 0}, true);
+        const auto reversed_piecewise_outer = piecewise_triangle(
+            {{{0, 0, 0}, {10, 0, 0}, {0, 10, 0}}}, {5, 0, 0}, false,
+            true);
+        const auto kinked_outer = piecewise_triangle(
+            {{{0, 0, 0}, {10, 0, 0}, {0, 10, 0}}}, {5, 2, 0}, false);
+        const auto crossing = triangle(
+            {{{5, -1, 0}, {5, 3, 0}, {6, 1, 0}}});
         if (!outer || !overlap || !near || !separated || !safe ||
+            !piecewise_outer || !chain_outer || !reversed_piecewise_outer ||
+            !kinked_outer || !crossing ||
             setup.commit().status != axiom::StatusCode::Ok) return 1;
 
         const auto writes_before_queries =
@@ -4927,6 +4999,24 @@ int main() {
             outer->loop, std::array<axiom::LoopId, 1>{near->loop});
         const auto separated_query = topo.validate().first_boundary_conflict(
             outer->loop, std::array<axiom::LoopId, 1>{separated->loop});
+        const auto piecewise_overlap_query =
+            topo.validate().first_boundary_conflict(
+                piecewise_outer->loop,
+                std::array<axiom::LoopId, 1>{overlap->loop});
+        const auto piecewise_near_query =
+            topo.validate().first_boundary_conflict(
+                piecewise_outer->loop,
+                std::array<axiom::LoopId, 1>{near->loop});
+        const auto chain_overlap_query = topo.validate().first_boundary_conflict(
+            chain_outer->loop,
+            std::array<axiom::LoopId, 1>{overlap->loop});
+        const auto reversed_overlap_query =
+            topo.validate().first_boundary_conflict(
+                reversed_piecewise_outer->loop,
+                std::array<axiom::LoopId, 1>{overlap->loop});
+        const auto internal_knot_query = topo.validate().first_boundary_conflict(
+            kinked_outer->loop,
+            std::array<axiom::LoopId, 1>{crossing->loop});
         if (!overlap_query.value || !overlap_query.value->has_value() ||
             overlap_query.value->value().kind !=
                 axiom::FaceBoundaryConflictKind::CollinearOverlap ||
@@ -4939,8 +5029,38 @@ int main() {
             !(near_query.value->value().distance > 0.0 &&
               near_query.value->value().distance <= config.tolerance.linear) ||
             !separated_query.value || separated_query.value->has_value() ||
+            !piecewise_overlap_query.value ||
+            !piecewise_overlap_query.value->has_value() ||
+            piecewise_overlap_query.value->value().kind !=
+                axiom::FaceBoundaryConflictKind::CollinearOverlap ||
+            piecewise_overlap_query.value->value().first_edge.value !=
+                piecewise_outer->edges[0].value ||
+            !piecewise_near_query.value ||
+            !piecewise_near_query.value->has_value() ||
+            piecewise_near_query.value->value().kind !=
+                axiom::FaceBoundaryConflictKind::NearContact ||
+            !chain_overlap_query.value ||
+            !chain_overlap_query.value->has_value() ||
+            chain_overlap_query.value->value().kind !=
+                axiom::FaceBoundaryConflictKind::CollinearOverlap ||
+            chain_overlap_query.value->value().first_edge.value !=
+                chain_outer->edges[0].value ||
+            !reversed_overlap_query.value ||
+            !reversed_overlap_query.value->has_value() ||
+            reversed_overlap_query.value->value().kind !=
+                axiom::FaceBoundaryConflictKind::CollinearOverlap ||
+            reversed_overlap_query.value->value().first_edge.value !=
+                reversed_piecewise_outer->edges[0].value ||
+            !internal_knot_query.value ||
+            !internal_knot_query.value->has_value() ||
+            internal_knot_query.value->value().kind !=
+                axiom::FaceBoundaryConflictKind::ProperIntersection ||
+            internal_knot_query.value->value().first_edge.value !=
+                kinked_outer->edges[0].value ||
+            internal_knot_query.value->value().second_edge.value !=
+                crossing->edges[0].value ||
             state->topology_committed_write_operations_total != writes_before_queries) {
-            std::cerr << "boundary preflight classification or read-only guarantee failed\n";
+            std::cerr << "linear boundary preflight classification or read-only guarantee failed\n";
             return 1;
         }
         const auto exact_only_query = topo.validate().first_boundary_conflict(
@@ -4993,6 +5113,45 @@ int main() {
             if (json.find(rejected_case.second) == std::string::npos ||
                 json.find("related_entities") == std::string::npos) return 1;
         }
+        struct PiecewiseRejected {
+            axiom::LoopId outer;
+            axiom::LoopId inner;
+            axiom::EdgeId outer_edge;
+            std::string_view code;
+        };
+        for (const auto& rejected_case : std::array{
+                 PiecewiseRejected{piecewise_outer->loop, overlap->loop,
+                     piecewise_outer->edges[0],
+                     axiom::diag_codes::kTopoFaceCrossLoopCollinearOverlap},
+                 PiecewiseRejected{piecewise_outer->loop, near->loop,
+                     piecewise_outer->edges[0],
+                     axiom::diag_codes::kTopoFaceCrossLoopNearContact},
+                 PiecewiseRejected{chain_outer->loop, overlap->loop,
+                     chain_outer->edges[0],
+                     axiom::diag_codes::kTopoFaceCrossLoopCollinearOverlap},
+                 PiecewiseRejected{reversed_piecewise_outer->loop,
+                     overlap->loop, reversed_piecewise_outer->edges[0],
+                     axiom::diag_codes::kTopoFaceCrossLoopCollinearOverlap},
+                 PiecewiseRejected{kinked_outer->loop, crossing->loop,
+                     kinked_outer->edges[0],
+                     axiom::diag_codes::kTopoFaceCrossLoopStraightEdgeIntersection}}) {
+            const auto rejected = txn.create_face(
+                *plane.value, rejected_case.outer,
+                std::array<axiom::LoopId, 1>{rejected_case.inner});
+            const auto report = diagnostics.get(rejected.diagnostic_id);
+            if (rejected.status != axiom::StatusCode::InvalidTopology ||
+                rejected.value || !report.value ||
+                !issue_links_entities(*report.value, rejected_case.code,
+                    {rejected_case.outer.value, rejected_case.inner.value,
+                     rejected_case.outer_edge.value}) ||
+                state->next_id != next_id || !state->faces.empty() ||
+                txn.created_face_count().value !=
+                    std::optional<std::uint64_t>{0} ||
+                txn.write_operation_count().value != writes) {
+                std::cerr << "piecewise boundary rejection polluted face transaction\n";
+                return 1;
+            }
+        }
 
         // Point-like corrupted boundary segments still produce finite evidence
         // and are treated as near contact rather than escaping through a divide
@@ -5017,7 +5176,7 @@ int main() {
         state->vertices.at(separated->vertices[1].value).point = original_degenerate_point;
 
         const auto good = txn.create_face(
-            *plane.value, outer->loop,
+            *plane.value, piecewise_outer->loop,
             std::array<axiom::LoopId, 1>{safe->loop});
         if (!good.value) return 1;
         state->faces.at(good.value->value).inner_loops[0] = overlap->loop;
@@ -5029,8 +5188,9 @@ int main() {
         if (invalid.status != axiom::StatusCode::InvalidTopology ||
             !invalid_report.value || !issue_links_entities(*invalid_report.value,
                 axiom::diag_codes::kTopoFaceCrossLoopCollinearOverlap,
-                {good.value->value, outer->loop.value, overlap->loop.value,
-                 outer->edges[0].value, overlap->edges[0].value}) ||
+                {good.value->value, piecewise_outer->loop.value,
+                 overlap->loop.value, piecewise_outer->edges[0].value,
+                 overlap->edges[0].value}) ||
             txn.write_operation_count().value != writes_before_validation ||
             txn.rollback().status != axiom::StatusCode::Ok ||
             topo.query().has_face(*good.value).value != std::optional<bool>{false}) {

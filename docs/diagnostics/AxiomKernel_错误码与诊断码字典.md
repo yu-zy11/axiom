@@ -252,10 +252,10 @@
 | `AXM-TOPO-E-0023` | Error | 环在闭合终点之外重复经过同一顶点，形成自接触的非简单边界；`create_loop` 在写入前拒绝并关联重复顶点与两条冲突定向边 |
 | `AXM-TOPO-E-0024` | Error | 同一面中不同边界环共用同一拓扑顶点；`create_face` 在写入前拒绝，`validate_face` 检出存量缺陷，关联冲突环与顶点 ID |
 | `AXM-TOPO-E-0025` | Error | 同一面中不同边界环的独立顶点具有完全相同的有限三维坐标；`create_face` 在写入前拒绝，`validate_face` 检出存量缺陷，关联两个环与两个顶点 ID。仅覆盖顶点坐标精确重合，不代表完整几何自交检测 |
-| `AXM-TOPO-E-0026` | Error | 同一面中不同边界环的有限 Line/LineSegment 边段在三维空间内部相交；`create_face` 在写入前拒绝，`validate_face` 检出存量缺陷，关联两个环与两条边 ID |
-| `AXM-TOPO-E-0027` | Error | 同一面中不同边界环的有限 Line/LineSegment 边段端点相接（至少一条边的端点落在另一条边上）；`create_face` 在写入前拒绝，`validate_face` 检出存量缺陷，关联两个环与两条边 ID |
-| `AXM-TOPO-E-0028` | Error | 同一面中不同边界环的有限 Line/LineSegment 边段共线且存在正长度重叠；`create_face` 在分配 FaceId 前拒绝，`validate_face` 检出存量缺陷，关联两个环与两条边 ID |
-| `AXM-TOPO-E-0029` | Error | 同一面中不同边界环的有限 Line/LineSegment 边段未精确相交，但最近距离为有限正值且不超过有效线性容差；`create_face` 在分配 FaceId 前拒绝，`validate_face` 检出存量缺陷，关联两个环与两条边 ID。一般曲线因缺少显式边 trim 区间尚不在覆盖范围内 |
+| `AXM-TOPO-E-0026` | Error | 同一面中不同边界环的有限线性边界片段在三维空间内部相交；精确覆盖 Line/LineSegment 与显式裁剪的 CompositePolyline/线性 CompositeChain；`create_face` 在写入前拒绝，`validate_face` 检出存量缺陷，关联两个环与两条边 ID |
+| `AXM-TOPO-E-0027` | Error | 上述线性边界片段在至少一条拓扑边的真实端点相接；复合折线/链的内部分段点不会被误当为边端点；创建与验证关联两环两边 ID |
+| `AXM-TOPO-E-0028` | Error | 上述线性边界片段共线且存在正长度重叠；`create_face` 在分配 FaceId 前拒绝，`validate_face` 检出存量缺陷，关联两环两边 ID |
+| `AXM-TOPO-E-0029` | Error | 上述线性边界片段未精确相交，但最近距离为有限正值且不超过有效线性容差；`create_face` 与 `validate_face` 共用该判定。圆锥曲线与样条的误差受控求交仍未覆盖 |
 
 ## 7.5 `BOOL` 布尔模块错误码
 

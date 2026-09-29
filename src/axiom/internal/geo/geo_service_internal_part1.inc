@@ -1106,6 +1106,8 @@ Point3 evaluate_bspline_curve_point(std::span<const Point3> poles, Scalar t) {
 
 Point3 evaluate_curve_point(const detail::CurveRecord &curve, Scalar t) {
   switch (curve.kind) {
+  case detail::CurveKind::Line:
+    return detail::add_point_vec(curve.origin, detail::scale(curve.direction, t));
   case detail::CurveKind::LineSegment: {
     if (curve.poles.size() >= 2) {
       return lerp_point(curve.poles.front(), curve.poles.back(),
@@ -1113,6 +1115,23 @@ Point3 evaluate_curve_point(const detail::CurveRecord &curve, Scalar t) {
     }
     return curve.origin;
   }
+  case detail::CurveKind::Circle:
+    return Point3{curve.origin.x + curve.radius *
+                                       (curve.axis_u.x * std::cos(t) +
+                                        curve.axis_v.x * std::sin(t)),
+                  curve.origin.y + curve.radius *
+                                       (curve.axis_u.y * std::cos(t) +
+                                        curve.axis_v.y * std::sin(t)),
+                  curve.origin.z + curve.radius *
+                                       (curve.axis_u.z * std::cos(t) +
+                                        curve.axis_v.z * std::sin(t))};
+  case detail::CurveKind::Ellipse:
+    return Point3{curve.origin.x + curve.axis_u.x * std::cos(t) +
+                                       curve.axis_v.x * std::sin(t),
+                  curve.origin.y + curve.axis_u.y * std::cos(t) +
+                                       curve.axis_v.y * std::sin(t),
+                  curve.origin.z + curve.axis_u.z * std::cos(t) +
+                                       curve.axis_v.z * std::sin(t)};
   case detail::CurveKind::Parabola: {
     const auto p = std::max(curve.param_a, 1e-9);
     const auto x = t;
@@ -1152,6 +1171,33 @@ Point3 evaluate_curve_point(const detail::CurveRecord &curve, Scalar t) {
   default:
     return curve.origin;
   }
+}
+
+bool evaluate_curve_point_no_cache(const detail::KernelState &state,
+                                   CurveId curve_id, Scalar parameter,
+                                   Point3 &point) {
+  const auto it = state.curves.find(curve_id.value);
+  if (it == state.curves.end() || !std::isfinite(parameter)) return false;
+  const auto &curve = it->second;
+  if (curve.kind == detail::CurveKind::CompositeChain) {
+    if (curve.children.empty()) return false;
+    const auto domain = curve_domain(curve);
+    if (parameter < domain.min || parameter > domain.max) return false;
+    const auto max_index = static_cast<Scalar>(curve.children.size());
+    const auto clamped = std::min(parameter, std::nextafter(max_index, 0.0));
+    const auto index = static_cast<std::size_t>(
+        std::max<Scalar>(0.0, std::floor(clamped)));
+    const auto local_parameter = clamped - static_cast<Scalar>(index);
+    if (!evaluate_curve_point_no_cache(
+            state, curve.children[std::min(index, curve.children.size() - 1)],
+            local_parameter, point)) {
+      return false;
+    }
+  } else {
+    point = evaluate_curve_point(curve, parameter);
+  }
+  return std::isfinite(point.x) && std::isfinite(point.y) &&
+         std::isfinite(point.z);
 }
 
 Scalar approximate_curve_parameter(const detail::CurveRecord &curve,

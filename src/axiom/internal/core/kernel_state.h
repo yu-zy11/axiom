@@ -126,6 +126,9 @@ struct EdgeRecord {
     CurveId curve_id {};
     VertexId v0 {};
     VertexId v1 {};
+    bool has_parameter_interval {false};
+    Scalar start_parameter {};
+    Scalar end_parameter {};
 };
 
 struct CoedgeRecord {

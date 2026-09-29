@@ -1192,6 +1192,140 @@ BoundingBox make_curve_bbox(const detail::CurveRecord &curve) {
   }
 }
 
+bool curve_interval_bbox_no_cache(const detail::KernelState &state,
+                                  CurveId curve_id, Scalar start_parameter,
+                                  Scalar end_parameter, BoundingBox &bbox) {
+  bbox = {};
+  const auto it = state.curves.find(curve_id.value);
+  if (it == state.curves.end() || !std::isfinite(start_parameter) ||
+      !std::isfinite(end_parameter)) {
+    return false;
+  }
+  const auto &curve = it->second;
+  const auto domain = curve_domain(curve);
+  const auto lo = std::min(start_parameter, end_parameter);
+  const auto hi = std::max(start_parameter, end_parameter);
+  if (lo < domain.min || hi > domain.max) return false;
+  const auto extend = [&](const Point3 &point) {
+    if (!std::isfinite(point.x) || !std::isfinite(point.y) ||
+        !std::isfinite(point.z)) {
+      return false;
+    }
+    if (!bbox.is_valid) {
+      bbox = detail::make_bbox(point, point);
+    } else {
+      bbox.min.x = std::min(bbox.min.x, point.x);
+      bbox.min.y = std::min(bbox.min.y, point.y);
+      bbox.min.z = std::min(bbox.min.z, point.z);
+      bbox.max.x = std::max(bbox.max.x, point.x);
+      bbox.max.y = std::max(bbox.max.y, point.y);
+      bbox.max.z = std::max(bbox.max.z, point.z);
+    }
+    return true;
+  };
+  Point3 endpoint{};
+  if (!evaluate_curve_point_no_cache(state, curve_id, lo, endpoint) ||
+      !extend(endpoint) ||
+      !evaluate_curve_point_no_cache(state, curve_id, hi, endpoint) ||
+      !extend(endpoint)) {
+    return false;
+  }
+  if (lo == hi) return true;
+  const auto extend_parameter = [&](Scalar parameter) {
+    if (!(parameter > lo && parameter < hi)) return true;
+    Point3 point{};
+    return evaluate_curve_point_no_cache(state, curve_id, parameter, point) &&
+           extend(point);
+  };
+  switch (curve.kind) {
+  case detail::CurveKind::Line:
+  case detail::CurveKind::LineSegment:
+    break;
+  case detail::CurveKind::Circle:
+  case detail::CurveKind::Ellipse: {
+    const Vec3 u = curve.kind == detail::CurveKind::Circle
+                       ? detail::scale(curve.axis_u, curve.radius)
+                       : curve.axis_u;
+    const Vec3 v = curve.kind == detail::CurveKind::Circle
+                       ? detail::scale(curve.axis_v, curve.radius)
+                       : curve.axis_v;
+    const auto pi = std::acos(-1.0);
+    for (const auto &[uc, vc] :
+         {std::pair<Scalar, Scalar>{u.x, v.x}, {u.y, v.y}, {u.z, v.z}}) {
+      const auto base = std::atan2(vc, uc);
+      const auto first = static_cast<long long>(
+          std::ceil((static_cast<long double>(lo) - base) / pi));
+      const auto last = static_cast<long long>(
+          std::floor((static_cast<long double>(hi) - base) / pi));
+      for (auto k = first; k <= last; ++k) {
+        const auto candidate = base + static_cast<Scalar>(k) * pi;
+        if (!extend_parameter(candidate)) return false;
+      }
+    }
+    break;
+  }
+  case detail::CurveKind::Parabola: {
+    const auto p = std::max(curve.param_a, Scalar{1e-9});
+    for (const auto &[uc, vc] :
+         {std::pair<Scalar, Scalar>{curve.axis_u.x, curve.axis_v.x},
+          {curve.axis_u.y, curve.axis_v.y},
+          {curve.axis_u.z, curve.axis_v.z}}) {
+      if (vc != 0.0 && !extend_parameter(-2.0 * p * uc / vc)) return false;
+    }
+    break;
+  }
+  case detail::CurveKind::Hyperbola: {
+    const auto a = std::max(curve.param_a, Scalar{1e-9});
+    const auto b = std::max(curve.param_b, Scalar{1e-9});
+    for (const auto &[uc, vc] :
+         {std::pair<Scalar, Scalar>{curve.axis_u.x, curve.axis_v.x},
+          {curve.axis_u.y, curve.axis_v.y},
+          {curve.axis_u.z, curve.axis_v.z}}) {
+      if (uc == 0.0) continue;
+      const auto ratio = -b * vc / (a * uc);
+      if (std::abs(ratio) < 1.0 &&
+          !extend_parameter(std::atanh(ratio))) return false;
+    }
+    break;
+  }
+  case detail::CurveKind::Bezier:
+  case detail::CurveKind::BSpline:
+  case detail::CurveKind::Nurbs:
+  case detail::CurveKind::CompositePolyline:
+    // Positive-weight polynomial/rational bases stay in their control hull.
+    for (const auto &pole : curve.poles) {
+      if (!extend(pole)) return false;
+    }
+    break;
+  case detail::CurveKind::CompositeChain:
+    // A child-local [0,1] interval may represent a shifted native domain;
+    // using every touched child's complete domain is deliberately conservative.
+    for (std::size_t index = 0; index < curve.children.size(); ++index) {
+      const auto child_lo = static_cast<Scalar>(index);
+      const auto child_hi = child_lo + 1.0;
+      if (hi < child_lo || lo > child_hi) continue;
+      const auto child = state.curves.find(curve.children[index].value);
+      if (child == state.curves.end()) return false;
+      const auto child_domain = curve_domain(child->second);
+      const auto child_start = std::isfinite(child_domain.min)
+                                   ? child_domain.min
+                                   : Scalar{0.0};
+      const auto child_end = std::isfinite(child_domain.max)
+                                 ? child_domain.max
+                                 : Scalar{1.0};
+      BoundingBox child_bbox{};
+      if (!curve_interval_bbox_no_cache(
+              state, curve.children[index], child_start,
+              child_end, child_bbox) || !child_bbox.is_valid ||
+          !extend(child_bbox.min) || !extend(child_bbox.max)) {
+        return false;
+      }
+    }
+    break;
+  }
+  return bbox.is_valid;
+}
+
 BoundingBox make_surface_bbox(const detail::SurfaceRecord &surface) {
   switch (surface.kind) {
   case detail::SurfaceKind::Plane:
@@ -1328,4 +1462,3 @@ detail::SurfaceRecord make_surface_record(detail::SurfaceKind kind,
   record.spline_degree_v = spline_degree_v;
   return record;
 }
-
