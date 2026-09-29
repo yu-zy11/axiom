@@ -77,6 +77,50 @@ Result<void> TopologyValidationService::validate_edge(EdgeId edge_id) const {
   const std::array<std::pair<VertexId, Point3>, 2> endpoints{{
       {edge_it->second.v0, state_->vertices.at(edge_it->second.v0.value).point},
       {edge_it->second.v1, state_->vertices.at(edge_it->second.v1.value).point}}};
+  if (edge_it->second.has_parameter_interval) {
+    Point3 expected_start{};
+    Point3 expected_end{};
+    const auto domain = curve_service.domain(edge_it->second.curve_id);
+    if (!domain.value ||
+        edge_it->second.start_parameter < domain.value->min ||
+        edge_it->second.start_parameter > domain.value->max ||
+        edge_it->second.end_parameter < domain.value->min ||
+        edge_it->second.end_parameter > domain.value->max ||
+        edge_it->second.start_parameter == edge_it->second.end_parameter) {
+      return detail::failed_void(
+          *state_, StatusCode::InvalidTopology,
+          diag_codes::kTopoCurveTopologyMismatch,
+          "边验证失败：显式裁剪区间无法在支撑曲线上求值", "边验证失败",
+          {edge_id.value, edge_it->second.curve_id.value});
+    }
+    const auto start_point = curve_service.point_at_parameter(
+        edge_it->second.curve_id, edge_it->second.start_parameter);
+    const auto end_point = curve_service.point_at_parameter(
+        edge_it->second.curve_id, edge_it->second.end_parameter);
+    if (!start_point.value || !end_point.value) {
+      return detail::failed_void(
+          *state_, StatusCode::InvalidTopology,
+          diag_codes::kTopoCurveTopologyMismatch,
+          "边验证失败：显式裁剪端点查询不可用", "边验证失败",
+          {edge_id.value, edge_it->second.curve_id.value});
+    }
+    expected_start = *start_point.value;
+    expected_end = *end_point.value;
+    const auto point_distance = [](const Point3 &a, const Point3 &b) {
+      return std::hypot(static_cast<long double>(a.x) - b.x,
+                        static_cast<long double>(a.y) - b.y,
+                        static_cast<long double>(a.z) - b.z);
+    };
+    if (point_distance(expected_start, endpoints[0].second) > tolerance ||
+        point_distance(expected_end, endpoints[1].second) > tolerance) {
+      return detail::failed_void(
+          *state_, StatusCode::InvalidTopology,
+          diag_codes::kTopoCurveTopologyMismatch,
+          "边验证失败：显式裁剪区间端点与拓扑顶点不一致", "边验证失败",
+          {edge_id.value, edge_it->second.curve_id.value,
+           edge_it->second.v0.value, edge_it->second.v1.value});
+    }
+  }
   for (const auto &[vertex_id, point] : endpoints) {
     const auto closest = curve_service.closest_point(edge_it->second.curve_id, point);
     if (closest.status != StatusCode::Ok || !closest.value.has_value()) {
@@ -1376,19 +1420,19 @@ Result<void> TopologyValidationService::validate_face(FaceId face_id) const {
     std::string_view code =
         diag_codes::kTopoFaceCrossLoopStraightEdgeIntersection;
     std::string message =
-        "面验证失败：不同边界环的直线边段在内部相交";
+        "面验证失败：不同边界环的线性边界片段在内部相交";
     switch (conflict->kind) {
       case FaceBoundaryConflictKind::EndpointTouch:
         code = diag_codes::kTopoFaceCrossLoopStraightEdgeEndpointTouch;
-        message = "面验证失败：不同边界环的直线边段在端点相接";
+        message = "面验证失败：不同边界环的线性边界片段在拓扑边端点相接";
         break;
       case FaceBoundaryConflictKind::CollinearOverlap:
         code = diag_codes::kTopoFaceCrossLoopCollinearOverlap;
-        message = "面验证失败：不同边界环的共线直线边段发生重叠";
+        message = "面验证失败：不同边界环的共线边界片段发生重叠";
         break;
       case FaceBoundaryConflictKind::NearContact:
         code = diag_codes::kTopoFaceCrossLoopNearContact;
-        message = "面验证失败：不同边界环的直线边段在拓扑容差内邻近相接（间距=" +
+        message = "面验证失败：不同边界环的线性边界片段在拓扑容差内邻近相接（间距=" +
                   std::to_string(conflict->distance) + "，容差=" +
                   std::to_string(boundary_tolerance) + "）";
         break;

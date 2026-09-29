@@ -469,7 +469,7 @@ TopologyValidationService::validate_body_bbox(BodyId body_id) const {
         *state_, StatusCode::InvalidTopology, diag_codes::kCoreInvalidHandle,
         "体包围盒验证失败：目标体不存在", "体包围盒验证失败");
   }
-  const auto bbox = compute_body_bbox(*state_, body_it->second.shells);
+  const auto bbox = compute_body_bbox(state_, body_it->second.shells);
   if (!bbox.is_valid) {
     return detail::failed_void(
         *state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,

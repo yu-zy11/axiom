@@ -104,6 +104,112 @@ bool length_query_regression() {
         runtime_before.value->face_tessellation_cache_entries != runtime_after.value->face_tessellation_cache_entries ||
         runtime_before.value->intersection_records != runtime_after.value->intersection_records) return false;
 
+    // Explicit topology trim intervals make curved-edge length unambiguous.
+    // Creation validates domain and endpoint correspondence before allocating an EdgeId.
+    {
+        const auto c0 = geo.eval(*circle.value, 0, 0);
+        const auto cpi = geo.eval(*circle.value, pi, 0);
+        const auto b0 = geo.eval(*bezier.value, .25, 0);
+        const auto b1 = geo.eval(*bezier.value, .75, 0);
+        if (!c0.value || !cpi.value || !b0.value || !b1.value) return false;
+        const auto public_query_stores = kernel.runtime_store_counts();
+        const auto uncached_c0 = geo.point_at_parameter(*circle.value, 0);
+        const auto half_circle_bbox = geo.bbox(*circle.value, 0, pi);
+        const auto invalid_parameter_point =
+            geo.point_at_parameter(*circle.value, -0.1);
+        const auto public_query_stores_after = kernel.runtime_store_counts();
+        const auto point_equal = [](const axiom::Point3 &lhs,
+                                    const axiom::Point3 &rhs) {
+            return approx(lhs.x, rhs.x) && approx(lhs.y, rhs.y) &&
+                   approx(lhs.z, rhs.z);
+        };
+        if (!uncached_c0.value ||
+            !point_equal(*uncached_c0.value, c0.value->point) ||
+            !half_circle_bbox.value || !half_circle_bbox.value->is_valid ||
+            invalid_parameter_point.status != axiom::StatusCode::InvalidInput ||
+            invalid_parameter_point.value || !public_query_stores.value ||
+            !public_query_stores_after.value ||
+            public_query_stores.value->curve_eval_cache_entries !=
+                public_query_stores_after.value->curve_eval_cache_entries) return false;
+        auto trim_txn = kernel.topology().begin_transaction();
+        const auto cv0 = trim_txn.create_vertex(c0.value->point);
+        const auto cv1 = trim_txn.create_vertex(cpi.value->point);
+        const auto bv0 = trim_txn.create_vertex(b0.value->point);
+        const auto bv1 = trim_txn.create_vertex(b1.value->point);
+        if (!cv0.value || !cv1.value || !bv0.value || !bv1.value) return false;
+        const auto writes_before_rejection = trim_txn.write_operation_count();
+        const auto objects_before_rejection = kernel.object_count_total();
+        const auto caches_before_rejection = kernel.runtime_store_counts();
+        const auto bad_domain = trim_txn.create_trimmed_edge(
+            *circle.value, -.1, pi, *cv0.value, *cv1.value);
+        const auto zero_interval = trim_txn.create_trimmed_edge(
+            *circle.value, 0, 0, *cv0.value, *cv1.value);
+        const auto mismatched = trim_txn.create_trimmed_edge(
+            *circle.value, 0, pi, *cv1.value, *cv0.value);
+        const auto bad_domain_report = kernel.diagnostics().get(bad_domain.diagnostic_id);
+        const auto mismatch_report = kernel.diagnostics().get(mismatched.diagnostic_id);
+        const auto caches_after_rejection = kernel.runtime_store_counts();
+        if (bad_domain.status != axiom::StatusCode::InvalidInput || bad_domain.value ||
+            !bad_domain_report.value || !has_issue_code(*bad_domain_report.value,
+                axiom::diag_codes::kGeoParameterOutOfDomain) ||
+            zero_interval.status != axiom::StatusCode::InvalidInput || zero_interval.value ||
+            mismatched.status != axiom::StatusCode::InvalidTopology || mismatched.value ||
+            !mismatch_report.value || !has_issue_code(*mismatch_report.value,
+                axiom::diag_codes::kTopoCurveTopologyMismatch) ||
+            trim_txn.write_operation_count().value != writes_before_rejection.value ||
+            kernel.object_count_total().value != objects_before_rejection.value ||
+            !caches_before_rejection.value || !caches_after_rejection.value ||
+            caches_before_rejection.value->curve_eval_cache_entries !=
+                caches_after_rejection.value->curve_eval_cache_entries) return false;
+
+        const auto first_arc = trim_txn.create_trimmed_edge(
+            *circle.value, 0, pi, *cv0.value, *cv1.value);
+        const auto second_arc = trim_txn.create_trimmed_edge(
+            *circle.value, pi, 2 * pi, *cv1.value, *cv0.value);
+        const auto bezier_trim = trim_txn.create_trimmed_edge(
+            *bezier.value, .25, .75, *bv0.value, *bv1.value);
+        const auto bezier_trim_length = geo.length(*bezier.value, .25, .75);
+        if (!first_arc.value || !second_arc.value || !bezier_trim.value ||
+            !bezier_trim_length.value ||
+            !equal(topo.edge_length(*first_arc.value), 2 * pi) ||
+            !equal(topo.edge_length(*second_arc.value), 2 * pi) ||
+            !equal(topo.edge_length(*bezier_trim.value),
+                   *bezier_trim_length.value)) return false;
+        const auto interval = topo.edge_curve_interval(*second_arc.value);
+        const auto legacy_interval = topo.edge_curve_interval({});
+        if (!interval.value || !interval.value->has_value() ||
+            !approx(interval.value->value().start_parameter, pi) ||
+            !approx(interval.value->value().end_parameter, 2 * pi) ||
+            legacy_interval.status != axiom::StatusCode::InvalidInput ||
+            legacy_interval.value) return false;
+        const auto ce0 = trim_txn.create_coedge(*first_arc.value, false);
+        const auto ce1 = trim_txn.create_coedge(*second_arc.value, false);
+        if (!ce0.value || !ce1.value) return false;
+        const auto arc_loop = trim_txn.create_loop(std::array{*ce0.value, *ce1.value});
+        const auto circle_plane = kernel.surfaces().make_plane({1, 2, 3}, {1, 2, 3});
+        if (!arc_loop.value || !circle_plane.value ||
+            !equal(topo.loop_length(*arc_loop.value), 4 * pi)) return false;
+        const auto arc_face = trim_txn.create_face(*circle_plane.value, *arc_loop.value, {});
+        const auto face_bbox = arc_face.value ? topo.bbox_of_face(*arc_face.value)
+                                              : axiom::Result<axiom::BoundingBox>{};
+        const auto curve_bbox = geo.bbox(*circle.value);
+        const auto same_bbox = [&](const axiom::BoundingBox &lhs,
+                                   const axiom::BoundingBox &rhs) {
+            return lhs.is_valid && rhs.is_valid && approx(lhs.min.x, rhs.min.x) &&
+                   approx(lhs.min.y, rhs.min.y) && approx(lhs.min.z, rhs.min.z) &&
+                   approx(lhs.max.x, rhs.max.x) && approx(lhs.max.y, rhs.max.y) &&
+                   approx(lhs.max.z, rhs.max.z);
+        };
+        if (!arc_face.value || !face_bbox.value || !curve_bbox.value ||
+            !same_bbox(*face_bbox.value, *curve_bbox.value) ||
+            !equal(topo.face_boundary_length(*arc_face.value), 4 * pi) ||
+            kernel.topology().validate().validate_edge(*first_arc.value).status !=
+                axiom::StatusCode::Ok ||
+            trim_txn.rollback().status != axiom::StatusCode::Ok ||
+            topo.edge_curve_interval(*first_arc.value).status !=
+                axiom::StatusCode::InvalidInput) return false;
+    }
+
     // Full boundary workflow: concave outer loop + two holes, independent winding,
     // reversed coedges, two planes and three model-unit scales (24 variants).
     for (double scale : {0.001, 1.0, 1000.0}) {
@@ -182,6 +288,8 @@ bool length_query_regression() {
     const auto degenerate = txn.create_edge(*segment.value, *v0.value, *coincident.value);
     const auto curved = txn.create_edge(*circle.value, *v0.value, *v2.value);
     if (!partial.value || !mismatch.value || !out_of_domain.value || !degenerate.value || !curved.value) return false;
+    const auto legacy_partial_interval = topo.edge_curve_interval(*partial.value);
+    if (!legacy_partial_interval.value || legacy_partial_interval.value->has_value()) return false;
     const auto straight = kernel.curves().make_line({0, 0, 0}, {3, 4, 0});
     const auto huge_line = kernel.curves().make_line({0, 0, 0}, {1, 0, 0});
     const auto huge0 = txn.create_vertex({-1e308, 0, 0});

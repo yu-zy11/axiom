@@ -123,6 +123,88 @@ Result<EdgeId> TopologyTransaction::create_edge(CurveId curve_id, VertexId v0,
   return ok_result(id, state_->create_diagnostic("已创建边"));
 }
 
+Result<EdgeId> TopologyTransaction::create_trimmed_edge(
+    CurveId curve_id, Scalar start_parameter, Scalar end_parameter,
+    VertexId v0, VertexId v1) {
+  if (const auto cancelled = observe_cancellation("创建裁剪边")) {
+    return error_result<EdgeId>(StatusCode::OperationFailed, *cancelled);
+  }
+  if (!active_ || !detail::has_curve(*state_, curve_id) ||
+      !detail::has_vertex(*state_, v0) || !detail::has_vertex(*state_, v1) ||
+      v0.value == v1.value) {
+    return detail::invalid_input_result<EdgeId>(
+        *state_, diag_codes::kCoreInvalidHandle,
+        "创建裁剪边失败：事务已关闭、目标曲线不存在、端点不存在或两个端点重合",
+        "创建裁剪边失败");
+  }
+  if (!std::isfinite(start_parameter) || !std::isfinite(end_parameter) ||
+      start_parameter == end_parameter) {
+    return detail::invalid_input_result<EdgeId>(
+        *state_, diag_codes::kCoreParameterOutOfRange,
+        "创建裁剪边失败：裁剪参数必须为有限且不同的值", "创建裁剪边失败");
+  }
+  const CurveService curve_service(state_);
+  const auto domain = curve_service.domain(curve_id);
+  if (!domain.value || start_parameter < domain.value->min ||
+      start_parameter > domain.value->max ||
+      end_parameter < domain.value->min || end_parameter > domain.value->max) {
+    return detail::invalid_input_result<EdgeId>(
+        *state_, diag_codes::kGeoParameterOutOfDomain,
+        "创建裁剪边失败：裁剪参数超出支撑曲线定义域", "创建裁剪边失败");
+  }
+  Point3 start_point{};
+  Point3 end_point{};
+  const auto evaluated_start =
+      curve_service.point_at_parameter(curve_id, start_parameter);
+  const auto evaluated_end =
+      curve_service.point_at_parameter(curve_id, end_parameter);
+  if (!evaluated_start.value || !evaluated_end.value) {
+    return detail::failed_result<EdgeId>(
+        *state_, StatusCode::InvalidTopology,
+        diag_codes::kTopoCurveTopologyMismatch,
+        "创建裁剪边失败：无法在裁剪参数处求值支撑曲线", "创建裁剪边失败",
+        {curve_id.value, v0.value, v1.value});
+  }
+  start_point = *evaluated_start.value;
+  end_point = *evaluated_end.value;
+  const auto distance = [](const Point3 &a, const Point3 &b) {
+    return std::hypot(static_cast<long double>(a.x) - b.x,
+                      static_cast<long double>(a.y) - b.y,
+                      static_cast<long double>(a.z) - b.z);
+  };
+  const auto tolerance = detail::resolve_linear_tolerance(
+      0.0, state_->config.tolerance);
+  const auto d0 = distance(start_point, state_->vertices.at(v0.value).point);
+  const auto d1 = distance(end_point, state_->vertices.at(v1.value).point);
+  if (!std::isfinite(d0) || !std::isfinite(d1) || d0 > tolerance ||
+      d1 > tolerance) {
+    const auto evidence_distance = [](long double value) {
+      return std::isfinite(value) &&
+                     value <= std::numeric_limits<Scalar>::max()
+                 ? static_cast<Scalar>(value)
+                 : std::numeric_limits<Scalar>::max();
+    };
+    auto issue = detail::make_error_issue(
+        diag_codes::kTopoCurveTopologyMismatch,
+        "创建裁剪边失败：裁剪区间端点与拓扑顶点不一致",
+        {curve_id.value, v0.value, v1.value});
+    issue.numeric_evidence = {
+        {"start_distance", evidence_distance(d0), "model_unit"},
+        {"end_distance", evidence_distance(d1), "model_unit"},
+        {"tolerance", tolerance, "model_unit"}};
+    return error_result<EdgeId>(
+        StatusCode::InvalidTopology,
+        state_->create_diagnostic("创建裁剪边失败", {std::move(issue)}));
+  }
+  const auto id = EdgeId{state_->allocate_id()};
+  state_->edges.emplace(
+      id.value, detail::EdgeRecord{curve_id, v0, v1, true,
+                                   start_parameter, end_parameter});
+  created_edges_.push_back(id.value);
+  ++txn_write_ops_;
+  return ok_result(id, state_->create_diagnostic("已创建显式曲线裁剪边"));
+}
+
 Result<CoedgeId> TopologyTransaction::create_coedge(EdgeId edge_id,
                                                     bool reversed) {
   if (const auto cancelled = observe_cancellation("创建定向边")) {
@@ -382,19 +464,19 @@ TopologyTransaction::create_face(SurfaceId surface_id, LoopId outer_loop,
     std::string_view code =
         diag_codes::kTopoFaceCrossLoopStraightEdgeIntersection;
     std::string message =
-        "创建面失败：不同边界环的直线边段在内部相交";
+        "创建面失败：不同边界环的线性边界片段在内部相交";
     switch (conflict->kind) {
       case FaceBoundaryConflictKind::EndpointTouch:
         code = diag_codes::kTopoFaceCrossLoopStraightEdgeEndpointTouch;
-        message = "创建面失败：不同边界环的直线边段在端点相接";
+        message = "创建面失败：不同边界环的线性边界片段在拓扑边端点相接";
         break;
       case FaceBoundaryConflictKind::CollinearOverlap:
         code = diag_codes::kTopoFaceCrossLoopCollinearOverlap;
-        message = "创建面失败：不同边界环的共线直线边段发生重叠";
+        message = "创建面失败：不同边界环的共线边界片段发生重叠";
         break;
       case FaceBoundaryConflictKind::NearContact:
         code = diag_codes::kTopoFaceCrossLoopNearContact;
-        message = "创建面失败：不同边界环的直线边段在拓扑容差内邻近相接（间距=" +
+        message = "创建面失败：不同边界环的线性边界片段在拓扑容差内邻近相接（间距=" +
                   std::to_string(conflict->distance) + "，容差=" +
                   std::to_string(boundary_tolerance) + "）";
         break;
@@ -561,7 +643,7 @@ TopologyTransaction::create_body(std::span<const ShellId> shells) {
       append_unique(record.source_faces, face_id);
     }
   }
-  record.bbox = compute_body_bbox(*state_, shells);
+  record.bbox = compute_body_bbox(state_, shells);
   if (!record.bbox.is_valid) {
     return detail::failed_result<BodyId>(
         *state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
@@ -662,7 +744,7 @@ Result<void> TopologyTransaction::delete_face(FaceId face_id) {
                      })) {
       continue;
     }
-    const auto bbox = compute_body_bbox(*state_, body.shells);
+    const auto bbox = compute_body_bbox(state_, body.shells);
     if (bbox.is_valid) {
       body.bbox = bbox;
     }
@@ -711,7 +793,7 @@ Result<void> TopologyTransaction::delete_shell(ShellId shell_id) {
     if (body.shells.empty() && body.shells.size() != old_size) {
       bodies_to_remove.push_back(BodyId{body_value});
     } else {
-      const auto bbox = compute_body_bbox(*state_, body.shells);
+      const auto bbox = compute_body_bbox(state_, body.shells);
       if (bbox.is_valid) {
         body.bbox = bbox;
       }

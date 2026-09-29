@@ -6,7 +6,7 @@
 
 当前阶段保持为：
 
-`Stage 1.5 / Stage 2 过渡：核心公共层增强 + 基础几何/拓扑深化`
+`Stage 1 已达成；Stage 2 可测基线已达成；当前为 Stage 2 深化 + Stage 3 准备，以基础建模与查询分析为主线`
 
 ## 2. 当前迭代焦点
 
@@ -88,6 +88,10 @@
 - `axiom_math_services_test` 与 `axiom_geometry_test` 覆盖新增语义。
 
 ### 2.3 `topo`
+
+- **FR-TOPO-001 第 73 切片（专项通过）**：`first_boundary_conflict` / `create_face` / `validate_face` 精确展开显式裁剪 CompositePolyline 和线性 CompositeChain，支持递增/递减区间，并保留复合曲线内部折点的边内部语义。相交、共线重叠、容差邻近、建面零写入与存量面验证已回归；真曲线仍不以弦线近似代替。
+
+- **FR-TOPO-001 / FR-QUERY-001 第 72 批（专项通过）**：公开 `create_trimmed_edge` 与 `edge_curve_interval`，在 EdgeId 分配前验证有限非零参数区间、曲线定义域和参数端点到 v0/v1 的容差一致性；显式曲边的 `edge_length/loop_length/face_boundary_length` 复用曲线真实区间弧长，曲边区间极值或控制点凸包进入面/壳/体拓扑 bbox。旧 `create_edge` 完全兼容，未带区间曲边继续拒绝弦长冒充弧长；失败不增加事务写计数或几何缓存。一般曲线跨环求交尚未接入该区间。
 
 - **FR-QUERY-001 第 70 批（已通过完整门禁）**：新增 `shell_mass_properties/body_mass_properties`，从当前真实拓扑重算平面直边双边流形闭壳的单位密度体积、面积、质心和世界坐标惯性，支持凹面、孔与多个独立实体壳的平行轴汇总。查询不分配网格、不写缓存/Eval/事务计数；`axiom_query_eval_test` 覆盖解析盒体、凹带孔拉伸、双壳、失败类、删除和回滚，最终完整 CTest 16/16 通过。曲面/曲边、独立内壳空腔和相交/重叠多壳仍未支持。
 
@@ -173,8 +177,8 @@
 
 ## 4. 下一未闭合批次
 
-1. FR-GEO-001：Bezier/BSpline/NURBS 及派生/修剪曲面的完整参数域（含 trim 边界）最近点精度、预算与收敛证书。
-2. FR-TOPO-001：给拓扑边引入显式 trim 区间，并覆盖圆锥曲线、样条和复合链的跨环求交；继续完整 trim bridge 与持久命名。
+1. FR-GEO-001：继续极端尺度、通用退化曲面与大模型性能证书；无限面仍须先有限化。
+2. FR-TOPO-001：在已交付的显式边 trim 区间上继续圆锥曲线与样条的误差受控跨环求交；线性 CompositePolyline/CompositeChain 子域已闭合，完整 trim bridge 与持久命名仍待推进。
 3. FR-DIAG-001：在第 70 批精确 B-Rep 文本导入阶段闭环之上，继续为 HEAL 验证/修复/回滚及 IO 后验验证/批处理/其他重量级失败分支补齐数值证据和模块级审计门禁。
 4. NFR-REL-001：在长耗时 BOOL/HEAL/IO 内部阶段轮询取消，并推进子事务/保存点及更细粒度隔离语义。
 5. BOOL 真求交闭环与工业数据集；HEAL 自交/流形性/容差冲突的可回放修复。

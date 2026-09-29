@@ -360,6 +360,35 @@ CurveService::eval_batch(CurveId curve_id, std::span<const Scalar> ts,
   return ok_result(std::move(out), state_->create_diagnostic("曲线批量求值完成"));
 }
 
+Result<Point3> CurveService::point_at_parameter(CurveId curve_id,
+                                                Scalar t) const {
+  const auto it = state_->curves.find(curve_id.value);
+  if (it == state_->curves.end()) {
+    return detail::invalid_input_result<Point3>(
+        *state_, diag_codes::kCoreInvalidHandle,
+        "曲线参数点查询失败：目标曲线不存在", "曲线参数点查询失败");
+  }
+  if (!std::isfinite(t)) {
+    return detail::invalid_input_result<Point3>(
+        *state_, diag_codes::kCoreParameterOutOfRange,
+        "曲线参数点查询失败：参数必须为有限值", "曲线参数点查询失败");
+  }
+  const auto range = curve_domain(it->second);
+  if (t < range.min || t > range.max) {
+    return detail::invalid_input_result<Point3>(
+        *state_, diag_codes::kGeoParameterOutOfDomain,
+        "曲线参数点查询失败：参数超出定义域", "曲线参数点查询失败");
+  }
+  Point3 point{};
+  if (!evaluate_curve_point_no_cache(*state_, curve_id, t, point)) {
+    return detail::failed_result<Point3>(
+        *state_, StatusCode::NumericalInstability,
+        diag_codes::kGeoParameterSolveFailure,
+        "曲线参数点查询失败：无缓存求值产生非法结果", "曲线参数点查询失败");
+  }
+  return ok_result(point, state_->create_diagnostic("已查询无缓存曲线参数点"));
+}
+
 namespace {
 
 long double closest_distance(const Point3 &lhs, const Point3 &rhs) {
@@ -1754,6 +1783,40 @@ Result<BoundingBox> CurveService::bbox(CurveId curve_id) const {
   }
   return ok_result(make_curve_bbox(it->second),
                    state_->create_diagnostic("已返回曲线包围盒"));
+}
+
+Result<BoundingBox> CurveService::bbox(CurveId curve_id, Scalar t0,
+                                       Scalar t1) const {
+  const auto it = state_->curves.find(curve_id.value);
+  if (it == state_->curves.end()) {
+    return detail::invalid_input_result<BoundingBox>(
+        *state_, diag_codes::kCoreInvalidHandle,
+        "曲线区间包围盒查询失败：目标曲线不存在", "曲线区间包围盒查询失败");
+  }
+  if (!std::isfinite(t0) || !std::isfinite(t1)) {
+    return detail::invalid_input_result<BoundingBox>(
+        *state_, diag_codes::kCoreParameterOutOfRange,
+        "曲线区间包围盒查询失败：参数必须为有限值", "曲线区间包围盒查询失败");
+  }
+  const auto range = curve_domain(it->second);
+  const auto lo = std::min(t0, t1);
+  const auto hi = std::max(t0, t1);
+  if (lo < range.min || hi > range.max) {
+    return detail::invalid_input_result<BoundingBox>(
+        *state_, diag_codes::kGeoParameterOutOfDomain,
+        "曲线区间包围盒查询失败：参数超出定义域", "曲线区间包围盒查询失败");
+  }
+  BoundingBox bbox{};
+  if (!curve_interval_bbox_no_cache(*state_, curve_id, t0, t1, bbox) ||
+      !bbox.is_valid) {
+    return detail::failed_result<BoundingBox>(
+        *state_, StatusCode::NumericalInstability,
+        diag_codes::kGeoParameterSolveFailure,
+        "曲线区间包围盒查询失败：无法建立有限保守范围",
+        "曲线区间包围盒查询失败");
+  }
+  return ok_result(bbox,
+                   state_->create_diagnostic("已查询曲线参数区间包围盒"));
 }
 
 Result<std::vector<BoundingBox>>

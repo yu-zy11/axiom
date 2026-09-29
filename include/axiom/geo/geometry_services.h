@@ -149,6 +149,8 @@ public:
 
     Result<CurveEvalResult> eval(CurveId curve_id, Scalar t, int deriv_order) const;
     Result<std::vector<CurveEvalResult>> eval_batch(CurveId curve_id, std::span<const Scalar> ts, int deriv_order) const;
+    /// 无导数、无求值缓存的参数点查询；参数须位于曲线定义域。
+    Result<Point3> point_at_parameter(CurveId curve_id, Scalar t) const;
     /// 对完整有效域执行确定性分支限界搜索；样条逐个非空结点段覆盖，满重数断点两侧独立参与。
     /// 预算耗尽、选项非法或数值范围不可表示时失败且不返回部分结果，也不写求值缓存。
     Result<CurveClosestPointResult> closest_point_detailed(
@@ -171,6 +173,8 @@ public:
     Result<Scalar> length(CurveId curve_id, const CurveLengthOptions& options) const;
     Result<Scalar> length(CurveId curve_id, Scalar t0, Scalar t1, const CurveLengthOptions& options) const;
     Result<BoundingBox> bbox(CurveId curve_id) const;
+    /// 有限参数区间的保守包围盒；允许递减或零宽区间，不写求值缓存。
+    Result<BoundingBox> bbox(CurveId curve_id, Scalar t0, Scalar t1) const;
     Result<std::vector<BoundingBox>> bbox_batch(std::span<const CurveId> curve_ids) const;
 
 private:

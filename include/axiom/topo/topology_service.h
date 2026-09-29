@@ -70,7 +70,8 @@ struct TopologyCancellationMetrics {
 };
 
 /// 同一面不同边界环之间的首个几何冲突类别。
-/// 当前检测覆盖由 Line/LineSegment 支撑的有限拓扑边；曲边在获得显式 trim 区间后扩展。
+/// 当前精确覆盖有限 Line/LineSegment，以及带显式 trim 区间的
+/// CompositePolyline 和仅含线性子曲线的 CompositeChain；真曲边仍待扩展。
 enum class FaceBoundaryConflictKind : std::uint8_t {
     ProperIntersection = 0,
     EndpointTouch = 1,
@@ -89,6 +90,13 @@ struct FaceBoundaryConflict {
     Point3 first_point {};
     Point3 second_point {};
     Scalar distance {};
+};
+
+/// 拓扑边在其支撑三维曲线上的有向裁剪区间。
+/// `start_parameter` 对应边的 `v0`，`end_parameter` 对应 `v1`；允许递减区间。
+struct EdgeCurveInterval {
+    Scalar start_parameter {};
+    Scalar end_parameter {};
 };
 
 /// 实体中闭壳相对于实体材料区域的角色。角色由严格几何包含深度决定，与壳自身绕向无关。
@@ -155,6 +163,8 @@ public:
     Result<bool> is_face_orphan(FaceId face_id) const;
     Result<bool> is_shell_orphan(ShellId shell_id) const;
     Result<bool> is_body_derived(BodyId body_id) const;
+    /// 返回边的显式曲线裁剪区间；由旧 `create_edge` 创建、未携带区间的边成功返回空 optional。
+    Result<std::optional<EdgeCurveInterval>> edge_curve_interval(EdgeId edge_id) const;
     Result<BoundingBox> bbox_of_face(FaceId face_id) const;
     /// 平面、直线边面片的真实边界面积（外环减内环），单位为模型长度单位的平方。
     /// 不支持曲边/非平面面；无效面返回失败且无数值。每次从当前拓扑重算，不缓存。
@@ -178,8 +188,8 @@ public:
     /// 独立最外层壳相加，奇数包含深度空腔相减，偶数深度材料岛再相加；壳接触/相交/重叠失败。
     /// `area` 为所有材料/空腔边界面积之和；其余单位及失败/只读语义同 `shell_mass_properties`。
     Result<MassProperties> body_mass_properties(BodyId body_id) const;
-    /// 当前 Line/LineSegment 边的端点距离，单位为模型长度单位；端点须位于支撑曲线范围内。
-    /// 曲边缺少裁剪区间，返回 NotImplemented；退化/不一致拓扑返回 InvalidTopology。
+    /// 显式裁剪边按支撑曲线区间计算真实弧长；兼容旧 Line/LineSegment 边的端点距离。
+    /// 曲边缺少裁剪区间返回 NotImplemented；区间、端点或曲线不一致返回 InvalidTopology。
     Result<Scalar> edge_length(EdgeId edge_id) const;
     /// 按闭合环的 coedge 累加边长，不受方向影响；空环/不闭合环失败且无值。
     Result<Scalar> loop_length(LoopId loop_id) const;
@@ -243,6 +253,12 @@ public:
     /// 坐标必须为有限值；否则返回 InvalidInput / AXM-CORE-E-0002，且不修改拓扑或事务写计数。
     Result<VertexId> create_vertex(const Point3& point);
     Result<EdgeId> create_edge(CurveId curve_id, VertexId v0, VertexId v1);
+    /// 创建带显式曲线裁剪区间的边。参数必须位于曲线定义域，且区间两端求值分别与 v0/v1 在容差内一致。
+    /// 失败发生在 EdgeId 分配前，不增加事务写计数，也不写几何求值缓存。
+    Result<EdgeId> create_trimmed_edge(CurveId curve_id,
+                                       Scalar start_parameter,
+                                       Scalar end_parameter,
+                                       VertexId v0, VertexId v1);
     Result<CoedgeId> create_coedge(EdgeId edge_id, bool reversed);
     Result<void> set_coedge_pcurve(CoedgeId coedge_id, PCurveId pcurve_id);
     /// 按定向端点 ID 首尾闭合；单共边不豁免。未闭合返回 InvalidTopology / AXM-TOPO-E-0002，不写入环或事务计数。
@@ -355,7 +371,8 @@ public:
     Result<void> validate_vertex(VertexId vertex_id) const;
     Result<void> validate_coedge(CoedgeId coedge_id) const;
     Result<void> validate_loop(LoopId loop_id) const;
-    /// 建面前返回候选外/内环间的首个直线边界冲突；无冲突为成功的空 optional。
+    /// 建面前返回候选外/内环间的首个线性边界冲突；无冲突为成功的空 optional。
+    /// 精确覆盖 Line/LineSegment 与显式裁剪的 CompositePolyline/线性 CompositeChain。
     /// `linear_tolerance == 0` 使用内核容差策略，正值会按策略上下限钳制；负值或非有限值失败。
     /// 只读查询不会修改拓扑、反向索引或活动事务计数。
     Result<std::optional<FaceBoundaryConflict>> first_boundary_conflict(
