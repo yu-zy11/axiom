@@ -67,11 +67,7 @@ MassProperties bbox_mass_properties(const BoundingBox& bbox);
 
 void set_box_inertia_about_centroid(MassProperties& props, Scalar dx, Scalar dy, Scalar dz);
 
-bool bbox_corners_almost_equal(const BoundingBox& a, const BoundingBox& b, Scalar eps);
-
 MassProperties mass_properties_from_box_body_record(const detail::BodyRecord& b);
-
-void add_inertia_parallel_axis(std::array<Scalar, 9>& I, Scalar m, const Point3& cm, const Point3& ref);
 
 void set_wedge_inertia_about_centroid(MassProperties& props, Scalar dx, Scalar dy, Scalar dz);
 
@@ -131,10 +127,6 @@ struct PappusRevolveMass {
 
 std::optional<PappusRevolveMass> try_pappus_revolve_mass(std::span<const Point3> poly, const Point3& O,
                                                          const Vec3& axis_u, Scalar angle);
-
-bool try_sweep_body_mass_properties(const detail::BodyRecord& body, MassProperties& props);
-
-bool try_boolean_operand_mass_properties(const detail::BodyRecord& body, MassProperties& m);
 
 Point3 rotate_point_around_unit_axis(const Point3& p, const Point3& origin, const Vec3& u, Scalar cos_t,
                                      Scalar sin_t);
@@ -203,16 +195,6 @@ CurveId longest_intersection_segment_curve(const detail::KernelState& state,
 std::vector<BoundingBox> body_regions_for_boolean(const detail::KernelState& state, BodyId body_id);
 
 Scalar bbox_volume(const BoundingBox& bbox);
-
-void combine_mass_properties_sum(const MassProperties& m0, const MassProperties& m1, MassProperties& out);
-
-bool mass_properties_axis_aligned_bbox_solid(const BoundingBox& bb, MassProperties& out);
-
-bool try_subtract_nested_axis_aligned_box_mass_properties(const MassProperties& m_big, const MassProperties& m_small,
-                                                            MassProperties& out);
-
-bool try_boolean_two_operand_mass_properties(const detail::KernelState& state, const detail::BodyRecord& body,
-                                             MassProperties& out);
 
 BooleanPrepStats compute_boolean_prep_stats(const detail::KernelState& state, BodyId lhs, BodyId rhs);
 

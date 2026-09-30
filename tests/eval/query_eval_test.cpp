@@ -1562,6 +1562,9 @@ bool topology_mass_properties_regression() {
         const auto combined = txn.create_body(combined_shells);
         if (!combined.value) return false;
         const auto properties = topo.body_mass_properties(*combined.value);
+        const auto public_properties = kernel.query().mass_properties(*combined.value);
+        if (!properties.value || !public_properties.value ||
+            !same_properties(*public_properties.value,*properties.value)) return false;
         if (!properties.value || !close(properties.value->volume, 2) ||
             !close(properties.value->area, 12) ||
             !close(properties.value->centroid.x, 2) ||
@@ -1569,7 +1572,19 @@ bool topology_mass_properties_regression() {
             !close(properties.value->centroid.z, .5) ||
             !close(properties.value->inertia[0], 1.0 / 3.0) ||
             !close(properties.value->inertia[4], 29.0 / 6.0) ||
-            !close(properties.value->inertia[8], 29.0 / 6.0) ||
+            !close(properties.value->inertia[8], 29.0 / 6.0)) return false;
+        // Deleting one material component is a successful geometry change. The
+        // creation-time bbox and two source-body references are not mass authority.
+        const auto savepoint = txn.create_savepoint();
+        if (!savepoint.value || txn.delete_shell(right_shells.value->front()).status != axiom::StatusCode::Ok)
+            return false;
+        const auto edited = kernel.query().mass_properties(*combined.value);
+        if (!edited.value || !close(edited.value->volume,1) || !close(edited.value->area,6) ||
+            !close(edited.value->centroid.x,.5) || !close(edited.value->centroid.y,.5) ||
+            !close(edited.value->centroid.z,.5) || !close(edited.value->inertia[0],1.0/6) ||
+            !close(edited.value->inertia[4],1.0/6) || !close(edited.value->inertia[8],1.0/6) ||
+            txn.rollback_to_savepoint(*savepoint.value).status != axiom::StatusCode::Ok ||
+            !result_matches(kernel.query().mass_properties(*combined.value),*properties.value) ||
             txn.rollback().status != axiom::StatusCode::Ok ||
             !failed(topo.body_mass_properties(*combined.value), axiom::StatusCode::InvalidInput,
                     axiom::diag_codes::kCoreInvalidHandle)) return false;
@@ -1602,6 +1617,9 @@ bool topology_mass_properties_regression() {
         if (!nested.value) return false;
         const auto regions = topo.body_shell_regions(*nested.value);
         const auto properties = topo.body_mass_properties(*nested.value);
+        const auto public_properties = kernel.query().mass_properties(*nested.value);
+        if (!properties.value || !public_properties.value ||
+            !same_properties(*public_properties.value,*properties.value)) return false;
         if (!regions.value || regions.value->size() != 3 || !properties.value ||
             (*regions.value)[0].shell.value != island_shells.value->front().value ||
             (*regions.value)[0].role != axiom::BodyShellRole::Material ||
@@ -1655,6 +1673,9 @@ bool topology_mass_properties_regression() {
         const auto hollow = txn.create_body(hollow_shells);
         if (!hollow.value) return false;
         const auto properties = topo.body_mass_properties(*hollow.value);
+        const auto public_properties = kernel.query().mass_properties(*hollow.value);
+        if (!properties.value || !public_properties.value ||
+            !same_properties(*public_properties.value,*properties.value)) return false;
         const auto regions = topo.body_shell_regions(*hollow.value);
         const double volume = 1000.0 - 24.0;
         const axiom::Point3 expected_centroid{
@@ -1890,6 +1911,196 @@ bool topology_mass_properties_regression() {
             !failed(kernel.query().section_detailed(*body.value, {{0,0,7},{0,0,1}}), expected_status, expected_code) ||
             !failed(kernel.query().closest_point(*body.value, {0,0,7}), expected_status, expected_code) ||
             !failed(kernel.query().closest_points(*body.value, *reference_box.value), expected_status, expected_code) ||
+            txn.rollback().status != axiom::StatusCode::Ok) return false;
+    }
+    return true;
+}
+
+bool stage3_mass_authority_regression() {
+    axiom::Kernel kernel;
+    auto& topo = kernel.topology().query();
+    const auto close = [](double a, double b) {
+        return std::abs(a-b) <= 2e-10 * std::max(1.0, std::abs(b));
+    };
+    const auto same = [&](const axiom::MassProperties& a, const axiom::MassProperties& b) {
+        if (!close(a.volume,b.volume) || !close(a.area,b.area) ||
+            !close(a.centroid.x,b.centroid.x) || !close(a.centroid.y,b.centroid.y) ||
+            !close(a.centroid.z,b.centroid.z)) return false;
+        for (std::size_t i=0; i<9; ++i) if (!close(a.inertia[i],b.inertia[i])) return false;
+        return true;
+    };
+    const auto failure = [&](const auto& result, axiom::StatusCode status,
+                             std::string_view code, std::string_view stage) {
+        const auto report = kernel.diagnostics().get(result.diagnostic_id);
+        return result.status == status && !result.value && report.value &&
+            std::any_of(report.value->issues.begin(), report.value->issues.end(),
+                [&](const axiom::Issue& issue) { return issue.code == code && issue.stage == stage; });
+    };
+    const auto unsupported = [&](const auto& result) {
+        return failure(result, axiom::StatusCode::NotImplemented,
+            axiom::diag_codes::kCoreOperationUnsupported, "query.mass_properties.support_gate");
+    };
+    const double pi = std::acos(-1.0);
+    // Independent textbook solid integrals, density 1. Both an axis-aligned
+    // tensor and all nonzero world-frame products are checked. No sampling error.
+    for (const auto axis : std::array{axiom::Vec3{0,0,1}, axiom::Vec3{1.0/3,2.0/3,2.0/3}}) {
+        const axiom::Point3 origin{17,-23,31};
+        const std::array models{
+            kernel.primitives().sphere(origin,2),
+            kernel.primitives().cylinder(origin,axis,2,6),
+            kernel.primitives().cone(origin,axis,std::atan(1.0/3),6),
+            kernel.primitives().torus(origin,axis,5,2)};
+        const std::array volumes{32*pi/3,24*pi,8*pi,40*pi*pi};
+        const std::array areas{16*pi,32*pi,4*pi+2*pi*std::sqrt(40.0),40*pi*pi};
+        const std::array transverse{volumes[0]*8/5,volumes[1]*4,
+            volumes[2]*(3.0*4/20+3.0*36/80),volumes[3]*(25.0/2+5.0*4/8)};
+        const std::array axial{transverse[0],volumes[1]*2,volumes[2]*3*4/10,
+            volumes[3]*(25+3.0*4/4)};
+        for (std::size_t i=0; i<models.size(); ++i) {
+            if (!models[i].value) return false;
+            const auto body = *models[i].value;
+            axiom::MassProperties expected{};
+            expected.volume = volumes[i];
+            expected.area = areas[i];
+            expected.centroid = origin;
+            if (i == 2) expected.centroid = {origin.x+4.5*axis.x,
+                origin.y+4.5*axis.y,origin.z+4.5*axis.z};
+            const std::array direction{axis.x,axis.y,axis.z};
+            for (std::size_t r=0; r<3; ++r) for (std::size_t c=0; c<3; ++c)
+                expected.inertia[3*r+c] = (r == c ? transverse[i] : 0) +
+                    (axial[i]-transverse[i])*direction[r]*direction[c];
+            const auto count = kernel.object_count_total();
+            const auto stores = kernel.runtime_store_counts();
+            const auto result = kernel.query().mass_properties(body);
+            const auto after = kernel.runtime_store_counts();
+            if (!count.value || !stores.value || !after.value || !result.value ||
+                !same(*result.value,expected) || kernel.object_count_total().value != count.value ||
+                after.value->mesh_records != stores.value->mesh_records ||
+                after.value->tessellation_cache_entries != stores.value->tessellation_cache_entries ||
+                after.value->face_tessellation_cache_entries != stores.value->face_tessellation_cache_entries ||
+                after.value->curve_eval_cache_entries != stores.value->curve_eval_cache_entries ||
+                after.value->surface_eval_cache_entries != stores.value->surface_eval_cache_entries) return false;
+            const auto shells = topo.shells_of_body(body);
+            const auto faces = topo.faces_of_body(body);
+            if (!shells.value || shells.value->size() != 1 || !faces.value || faces.value->empty() ||
+                !unsupported(topo.shell_mass_properties(shells.value->front())) ||
+                !unsupported(topo.body_mass_properties(body))) return false;
+            const auto replacement = kernel.surfaces().make_plane({0,0,0},{0,0,1});
+            if (!replacement.value) return false;
+            {
+                auto txn = kernel.topology().begin_transaction();
+                const auto savepoint = txn.create_savepoint();
+                const auto writes = txn.write_operation_count();
+                const auto invalid_edit = txn.replace_surface(faces.value->front(),{});
+                const auto after_failed_edit = kernel.query().mass_properties(body);
+                if (!savepoint.value || !writes.value || invalid_edit.status != axiom::StatusCode::InvalidInput ||
+                    txn.write_operation_count().value != writes.value ||
+                    !after_failed_edit.value || !same(*after_failed_edit.value,expected) ||
+                    txn.replace_surface(faces.value->front(),*replacement.value).status != axiom::StatusCode::Ok ||
+                    !unsupported(kernel.query().mass_properties(body)) ||
+                    txn.rollback_to_savepoint(*savepoint.value).status != axiom::StatusCode::Ok) return false;
+                const auto restored = kernel.query().mass_properties(body);
+                if (!restored.value || !same(*restored.value,expected) ||
+                    txn.delete_face(faces.value->front()).status != axiom::StatusCode::Ok ||
+                    !unsupported(kernel.query().mass_properties(body)) ||
+                    txn.rollback().status != axiom::StatusCode::Ok) return false;
+            }
+            const auto restored = kernel.query().mass_properties(body);
+            if (!restored.value || !same(*restored.value,expected)) return false;
+            const auto edges = topo.edges_of_body(body);
+            const auto coedges = edges.value && !edges.value->empty() ? topo.coedges_of_edge(edges.value->front()) :
+                axiom::Result<std::vector<axiom::CoedgeId>>{};
+            const auto pcurve = kernel.pcurves().make_polyline(std::array<axiom::Point2,2>{{{0,0},{1,0}}});
+            if (!coedges.value || coedges.value->empty() || !pcurve.value) return false;
+            {
+                auto txn = kernel.topology().begin_transaction();
+                if (txn.set_coedge_pcurve(coedges.value->front(),*pcurve.value).status != axiom::StatusCode::Ok ||
+                    !unsupported(kernel.query().mass_properties(body)) ||
+                    txn.rollback().status != axiom::StatusCode::Ok) return false;
+                const auto restored_pcurve = kernel.query().mass_properties(body);
+                if (!restored_pcurve.value || !same(*restored_pcurve.value,expected)) return false;
+            }
+            {
+                // Proxy faces remain proxies after re-shelling and deleting all
+                // original owners. Provenance is not a geometry certificate.
+                auto txn = kernel.topology().begin_transaction();
+                const auto shell = txn.create_shell(*faces.value);
+                const auto generic = shell.value ? txn.create_body(std::array{*shell.value}) :
+                    axiom::Result<axiom::BodyId>{};
+                if (!generic.value || !unsupported(kernel.query().mass_properties(*generic.value)) ||
+                    txn.delete_body(body).status != axiom::StatusCode::Ok ||
+                    txn.delete_shell(shells.value->front()).status != axiom::StatusCode::Ok ||
+                    !unsupported(kernel.query().mass_properties(*generic.value)) ||
+                    txn.rollback().status != axiom::StatusCode::Ok) return false;
+            }
+            {
+                auto txn = kernel.topology().begin_transaction();
+                if (txn.replace_surface(faces.value->front(),*replacement.value).status != axiom::StatusCode::Ok ||
+                    txn.commit().status != axiom::StatusCode::Ok ||
+                    !unsupported(kernel.query().mass_properties(body))) return false;
+            }
+        }
+    }
+    // Overflow and underflow in inertia cannot leak a partial volume/centroid.
+    for (const auto radius : {1e70,1e-70}) {
+        const auto body = kernel.primitives().sphere({0,0,0},radius);
+        if (!body.value || !failure(kernel.query().mass_properties(*body.value),
+                axiom::StatusCode::NumericalInstability,axiom::diag_codes::kQueryMassPropertiesFailure,
+                "query.mass_properties.numeric")) return false;
+    }
+    if (!failure(kernel.query().mass_properties({}),axiom::StatusCode::InvalidInput,
+            axiom::diag_codes::kCoreInvalidHandle,"query.mass_properties.preflight") ||
+        !failure(topo.shell_mass_properties({}),axiom::StatusCode::InvalidInput,
+            axiom::diag_codes::kCoreInvalidHandle,"query.mass_properties.preflight")) return false;
+    // A warmed mesh cannot restore pre-edit numbers from a real polyhedron.
+    // Read-only rejected mass queries preserve writes, provenance and Eval state.
+    const auto box = kernel.primitives().box({0,0,0},2,3,4);
+    const auto curved = kernel.surfaces().make_sphere({0,0,0},1);
+    const auto shifted = kernel.surfaces().make_plane({0,0,100},{0,0,1});
+    const auto node = kernel.eval_graph().register_node(axiom::NodeKind::Analysis,"mass:edits");
+    if (!box.value || !curved.value || !shifted.value || !node.value ||
+        !kernel.convert().brep_to_mesh(*box.value,{}).value) return false;
+    const auto original = kernel.query().mass_properties(*box.value);
+    const auto faces = topo.faces_of_body(*box.value);
+    const auto shells = topo.shells_of_body(*box.value);
+    const auto source_faces = topo.source_faces_of_body(*box.value);
+    if (!original.value || !faces.value || faces.value->empty() || !shells.value ||
+        shells.value->size() != 1 || !source_faces.value) return false;
+    for (int edit=0; edit<4; ++edit) {
+        auto txn = kernel.topology().begin_transaction();
+        const auto savepoint = txn.create_savepoint();
+        const auto changed = edit == 0 ? txn.replace_surface(faces.value->front(),*curved.value)
+            : edit == 1 ? txn.replace_surface(faces.value->front(),*shifted.value)
+            : edit == 2 ? txn.delete_face(faces.value->front()) : txn.delete_shell(shells.value->front());
+        const auto writes = txn.write_operation_count();
+        const auto stores = kernel.runtime_store_counts();
+        const auto invalid = kernel.eval_graph().is_invalid(*node.value);
+        const auto recompute = kernel.eval_graph().recompute_count(*node.value);
+        if (!savepoint.value || changed.status != axiom::StatusCode::Ok || !writes.value || !stores.value ||
+            !invalid.value || !recompute.value) return false;
+        const auto result = kernel.query().mass_properties(*box.value);
+        const auto after = kernel.runtime_store_counts();
+        const auto code = edit == 0 ? axiom::diag_codes::kCoreOperationUnsupported
+            : edit == 1 ? axiom::diag_codes::kTopoCurveTopologyMismatch
+            : edit == 2 ? axiom::diag_codes::kTopoShellNotClosed : axiom::diag_codes::kCoreInvalidHandle;
+        const auto stage = edit == 0 ? "query.mass_properties.support_gate" : "query.mass_properties.preflight";
+        // Removing the last shell deletes its owning body; the public API does
+        // not leave a zero-shell fixture for the internal empty_gate branch.
+        const auto status = edit == 0 ? axiom::StatusCode::NotImplemented
+            : edit == 3 ? axiom::StatusCode::InvalidInput : axiom::StatusCode::InvalidTopology;
+        if (!failure(result,status,
+                code,stage) || !after.value || txn.write_operation_count().value != writes.value ||
+            after.value->mesh_records != stores.value->mesh_records ||
+            after.value->tessellation_cache_entries != stores.value->tessellation_cache_entries ||
+            after.value->face_tessellation_cache_entries != stores.value->face_tessellation_cache_entries ||
+            after.value->curve_eval_cache_entries != stores.value->curve_eval_cache_entries ||
+            after.value->surface_eval_cache_entries != stores.value->surface_eval_cache_entries ||
+            kernel.eval_graph().is_invalid(*node.value).value != invalid.value ||
+            kernel.eval_graph().recompute_count(*node.value).value != recompute.value ||
+            txn.rollback_to_savepoint(*savepoint.value).status != axiom::StatusCode::Ok) return false;
+        const auto restored = kernel.query().mass_properties(*box.value);
+        if (!restored.value || !same(*restored.value,*original.value) ||
+            topo.source_faces_of_body(*box.value).value != source_faces.value ||
             txn.rollback().status != axiom::StatusCode::Ok) return false;
     }
     return true;
@@ -2134,6 +2345,10 @@ bool curve_curve_intersection_regression() {
 }  // namespace
 
 int main() {
+    if (!stage3_mass_authority_regression()) {
+        std::cerr << "Stage 3 mass authority regression failed\n";
+        return 1;
+    }
     if (!stage3_section_distance_regression()) {
         std::cerr << "Stage 3 actual section/distance regression failed\n";
         return 1;

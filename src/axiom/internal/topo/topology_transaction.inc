@@ -1,3 +1,28 @@
+namespace {
+
+// A compatibility shell cannot re-certify an edited analytic primitive. Use the
+// same body undo records as topology deletion so rollback and savepoints agree.
+void revoke_analytic_mass_for_face(detail::KernelState& state,
+                                  detail::TopologyTransactionState& transaction,
+                                  FaceId face_id) {
+  for (auto &[body_value, body] : state.bodies) {
+    if (!body.analytic_mass_valid) continue;
+    const bool owns_face = std::any_of(body.shells.begin(), body.shells.end(),
+        [&](ShellId shell_id) {
+          const auto shell = state.shells.find(shell_id.value);
+          return shell != state.shells.end() &&
+              std::any_of(shell->second.faces.begin(), shell->second.faces.end(),
+                  [face_id](FaceId current) { return current.value == face_id.value; });
+        });
+    if (owns_face) {
+      transaction.snapshot_body(state, BodyId{body_value});
+      body.analytic_mass_valid = false;
+    }
+  }
+}
+
+}  // namespace
+
 TopologyTransaction::TopologyTransaction(
     std::shared_ptr<detail::KernelState> state)
     : TopologyTransaction(std::move(state), TopologyCancellationToken{}) {}
@@ -248,6 +273,15 @@ Result<void> TopologyTransaction::set_coedge_pcurve(CoedgeId coedge_id,
   const auto prev_pcurve = it->second.pcurve_id.value;
   transaction_state_->original_coedge_pcurves.try_emplace(coedge_id.value,
                                                          it->second.pcurve_id);
+  if (pcurve_id.value != prev_pcurve) {
+    const auto loop = state_->coedge_to_loop.find(coedge_id.value);
+    if (loop != state_->coedge_to_loop.end()) {
+      const auto faces = state_->loop_to_faces.find(loop->second);
+      if (faces != state_->loop_to_faces.end())
+        for (const auto face : faces->second)
+          revoke_analytic_mass_for_face(*state_, *transaction_state_, FaceId{face});
+    }
+  }
   it->second.pcurve_id = pcurve_id;
   rebuild_topology_indices(*state_);
   if (pcurve_id.value != 0) {
@@ -729,6 +763,7 @@ Result<void> TopologyTransaction::delete_face(FaceId face_id) {
       continue;
     }
     transaction_state_->snapshot_body(*state_, BodyId{body_value});
+    body.analytic_mass_valid = false;
     const auto old_size = body.shells.size();
     body.shells.erase(
         std::remove_if(body.shells.begin(), body.shells.end(),
@@ -802,6 +837,7 @@ Result<void> TopologyTransaction::delete_shell(ShellId shell_id) {
       continue;
     }
     transaction_state_->snapshot_body(*state_, BodyId{body_value});
+    body.analytic_mass_valid = false;
     const auto old_size = body.shells.size();
     body.shells.erase(std::remove_if(body.shells.begin(), body.shells.end(),
                                      [shell_id](ShellId current) {
@@ -871,6 +907,7 @@ Result<void> TopologyTransaction::replace_surface(FaceId face_id,
         "替换面失败：目标面不存在或替换曲面不存在", "替换面失败");
   }
   transaction_state_->snapshot_face(*state_, face_id);
+  revoke_analytic_mass_for_face(*state_, *transaction_state_, face_id);
   it->second.surface_id = replacement;
   rebuild_topology_indices(*state_);
   ++txn_replaced_surfaces_;

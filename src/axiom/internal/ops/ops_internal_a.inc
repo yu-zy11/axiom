@@ -72,6 +72,16 @@ BodyId make_body(std::shared_ptr<detail::KernelState> state, detail::BodyRecord 
             detail::materialize_body_bbox_shell(*state, record);
         }
     }
+    record.analytic_mass_valid = !is_derived && record.rep_kind == RepKind::ExactBRep &&
+        (record.kind == detail::BodyKind::Sphere || record.kind == detail::BodyKind::Cylinder ||
+         record.kind == detail::BodyKind::Cone || record.kind == detail::BodyKind::Torus);
+    const bool proxy = record.analytic_mass_valid ||
+        (is_derived && !(record.kind == detail::BodyKind::Sweep && record.sweep_polyhedral_mass_valid));
+    if (proxy) {
+        for (const auto shell : record.shells)
+            for (const auto face : state->shells.at(shell.value).faces)
+                state->faces.at(face.value).mass_boundary_proxy = true;
+    }
     const auto id = BodyId {state->allocate_id()};
     state->bodies.emplace(id.value, std::move(record));
     if (fresh_topology) {
@@ -300,15 +310,6 @@ void set_box_inertia_about_centroid(MassProperties& props, Scalar dx, Scalar dy,
         0.0, 0.0, izz};
 }
 
-bool bbox_corners_almost_equal(const BoundingBox& a, const BoundingBox& b, Scalar eps) {
-    if (!a.is_valid || !b.is_valid) {
-        return false;
-    }
-    return std::abs(a.min.x - b.min.x) <= eps && std::abs(a.min.y - b.min.y) <= eps &&
-           std::abs(a.min.z - b.min.z) <= eps && std::abs(a.max.x - b.max.x) <= eps &&
-           std::abs(a.max.y - b.max.y) <= eps && std::abs(a.max.z - b.max.z) <= eps;
-}
-
 MassProperties mass_properties_from_box_body_record(const detail::BodyRecord& b) {
     MassProperties props {};
     props.volume = b.a * b.b * b.c;
@@ -319,27 +320,7 @@ MassProperties mass_properties_from_box_body_record(const detail::BodyRecord& b)
     return props;
 }
 
-/// 将关于 `cm` 的惯性张量平移到参考点 `ref`（均质 m，世界坐标、行主序 3x3）：I_ref += I_cm + m((d·d)I - d⊗d)，d = cm - ref。
-void add_inertia_parallel_axis(std::array<Scalar, 9>& I, Scalar m, const Point3& cm, const Point3& ref) {
-    if (m <= 0.0) {
-        return;
-    }
-    const Scalar dx = cm.x - ref.x;
-    const Scalar dy = cm.y - ref.y;
-    const Scalar dz = cm.z - ref.z;
-    const Scalar r2 = dx * dx + dy * dy + dz * dz;
-    I[0] += m * (r2 - dx * dx);
-    I[1] += m * (-dx * dy);
-    I[2] += m * (-dx * dz);
-    I[3] += m * (-dx * dy);
-    I[4] += m * (r2 - dy * dy);
-    I[5] += m * (-dy * dz);
-    I[6] += m * (-dx * dz);
-    I[7] += m * (-dy * dz);
-    I[8] += m * (r2 - dz * dz);
-}
-
-/// 直角三棱柱：XY 内直角三角形 (0,0),(+dx,0),(0,+dy)，沿 +Z 拉伸 dz；均质 rho=1，张量关于质心，与世界轴对齐。
+/// 均匀三角棱柱关于质心的惯性张量。
 void set_wedge_inertia_about_centroid(MassProperties& props, Scalar dx, Scalar dy, Scalar dz) {
     const auto m = props.volume;
     if (m <= 0.0 || dx <= 0.0 || dy <= 0.0 || dz <= 0.0) {
@@ -429,7 +410,7 @@ void set_cone_inertia_about_centroid(MassProperties& props, const Vec3& axis, Sc
     const auto r2 = radius * radius;
     const auto h2 = height * height;
     const auto i_axial = 0.3 * m * r2;
-    const auto i_perp = m * (0.15 * r2 + 0.0125 * h2);
+    const auto i_perp = m * (0.15 * r2 + 0.0375 * h2);
     set_axisymmetric_inertia_world(props, axis, i_perp, i_axial);
 }
 
@@ -446,7 +427,7 @@ void set_torus_inertia_about_center(MassProperties& props, const Vec3& axis, Sca
     set_axisymmetric_inertia_world(props, axis, i_transverse, i_axial);
 }
 
-/// `Box`/`Wedge`/`Sphere`/`Cylinder`/`Cone`/`Torus` 的解析质量属性（ρ=1）；失败时返回 false（调用方回退 bbox）。
+/// `Box`/`Wedge`/`Sphere`/`Cylinder`/`Cone`/`Torus` 的解析质量属性（ρ=1）；失败时返回 false，不允许 bbox 恢复。
 bool try_primitive_analytic_mass_properties(const detail::BodyRecord& body, MassProperties& props) {
     props = MassProperties {};
     switch (body.kind) {
@@ -1242,141 +1223,6 @@ std::optional<PappusRevolveMass> try_pappus_revolve_mass(std::span<const Point3>
         return std::nullopt;
     }
     return PappusRevolveMass {poly_area * r_bar * angle, poly_area};
-}
-
-/// `BodyKind::Sweep` 的占位/解析质量口径（与 `QueryService::mass_properties` 一致），供布尔操作数等复用。
-bool try_sweep_body_mass_properties(const detail::BodyRecord& body, MassProperties& props) {
-    if (body.kind != detail::BodyKind::Sweep) {
-        return false;
-    }
-    if (body.label == "thicken" && body.a > 0.0) {
-        props.volume = body.a;
-        if (body.bbox.is_valid) {
-            props.centroid = Point3 {
-                (body.bbox.min.x + body.bbox.max.x) * 0.5,
-                (body.bbox.min.y + body.bbox.max.y) * 0.5,
-                (body.bbox.min.z + body.bbox.max.z) * 0.5};
-            const auto bboxp = bbox_mass_properties(body.bbox);
-            props.area = bboxp.area;
-        }
-        return true;
-    }
-    if (body.label.size() >= 8 && body.label.compare(0, 8, "revolve:") == 0) {
-        if (body.sweep_polyhedral_mass_valid) {
-            props.volume = body.sweep_polyhedral_volume;
-            props.area = body.sweep_cached_surface_area;
-            props.centroid = body.sweep_polyhedral_centroid;
-            props.inertia = body.sweep_inertia_about_centroid;
-            if (body.b > 0.0 && !body.revolve_profile_xyz.empty()) {
-                if (const auto pm = try_pappus_revolve_mass(
-                        std::span<const Point3>(body.revolve_profile_xyz.data(), body.revolve_profile_xyz.size()),
-                        body.origin, body.axis, body.b)) {
-                    const auto pp = std::abs(pm->volume);
-                    const auto pv = std::abs(props.volume);
-                    if (pp > 1e-12 && pv < 1e-4 * pp) {
-                        props.volume = pm->volume;
-                        if (body.bbox.is_valid &&
-                            (props.area <= 0.0 || props.inertia[0] <= 0.0 || props.inertia[4] <= 0.0 ||
-                             props.inertia[8] <= 0.0)) {
-                            const auto bboxp = bbox_mass_properties(body.bbox);
-                            props.area = bboxp.area;
-                            props.centroid = bboxp.centroid;
-                            const auto dx = std::max<Scalar>(0.0, body.bbox.max.x - body.bbox.min.x);
-                            const auto dy = std::max<Scalar>(0.0, body.bbox.max.y - body.bbox.min.y);
-                            const auto dz = std::max<Scalar>(0.0, body.bbox.max.z - body.bbox.min.z);
-                            set_box_inertia_about_centroid(props, dx, dy, dz);
-                        }
-                    }
-                }
-            }
-            return true;
-        }
-        if (body.a > 0.0) {
-            props.volume = body.a;
-            if (body.bbox.is_valid) {
-                props.centroid = Point3 {
-                    (body.bbox.min.x + body.bbox.max.x) * 0.5,
-                    (body.bbox.min.y + body.bbox.max.y) * 0.5,
-                    (body.bbox.min.z + body.bbox.max.z) * 0.5};
-                const auto bboxp = bbox_mass_properties(body.bbox);
-                props.area = bboxp.area;
-            }
-            return true;
-        }
-    }
-    if (body.label == "loft" && body.a > 0.0) {
-        props.volume = body.a;
-        if (body.bbox.is_valid) {
-            props.centroid = Point3 {
-                (body.bbox.min.x + body.bbox.max.x) * 0.5,
-                (body.bbox.min.y + body.bbox.max.y) * 0.5,
-                (body.bbox.min.z + body.bbox.max.z) * 0.5};
-            const auto bboxp = bbox_mass_properties(body.bbox);
-            props.area = bboxp.area;
-        }
-        return true;
-    }
-    if (body.label == "loft:polygon" && body.sweep_polyhedral_mass_valid) {
-        props.volume = body.sweep_polyhedral_volume;
-        props.area = body.sweep_cached_surface_area;
-        props.centroid = body.sweep_polyhedral_centroid;
-        props.inertia = body.sweep_inertia_about_centroid;
-        return true;
-    }
-    if (body.label.size() >= 6 && body.label.compare(0, 6, "sweep:") == 0 && body.a > 0.0) {
-        props.volume = body.a;
-        if (body.bbox.is_valid) {
-            props.centroid = Point3 {
-                (body.bbox.min.x + body.bbox.max.x) * 0.5,
-                (body.bbox.min.y + body.bbox.max.y) * 0.5,
-                (body.bbox.min.z + body.bbox.max.z) * 0.5};
-            const auto bboxp = bbox_mass_properties(body.bbox);
-            props.area = bboxp.area;
-        }
-        return true;
-    }
-    if (((body.label.size() >= 8 && body.label.compare(0, 8, "extrude:") == 0) ||
-         !body.sweep_station_offsets.empty() || !body.sweep_frame_origins.empty()) && body.a > 0.0) {
-        if (body.sweep_polyhedral_mass_valid) {
-            props.volume = body.sweep_polyhedral_volume;
-            props.area = body.sweep_cached_surface_area;
-            props.centroid = body.sweep_polyhedral_centroid;
-            props.inertia = body.sweep_inertia_about_centroid;
-            return true;
-        }
-        props.volume = body.a;
-        if (body.extrude_poly_cap_area > 0.0) {
-            props.area = 2.0 * body.extrude_poly_cap_area + body.extrude_lateral_area;
-            props.centroid = body.extrude_mass_centroid;
-        } else if (body.bbox.is_valid) {
-            props.centroid = Point3 {
-                (body.bbox.min.x + body.bbox.max.x) * 0.5,
-                (body.bbox.min.y + body.bbox.max.y) * 0.5,
-                (body.bbox.min.z + body.bbox.max.z) * 0.5};
-            const auto bboxp = bbox_mass_properties(body.bbox);
-            props.area = bboxp.area;
-        }
-        return true;
-    }
-    props = bbox_mass_properties(body.bbox);
-    if (body.label.size() >= 8 && body.label.compare(0, 8, "revolve:") == 0 && body.b > 0.0 &&
-        !body.revolve_profile_xyz.empty()) {
-        if (const auto pm = try_pappus_revolve_mass(
-                std::span<const Point3>(body.revolve_profile_xyz.data(), body.revolve_profile_xyz.size()),
-                body.origin, body.axis, body.b)) {
-            if (pm->volume > 1e-18) {
-                props.volume = pm->volume;
-            }
-        }
-    }
-    return true;
-}
-
-bool try_boolean_operand_mass_properties(const detail::BodyRecord& body, MassProperties& m) {
-    if (try_primitive_analytic_mass_properties(body, m)) {
-        return true;
-    }
-    return try_sweep_body_mass_properties(body, m);
 }
 
 /// Rodrigues：绕单位轴 `u` 过 `origin` 旋转角度 θ，`cos_t=cos(θ)`，`sin_t=sin(θ)`。

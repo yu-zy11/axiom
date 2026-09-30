@@ -2504,53 +2504,41 @@ Result<MassProperties> QueryService::mass_properties(BodyId body_id) const {
         return TopologyQueryService(state_).body_mass_properties(body_id);
     }
 
-    MassProperties props {};
     const auto& body = it->second;
-    // Stage 3 real polyhedra are measured from current topology, never cached
-    // sweep metadata or a bbox recovery after a failed topology edit.
-    if (body.kind == detail::BodyKind::Box || body.kind == detail::BodyKind::Wedge ||
-        body.kind == detail::BodyKind::Generic ||
-        (body.kind == detail::BodyKind::Sweep && body.sweep_polyhedral_mass_valid)) {
+    const bool analytic = body.kind == detail::BodyKind::Sphere ||
+        body.kind == detail::BodyKind::Cylinder || body.kind == detail::BodyKind::Cone ||
+        body.kind == detail::BodyKind::Torus;
+    if (!analytic) {
+        // Current topology is the sole authority for real polyhedra. Provenance,
+        // sweep creation caches and bounding boxes cannot recover a failed query.
         return TopologyQueryService(state_).body_mass_properties(body_id);
     }
-    switch (body.kind) {
-        case detail::BodyKind::Box:
-        case detail::BodyKind::Wedge:
-        case detail::BodyKind::Sphere:
-        case detail::BodyKind::Cylinder:
-        case detail::BodyKind::Cone:
-        case detail::BodyKind::Torus:
-            if (!try_primitive_analytic_mass_properties(body, props)) {
-                props = bbox_mass_properties(body.bbox);
-            }
-            break;
-        case detail::BodyKind::Sweep:
-            (void)try_sweep_body_mass_properties(body, props);
-            break;
-        case detail::BodyKind::Modified:
-            if (body.source_bodies.size() == 1 && body.label == "replace_face" && body.bbox.is_valid) {
-                const auto src_it = state_->bodies.find(body.source_bodies[0].value);
-                if (src_it != state_->bodies.end()) {
-                    const Scalar rlin = detail::resolve_linear_tolerance(0.0, state_->config.tolerance);
-                    const Scalar meps = std::max(Scalar {1e-7}, rlin * Scalar {128});
-                    if (bbox_corners_almost_equal(body.bbox, src_it->second.bbox, meps)) {
-                        return mass_properties(body.source_bodies[0]);
-                    }
-                }
-            }
-            props = bbox_mass_properties(body.bbox);
-            break;
-        case detail::BodyKind::BooleanResult:
-            if (!try_boolean_two_operand_mass_properties(*state_, body, props)) {
-                props = bbox_mass_properties(body.bbox);
-            }
-            break;
-        default:
-            props = bbox_mass_properties(body.bbox);
-            break;
+    const auto failure = [&](StatusCode status, std::string_view code,
+                              std::string_view stage, const char* message) {
+        auto issue = detail::make_error_issue(code, message, {body_id.value});
+        issue.stage = std::string(stage);
+        return error_result<MassProperties>(status,
+            state_->create_diagnostic("质量属性查询失败", {std::move(issue)}));
+    };
+    // Analytic primitive records describe the solid; their compatibility shells
+    // are proxies. A topology edit revokes this certificate transactionally.
+    if (body.rep_kind != RepKind::ExactBRep || !body.analytic_mass_valid) {
+        return failure(StatusCode::NotImplemented, diag_codes::kCoreOperationUnsupported,
+            "query.mass_properties.support_gate", "质量属性查询失败：解析实体已被编辑或表示不受支持");
     }
-
-    return ok_result(props, state_->create_diagnostic("已完成质量属性计算"));
+    MassProperties props {};
+    if (!try_primitive_analytic_mass_properties(body, props) ||
+        !(props.volume > 0.0) || !(props.area > 0.0) ||
+        !std::isfinite(props.volume) || !std::isfinite(props.area) ||
+        !std::isfinite(props.centroid.x) || !std::isfinite(props.centroid.y) ||
+        !std::isfinite(props.centroid.z) ||
+        !std::all_of(props.inertia.begin(), props.inertia.end(),
+                     [](Scalar value) { return std::isfinite(value); }) ||
+        !(props.inertia[0] > 0.0) || !(props.inertia[4] > 0.0) || !(props.inertia[8] > 0.0)) {
+        return failure(StatusCode::NumericalInstability, diag_codes::kQueryMassPropertiesFailure,
+            "query.mass_properties.numeric", "质量属性查询失败：解析积分退化或超出数值范围");
+    }
+    return ok_result(props, state_->create_diagnostic("已从未编辑解析实体计算质量属性"));
 }
 
 Result<Scalar> QueryService::min_distance(BodyId lhs, BodyId rhs) const {

@@ -1,3 +1,4 @@
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -8,6 +9,34 @@
 
 int main() {
     axiom::Kernel kernel;
+    const auto unsupported_mass = [&](axiom::BodyId body) {
+        const auto result = kernel.query().mass_properties(body);
+        const auto diagnostic = kernel.diagnostics().get(result.diagnostic_id);
+        if (result.status != axiom::StatusCode::NotImplemented || result.value || !diagnostic.value) return false;
+        for (const auto& issue : diagnostic.value->issues)
+            if (issue.code == axiom::diag_codes::kCoreOperationUnsupported &&
+                issue.stage == "query.mass_properties.support_gate") return true;
+        return false;
+    };
+    const auto proxy_survives_reownership = [&](axiom::BodyId body) {
+        const auto shells = kernel.topology().query().shells_of_body(body);
+        if (!shells.value || shells.value->empty()) return false;
+        for (const auto shell : *shells.value) {
+            const auto faces = kernel.topology().query().faces_of_shell(shell);
+            if (!faces.value) return false;
+            auto txn = kernel.topology().begin_transaction();
+            const auto copied_shell = txn.create_shell(*faces.value);
+            const auto generic = copied_shell.value ? txn.create_body(std::array{*copied_shell.value})
+                : axiom::Result<axiom::BodyId>{};
+            // The new body's kind/source metadata cannot launder imprinted
+            // proxy faces into material boundaries, even after deleting owners.
+            if (!generic.value || !unsupported_mass(*generic.value) ||
+                txn.delete_body(body).status != axiom::StatusCode::Ok ||
+                txn.delete_shell(shell).status != axiom::StatusCode::Ok ||
+                !unsupported_mass(*generic.value) || txn.rollback().status != axiom::StatusCode::Ok) return false;
+        }
+        return true;
+    };
 
     auto a = kernel.primitives().box({0.0, 0.0, 0.0}, 100.0, 80.0, 30.0);
     auto b = kernel.primitives().cylinder({20.0, 20.0, 0.0}, {0.0, 0.0, 1.0}, 10.0, 30.0);
@@ -163,9 +192,10 @@ int main() {
         return 1;
     }
 
-    auto props = kernel.query().mass_properties(result.value->output);
-    if (props.status != axiom::StatusCode::Ok || !props.value.has_value() || props.value->volume <= 0.0) {
-        std::cerr << "invalid boolean output mass properties\n";
+    // Historical BooleanResult provenance/topology is not a certificate of the
+    // physical Boolean solid. Mass must not restore operand or bbox estimates.
+    if (!unsupported_mass(result.value->output) || !proxy_survives_reownership(result.value->output)) {
+        std::cerr << "boolean output must reject uncertified mass without partial values\n";
         return 1;
     }
 
@@ -251,9 +281,8 @@ int main() {
             std::cerr << "boolean intersect expected imprint stage diagnostic\n";
             return 1;
         }
-        auto ix_props = kernel.query().mass_properties(ix.value->output);
-        if (ix_props.status != axiom::StatusCode::Ok || !ix_props.value.has_value() || ix_props.value->volume <= 0.0) {
-            std::cerr << "boolean intersect output mass properties invalid\n";
+        if (!unsupported_mass(ix.value->output) || !proxy_survives_reownership(ix.value->output)) {
+            std::cerr << "boolean intersect output must reject uncertified mass\n";
             return 1;
         }
     }
@@ -286,9 +315,8 @@ int main() {
             std::cerr << "  face_count=" << (un_faces_all.value.has_value() ? un_faces_all.value->size() : 0U) << "\n";
             return 1;
         }
-        auto un_props = kernel.query().mass_properties(un.value->output);
-        if (un_props.status != axiom::StatusCode::Ok || !un_props.value.has_value() || un_props.value->volume <= 0.0) {
-            std::cerr << "boolean union output mass properties invalid\n";
+        if (!unsupported_mass(un.value->output) || !proxy_survives_reownership(un.value->output)) {
+            std::cerr << "boolean union output must reject uncertified mass\n";
             return 1;
         }
     }

@@ -614,16 +614,48 @@ if (fillet.status != StatusCode::Ok) {
 
 ## 10. 查询与分析样例
 
-## 10.1 质量属性
+## 10.1 质量属性（cycle-0076 / S3-MASS）
 
 ```cpp
-auto mp = kernel.query().mass_properties(body_id);
-if (mp.status == StatusCode::Ok) {
-  print("volume", mp.value->volume);
-  print("area", mp.value->area);
-  print("centroid", mp.value->centroid);
+auto box = kernel.primitives().box({10,20,30}, 2,3,4);
+if (!box.value) { handle_error(box); return; }
+auto mp = kernel.query().mass_properties(*box.value);
+if (!mp.value) {
+  handle_error(mp);  // diagnostic_id → Issue.code / query.mass_properties.*
+  return;           // 失败无部分数值，不用 bbox 或来源记录代算
 }
+print("volume", mp.value->volume);      // 24
+print("area", mp.value->area);          // 52
+print("centroid", mp.value->centroid);  // (11,21.5,32)
+print("inertia", mp.value->inertia);    // diag(50,40,26)，质心世界张量
 ```
+
+密度为 1；体积/面积/重心/惯性单位分别为模型长度的 3/2/1/5 次方。惯性是关于质心的世界坐标系行主序张量，非对角项是负积惯量；若另有均匀物理密度 ρ，质量为 `ρ*volume`、物理惯性为 `ρ*inertia`。
+
+真实 ExactBRep box/wedge、已物化 Sweep 与用户 Generic 平面直边闭壳每次从当前拓扑积分，通用/专用体质量一致。独立材料壳相加、奇数深度空腔相减、偶数深度岛相加，面积含所有内外边界；壳顺序不决定材料角色，相交/重合/建模容差接触多壳拒绝。采样 revolve/曲线 sweep/截面律返回实际多面体属性，光滑解析极限只作误差对照。
+
+```cpp
+auto sphere = kernel.primitives().sphere({0,0,0}, 2);
+if (!sphere.value) { handle_error(sphere); return; }
+auto native_mass = kernel.query().mass_properties(*sphere.value); // V=32π/3，A=16π
+// 这是未编辑原生记录的解析质量；其兼容壳不是球的物理边界。
+auto faces = kernel.topology().query().faces_of_body(*sphere.value);
+if (!faces.value || faces.value->empty()) { handle_error(faces); return; }
+auto replacement = kernel.surfaces().make_plane({0,0,0}, {0,0,1});
+if (!replacement.value) { handle_error(replacement); return; }
+auto txn = kernel.topology().begin_transaction();
+auto changed = txn.replace_surface(faces.value->front(), *replacement.value);
+if (changed.status != StatusCode::Ok) { handle_error(changed); return; }
+auto edited_mass = kernel.query().mass_properties(*sphere.value);
+// NotImplemented / AXM-CORE-E-0004 / query.mass_properties.support_gate；无 value。
+auto rolled_back = txn.rollback();
+if (rolled_back.status != StatusCode::Ok) { handle_error(rolled_back); return; }
+auto restored_mass = kernel.query().mass_properties(*sphere.value); // 恢复原解析质量
+```
+
+原生球/柱/锥/环仅 ExactBRep 且未编辑时有解析资格；专用体/壳质量拒绝代理边界。成功面替换或改变 PCurve 绑定/删除会撤销资格，失败编辑保留，保存点/回滚恢复，提交后仍拒绝。圆锥横向质心惯性为 `V*(3r²/20+3h²/80)`，重心距 apex 为 `3h/4`。
+
+metadata-only STEP 恢复与 mesh/implicit 派生 BRep 不继承解析资格；Boolean/Modified、旧 label-only extrude/thicken、未知体类/表示或兼容代理壳均 support_gate 拒绝。真实 box 改为曲面 support_gate 拒绝，支撑平面错配/开壳 preflight 拒绝，回滚恢复；热网格、来源或创建缓存不能恢复旧值。数值溢出/惯性下溢为 `AXM-QUERY-E-0003 / numeric`，无部分属性。查询不创建网格或改变缓存/Eval/事务写计数。完整范围、采样误差和独立参考见 [质量支持矩阵](AxiomKernel_详细模块接口清单.md#613-stage-3-质量属性支持矩阵cycle-0076--s3-mass) 与 [三条验收证据](../quality/AxiomKernel_测试与验收方案.md#13-cycle-0076--s3-mass-门禁与逐项证据)；真实 thicken 主路径仍缺。
 
 ## 10.2 最短距离
 
@@ -1164,7 +1196,7 @@ if (box.value) {
 }
 ```
 
-这两个入口仅支持平面、Line/LineSegment 边组成的双边流形闭壳，面可凹且可带孔。实体壳按严格包含深度判定材料、空腔及材料岛，并以平行轴定理汇总；`body_shell_regions` 可查询深度、角色与直接父壳。相交/重叠/建模容差接触多壳不在支持范围。曲面、曲边（含显式 trim）、开壳、非流形或零体积壳失败且无部分值，面边界必须位于支撑平面。查询每次从当前拓扑重算，不分配网格、不写缓存或改变 Eval 状态。
+这两个入口仅支持实际物理边界的平面、Line/LineSegment 边双边流形闭壳；原生解析体兼容代理面即使重新组壳也拒绝，面可凹且可带孔。实体壳按严格包含深度判定材料、空腔及材料岛，并以平行轴定理汇总；`body_shell_regions` 可查询深度、角色与直接父壳。相交/重叠/建模容差接触多壳不在支持范围。曲面、曲边（含显式 trim）、开壳、非流形或零体积壳失败且无部分值，面边界必须位于支撑平面。查询每次从当前拓扑重算，不分配网格、不写缓存或改变 Eval 状态。
 
 ### 实体点定位与有限线段裁剪（cycle-0074，已通过完整门禁）
 

@@ -597,6 +597,7 @@ inline ShellId clone_materialized_shell(KernelState& state, ShellId source_shell
         const auto cloned_face = FaceId {state.allocate_id()};
         FaceRecord face;
         face.surface_id = source_face_it->second.surface_id;
+        face.mass_boundary_proxy = source_face_it->second.mass_boundary_proxy;
         face.outer_loop = cloned_outer;
         face.inner_loops = std::move(cloned_inner_loops);
         if (source_face_it->second.source_faces.empty()) {
@@ -656,6 +657,7 @@ inline ShellId clone_materialized_shell_with_faces(KernelState& state,
         const auto cloned_face = FaceId {state.allocate_id()};
         FaceRecord face;
         face.surface_id = source_face_it->second.surface_id;
+        face.mass_boundary_proxy = source_face_it->second.mass_boundary_proxy;
         face.outer_loop = cloned_outer;
         face.inner_loops = std::move(cloned_inner_loops);
         if (source_face_it->second.source_faces.empty()) {

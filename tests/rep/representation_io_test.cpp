@@ -1007,18 +1007,39 @@ int main() {
     auto imported_cone_props = kernel.query().mass_properties(*imported_cone.value);
     auto sphere_props = kernel.query().mass_properties(*sphere.value);
     auto cone_props = kernel.query().mass_properties(*cone.value);
-    if (imported_sphere_props.status != axiom::StatusCode::Ok || imported_cone_props.status != axiom::StatusCode::Ok ||
-        sphere_props.status != axiom::StatusCode::Ok || cone_props.status != axiom::StatusCode::Ok ||
-        !imported_sphere_props.value.has_value() || !imported_cone_props.value.has_value()) {
-        std::cerr << "failed to query imported primitive mass properties\n";
+    // STEP currently restores primitive metadata, not an owned physical BRep.
+    // Such imported records do not gain the native factory's mass certificate.
+    const auto unsupported_mass = [&](const auto& result) {
+        const auto report = kernel.diagnostics().get(result.diagnostic_id);
+        if (result.status != axiom::StatusCode::NotImplemented || result.value || !report.value) return false;
+        for (const auto& issue : report.value->issues)
+            if (issue.code == axiom::diag_codes::kCoreOperationUnsupported &&
+                issue.stage == "query.mass_properties.support_gate") return true;
+        return false;
+    };
+    if (!unsupported_mass(imported_sphere_props) || !unsupported_mass(imported_cone_props) ||
+        !unsupported_mass(kernel.query().mass_properties(*brep.value)) ||
+        !unsupported_mass(kernel.query().mass_properties(*implicit_brep.value))) {
+        std::cerr << "metadata/mesh representations must not fabricate physical mass\n";
         return 1;
     }
-
-    if (!sphere_props.value.has_value() || !cone_props.value.has_value() ||
-        !approx(imported_sphere_props.value->volume, sphere_props.value->volume) ||
-        !approx(imported_cone_props.value->volume, cone_props.value->volume, 1e-3) ||
-        !approx(imported_cone_props.value->centroid.z, cone_props.value->centroid.z, 1e-5)) {
-        std::cerr << "imported primitive metadata was not restored into mass properties\n";
+    // Independent native references, rather than comparing two implementations
+    // that could share the same incorrect cone-height inertia coefficient.
+    const double mass_pi = std::acos(-1.0);
+    const double cone_radius = 6*std::tan(mass_pi/6);
+    const double cone_volume = mass_pi*cone_radius*cone_radius*6/3;
+    const double cone_transverse = cone_volume*(3*cone_radius*cone_radius/20+3.0*36/80);
+    if (!sphere_props.value || !cone_props.value ||
+        !approx(sphere_props.value->volume,32*mass_pi/3) ||
+        !approx(sphere_props.value->area,16*mass_pi) ||
+        !approx(sphere_props.value->inertia[0],sphere_props.value->volume*8/5) ||
+        !approx(cone_props.value->volume,cone_volume) ||
+        !approx(cone_props.value->area,mass_pi*cone_radius*(cone_radius+std::hypot(cone_radius,6))) ||
+        !approx(cone_props.value->centroid.z,4.5) ||
+        !approx(cone_props.value->inertia[0],cone_transverse) ||
+        !approx(cone_props.value->inertia[4],cone_transverse) ||
+        !approx(cone_props.value->inertia[8],cone_volume*3*cone_radius*cone_radius/10)) {
+        std::cerr << "native primitive analytic mass reference mismatch\n";
         return 1;
     }
 

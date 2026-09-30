@@ -245,6 +245,16 @@ public:
         BodyId body_id, const Point3& point, const BodySpatialQueryOptions& options = {}) const;
     Result<BodyDistanceQuery> closest_points(
         BodyId lhs, BodyId rhs, const BodySpatialQueryOptions& options = {}) const;
+    /// Uniform density 1: volume/area/centroid use model length powers 3/2/1;
+    /// inertia is the centroidal world-frame row-major tensor (length power 5).
+    /// Real planar straight-edge bodies are integrated from current ExactBRep
+    /// topology, including odd-depth cavities and even-depth material islands.
+    /// Native unedited sphere/cylinder/cone/torus factory records use analytic formulas; their
+    /// compatibility shells are not physical boundaries. Editing revokes analytic
+    /// mass until rollback. Sampled sweeps measure the polyhedron, not its smooth limit.
+    /// Metadata-only imports, unsupported/proxy bodies and invalid topology fail without partial values;
+    /// Issue.stage is query.mass_properties.{support_gate,preflight,empty_gate,numeric}.
+    /// No bbox, provenance or creation-cache fallback; queries do not publish meshes.
     Result<MassProperties> mass_properties(BodyId body_id) const;
     /// 实体材料距离，同 closest_points；空实体失败，不返回 bbox 间隔。
     Result<Scalar> min_distance(BodyId lhs, BodyId rhs) const;

@@ -609,7 +609,7 @@ public:
 
 PCurve 必须为至少两点的折线，按 coedge 方向连续闭合，各点位于当前包装后参数域，且 UV 端点在支撑曲面上与定向拓扑顶点的 3D 位置一致。退化、自交、断裂或越域的外/内环分别返回 `InvalidTopology / AXM-TOPO-E-0003/0004`；内环必须严格位于外环内且不得相交、重叠或嵌套。非有限面积返回 `NumericalInstability / AXM-QUERY-E-0003`，扣孔后非正或退化返回 `DegenerateGeometry / AXM-GEO-E-0003`，结果溢出返回 `InvalidInput / AXM-CORE-E-0002`；所有失败均无部分面积。周期参数缝须由调用方在同一展开区间内表达，查询不自动解包裹。每次查询从当前面/环/曲面重算，不写求值或网格缓存；事务内替换/删除即时可见，回滚后恢复。
 
-`shell_mass_properties / body_shell_regions / body_mass_properties` 从当前真实拓扑重算单位密度的体积、表面积、质心及关于质心的世界坐标系 3×3 行主序惯性张量。体积、面积、质心和惯性的单位分别是模型长度单位的三次方、平方、一次方和五次方。支持平面、Line/LineSegment 边组成的双边流形闭壳，面可凹且可带孔。`body_shell_regions` 以严格包含深度给出 Material/Void 和直接父壳；`body_mass_properties` 用平行轴定理累加偶数深度材料壳、扣除奇数深度空腔壳，面积保留全部边界面积。多壳相交、重叠或在建模容差内接触返回 `InvalidTopology / AXM-QUERY-E-0006`；曲面、曲边、空/开/非流形壳、共享边同向、环绕向错误、非共面或零体积均结构化失败且无部分值。查询不发布网格、不写缓存、不改变 Eval 状态或事务写计数；事务内删除/替换即时可见，回滚后恢复。
+`shell_mass_properties / body_shell_regions / body_mass_properties` 从当前真实拓扑重算单位密度的体积、表面积、质心及关于质心的世界坐标系 3×3 行主序惯性张量。体积、面积、质心和惯性的单位分别是模型长度单位的三次方、平方、一次方和五次方。支持平面、Line/LineSegment 边组成的双边流形闭壳，面可凹且可带孔。`body_shell_regions` 以严格包含深度给出 Material/Void 和直接父壳；`body_mass_properties` 用平行轴定理累加偶数深度材料壳、扣除奇数深度空腔壳，面积保留全部边界面积。多壳相交、重叠或在建模容差内接触返回 `InvalidTopology / AXM-QUERY-E-0006`；曲面、曲边、空/开/非流形壳、共享边同向、环绕向错误、非共面或零体积均结构化失败且无部分值。查询不发布网格、不写缓存、不改变 Eval 状态或事务写计数；事务内删除/替换即时可见，回滚后恢复。cycle-0076 起明确拒绝兼容代理面，包括重新组壳后的原生解析体代理面；原生解析质量资格仅供通用查询使用，完整范围与稳定失败阶段见 §6.1.3。
 
 `edge_curve_interval / edge_length / loop_length / face_boundary_length` 组成拓扑边界长度接口族，单位为模型长度单位。`create_trimmed_edge` 创建的边保存有向参数区间，`edge_length` 调用同一支撑曲线的区间弧长实现，覆盖圆/椭圆/抛物线/双曲线、Bezier/BSpline/NURBS、折线和复合链；递减区间合法，区间起止必须分别对应 v0/v1。旧 `create_edge` 保持兼容：Line/LineSegment 继续按端点真实距离计算，未携带区间的曲边仍返回 `NotImplemented / AXM-CORE-E-0004`，绝不以弦长冒充弧长。显式曲边还会把解析区间极值或控制点凸包纳入面/壳/体拓扑包围盒，避免半圆等边界只取端点而低估范围。
 
@@ -639,8 +639,8 @@ PCurve 必须为至少两点的折线，按 coedge 方向连续闭合，各点�
 | 真实物化的显式 polygon `extrude`、折线 `sweep`、拓扑兼容 `loft` | 支持真实多面体，凹/孔按材料奇偶填充 | ExactBRep 标签；真实拓扑 bbox、质量、面/壳归属及 provenance 一致 | `tests/ops/ops_heal_test.cpp::test_stage3_model_query_chain`；只覆盖各入口已声明可物化子域，不扩大自动环匹配或任意放样 |
 | 真实物化的 `extrude_scaled/extrude_twisted/extrude_with_law`、`sweep_scaled/sweep_with_scale_law/sweep_with_law`、采样曲线 sweep、有向部分/整周 revolve | 查询实际采样与剖分多面体，非连续曲面的解析解 | 通用质量每次消费当前拓扑，不恢复旧 Sweep 质量缓存 | 同上及 `test_directed_interval_revolutions`、既有建模回归；新增跨模块截面断言覆盖其中选定夹具，不能视为所有采样变体穷举 |
 | ExactBRep 用户 Generic 平面直边闭壳；独立壳、嵌套空腔与材料岛 | 支持；按严格包含深度奇偶计算材料 | 体积材料加/空腔减/岛加，面积计全部边界 | Query 多壳截面面积 `100−36+4=68`、空腔悬浮体距离 `0.5`；壳相交/重叠/建模容差接触拒绝，未证明壳自身全局嵌入 |
-| sphere / cylinder / cone / torus 等解析曲面体、曲面/曲边闭壳 | `NotImplemented / AXM-CORE-E-0004`，`query.*.support_gate` | 通用基本解析体质量仍保留解析路径；专用体闭壳质量拒绝 bbox 壳 | sphere 拒绝回归与共享体类门禁；Geo 曲面最近点/单面面积的既有支持不等于实体查询支持 |
-| 旧占位 thicken、未真实物化 Sweep、其他占位或非 ExactBRep 体 | 同上，不能用 bbox 壳代替实体 | 不将旧质量恢复路径升级为真实拓扑质量 | 旧 thicken 拒绝已回归；真实 thicken 主路径仍是 Stage 3 剩余限制 |
+| sphere / cylinder / cone / torus 等解析曲面体、曲面/曲边闭壳 | `NotImplemented / AXM-CORE-E-0004`，`query.*.support_gate` | 仅未编辑原生 sphere/cylinder/cone/torus 的通用质量保留解析路径；专用体/壳质量拒绝兼容代理面（cycle-0076） | sphere 拒绝回归与共享体类门禁；Geo 曲面最近点/单面面积的既有支持不等于实体查询支持 |
+| 旧占位 thicken、未真实物化 Sweep、其他占位或非 ExactBRep 体 | 同上，不能用 bbox 壳代替实体 | 质量明确失败且无 value；无 bbox/来源/创建缓存恢复（cycle-0076） | 旧 thicken 拒绝已回归；真实 thicken 主路径仍是 Stage 3 剩余限制 |
 | 已删除体/面、支撑面错配、活动事务内改成曲面 | `preflight` 或 `support_gate` 失败，无部分结果 | 支持体类质量同步失败，回滚后恢复 | Query/Ops 编辑失败、缓存与 Eval 不污染、rollback/Strict 回归 |
 
 截面三角形覆盖实际材料区域，扣除孔/空腔并保留材料岛。`vertices` 为世界坐标，`triangles` 是有效顶点索引，`area` 是实际三角面积之和；`boundary_segments` 是真实边界三角片与平面的交段，可重复，共面片含三角化内部边，因此不是已去重的闭合轮廓环。`contact_points` 保留点接触。完全无交集成功返回空容器、area=0、无效 bbox；共面面保留真实面积，纯线/点相切成功零面积并保留接触信息。
@@ -657,7 +657,28 @@ PCurve 必须为至少两点的折线，按 coedge 方向连续闭合，各点�
 
 详细查询每次消费当前拓扑，只增加诊断与 Topo 只读审计，不写模型/网格/交线存储、曲线/曲面求值缓存、体/面三角化缓存、Eval 失效/重算或事务写计数。编辑失败不得恢复旧拓扑质量或 bbox fallback；rollback 后截面与质量恢复。内部零壳分支约定截面成功空、距离 `DegenerateGeometry / AXM-QUERY-E-0001 / query.distance.empty_gate`，但公共 `create_body({})` 返回 `OperationFailed / AXM-TX-E-0001`，本批仅验证创建拒绝及写计数不变，未构造或验收零壳查询分支。
 
-调度器修复后完整构建及 CTest **16/16 通过、148.44 s**；Query/Eval **0.90 s**、Ops/Heal **121.81 s**、representation/IO **9.87 s**。逐项独立参考与四条验收证据见 [测试与验收方案 §1.2](../quality/AxiomKernel_测试与验收方案.md#12-cycle-0075--s3-query-门禁与逐项证据)，稳定失败码见 [错误码字典](../diagnostics/AxiomKernel_错误码与诊断码字典.md)。S3-QUERY 为 `ready_for_acceptance`；正式验收需调度器文档检查与提交成功，Stage 3 / FR-QUERY-001 保持进行中。
+调度器修复后完整构建及 CTest **16/16 通过、148.44 s**；Query/Eval **0.90 s**、Ops/Heal **121.81 s**、representation/IO **9.87 s**。逐项独立参考与四条验收证据见 [测试与验收方案 §1.2](../quality/AxiomKernel_测试与验收方案.md#12-cycle-0075--s3-query-门禁与逐项证据)，稳定失败码见 [错误码字典](../diagnostics/AxiomKernel_错误码与诊断码字典.md)。该节保留 S3-QUERY 历史代码门禁与支持范围；当前唯一任务为 cycle-0076 / S3-MASS（§6.1.3），正式状态见当前进度 §5.2.1，不由历史日志推断文档检查/提交成功。Stage 3 / FR-QUERY-001 保持进行中。
+
+### 6.1.3 Stage 3 质量属性支持矩阵（cycle-0076 / S3-MASS）
+
+`QueryService::mass_properties(BodyId)` 返回 `Result<MassProperties>`。密度固定为 1；`volume/area/centroid` 的单位为模型长度单位的三次方/平方/一次方，`inertia` 为关于质心的世界坐标系 3×3 行主序张量，单位为长度的五次方。张量非对角项为负积惯量，坐标旋转按 `R I Rᵀ` 变换。接口没有密度参数；均匀密度 ρ 的物理质量为 `ρ*volume`，物理惯性为 `ρ*inertia`，面积与重心不变。
+
+| 当前模型 / 路径 | 质量来源与支持范围 | 边界与回归 |
+|---|---|---|
+| ExactBRep box / wedge | 委托 `TopologyQueryService::body_mass_properties`，从当前平面直边闭壳积分全部属性 | 盒体解析积分、楔体三角棱柱全张量参考；非等边/平移及当前支撑平面一致性 |
+| 真实物化 polygon extrude、直线/折线 sweep、拓扑兼容 polygon loft | 同一当前拓扑积分；支持各入口已声明的凸/凹及孔子域 | `test_stage3_model_mass_references` 独立棱柱/方截面积分；逐面面积总和、通用/体/壳一致、Strict 与 owned_topo_welded 表示 |
+| revolve/revolve_between、曲线 sweep、比例/扭转/联合律与其他已物化 Sweep | 返回实际采样剖分多面体的质量；创建时 Sweep 数值和来源记录不作为查询依据 | 有向整周/部分旋转 Green 边积分参考；连续光滑体只作采样误差对照，不能代替当前边界；一般曲线/律无统一解析误差保证 |
+| ExactBRep 用户 Generic 平面直边嵌入闭壳、多壳材料/空腔/岛 | 严格包含层级：独立材料相加、奇数深度空腔相减、偶数深度岛再加；用平行轴定理汇总惯性 | 壳输入顺序不决定角色；面积包含外边界和全部空腔/岛边界。相交、重合、重叠或建模容差接触多壳拒绝；未新增壳自身全局嵌入证明 |
+| 原生 PrimitiveFactory sphere / cylinder / cone / torus，ExactBRep 且未编辑 | 原生记录具有解析质量资格，体积/完整边界面积/重心/质心惯性按解析公式计算 | 兼容拓扑是代理壳而非物理边界；专用 `shell_mass_properties/body_mass_properties` 拒绝。此解析资格不扩展实体截面/距离支持 |
+| 编辑后的原生解析体 | 成功替换面、改变 PCurve 绑定、删除面/壳等撤销解析资格，立即 support_gate 拒绝 | 失败编辑不撤销；保存点/整事务回滚恢复资格与数值，提交后持续拒绝；不能用其代理壳积分重新认证 |
+| 旧 label-only Sweep/extrude/thicken、Boolean/Modified、未知或不支持体类/表示 | 明确 `NotImplemented / AXM-CORE-E-0004 / query.mass_properties.support_gate`，无 value | 删除 bbox、Boolean/Modified 来源组合及 Sweep 创建缓存质量恢复。历史 thicken 尚无真实质量主路径 |
+| metadata-only STEP 等恢复记录、mesh/implicit 派生 BRep、重新组壳的兼容代理面 | 不继承原生解析资格，不能以标签/来源/ExactBRep 名称证明实际边界 | `representation_io_test` 检查导入与派生体拒绝；代理面标记随克隆及布尔 imprint 切分保留，重新归属和删除原 owner 后仍拒绝 |
+
+真实多面体要求无自交的嵌入平面直边双边流形闭壳。每次消费当前拓扑，合法编辑会改变结果；换曲面、支撑平面错配、开壳或删除目标则即时失败，即使已热缓存网格也不恢复旧数值。成功/失败质量查询不发布网格、不改模型、三角化/求值缓存、Eval invalid/recompute 或事务写计数；诊断与 Topo 只读审计可增加。回滚恢复当前拓扑、质量及来源记录，不以 provenance 冒充几何证明。
+
+所有失败无 `value`，不返回部分体积/面积/重心/惯性。稳定阶段为 `query.mass_properties.support_gate/preflight/empty_gate/numeric`；原生解析溢出/惯性下溢、非有限结果或非正惯性对角项为 `NumericalInstability / AXM-QUERY-E-0003 / numeric`。无效/删除句柄为 `InvalidInput / AXM-CORE-E-0001 / preflight`；其余拓扑根因保留错误码。公共 API 无零壳体夹具，删除最后壳会删除 owner Body，回归核对的是 InvalidInput/preflight，内部 empty_gate 不声称已覆盖。
+
+独立参考、采样误差和三条 `stage_evidence` 见 [测试与验收 §1.3](../quality/AxiomKernel_测试与验收方案.md#13-cycle-0076--s3-mass-门禁与逐项证据)。调度器完整构建成功，全量 CTest **16/16、0 失败、147.97 s**；S3-MASS 为 `ready_for_acceptance`，正式验收以文档检查及调度器提交成功为条件，Stage 3 / FR-QUERY-001 继续进行中。
 
 ### 6.2 拓扑事务接口
 
@@ -963,7 +984,7 @@ public:
 
 `extrude_twisted`、`sweep_scaled` 和 `sweep` 的旧合同保留，零扭角比例律及两关键站兼容回归通过。输出仍为采样多面体 BRep；新律不支持零/负比例、尖顶、至平面组合、嵌套复合导轨、一般非线性解析律、解析扫掠/螺旋曲面或任意截面匹配。三个入口的独立体积/质心/完整惯性、真实拓扑/边长/面面积/Strict/索引/网格、中间关键站、周期正负整周、无效/数值退化/采样预算、阶段诊断、活动事务失败原子性和编辑回滚重试回归随 `axiom_ops_heal_test` 通过（106.39 s）；整批 CTest 16/16、0 失败、134.05 s，见 [cycle-0074 门禁日志](../../.axiom-agent/logs/cycle-0074-gates.log)。FR-OPS-001 保持进行中。
 
-`loft` 要求至少两个显式平面多边形截面。各站外环以及同索引孔环必须保持相同顶点数，以顶点顺序定义直纹侧壁对应关系；环绕向可独立变化。截面须沿共同横向严格有序，站间插值区域不得退化、翻折或相交。成功时生成真实共享面边点的单闭壳并缓存闭合多面体质量属性；不同环拓扑、自动顶点匹配、分支、尖顶/坍塌截面和无显式轮廓路径拒绝，不再返回 bbox 占位体。
+`loft` 要求至少两个显式平面多边形截面。各站外环以及同索引孔环必须保持相同顶点数，以顶点顺序定义直纹侧壁对应关系；环绕向可独立变化。截面须沿共同横向严格有序，站间插值区域不得退化、翻折或相交。成功时生成真实共享面边点的单闭壳；公开质量每次从当前拓扑重算，创建时积分数据不作查询回退；不同环拓扑、自动顶点匹配、分支、尖顶/坍塌截面和无显式轮廓路径拒绝，不再返回 bbox 占位体。
 
 `sweep` 还支持显式凹多边形或带孔截面沿 Bezier/BSpline/NURBS 开放导轨、显式端点重合且首尾切向连续的闭合样条、整圆/椭圆周期导轨，以及 `CompositeChain` 复合导轨。复合链子段可为有界直线/线段、圆/椭圆弧、Bezier、BSpline、NURBS 或 polyline 首段，按公开链语义的子曲线局部参数 `[0,1]` 取值；接缝必须位置连续且 G1 切向连续。截面必须位于导轨起点且其平面法向与起始切向对齐；开放导轨生成两端盖，闭合样条与闭合复合链生成无端盖周期闭壳。空间闭环使用沿采样弧长分布的旋转最小标架 holonomy 校正，避免首尾截面隐藏扭转缝。周期带孔截面的外边界与每个孔边界是互不连通的闭壳，因此一个 Body 含 `1 + holes_xyz.size()` 个 Shell，`owned_topo_welded` 网格也报告同数量的连通分量；开放带孔导轨由端盖连成单壳，周期无孔也为单壳。
 
@@ -1058,7 +1079,7 @@ public:
 };
 ```
 
-cycle-0075 起，上述实体截面与距离入口遵循 §6.1.2 的真实拓扑支持矩阵及空结果合同。`mass_properties` 对 box/wedge/Generic/真实物化 Sweep 复用 `body_mass_properties`，当前拓扑错误直接失败，不恢复旧质量缓存；球/柱/锥/环基本体的通用解析质量路径保留，其他历史布尔/Modified 等质量恢复路径未在 S3-QUERY 中升级，不属于真实多面体查询支持范围。
+cycle-0075 起，上述实体截面与距离入口遵循 §6.1.2 的真实拓扑支持矩阵及空结果合同。cycle-0076 / S3-MASS 的质量合同见 §6.1.3：真实多面体只消费当前拓扑，未编辑原生球/柱/锥/环保留解析资格；编辑撤销资格，回滚恢复。旧布尔/Modified、metadata 导入和兼容代理壳明确拒绝，无 bbox、来源记录或创建缓存回退。公开签名未变，本批补齐注释与失败语义，复用既有错误码。
 
 ## 9. `HealCore` 接口清单
 

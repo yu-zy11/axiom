@@ -443,10 +443,12 @@ bool imprint_split_rect_face_by_segment(detail::KernelState& state,
     const auto face_b = FaceId {state.allocate_id()};
     detail::FaceRecord fa;
     fa.surface_id = face_it->second.surface_id;
+    fa.mass_boundary_proxy = face_it->second.mass_boundary_proxy;
     fa.outer_loop = loop_a;
     fa.source_faces = face_it->second.source_faces.empty() ? std::vector<FaceId> {face_id} : face_it->second.source_faces;
     detail::FaceRecord fb;
     fb.surface_id = face_it->second.surface_id;
+    fb.mass_boundary_proxy = face_it->second.mass_boundary_proxy;
     fb.outer_loop = loop_b;
     fb.source_faces = face_it->second.source_faces.empty() ? std::vector<FaceId> {face_id} : face_it->second.source_faces;
     state.faces.emplace(face_a.value, std::move(fa));
@@ -580,10 +582,12 @@ bool imprint_split_rect_face_diagonal(detail::KernelState& state, ShellId shell_
     const auto face_b = FaceId {state.allocate_id()};
     detail::FaceRecord fa;
     fa.surface_id = face_it->second.surface_id;
+    fa.mass_boundary_proxy = face_it->second.mass_boundary_proxy;
     fa.outer_loop = loop_a;
     fa.source_faces = face_it->second.source_faces.empty() ? std::vector<FaceId> {face_id} : face_it->second.source_faces;
     detail::FaceRecord fb;
     fb.surface_id = face_it->second.surface_id;
+    fb.mass_boundary_proxy = face_it->second.mass_boundary_proxy;
     fb.outer_loop = loop_b;
     fb.source_faces = face_it->second.source_faces.empty() ? std::vector<FaceId> {face_id} : face_it->second.source_faces;
     state.faces.emplace(face_a.value, std::move(fa));
@@ -614,4 +618,3 @@ IntersectionId store_intersection(std::shared_ptr<detail::KernelState> state,
     state->intersections.emplace(id.value, std::move(record));
     return id;
 }
-

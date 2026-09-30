@@ -294,6 +294,8 @@ public:
     /// `volume`/`area`/`centroid` 的单位分别为模型长度单位的三次方、平方和一次方；
     /// `inertia` 是关于质心、世界坐标系行主序的 3x3 张量，密度取 1，单位为模型长度单位的五次方。
     /// 壳须为双边流形闭壳，面边界绕向须与平面法向一致；曲面、曲边、开壳、非流形或退化壳失败且不返回部分值。
+    /// 兼容占位面（含解析 primitive 的代理面）不能用于积分；重新组壳也不改变该限制。
+    /// 失败阶段为 query.mass_properties.{support_gate,preflight,numeric}，不返回部分数值。
     /// 每次从当前拓扑重算，不创建网格或写缓存；事务内删除/替换即时可见，回滚后恢复。
     Result<MassProperties> shell_mass_properties(ShellId shell_id) const;
     /// 查询实体闭壳的严格空间包含层级。互不相交的最外层壳是独立材料分量；奇数深度壳为空腔，偶数深度壳为材料岛。
@@ -303,6 +305,7 @@ public:
     /// 汇总实体一个或多个闭合多面体壳的均匀密度质量属性。
     /// 独立最外层壳相加，奇数包含深度空腔相减，偶数深度材料岛再相加；壳接触/相交/重叠失败。
     /// `area` 为所有材料/空腔边界面积之和；其余单位及失败/只读语义同 `shell_mass_properties`。
+    /// 受支持体类不拥有壳时返回 InvalidTopology/query.mass_properties.empty_gate；不从 bbox 或来源记录恢复质量。
     Result<MassProperties> body_mass_properties(BodyId body_id) const;
     /// 平面直边、多面体实体的真实材料定位与最近边界；支持凹面、孔、多壳、空腔、材料岛。
     /// 仅 ExactBRep 的 box/wedge、已物化真实多面体 Sweep 和用户建立的 Generic 闭壳；
