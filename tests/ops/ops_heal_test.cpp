@@ -808,6 +808,297 @@ bool test_twisted_extrusions() {
         kernel.validate().validate_all(*retry.value,axiom::ValidationMode::Strict).status==axiom::StatusCode::Ok;
 }
 
+bool test_extrusion_section_laws() {
+    constexpr double pi = 3.1415926535897932384626433832795;
+    struct Model {
+        axiom::ProfileRef profile;
+        std::vector<std::array<double,5>> rectangles;
+        std::vector<axiom::ExtrusionLawStation> law;
+    };
+    const std::vector<Model> models {
+        {{"law_bulge",{{-2,-1,0},{2,-1,0},{2,1,0},{-2,1,0}}},
+         {{-2,-1,4,2,1}}, {{0,1,0},{0.25,2,0},{0.75,0.5,0},{1,1,0}}},
+        {{"law_concave",{{0,0,0},{5,0,0},{5,2,0},{2,2,0},{2,5,0},{0,5,0}}},
+         {{0,0,5,2,1},{0,2,2,3,1}}, {{0,1,0},{0.3,0.75,0},{0.6,1.5,0},{1,0.5,0}}},
+        {{"law_two_holes",{{-4,-3,0},{4,-3,0},{4,3,0},{-4,3,0}},
+          {{{-3,-1,0},{-1,-1,0},{-1,1,0},{-3,1,0}},{{1,-1,0},{3,-1,0},{3,1,0},{1,1,0}}}},
+         {{-4,-3,8,6,1},{-3,-1,2,2,-1},{1,-1,2,2,-1}},
+         {{0,1,0},{0.5,1.5,0},{1,0.75,0}}},
+        {{"law_twist_reverse",{{-2,-1,0},{2,-1,0},{2,1,0},{-2,1,0}}},
+         {{-2,-1,4,2,1}}, {{0,1,0},{0.4,1.5,pi/2},{0.6,1.5,pi/2},{1,0.75,0}}},
+        {{"law_twisted_hole",{{-4,-3,0},{4,-3,0},{4,3,0},{-4,3,0}},
+          {{{-1,-1,0},{1,-1,0},{1,1,0},{-1,1,0}}}},
+         {{-4,-3,8,6,1},{-1,-1,2,2,-1}}, {{0,1,0},{0.5,1.5,-pi/2},{1,0.75,-pi}}},
+        {{"law_twisted_concave",{{0,0,0},{5,0,0},{5,2,0},{2,2,0},{2,5,0},{0,5,0}}},
+         {{0,0,5,2,1},{0,2,2,3,1}}, {{0,1,0},{0.5,1.5,pi/4},{1,0.75,pi/2}}}
+    };
+    for (std::size_t model_index = 0; model_index < models.size(); ++model_index)
+    for (const bool tilted : {false,true}) {
+        axiom::Kernel kernel;
+        auto model = models[model_index];
+        const double height = 5, direction_sign = tilted ? -1 : 1;
+        const axiom::Point3 center = model_index == 1 ? axiom::Point3 {-5,6,0} : axiom::Point3 {0.5,0.25,0};
+        const auto rotate = [tilted](axiom::Point3 p) -> axiom::Point3 {
+            if (!tilted) return p;
+            return {0.6*p.x-0.48*p.y+0.64*p.z,0.8*p.x+0.36*p.y-0.48*p.z,0.8*p.y+0.6*p.z};
+        };
+        const auto world = [&](axiom::Point3 p) -> axiom::Point3 {
+            const auto q = rotate(p);
+            return {q.x+10,q.y-20,q.z+30};
+        };
+        // Independent volume/moment integration over signed rectangles and each
+        // caller interval. With zero twist, three Gauss points are exact for the
+        // fourth-degree mass moments of a linearly scaled extrusion.
+        const double node = std::sqrt(15.0)/10;
+        const std::array<std::array<double,2>,3> gauss {{{0.5-node,5.0/18},{0.5,4.0/9},{0.5+node,5.0/18}}};
+        double expected_volume = 0;
+        std::array<double,3> first {};
+        std::array<double,9> second {};
+        bool has_twist = false;
+        std::size_t intervals = 0;
+        axiom::BoundingBox expected_bounds {};
+        for (std::size_t k = 1; k < model.law.size(); ++k) {
+            const auto& a = model.law[k-1];
+            const auto& b = model.law[k];
+            has_twist = has_twist || a.twist_angle != 0 || b.twist_angle != 0;
+            for (const auto& r : model.rectangles) for (const auto& gx : gauss)
+            for (const auto& gy : gauss) for (const auto& gt : gauss) {
+                const double s = a.scale+gt[0]*(b.scale-a.scale);
+                const double fraction = a.fraction+gt[0]*(b.fraction-a.fraction);
+                const double weight = r[2]*r[3]*r[4]*height*(b.fraction-a.fraction)*s*s*gx[1]*gy[1]*gt[1];
+                const auto p = world({center.x+s*(r[0]+r[2]*gx[0]-center.x),
+                                      center.y+s*(r[1]+r[3]*gy[0]-center.y),direction_sign*height*fraction});
+                const std::array<double,3> q {p.x,p.y,p.z};
+                expected_volume += weight;
+                for (int i = 0; i < 3; ++i) {
+                    first[i] += weight*q[i];
+                    for (int j = 0; j < 3; ++j) second[3*i+j] += weight*q[i]*q[j];
+                }
+            }
+            const auto count = static_cast<std::size_t>(std::max({1.0,
+                std::ceil(std::abs(b.twist_angle-a.twist_angle)/(pi/24)),
+                std::ceil(std::abs(b.scale-a.scale)/std::min(a.scale,b.scale)/0.25)}));
+            intervals += count;
+            for (std::size_t j = 0; j <= count; ++j) {
+                const double t = static_cast<double>(j)/static_cast<double>(count);
+                const double s = a.scale+t*(b.scale-a.scale);
+                const double angle = direction_sign*(a.twist_angle+t*(b.twist_angle-a.twist_angle));
+                const double z = direction_sign*height*(a.fraction+t*(b.fraction-a.fraction));
+                for (std::size_t ring = 0; ring <= model.profile.holes_xyz.size(); ++ring) {
+                    const auto& points = ring == 0 ? model.profile.polygon_xyz : model.profile.holes_xyz[ring-1];
+                    for (const auto& p : points) {
+                        const double x = s*(p.x-center.x), y = s*(p.y-center.y);
+                        const auto q = world({center.x+x*std::cos(angle)-y*std::sin(angle),
+                                              center.y+x*std::sin(angle)+y*std::cos(angle),z});
+                        if (!expected_bounds.is_valid) expected_bounds = {q,q,true};
+                        expected_bounds.min.x = std::min(expected_bounds.min.x,q.x);
+                        expected_bounds.min.y = std::min(expected_bounds.min.y,q.y);
+                        expected_bounds.min.z = std::min(expected_bounds.min.z,q.z);
+                        expected_bounds.max.x = std::max(expected_bounds.max.x,q.x);
+                        expected_bounds.max.y = std::max(expected_bounds.max.y,q.y);
+                        expected_bounds.max.z = std::max(expected_bounds.max.z,q.z);
+                    }
+                }
+            }
+        }
+        std::size_t ring_vertices = 0;
+        for (std::size_t ring = 0; ring <= model.profile.holes_xyz.size(); ++ring) {
+            auto& points = ring == 0 ? model.profile.polygon_xyz : model.profile.holes_xyz[ring-1];
+            ring_vertices += points.size();
+            if (tilted || ring != 0) std::reverse(points.begin(),points.end());
+            std::rotate(points.begin(),points.begin()+model_index%points.size(),points.end());
+            for (auto& p : points) p = world(p);
+        }
+        if (tilted) std::reverse(model.profile.holes_xyz.begin(),model.profile.holes_xyz.end());
+        const auto d = rotate({0,0,7*direction_sign});
+        const auto body = kernel.sweeps().extrude_with_law(model.profile,{d.x,d.y,d.z},height,world(center),model.law);
+        if (!body.value || body.status != axiom::StatusCode::Ok) {
+            std::cerr << "section law extrusion failed: " << model.profile.label << " tilted=" << tilted << '\n';
+            return false;
+        }
+        const auto query = kernel.topology().query();
+        const auto faces = query.faces_of_body(*body.value);
+        const auto edges = query.edges_of_body(*body.value);
+        const auto vertices = query.vertices_of_body(*body.value);
+        const auto shells = query.shells_of_body(*body.value);
+        const auto mass = kernel.query().mass_properties(*body.value);
+        const auto actual = query.body_mass_properties(*body.value);
+        const std::size_t face_count = 2*(ring_vertices+2*model.profile.holes_xyz.size()-2)+2*ring_vertices*intervals;
+        const double volume_tol = has_twist ? expected_volume*0.015 : 1e-8;
+        if (!faces.value || faces.value->size() != face_count || !edges.value || edges.value->size() != 3*face_count/2 ||
+            !vertices.value || vertices.value->size() != ring_vertices*(intervals+1) ||
+            !shells.value || shells.value->size() != 1 || !mass.value || !actual.value ||
+            std::abs(mass.value->volume-expected_volume) > volume_tol ||
+            std::abs(actual.value->volume-mass.value->volume) > 1e-8 ||
+            std::abs(actual.value->area-mass.value->area) > 1e-8 ||
+            kernel.validate().validate_all(*body.value,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok) {
+            std::cerr << "section law topology/mass/Strict mismatch: " << model.profile.label << '\n';
+            return false;
+        }
+        for (int i = 0; i < 9; ++i)
+            if (std::abs(actual.value->inertia[i]-mass.value->inertia[i]) > 1e-7) return false;
+        if (!has_twist) {
+            for (auto& value : first) value /= expected_volume;
+            for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j)
+                second[3*i+j] = second[3*i+j]/expected_volume-first[i]*first[j];
+            const double trace = second[0]+second[4]+second[8];
+            if (std::hypot(mass.value->centroid.x-first[0],mass.value->centroid.y-first[1],
+                           mass.value->centroid.z-first[2]) > 1e-8) return false;
+            for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j)
+                if (std::abs(mass.value->inertia[3*i+j]-expected_volume*((i == j ? trace : 0)-second[3*i+j])) > 1e-6)
+                    return false;
+        }
+        for (const auto bounds : {query.bbox_of_body_from_topology(*body.value),kernel.representation().bbox_of_body(*body.value)})
+            if (!bounds.value || !bounds.value->is_valid ||
+                std::hypot(bounds.value->min.x-expected_bounds.min.x,bounds.value->min.y-expected_bounds.min.y,
+                           bounds.value->min.z-expected_bounds.min.z) > 1e-8 ||
+                std::hypot(bounds.value->max.x-expected_bounds.max.x,bounds.value->max.y-expected_bounds.max.y,
+                           bounds.value->max.z-expected_bounds.max.z) > 1e-8) return false;
+        double face_area = 0;
+        for (const auto face : *faces.value) {
+            const auto owners = query.bodies_of_face(face);
+            const auto loops = query.loops_of_face(face);
+            const auto area = query.planar_face_area(face);
+            if (!owners.value || owners.value->size() != 1 || owners.value->front().value != body.value->value ||
+                !loops.value || loops.value->size() != 1 || !area.value || *area.value <= 0) return false;
+            face_area += *area.value;
+        }
+        if (std::abs(face_area-mass.value->area) > 1e-8) return false;
+        for (const auto edge : *edges.value) {
+            const auto uses = query.coedge_count_of_edge(edge);
+            const auto adjacent = query.faces_of_edge(edge);
+            const auto length = query.edge_length(edge);
+            if (!uses.value || *uses.value != 2 || !adjacent.value || adjacent.value->size() != 2 ||
+                !length.value || *length.value <= 0) return false;
+        }
+        const auto mesh = kernel.convert().brep_to_mesh(*body.value,{});
+        if (!mesh.value) return false;
+        const auto inspection = kernel.convert().inspect_mesh(*mesh.value);
+        if (!inspection.value || inspection.value->tessellation_strategy != "owned_topo_welded" ||
+            inspection.value->vertex_count != vertices.value->size() || inspection.value->triangle_count != face_count ||
+            inspection.value->connected_components != 1 || inspection.value->has_degenerate_triangles ||
+            inspection.value->has_out_of_range_indices) return false;
+    }
+
+    // Two-key laws retain the existing scale-only and twist-only semantics.
+    {
+        axiom::Kernel kernel;
+        const auto& profile = models.front().profile;
+        for (const auto end : {axiom::ExtrusionLawStation {1,1,0},{1,1.5,0},{1,1,pi/2},{1,1,-2*pi}}) {
+            const std::array<axiom::ExtrusionLawStation,2> law {{{0,1,0},end}};
+            const auto body = kernel.sweeps().extrude_with_law(profile,{0,0,1},5,{0,0,0},law);
+            const auto reference = end.twist_angle == 0 ? kernel.sweeps().extrude_scaled(profile,{0,0,1},5,{0,0,0},end.scale)
+                : kernel.sweeps().extrude_twisted(profile,{0,0,1},5,{0,0,0},end.twist_angle);
+            if (!body.value || !reference.value) return false;
+            const auto a = kernel.query().mass_properties(*body.value);
+            const auto b = kernel.query().mass_properties(*reference.value);
+            if (!a.value || !b.value || std::abs(a.value->volume-b.value->volume) > 1e-8 ||
+                std::abs(a.value->area-b.value->area) > 1e-8 ||
+                std::hypot(a.value->centroid.x-b.value->centroid.x,a.value->centroid.y-b.value->centroid.y,
+                           a.value->centroid.z-b.value->centroid.z) > 1e-8) return false;
+            for (int i = 0; i < 9; ++i) if (std::abs(a.value->inertia[i]-b.value->inertia[i]) > 1e-7) return false;
+        }
+    }
+
+    // Every failure, including intermediate rounded sections and law sampling
+    // overflow, must preserve existing bodies/caches and active transaction writes.
+    axiom::Kernel kernel;
+    const auto& profile = models.front().profile;
+    const auto& good_law = models.front().law;
+    const auto source = kernel.sweeps().extrude_with_law(profile,{0,0,1},5,{0,0,0},good_law);
+    if (!source.value || !kernel.convert().brep_to_mesh(*source.value,{}).value) return false;
+    const auto source_mass = kernel.query().mass_properties(*source.value);
+    const auto source_faces = kernel.topology().query().faces_of_body(*source.value);
+    if (!source_mass.value || !source_faces.value || source_faces.value->empty()) return false;
+    auto transaction = kernel.topology().begin_transaction();
+    const auto temporary = transaction.create_vertex({71,72,73});
+    const auto objects = kernel.object_count_total(), geometry = kernel.geometry_count(), bodies = kernel.body_count();
+    const auto next = kernel.next_object_id(), writes = transaction.write_operation_count();
+    const auto runtime = kernel.runtime_store_counts();
+    if (!temporary.value || !objects.value || !geometry.value || !bodies.value || !next.value || !writes.value || !runtime.value)
+        return false;
+    const auto rejected = [&](const axiom::ProfileRef& p, const axiom::Vec3& direction, double distance,
+                              const axiom::Point3& center, const std::vector<axiom::ExtrusionLawStation>& law) {
+        const auto result = kernel.sweeps().extrude_with_law(p,direction,distance,center,law);
+        const auto diagnostic = kernel.diagnostics().get(result.diagnostic_id);
+        const auto after = kernel.runtime_store_counts();
+        return result.status == axiom::StatusCode::InvalidInput && !result.value && diagnostic.value &&
+            has_issue_code(*diagnostic.value,axiom::diag_codes::kCoreParameterOutOfRange) &&
+            kernel.object_count_total().value == objects.value && kernel.geometry_count().value == geometry.value &&
+            kernel.body_count().value == bodies.value && kernel.next_object_id().value == next.value &&
+            transaction.write_operation_count().value == writes.value && after.value &&
+            after.value->mesh_records == runtime.value->mesh_records &&
+            after.value->tessellation_cache_entries == runtime.value->tessellation_cache_entries &&
+            after.value->face_tessellation_cache_entries == runtime.value->face_tessellation_cache_entries &&
+            after.value->curve_eval_cache_entries == runtime.value->curve_eval_cache_entries &&
+            after.value->surface_eval_cache_entries == runtime.value->surface_eval_cache_entries;
+    };
+    const double inf = std::numeric_limits<double>::infinity(), nan = std::numeric_limits<double>::quiet_NaN();
+    const std::vector<std::vector<axiom::ExtrusionLawStation>> invalid_laws {
+        {}, {{0,1,0}}, {{0.1,1,0},{1,1,0}}, {{0,1,0},{0.9,1,0}},
+        {{0,2,0},{1,1,0}}, {{0,1,0.1},{1,1,0}},
+        {{0,1,0},{0.5,1,0},{0.5,1.2,0},{1,1,0}}, {{0,1,0},{0.7,1,0},{0.3,1,0},{1,1,0}},
+        {{0,1,0},{-0.5,1,0},{1,1,0}}, {{0,1,0},{1.5,1,0},{1,1,0}},
+        {{0,1,0},{nan,1,0},{1,1,0}}, {{0,1,0},{0.5,inf,0},{1,1,0}},
+        {{0,1,0},{0.5,1,nan},{1,1,0}}, {{0,1,0},{1,1,inf}},
+        {{0,1,0},{1,0,0}}, {{0,1,0},{0.5,-1,0},{1,1,0}},
+        {{0,1,0},{0.5,1,2*pi},{1,1,0}}, {{0,1,0},{1,1,2*pi+1e-5}},
+        {{0,1,0},{0.5,1e-20,0},{1,1,0}}, {{0,1,0},{1,1e200,0}},
+        {{0,1,0},{1e-20,1,pi/4},{1,1,pi/2}}
+    };
+    for (const auto& law : invalid_laws) if (!rejected(profile,{0,0,1},5,{0,0,0},law)) return false;
+    std::vector<axiom::ExtrusionLawStation> excessive_keys(4098);
+    for (std::size_t i = 0; i < excessive_keys.size(); ++i)
+        excessive_keys[i] = {static_cast<double>(i)/static_cast<double>(excessive_keys.size()-1),1,0};
+    if (!rejected(profile,{0,0,1},5,{0,0,0},excessive_keys)) return false;
+    // Intermediate numerical collapse with a moderate scale ratio (no budget failure).
+    auto rounded = profile;
+    for (auto& p : rounded.polygon_xyz) p.x += 1e16;
+    if (!rejected(rounded,{0,0,1},5,{1e16,0,0},{{0,1,0},{0.5,0.25,0},{1,1,0}})) return false;
+    for (const double distance : {0.0,-1.0,1e-20,inf,nan})
+        if (!rejected(profile,{0,0,1},distance,{0,0,0},good_law)) return false;
+    for (const auto direction : {axiom::Vec3 {0,0,0},{1,0,0},{1,0,1},{inf,0,1},{0,nan,1}})
+        if (!rejected(profile,direction,5,{0,0,0},good_law)) return false;
+    for (const auto center : {axiom::Point3 {0,0,0.1},{inf,0,0},{0,nan,0},{1e308,1e308,0}})
+        if (!rejected(profile,{0,0,1},5,center,good_law)) return false;
+    const std::vector<axiom::ProfileRef> invalid_profiles {
+        {"empty"},{"",profile.polygon_xyz},{"short",{{0,0,0},{1,0,0}}},
+        {"collinear",{{0,0,0},{1,0,0},{2,0,0}}},
+        {"duplicate",{{0,0,0},{3,0,0},{3,3,0},{3,0,0},{0,3,0}}},
+        {"crossing",{{0,0,0},{4,3,0},{0,4,0},{3,0,0}}},
+        {"nonplanar",{{0,0,0},{3,0,0},{3,3,0.1},{0,3,0}}},
+        {"nan",{{0,0,0},{3,0,0},{0,nan,0}}},
+        {"outside_hole",profile.polygon_xyz,{{{1,0,0},{3,0,0},{3,0.5,0},{1,0.5,0}}}},
+        {"touching_hole",profile.polygon_xyz,{{{-2,0,0},{-1,0,0},{-1,0.5,0},{-2,0.5,0}}}},
+        {"nested_holes",{{-4,-4,0},{4,-4,0},{4,4,0},{-4,4,0}},
+          {{{-2,-2,0},{2,-2,0},{2,2,0},{-2,2,0}},{{-1,-1,0},{1,-1,0},{1,1,0},{-1,1,0}}}}
+    };
+    for (const auto& p : invalid_profiles) if (!rejected(p,{0,0,1},5,{0,0,0},good_law)) return false;
+    // A geometrically valid holed region can still place its nonadjacent side
+    // triangles in tolerance contact. Reject the real walls before allocation.
+    const axiom::ProfileRef near_contact {"law_wall_contact",profile.polygon_xyz,
+        {{{1,-0.5,0},{2-5e-7,-0.5,0},{2-5e-7,0.5,0},{1,0.5,0}}}};
+    if (!rejected(near_contact,{0,0,1},5,{0,0,0},{{0,1,0},{1,1,0}})) return false;
+    if (transaction.rollback().status != axiom::StatusCode::Ok) return false;
+    const auto remains = kernel.topology().query().has_vertex(*temporary.value);
+    const auto after_rollback = kernel.object_count_total();
+    if (!remains.value || *remains.value || !after_rollback.value || *after_rollback.value+1 != *objects.value)
+        return false;
+    auto edit = kernel.topology().begin_transaction();
+    if (edit.delete_face(source_faces.value->front()).status != axiom::StatusCode::Ok) return false;
+    if (kernel.topology().query().body_mass_properties(*source.value).status == axiom::StatusCode::Ok) return false;
+    if (edit.rollback().status != axiom::StatusCode::Ok) return false;
+    const auto restored = kernel.query().mass_properties(*source.value);
+    const auto restored_faces = kernel.topology().query().faces_of_body(*source.value);
+    if (!restored.value || !restored_faces.value || restored_faces.value->size() != source_faces.value->size() ||
+        restored.value->inertia != source_mass.value->inertia ||
+        std::abs(restored.value->volume-source_mass.value->volume) > 1e-8 ||
+        std::abs(restored.value->area-source_mass.value->area) > 1e-8 ||
+        kernel.validate().validate_all(*source.value,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok) return false;
+    const auto retry = kernel.sweeps().extrude_with_law(profile,{0,0,-11},5,{0,0,0},models[3].law);
+    return retry.value && kernel.validate().validate_all(*retry.value,axiom::ValidationMode::Strict).status == axiom::StatusCode::Ok;
+}
+
 bool test_extrusions_to_plane() {
     struct Model {
         axiom::ProfileRef profile;
@@ -2965,6 +3256,626 @@ bool test_scaled_rail_sweeps() {
         kernel.validate().validate_all(*retry.value,axiom::ValidationMode::Strict).status==axiom::StatusCode::Ok;
 }
 
+bool check_sweep_law_body(axiom::Kernel& kernel, axiom::BodyId body, std::size_t ring_vertices,
+                          std::size_t holes, bool closed) {
+    const auto query = kernel.topology().query();
+    const auto vertices = query.vertices_of_body(body);
+    const auto faces = query.faces_of_body(body);
+    const auto edges = query.edges_of_body(body);
+    const auto shells = query.shells_of_body(body);
+    if (!vertices.value || vertices.value->size()%ring_vertices != 0 || !faces.value || !edges.value ||
+        !shells.value || shells.value->size() != (closed ? holes+1 : 1)) return false;
+    const std::size_t stations = vertices.value->size()/ring_vertices;
+    const std::size_t expected_faces = closed ? 2*ring_vertices*stations :
+        2*(ring_vertices+2*holes-2)+2*ring_vertices*(stations-1);
+    const auto mass = kernel.query().mass_properties(body);
+    const auto actual = query.body_mass_properties(body);
+    const auto bounds = query.bbox_of_body_from_topology(body);
+    const auto cached = kernel.representation().bbox_of_body(body);
+    if (stations < 3 || faces.value->size() != expected_faces || edges.value->size() != 3*expected_faces/2 ||
+        !mass.value || !actual.value || !(mass.value->volume > 0) || !(mass.value->area > 0) ||
+        std::abs(actual.value->volume-mass.value->volume) > 1e-8 ||
+        std::abs(actual.value->area-mass.value->area) > 1e-8 || !bounds.value || !cached.value ||
+        !bounds.value->is_valid || !cached.value->is_valid ||
+        std::hypot(bounds.value->min.x-cached.value->min.x,bounds.value->min.y-cached.value->min.y,
+                   bounds.value->min.z-cached.value->min.z) > 1e-9 ||
+        std::hypot(bounds.value->max.x-cached.value->max.x,bounds.value->max.y-cached.value->max.y,
+                   bounds.value->max.z-cached.value->max.z) > 1e-9 ||
+        kernel.validate().validate_all(body,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok ||
+        kernel.topology().validate().validate_body_topology_indices(body).status != axiom::StatusCode::Ok)
+        return false;
+    for (std::size_t i = 0; i < 9; ++i)
+        if (!std::isfinite(mass.value->inertia[i]) || std::abs(actual.value->inertia[i]-mass.value->inertia[i]) > 1e-7)
+            return false;
+    double area = 0;
+    for (const auto face : *faces.value) {
+        const auto owners = query.bodies_of_face(face);
+        const auto loops = query.loops_of_face(face);
+        const auto face_area = query.planar_face_area(face);
+        if (!owners.value || owners.value->size() != 1 || owners.value->front().value != body.value ||
+            !loops.value || loops.value->size() != 1 || !face_area.value || !(*face_area.value > 0)) return false;
+        area += *face_area.value;
+    }
+    if (std::abs(area-mass.value->area) > 1e-8) return false;
+    for (const auto edge : *edges.value) {
+        const auto uses = query.coedge_count_of_edge(edge);
+        const auto adjacent = query.faces_of_edge(edge);
+        const auto length = query.edge_length(edge);
+        if (!uses.value || *uses.value != 2 || !adjacent.value || adjacent.value->size() != 2 ||
+            !length.value || !(*length.value > 0)) return false;
+    }
+    const auto mesh = kernel.convert().brep_to_mesh(body,{});
+    if (!mesh.value) return false;
+    const auto inspection = kernel.convert().inspect_mesh(*mesh.value);
+    return inspection.value && inspection.value->tessellation_strategy == "owned_topo_welded" &&
+        inspection.value->vertex_count == vertices.value->size() &&
+        inspection.value->triangle_count == faces.value->size() &&
+        inspection.value->connected_components == (closed ? holes+1 : 1) &&
+        !inspection.value->has_degenerate_triangles && !inspection.value->has_out_of_range_indices;
+}
+
+bool test_sweep_scale_laws() {
+    using Station = axiom::SweepScaleStation;
+    const std::vector<Station> law {{0,1},{0.23,1.5},{0.42,1.5},{0.73,0.65},{1,1.1}};
+    // An independent three-point Gauss integral over signed rectangles checks
+    // volume, centroid and all nine inertia entries. Both the path corners and
+    // caller law keys partition the integral; rail parameter spacing is irrelevant.
+    for (const int shape : {0,1,2}) for (const bool transformed : {false,true}) {
+        axiom::Kernel kernel;
+        axiom::ProfileRef profile {"scale_law_box",{{-1,-0.75,0},{1,-0.75,0},{1,0.75,0},{-1,0.75,0}}};
+        std::vector<std::array<double,5>> rectangles {{-1,-0.75,2,1.5,1}};
+        if (shape == 1) {
+            profile.holes_xyz = {{{-0.7,-0.3,0},{-0.3,-0.3,0},{-0.3,0.3,0},{-0.7,0.3,0}},
+                                 {{0.3,-0.3,0},{0.7,-0.3,0},{0.7,0.3,0},{0.3,0.3,0}}};
+            rectangles.push_back({-0.7,-0.3,0.4,0.6,-1});
+            rectangles.push_back({0.3,-0.3,0.4,0.6,-1});
+        } else if (shape == 2) {
+            profile = {"scale_law_concave",{{-1,-1,0},{1,-1,0},{1,0,0},{0,0,0},{0,1,0},{-1,1,0}}};
+            rectangles = {{-1,-1,2,1,1},{-1,0,1,1,1}};
+        }
+        const std::vector<axiom::Point3> path = shape == 0 ?
+            std::vector<axiom::Point3>{{0,0,0},{0,0,8}} :
+            std::vector<axiom::Point3>{{0,0,0},{0.2,-0.1,1.6},{0.6,0.3,5},{0.3,0.1,8}};
+        const auto world = [transformed](axiom::Point3 p) -> axiom::Point3 {
+            if (!transformed) return p;
+            p.z = -p.z;
+            return {10+0.6*p.x-0.48*p.y+0.64*p.z,
+                    -20+0.8*p.x+0.36*p.y-0.48*p.z,30+0.8*p.y+0.6*p.z};
+        };
+        std::vector<double> lengths(path.size(),0);
+        for (std::size_t i = 1; i < path.size(); ++i)
+            lengths[i] = lengths[i-1]+std::hypot(path[i].x-path[i-1].x,path[i].y-path[i-1].y,path[i].z-path[i-1].z);
+        std::vector<double> cuts;
+        for (const auto length : lengths) cuts.push_back(length/lengths.back());
+        for (const auto& key : law) cuts.push_back(key.fraction);
+        std::sort(cuts.begin(),cuts.end());
+        cuts.erase(std::unique(cuts.begin(),cuts.end()),cuts.end());
+        const double node = std::sqrt(15.0)/10;
+        const std::array<std::array<double,2>,3> gauss {{{0.5-node,5.0/18},{0.5,4.0/9},{0.5+node,5.0/18}}};
+        double volume = 0;
+        std::array<double,3> first {};
+        std::array<double,9> second {};
+        for (std::size_t cut = 1; cut < cuts.size(); ++cut) {
+            const double midpoint = (cuts[cut-1]+cuts[cut])*0.5;
+            std::size_t segment = 1, key = 1;
+            while (segment+1 < path.size() && lengths[segment]/lengths.back() < midpoint) ++segment;
+            while (key+1 < law.size() && law[key].fraction < midpoint) ++key;
+            const double dz_df = (path[segment].z-path[segment-1].z)*lengths.back()/
+                                  (lengths[segment]-lengths[segment-1]);
+            for (const auto& r : rectangles) for (const auto& gx : gauss)
+            for (const auto& gy : gauss) for (const auto& gt : gauss) {
+                const double f = cuts[cut-1]+gt[0]*(cuts[cut]-cuts[cut-1]);
+                const double t = (f*lengths.back()-lengths[segment-1])/(lengths[segment]-lengths[segment-1]);
+                const double s = law[key-1].scale+(law[key].scale-law[key-1].scale)*
+                    (f-law[key-1].fraction)/(law[key].fraction-law[key-1].fraction);
+                const auto& a = path[segment-1]; const auto& b = path[segment];
+                const auto p = world({a.x+t*(b.x-a.x)+s*(r[0]+r[2]*gx[0]),
+                                       a.y+t*(b.y-a.y)+s*(r[1]+r[3]*gy[0]),a.z+t*(b.z-a.z)});
+                const double weight = r[2]*r[3]*r[4]*dz_df*(cuts[cut]-cuts[cut-1])*s*s*gx[1]*gy[1]*gt[1];
+                const std::array<double,3> q {p.x,p.y,p.z};
+                volume += weight;
+                for (int i = 0; i < 3; ++i) {
+                    first[i] += weight*q[i];
+                    for (int j = 0; j < 3; ++j) second[3*i+j] += weight*q[i]*q[j];
+                }
+            }
+        }
+        std::size_t ring_vertices = profile.polygon_xyz.size();
+        for (auto& ring : profile.holes_xyz) {
+            ring_vertices += ring.size();
+            if (transformed) std::reverse(ring.begin(),ring.end());
+            for (auto& p : ring) p = world(p);
+        }
+        if (transformed) std::reverse(profile.polygon_xyz.begin(),profile.polygon_xyz.end());
+        for (auto& p : profile.polygon_xyz) p = world(p);
+        auto world_path = path;
+        for (auto& p : world_path) p = world(p);
+        const auto rail = path.size() == 2 ? kernel.curves().make_line_segment(world_path.front(),world_path.back()) :
+                                            kernel.curves().make_composite_polyline(world_path);
+        if (!rail.value) return false;
+        const auto body = kernel.sweeps().sweep_with_scale_law(profile,*rail.value,law);
+        if (!body.value || !check_sweep_law_body(kernel,*body.value,ring_vertices,profile.holes_xyz.size(),false)) {
+            std::cerr << "piecewise arc-length scale sweep failed: " << shape << ", transformed=" << transformed << '\n';
+            return false;
+        }
+        const auto mass = kernel.query().mass_properties(*body.value);
+        if (!mass.value || std::abs(mass.value->volume-volume) > 1e-8) return false;
+        for (auto& value : first) value /= volume;
+        for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j)
+            second[3*i+j] = second[3*i+j]/volume-first[i]*first[j];
+        const double trace = second[0]+second[4]+second[8];
+        if (std::hypot(mass.value->centroid.x-first[0],mass.value->centroid.y-first[1],mass.value->centroid.z-first[2]) > 1e-8)
+            return false;
+        for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j)
+            if (std::abs(mass.value->inertia[3*i+j]-volume*((i == j ? trace : 0)-second[3*i+j])) > 1e-6) return false;
+        // A peak at an interior key must survive even when both endpoint scales
+        // are smaller. The line case has an exact independently known bound.
+        if (shape == 0 && !transformed) {
+            const auto bounds = kernel.topology().query().bbox_of_body_from_topology(*body.value);
+            if (!bounds.value || std::abs(bounds.value->min.x+1.5) > 1e-10 ||
+                std::abs(bounds.value->max.x-1.5) > 1e-10 || std::abs(bounds.value->max.z-8) > 1e-10) return false;
+            const auto edges = kernel.topology().query().edges_of_body(*body.value);
+            if (!edges.value) return false;
+            // Every key has a complete ring of actual planar boundary edges.
+            for (const auto& station : law) {
+                std::size_t at_height = 0;
+                for (const auto edge : *edges.value) {
+                    const auto neighbors = kernel.topology().query().faces_of_edge(edge);
+                    if (!neighbors.value) return false;
+                    for (const auto face : *neighbors.value) {
+                        const auto box = kernel.topology().query().bbox_of_face(face);
+                        if (!box.value) return false;
+                        if (std::abs(box.value->min.z-8*station.fraction) < 1e-10 ||
+                            std::abs(box.value->max.z-8*station.fraction) < 1e-10) { ++at_height; break; }
+                    }
+                }
+                if (at_height < ring_vertices) return false;
+            }
+        }
+    }
+
+    // Open spline/composite and periodic circular/elliptical rails use the same
+    // law while retaining their actual transported stations and seam topology.
+    for (int kind = 0; kind < 6; ++kind) {
+        axiom::Kernel kernel;
+        axiom::Result<axiom::CurveId> rail;
+        if (kind == 0) rail = kernel.curves().make_bezier(std::array<axiom::Point3,4>{{{0,0,0},{4,0,0},{8,0.7,0.3},{12,2,0.8}}});
+        if (kind == 1) rail = kernel.curves().make_bspline({{{0,0,0},{3,0,0},{6,0.4,0.1},{9,1.1,0.4},{12,2,0.8}},3,{}});
+        if (kind == 2) rail = kernel.curves().make_nurbs({{{0,0,0},{3,0,0},{6,0.4,0.1},{9,1.1,0.4},{12,2,0.8}},
+                                                         {1,0.9,1.1,0.95,1},3,{}});
+        if (kind == 3) {
+            const auto line = kernel.curves().make_line_segment({0,0,0},{4,0,0});
+            const auto tail = kernel.curves().make_bezier(std::array<axiom::Point3,4>{{{4,0,0},{6,0,0},{9,0.7,0.3},{12,2,0.8}}});
+            if (!line.value || !tail.value) return false;
+            rail = kernel.curves().make_composite_chain(std::array{*line.value,*tail.value});
+        }
+        if (kind == 4) rail = kernel.curves().make_circle({0,0,0},{0,0,1},12);
+        if (kind == 5) rail = kernel.curves().make_ellipse({0,0,0},{12,0,0},{0,9,0});
+        if (!rail.value) return false;
+        const auto domain = kernel.curve_service().domain(*rail.value);
+        const auto start = domain.value ? kernel.curve_service().eval(*rail.value,domain.value->min,1) :
+                                          axiom::Result<axiom::CurveEvalResult>{};
+        if (!start.value) return false;
+        const auto& origin = start.value->point;
+        const bool closed = kind >= 4;
+        axiom::ProfileRef profile {"scale_law_curve",{{0,-0.2,-0.15},{0,0.2,-0.15},{0,0.2,0.15},{0,-0.2,0.15}}};
+        if (kind == 2) profile = {"scale_law_curve_concave",
+            {{0,-0.2,-0.15},{0,0.2,-0.15},{0,0.2,0},{0,0,0},{0,0,0.15},{0,-0.2,0.15}}};
+        if (kind == 3) profile.holes_xyz = {{{0,-0.07,-0.05},{0,0.07,-0.05},{0,0.07,0.05},{0,-0.07,0.05}}};
+        if (closed) {
+            const double tangent_length = std::hypot(start.value->tangent.x,start.value->tangent.y);
+            if (!(tangent_length > 0)) return false;
+            const double ux = start.value->tangent.y/tangent_length, uy = -start.value->tangent.x/tangent_length;
+            const auto point = [&](double x, double y) -> axiom::Point3 {
+                return {origin.x+x*ux,origin.y+x*uy,origin.z+y};
+            };
+            profile = {"scale_law_periodic",{point(-0.2,-0.15),point(0.2,-0.15),point(0.2,0.15),point(-0.2,0.15)},
+                       {{point(-0.07,-0.05),point(0.07,-0.05),point(0.07,0.05),point(-0.07,0.05)}}};
+        }
+        auto keys = law;
+        if (closed) keys.back().scale = 1;
+        const auto body = kernel.sweeps().sweep_with_scale_law(profile,*rail.value,keys);
+        std::size_t ring_vertices = profile.polygon_xyz.size();
+        for (const auto& hole : profile.holes_xyz) ring_vertices += hole.size();
+        if (!body.value || !check_sweep_law_body(kernel,*body.value,ring_vertices,profile.holes_xyz.size(),closed)) {
+            std::cerr << "curve/periodic scale law sweep failed: " << kind << '\n';
+            return false;
+        }
+    }
+
+    // Active transaction failures must preserve model IDs, topology writes,
+    // mesh/evaluation caches, and a previously materialized source body.
+    axiom::Kernel kernel;
+    const axiom::ProfileRef profile {"scale_law_transaction",{{-1,-1,0},{1,-1,0},{1,1,0},{-1,1,0}}};
+    const auto rail = kernel.curves().make_line_segment({0,0,0},{0,0,8});
+    const auto reversed = kernel.curves().make_composite_polyline(std::array<axiom::Point3,3>{{{0,0,0},{0,0,5},{0,0,3}}});
+    const auto off_plane = kernel.curves().make_line_segment({0,0,1},{0,0,9});
+    const auto circle = kernel.curves().make_circle({0,0,0},{0,0,1},8);
+    const auto budget_rail = kernel.curves().make_composite_polyline(
+        std::array<axiom::Point3,3>{{{0,0,0},{0.2,0,1.6},{0.3,0.1,8}}});
+    if (!rail.value || !reversed.value || !off_plane.value || !circle.value || !budget_rail.value) return false;
+    const auto source = kernel.sweeps().sweep_with_scale_law(profile,*rail.value,law);
+    if (!source.value || !check_sweep_law_body(kernel,*source.value,4,0,false)) return false;
+    const auto source_mass = kernel.query().mass_properties(*source.value);
+    const auto source_faces = kernel.topology().query().faces_of_body(*source.value);
+    if (!source_mass.value || !source_faces.value || source_faces.value->empty()) return false;
+    auto transaction = kernel.topology().begin_transaction();
+    const auto temporary = transaction.create_vertex({111,112,113});
+    const auto objects = kernel.object_count_total(), geometry = kernel.geometry_count(), bodies = kernel.body_count();
+    const auto next = kernel.next_object_id(), writes = transaction.write_operation_count();
+    const auto runtime = kernel.runtime_store_counts();
+    if (!temporary.value || !objects.value || !geometry.value || !bodies.value || !next.value || !writes.value || !runtime.value)
+        return false;
+    const auto rejected = [&](const axiom::ProfileRef& input, axiom::CurveId path, const std::vector<Station>& keys,
+                              std::string_view code = axiom::diag_codes::kCoreParameterOutOfRange,
+                              std::string_view stage = {}) {
+        const auto result = kernel.sweeps().sweep_with_scale_law(input,path,keys);
+        const auto diagnostic = kernel.diagnostics().get(result.diagnostic_id);
+        const auto after = kernel.runtime_store_counts();
+        if (!stage.empty()) {
+            if (!diagnostic.value || diagnostic.value->issues.size() != 1 ||
+                diagnostic.value->issues.front().stage != stage) return false;
+            const auto& evidence = diagnostic.value->issues.front().numeric_evidence;
+            const auto count = std::find_if(evidence.begin(),evidence.end(),[](const auto& item) {
+                return item.name == "law_key_count";
+            });
+            if (count == evidence.end() || count->value != static_cast<double>(keys.size())) return false;
+        }
+        return result.status == axiom::StatusCode::InvalidInput && !result.value && diagnostic.value &&
+            has_issue_code(*diagnostic.value,code) && kernel.object_count_total().value == objects.value &&
+            kernel.geometry_count().value == geometry.value && kernel.body_count().value == bodies.value &&
+            kernel.next_object_id().value == next.value && transaction.write_operation_count().value == writes.value &&
+            after.value && after.value->mesh_records == runtime.value->mesh_records &&
+            after.value->tessellation_cache_entries == runtime.value->tessellation_cache_entries &&
+            after.value->face_tessellation_cache_entries == runtime.value->face_tessellation_cache_entries &&
+            after.value->curve_eval_cache_entries == runtime.value->curve_eval_cache_entries &&
+            after.value->surface_eval_cache_entries == runtime.value->surface_eval_cache_entries;
+    };
+    const double nan = std::numeric_limits<double>::quiet_NaN(), inf = std::numeric_limits<double>::infinity();
+    const std::vector<std::vector<Station>> invalid {
+        {},{{0,1}},{{0.1,1},{1,1}},{{0,2},{1,1}},{{0,1},{0.9,1}},{{0,1},{0.5,1},{0.5,2},{1,1}},
+        {{0,1},{0.7,1},{0.4,1},{1,1}},{{0,1},{0.5,0},{1,1}},{{0,1},{0.5,-1},{1,1}},
+        {{0,1},{0.5,nan},{1,1}},{{0,1},{0.5,inf},{1,1}},{{0,1},{nan,1},{1,1}},
+        {{0,1},{inf,1},{1,1}},{{0,1},{0.5,2000},{1,1}},{{0,1},{0.5,1e-200},{1,1}},
+        {{0,1},{1e-18,1},{1,1}},{{0,1},{0.5,1},{std::nextafter(0.5,1.0),1},{1,1}}
+    };
+    for (const auto& keys : invalid) if (!rejected(profile,*rail.value,keys)) return false;
+    std::vector<Station> too_many(4098);
+    for (std::size_t i = 0; i < too_many.size(); ++i) too_many[i] = {static_cast<double>(i)/(too_many.size()-1),1};
+    auto nonplanar = profile; nonplanar.polygon_xyz.back().z = 0.1;
+    auto nonfinite = profile; nonfinite.polygon_xyz.front().x = inf;
+    auto crossed = profile; std::swap(crossed.polygon_xyz[1],crossed.polygon_xyz[2]);
+    auto touching_hole = profile;
+    touching_hole.holes_xyz = {{{-1,-0.2,0},{0,-0.2,0},{0,0.2,0},{-1,0.2,0}}};
+    const axiom::ProfileRef periodic_profile {"law_bad_seam",{{7.8,0,-0.15},{8.2,0,-0.15},{8.2,0,0.15},{7.8,0,0.15}}};
+    const axiom::ProfileRef oversized_periodic {"law_tube_fold",{{3,0,-5},{13,0,-5},{13,0,5},{3,0,5}}};
+    std::vector<Station> combined_budget(4097);
+    for (std::size_t i = 0; i < combined_budget.size(); ++i)
+        combined_budget[i] = {static_cast<double>(i)/4096,1};
+    if (!rejected(profile,*budget_rail.value,combined_budget,axiom::diag_codes::kCoreParameterOutOfRange,"sweep_law_sampling") ||
+        !rejected(profile,*rail.value,{{0,1},{0.5,1},{std::nextafter(0.5,1.0),1},{1,1}},
+                  axiom::diag_codes::kCoreParameterOutOfRange,"sweep_law_sampling") ||
+        !rejected(touching_hole,*rail.value,law,axiom::diag_codes::kCoreParameterOutOfRange,"sweep_law_materialization") ||
+        !rejected(oversized_periodic,*circle.value,{{0,1},{0.5,1.5},{1,1}})) return false;
+    if (!rejected(profile,*rail.value,too_many) || !rejected(profile,*reversed.value,law) ||
+        !rejected(profile,*off_plane.value,law) || !rejected(nonplanar,*rail.value,law) ||
+        !rejected(nonfinite,*rail.value,law) || !rejected(crossed,*rail.value,law) ||
+        !rejected(touching_hole,*rail.value,law) || !rejected(periodic_profile,*circle.value,law) ||
+        !rejected(profile,{},law,axiom::diag_codes::kCoreInvalidHandle) ||
+        !rejected({"implicit",{}},*rail.value,law)) return false;
+    if (transaction.rollback().status != axiom::StatusCode::Ok) return false;
+    const auto remains = kernel.topology().query().has_vertex(*temporary.value);
+    if (!remains.value || *remains.value) return false;
+    auto edit = kernel.topology().begin_transaction();
+    if (edit.delete_face(source_faces.value->front()).status != axiom::StatusCode::Ok ||
+        edit.rollback().status != axiom::StatusCode::Ok) return false;
+    const auto restored = kernel.query().mass_properties(*source.value);
+    if (!restored.value || std::abs(restored.value->volume-source_mass.value->volume) > 1e-10 ||
+        restored.value->inertia != source_mass.value->inertia ||
+        kernel.validate().validate_all(*source.value,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok)
+        return false;
+    const std::array<Station,2> compatible_law {{{0,1},{1,1.25}}};
+    const auto retry = kernel.sweeps().sweep_with_scale_law(profile,*rail.value,compatible_law);
+    const auto compatible = kernel.sweeps().sweep_scaled(profile,*rail.value,1.25);
+    const auto retry_mass = retry.value ? kernel.query().mass_properties(*retry.value) : axiom::Result<axiom::MassProperties>{};
+    const auto compatible_mass = compatible.value ? kernel.query().mass_properties(*compatible.value) :
+                                                    axiom::Result<axiom::MassProperties>{};
+    return retry.value && compatible.value && retry_mass.value && compatible_mass.value &&
+        std::abs(retry_mass.value->volume-compatible_mass.value->volume) < 1e-10 &&
+        std::abs(retry_mass.value->area-compatible_mass.value->area) < 1e-10 &&
+        kernel.validate().validate_all(*retry.value,axiom::ValidationMode::Strict).status == axiom::StatusCode::Ok;
+}
+
+bool test_sweep_section_laws() {
+    using Station = axiom::SweepLawStation;
+    constexpr double pi = 3.1415926535897932384626433832795;
+    const std::vector<Station> law {{0,1,0},{0.25,1.2,pi/3},{0.5,1.2,pi/3},
+                                    {0.75,0.8,-pi/6},{1,1.1,pi/8}};
+    // Compare to an independent integral of the continuous scale/roll law.
+    // The sampled polyhedron is deliberately approximate; its cached moments
+    // must separately agree with moments recomputed from actual owned topology.
+    for (const int shape : {0,1,2}) for (const bool transformed : {false,true}) {
+        axiom::Kernel kernel;
+        axiom::ProfileRef profile {"joint_law_rectangle",{{-1,-0.75,0},{1,-0.75,0},{1,0.75,0},{-1,0.75,0}}};
+        std::vector<std::array<double,5>> rectangles {{-1,-0.75,2,1.5,1}};
+        if (shape == 1) {
+            profile.holes_xyz = {{{-0.7,-0.25,0},{-0.3,-0.25,0},{-0.3,0.25,0},{-0.7,0.25,0}},
+                                 {{0.3,-0.25,0},{0.7,-0.25,0},{0.7,0.25,0},{0.3,0.25,0}}};
+            rectangles.push_back({-0.7,-0.25,0.4,0.5,-1});
+            rectangles.push_back({0.3,-0.25,0.4,0.5,-1});
+        } else if (shape == 2) {
+            profile = {"joint_law_concave",{{-1,-1,0},{1,-1,0},{1,0,0},{0,0,0},{0,1,0},{-1,1,0}}};
+            rectangles = {{-1,-1,2,1,1},{-1,0,1,1,1}};
+        }
+        const auto world = [transformed](axiom::Point3 p) -> axiom::Point3 {
+            if (!transformed) return p;
+            return {10+0.6*p.x-0.48*p.y+0.64*p.z,
+                    -20+0.8*p.x+0.36*p.y-0.48*p.z,30+0.8*p.y+0.6*p.z};
+        };
+        const double sign = transformed ? -1 : 1, height = 6;
+        const double node = std::sqrt(15.0)/10;
+        const std::array<std::array<double,2>,3> gauss {{{0.5-node,5.0/18},{0.5,4.0/9},{0.5+node,5.0/18}}};
+        double volume = 0;
+        std::array<double,3> first {};
+        std::array<double,9> second {};
+        for (std::size_t k = 1; k < law.size(); ++k) for (int slice = 0; slice < 24; ++slice)
+        for (const auto& r : rectangles) for (const auto& gx : gauss)
+        for (const auto& gy : gauss) for (const auto& gt : gauss) {
+            const auto& a = law[k-1]; const auto& b = law[k];
+            const double t = (slice+gt[0])/24;
+            const double f = a.fraction+t*(b.fraction-a.fraction);
+            const double scale = a.scale+t*(b.scale-a.scale);
+            const double angle = sign*(a.twist_angle+t*(b.twist_angle-a.twist_angle));
+            const double x = scale*(r[0]+r[2]*gx[0]), y = scale*(r[1]+r[3]*gy[0]);
+            const auto p = world({x*std::cos(angle)-y*std::sin(angle),
+                                  x*std::sin(angle)+y*std::cos(angle),sign*height*f});
+            const double weight = r[2]*r[3]*r[4]*height*(b.fraction-a.fraction)*scale*scale*
+                                  gx[1]*gy[1]*gt[1]/24;
+            const std::array<double,3> q {p.x,p.y,p.z};
+            volume += weight;
+            for (int i = 0; i < 3; ++i) {
+                first[i] += weight*q[i];
+                for (int j = 0; j < 3; ++j) second[3*i+j] += weight*q[i]*q[j];
+            }
+        }
+        std::size_t ring_vertices = profile.polygon_xyz.size();
+        const auto original_corner = profile.polygon_xyz.front();
+        for (auto& ring : profile.holes_xyz) {
+            ring_vertices += ring.size();
+            std::reverse(ring.begin(),ring.end());
+            for (auto& p : ring) p = world(p);
+        }
+        if (transformed) std::reverse(profile.polygon_xyz.begin(),profile.polygon_xyz.end());
+        for (auto& p : profile.polygon_xyz) p = world(p);
+        const auto rail = kernel.curves().make_line_segment(world({0,0,0}),world({0,0,sign*height}));
+        if (!rail.value) return false;
+        const auto body = kernel.sweeps().sweep_with_law(profile,*rail.value,law);
+        if (!body.value || !check_sweep_law_body(kernel,*body.value,ring_vertices,profile.holes_xyz.size(),false)) {
+            std::cerr << "joint scale/roll line sweep failed: " << shape << ", transformed=" << transformed << '\n';
+            return false;
+        }
+        const auto mass = kernel.query().mass_properties(*body.value);
+        if (!mass.value || std::abs(mass.value->volume-volume) > 0.015*volume) return false;
+        for (auto& value : first) value /= volume;
+        for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j)
+            second[3*i+j] = second[3*i+j]/volume-first[i]*first[j];
+        const double trace = second[0]+second[4]+second[8];
+        if (std::hypot(mass.value->centroid.x-first[0],mass.value->centroid.y-first[1],mass.value->centroid.z-first[2]) > 0.025)
+            return false;
+        for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j)
+            if (std::abs(mass.value->inertia[3*i+j]-volume*((i == j ? trace : 0)-second[3*i+j])) > 0.025*volume*trace)
+                return false;
+        // A requested intermediate corner must be a real boundary point after
+        // scaling and rolling; its nearest face must belong to this result body.
+        const double angle = sign*law[1].twist_angle, scale = law[1].scale;
+        const auto key_point = world({scale*(original_corner.x*std::cos(angle)-original_corner.y*std::sin(angle)),
+                                      scale*(original_corner.x*std::sin(angle)+original_corner.y*std::cos(angle)),
+                                      sign*height*law[1].fraction});
+        const auto location = kernel.topology().query().locate_point(*body.value,key_point);
+        if (!location.value || location.value->location != axiom::BodyPointLocation::Boundary ||
+            !location.value->nearest_boundary || location.value->nearest_boundary->distance > 1e-9) return false;
+        const auto owner = kernel.topology().query().bodies_of_face(location.value->nearest_boundary->face);
+        if (!owner.value || owner.value->size() != 1 || owner.value->front() != *body.value) return false;
+    }
+
+    // Nonuniform-length polyline corners must remain, and their sections roll
+    // about the oriented plane normal rather than the oblique rail displacement.
+    {
+        axiom::Kernel kernel;
+        const axiom::ProfileRef profile {"joint_law_polyline",{{-0.4,-0.3,0},{0.4,-0.3,0},{0.4,0.3,0},{-0.4,0.3,0}}};
+        const std::array<axiom::Point3,4> path {{{0,0,0},{0.3,0.1,1},{-0.1,0.4,3},{0.6,0.2,6}}};
+        const auto rail = kernel.curves().make_composite_polyline(path);
+        if (!rail.value) return false;
+        const auto body = kernel.sweeps().sweep_with_law(profile,*rail.value,law);
+        if (!body.value || !check_sweep_law_body(kernel,*body.value,4,0,false)) return false;
+        double length = 0;
+        for (std::size_t i = 1; i < path.size(); ++i)
+            length += std::hypot(path[i].x-path[i-1].x,path[i].y-path[i-1].y,path[i].z-path[i-1].z);
+        const double fraction = std::hypot(0.3,0.1,1.0)/length;
+        const double t = fraction/law[1].fraction;
+        const double scale = 1+t*(law[1].scale-1), angle = t*law[1].twist_angle;
+        const auto p = profile.polygon_xyz.front();
+        const auto at_corner = kernel.topology().query().locate_point(*body.value,
+            {path[1].x+scale*(p.x*std::cos(angle)-p.y*std::sin(angle)),
+             path[1].y+scale*(p.x*std::sin(angle)+p.y*std::cos(angle)),path[1].z});
+        if (!at_corner.value || !at_corner.value->nearest_boundary || at_corner.value->nearest_boundary->distance > 1e-9)
+            return false;
+    }
+
+    // Curved transport, a tangent-continuous mixed rail, and positive/negative
+    // full roll on periodic rails. Closed holed sweeps must retain separate shells.
+    for (int kind = 0; kind < 6; ++kind) {
+        axiom::Kernel kernel;
+        axiom::Result<axiom::CurveId> rail;
+        if (kind == 0) rail = kernel.curves().make_bezier(std::array<axiom::Point3,4>{{{0,0,0},{4,0,0},{8,0.4,0.2},{12,1,0.5}}});
+        if (kind == 1) rail = kernel.curves().make_bspline({{{0,0,0},{3,0,0},{6,0.3,0.1},{9,0.6,0.3},{12,1,0.5}},3,{}});
+        if (kind == 2) rail = kernel.curves().make_nurbs({{{0,0,0},{3,0,0},{6,0.3,0.1},{9,0.6,0.3},{12,1,0.5}},
+                                                         {1,0.95,1.05,0.95,1},3,{}});
+        if (kind == 3) {
+            const auto line = kernel.curves().make_line_segment({0,0,0},{4,0,0});
+            const auto tail = kernel.curves().make_bezier(std::array<axiom::Point3,4>{{{4,0,0},{6,0,0},{9,0.4,0.2},{12,1,0.5}}});
+            if (!line.value || !tail.value) return false;
+            rail = kernel.curves().make_composite_chain(std::array{*line.value,*tail.value});
+        }
+        if (kind == 4) rail = kernel.curves().make_circle({0,0,0},{0,0,1},12);
+        if (kind == 5) rail = kernel.curves().make_ellipse({0,0,0},{12,0,0},{0,10,0});
+        if (!rail.value) return false;
+        axiom::ProfileRef profile {"joint_law_curve",{{0,-0.2,-0.15},{0,0.2,-0.15},{0,0.2,0.15},{0,-0.2,0.15}}};
+        if (kind == 2) profile = {"joint_law_curve_concave",
+            {{0,-0.2,-0.15},{0,0.2,-0.15},{0,0.2,0},{0,0,0},{0,0,0.15},{0,-0.2,0.15}}};
+        if (kind == 3) profile.holes_xyz = {{{0,-0.06,-0.04},{0,0.06,-0.04},{0,0.06,0.04},{0,-0.06,0.04}}};
+        const bool closed = kind >= 4;
+        auto keys = law;
+        if (closed) {
+            const auto domain = kernel.curve_service().domain(*rail.value);
+            if (!domain.value) return false;
+            const auto start = kernel.curve_service().eval(*rail.value,domain.value->min,1);
+            if (!start.value) return false;
+            const double length = std::hypot(start.value->tangent.x,start.value->tangent.y);
+            if (!(length > 0)) return false;
+            const auto point = [&](double x, double y) -> axiom::Point3 {
+                return {start.value->point.x+x*start.value->tangent.y/length,
+                        start.value->point.y-x*start.value->tangent.x/length,start.value->point.z+y};
+            };
+            profile = {"joint_law_periodic",{point(-0.2,-0.15),point(0.2,-0.15),point(0.2,0.15),point(-0.2,0.15)},
+                       {{point(-0.06,-0.04),point(0.06,-0.04),point(0.06,0.04),point(-0.06,0.04)}}};
+            const double sign = kind == 4 ? 1 : -1;
+            keys = {{0,1,0},{0.25,1.2,sign*pi/2},{0.5,0.8,sign*pi},{0.75,1.1,sign*1.5*pi},{1,1,sign*2*pi}};
+        }
+        const auto body = kernel.sweeps().sweep_with_law(profile,*rail.value,keys);
+        std::size_t ring_vertices = profile.polygon_xyz.size();
+        for (const auto& hole : profile.holes_xyz) ring_vertices += hole.size();
+        if (!body.value || !check_sweep_law_body(kernel,*body.value,ring_vertices,profile.holes_xyz.size(),closed)) {
+            std::cerr << "joint scale/roll curved sweep failed: " << kind << '\n';
+            return false;
+        }
+        if (kind == 4) {
+            // A closed reversal returns the same indexed ring without requiring
+            // a full turn. A half-turn is still rejected even for a symmetric box.
+            const std::array<Station,4> reversal {{{0,1,0},{0.3,1.1,pi/3},{0.7,0.9,-pi/6},{1,1,0}}};
+            const auto reversed_roll = kernel.sweeps().sweep_with_law(profile,*rail.value,reversal);
+            if (!reversed_roll.value || !check_sweep_law_body(kernel,*reversed_roll.value,ring_vertices,1,true)) return false;
+        }
+        // Zero roll keeps the existing scale-only topology and moments exactly.
+        if (kind == 0) {
+            auto zero_roll = keys;
+            std::vector<axiom::SweepScaleStation> scales;
+            for (auto& key : zero_roll) { key.twist_angle = 0; scales.push_back({key.fraction,key.scale}); }
+            const auto joint = kernel.sweeps().sweep_with_law(profile,*rail.value,zero_roll);
+            const auto reference = kernel.sweeps().sweep_with_scale_law(profile,*rail.value,scales);
+            if (!joint.value || !reference.value) return false;
+            const auto a = kernel.query().mass_properties(*joint.value), b = kernel.query().mass_properties(*reference.value);
+            if (!a.value || !b.value || std::abs(a.value->volume-b.value->volume) > 1e-10 ||
+                std::abs(a.value->area-b.value->area) > 1e-10 || a.value->inertia != b.value->inertia) return false;
+        }
+    }
+
+    axiom::Kernel kernel;
+    const axiom::ProfileRef profile {"joint_law_transaction",{{-1,-0.75,0},{1,-0.75,0},{1,0.75,0},{-1,0.75,0}}};
+    const auto rail = kernel.curves().make_line_segment({0,0,0},{0,0,6});
+    const auto off_plane = kernel.curves().make_line_segment({0,0,1},{0,0,7});
+    const auto backwards = kernel.curves().make_composite_polyline(std::array<axiom::Point3,3>{{{0,0,0},{0,0,5},{0,0,3}}});
+    const auto circle = kernel.curves().make_circle({0,0,0},{0,0,1},12);
+    const auto budget_rail = kernel.curves().make_composite_polyline(
+        std::array<axiom::Point3,3>{{{0,0,0},{0.3,0.1,1},{0.6,0.2,6}}});
+    const auto shifted_rail = kernel.curves().make_line_segment({1e16,0,0},{1e16,0,6});
+    if (!rail.value || !off_plane.value || !backwards.value || !circle.value || !budget_rail.value || !shifted_rail.value)
+        return false;
+    const auto source = kernel.sweeps().sweep_with_law(profile,*rail.value,law);
+    if (!source.value || !check_sweep_law_body(kernel,*source.value,4,0,false)) return false;
+    const auto source_mass = kernel.query().mass_properties(*source.value);
+    const auto source_faces = kernel.topology().query().faces_of_body(*source.value);
+    if (!source_mass.value || !source_faces.value || source_faces.value->empty()) return false;
+    auto transaction = kernel.topology().begin_transaction();
+    const auto temporary = transaction.create_vertex({111,112,113});
+    const auto objects = kernel.object_count_total(), geometry = kernel.geometry_count(), bodies = kernel.body_count();
+    const auto next = kernel.next_object_id(), writes = transaction.write_operation_count();
+    const auto runtime = kernel.runtime_store_counts();
+    if (!temporary.value || !objects.value || !geometry.value || !bodies.value || !next.value || !writes.value || !runtime.value)
+        return false;
+    const auto rejected = [&](const axiom::ProfileRef& input, axiom::CurveId path, const std::vector<Station>& keys,
+                              std::string_view code = axiom::diag_codes::kCoreParameterOutOfRange,
+                              std::string_view stage = {}) {
+        const auto result = kernel.sweeps().sweep_with_law(input,path,keys);
+        const auto diagnostic = kernel.diagnostics().get(result.diagnostic_id);
+        const auto after = kernel.runtime_store_counts();
+        if (!stage.empty()) {
+            if (!diagnostic.value || diagnostic.value->issues.size() != 1 || diagnostic.value->issues.front().stage != stage)
+                return false;
+            const auto& evidence = diagnostic.value->issues.front().numeric_evidence;
+            const auto travel = std::find_if(evidence.begin(),evidence.end(),[](const auto& item) {
+                return item.name == "absolute_twist_travel" && item.unit == "rad";
+            });
+            if (travel == evidence.end() || !(travel->value > 0)) return false;
+        }
+        return result.status == axiom::StatusCode::InvalidInput && !result.value && diagnostic.value &&
+            has_issue_code(*diagnostic.value,code) && kernel.object_count_total().value == objects.value &&
+            kernel.geometry_count().value == geometry.value && kernel.body_count().value == bodies.value &&
+            kernel.next_object_id().value == next.value && transaction.write_operation_count().value == writes.value &&
+            after.value && after.value->mesh_records == runtime.value->mesh_records &&
+            after.value->tessellation_cache_entries == runtime.value->tessellation_cache_entries &&
+            after.value->face_tessellation_cache_entries == runtime.value->face_tessellation_cache_entries &&
+            after.value->curve_eval_cache_entries == runtime.value->curve_eval_cache_entries &&
+            after.value->surface_eval_cache_entries == runtime.value->surface_eval_cache_entries;
+    };
+    const double nan = std::numeric_limits<double>::quiet_NaN(), inf = std::numeric_limits<double>::infinity();
+    const std::vector<std::vector<Station>> invalid {
+        {},{{0,1,0}},{{0.1,1,0},{1,1,0}},{{0,2,0},{1,1,0}},{{0,1,1},{1,1,0}},{{0,1,0},{0.9,1,0}},
+        {{0,1,0},{0.5,1,0},{0.5,1,pi/4},{1,1,pi/2}},{{0,1,0},{0.7,1,0},{0.4,1,0},{1,1,0}},
+        {{0,1,0},{0.5,0,0},{1,1,0}},{{0,1,0},{1,-1,0}},{{0,1,0},{1,nan,0}},{{0,1,0},{1,inf,0}},
+        {{0,1,0},{nan,1,0},{1,1,0}},{{0,1,0},{1,1,nan}},{{0,1,0},{1,1,inf}},
+        {{0,1,0},{1,1,2*pi+0.01}},{{0,1,0},{0.5,1,pi},{1,1,-0.01}},
+        {{0,1,0},{0.5,1,2*pi},{1,1,0}},{{0,1,0},{0.5,2000,pi/2},{1,1,pi}},
+        {{0,1,0},{1e-18,1,0},{1,1,pi/2}}
+    };
+    for (const auto& keys : invalid) if (!rejected(profile,*rail.value,keys)) return false;
+    std::vector<Station> too_many(4098);
+    for (std::size_t i = 0; i < too_many.size(); ++i) too_many[i] = {static_cast<double>(i)/(too_many.size()-1),1,0};
+    std::vector<Station> combined_budget(4097);
+    for (std::size_t i = 0; i < combined_budget.size(); ++i) {
+        const double fraction = static_cast<double>(i)/4096;
+        combined_budget[i] = {fraction,1,fraction*pi/2};
+    }
+    auto nonplanar = profile; nonplanar.polygon_xyz.back().z = 0.1;
+    auto nonfinite = profile; nonfinite.polygon_xyz.front().x = inf;
+    auto crossed = profile; std::swap(crossed.polygon_xyz[1],crossed.polygon_xyz[2]);
+    auto touching = profile; touching.holes_xyz = {{{-1,-0.2,0},{0,-0.2,0},{0,0.2,0},{-1,0.2,0}}};
+    auto nested = profile;
+    nested.holes_xyz = {{{-0.5,-0.4,0},{0.5,-0.4,0},{0.5,0.4,0},{-0.5,0.4,0}},
+                       {{-0.2,-0.1,0},{0.2,-0.1,0},{0.2,0.1,0},{-0.2,0.1,0}}};
+    const axiom::ProfileRef periodic {"joint_law_bad_seam",{{11.8,0,-0.15},{12.2,0,-0.15},{12.2,0,0.15},{11.8,0,0.15}}};
+    const axiom::ProfileRef rounded {"joint_law_rounded",{{1e16-4,-3,0},{1e16+4,-3,0},{1e16+4,3,0},{1e16-4,3,0}}};
+    if (!rejected(profile,*rail.value,too_many) || !rejected(nonplanar,*rail.value,law) ||
+        !rejected(nonfinite,*rail.value,law) || !rejected(crossed,*rail.value,law) ||
+        !rejected(touching,*rail.value,law,axiom::diag_codes::kCoreParameterOutOfRange,"sweep_law_materialization") ||
+        !rejected(nested,*rail.value,law) || !rejected(profile,*backwards.value,law) ||
+        !rejected(profile,*off_plane.value,law) || !rejected({"implicit",{}},*rail.value,law) ||
+        !rejected(profile,{},law,axiom::diag_codes::kCoreInvalidHandle) ||
+        !rejected(rounded,*shifted_rail.value,{{0,1,0},{0.5,0.25,0},{1,1,pi/4}}) ||
+        !rejected(profile,*budget_rail.value,combined_budget,axiom::diag_codes::kCoreParameterOutOfRange,"sweep_law_sampling") ||
+        !rejected(periodic,*circle.value,{{0,1,0},{1,1,pi}},axiom::diag_codes::kCoreParameterOutOfRange,"sweep_law_seam") ||
+        !rejected(profile,*rail.value,{{0,1,0},{0.5,1,pi/4},{std::nextafter(0.5,1.0),1,pi/4},{1,1,pi/2}},
+                  axiom::diag_codes::kCoreParameterOutOfRange,"sweep_law_sampling")) return false;
+    if (transaction.rollback().status != axiom::StatusCode::Ok) return false;
+    const auto remains = kernel.topology().query().has_vertex(*temporary.value);
+    if (!remains.value || *remains.value) return false;
+    auto edit = kernel.topology().begin_transaction();
+    if (edit.delete_face(source_faces.value->front()).status != axiom::StatusCode::Ok ||
+        edit.rollback().status != axiom::StatusCode::Ok) return false;
+    const auto restored = kernel.query().mass_properties(*source.value);
+    if (!restored.value || restored.value->inertia != source_mass.value->inertia ||
+        std::abs(restored.value->volume-source_mass.value->volume) > 1e-10 ||
+        kernel.validate().validate_all(*source.value,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok)
+        return false;
+    const std::array<Station,2> twist {{{0,1,0},{1,1,-pi/2}}};
+    const auto retry = kernel.sweeps().sweep_with_law(profile,*rail.value,twist);
+    const auto reference = kernel.sweeps().extrude_twisted(profile,{0,0,1},6,{0,0,0},-pi/2);
+    if (!retry.value || !reference.value || !check_sweep_law_body(kernel,*retry.value,4,0,false)) return false;
+    const auto a = kernel.query().mass_properties(*retry.value), b = kernel.query().mass_properties(*reference.value);
+    return a.value && b.value && std::abs(a.value->volume-b.value->volume) < 1e-10 &&
+        std::abs(a.value->area-b.value->area) < 1e-10;
+}
+
 bool test_polygon_lofts() {
     struct Model {
         axiom::ProfileRef base;
@@ -3173,9 +4084,12 @@ int main() {
         !run_stage("closed_spline_sweeps", test_closed_spline_sweeps) ||
         !run_stage("composite_chain_sweeps", test_composite_chain_sweeps) ||
         !run_stage("scaled_rail_sweeps", test_scaled_rail_sweeps) ||
+        !run_stage("sweep_scale_laws", test_sweep_scale_laws) ||
+        !run_stage("sweep_section_laws", test_sweep_section_laws) ||
         !run_stage("polygon_lofts", test_polygon_lofts) ||
         !run_stage("scaled_extrusions", test_scaled_extrusions) ||
         !run_stage("twisted_extrusions", test_twisted_extrusions) ||
+        !run_stage("extrusion_section_laws", test_extrusion_section_laws) ||
         !run_stage("holed_polygon_revolutions", test_holed_polygon_revolutions) ||
         !run_stage("partial_polygon_revolutions", test_partial_polygon_revolutions) ||
         !run_stage("directed_interval_revolutions", test_directed_interval_revolutions) ||

@@ -373,7 +373,60 @@ if (twisted.value) {
 }
 ```
 
-方向按单位化使用，必须垂直于轮廓平面；中心须在该平面内，距离为有限正数。支持凸/凹外环、非嵌套分离孔洞和任意空间朝向，扭角以弧度表示，正负部分角及正负整周均可，限于一周。沿方向按右手规则扭转，零扭角在该法向合同下兼容 `extrude`。角站差不超过 7.5°，站间侧壁交替对角线剖分以避免系统性体积偏差。结果为有真实共享拓扑的采样多面体 BRep，质量属性来自该多面体；不是解析螺旋面，未与变比例或至平面拉伸组合。非法中心/方向/扭角或退化轮廓在模型分配前以 `InvalidInput / AXM-CORE-E-0002` 拒绝。
+方向按单位化使用，必须垂直于轮廓平面；中心须在该平面内，距离为有限正数。支持凸/凹外环、非嵌套分离孔洞和任意空间朝向，扭角以弧度表示，正负部分角及正负整周均可，限于一周。沿方向按右手规则扭转，零扭角在该法向合同下兼容 `extrude`。角站差不超过 7.5°，站间侧壁交替对角线剖分以避免系统性体积偏差。结果为有真实共享拓扑的采样多面体 BRep，质量属性来自该多面体；不是解析螺旋面，变比例联合扭转由 `extrude_with_law` 提供，至平面组合仍不支持。非法中心/方向/扭角或退化轮廓在模型分配前以 `InvalidInput / AXM-CORE-E-0002` 拒绝。
+
+### 分段截面律拉伸与扫掠（cycle-0074，已通过完整门禁）
+
+```cpp
+axiom::ProfileRef law_profile;
+law_profile.label = "section_law";
+law_profile.polygon_xyz = {{-.2,-.1,0}, {.2,-.1,0}, {.2,.1,0}, {-.2,.1,0}};
+constexpr axiom::Scalar law_pi = 3.14159265358979323846;
+// fraction 是高度比例；中间扩张、扭转停顿，随后收缩并反向扭回。
+std::vector<axiom::ExtrusionLawStation> extrusion_keys {
+    {0,1,0}, {.4,1.5,law_pi/2}, {.6,1.5,law_pi/2}, {1,.75,0}};
+auto law_body = kernel.sweeps().extrude_with_law(
+    law_profile, {0,0,5}, 8, {0,0,0}, extrusion_keys);
+if (law_body.value) {
+    auto valid = kernel.validate().validate_all(*law_body.value, axiom::ValidationMode::Strict);
+    auto mass = kernel.topology().query().body_mass_properties(*law_body.value);
+    // mass 属于实际采样多面体；还须检查 valid/mass.value。
+} else {
+    auto report = kernel.diagnostics().get(law_body.diagnostic_id);
+    handle_query_error(report);
+}
+
+auto law_rail = kernel.curves().make_line_segment({0,0,0}, {0,0,8});
+if (law_rail.value) {
+    // 扫掠 fraction 是归一化采样弦长，不是导轨参数或解析弧长。
+    std::vector<axiom::SweepScaleStation> scale_keys {
+        {0,1}, {.25,1.5}, {.75,.75}, {1,1}};
+    auto scaled_law = kernel.sweeps().sweep_with_scale_law(
+        law_profile, *law_rail.value, scale_keys);
+    std::vector<axiom::SweepLawStation> combined_keys {
+        {0,1,0}, {.4,1.5,law_pi/2}, {.6,1.5,law_pi/2}, {1,.75,0}};
+    auto combined_law = kernel.sweeps().sweep_with_law(
+        law_profile, *law_rail.value, combined_keys);
+    for (const auto* result : {&scaled_law, &combined_law}) {
+        if (result->value) {
+            auto valid = kernel.validate().validate_all(*result->value, axiom::ValidationMode::Strict);
+            use_if_valid(valid);
+        } else {
+            auto report = kernel.diagnostics().get(result->diagnostic_id);
+            handle_query_error(report);
+        }
+    }
+} else {
+    auto report = kernel.diagnostics().get(law_rail.diagnostic_id);
+    handle_query_error(report);
+}
+```
+
+拉伸中心须共面，方向须法向，距离有限且正。直线/折线扫掠的起点须在截面平面内，每段严格同向穿过该平面；联合扭转绕按净推进方向定向的初始法向。曲线扫掠使用局部前向切向及传输标架，支持既有 Bezier/BSpline/NURBS 与非嵌套 G1 连续 CompositeChain；凹轮廓和分离非嵌套孔同样支持。
+
+关键站从 `(0,1)` 或 `(0,1,0)` 到 fraction=1 严格递增，比例严格正；每步比例变化最多较小端的 25%，扭角最多 7.5°，累计绝对扭角最多一周，联合采样最多 4096 区间（含原导轨站和关键站）。原站与关键站数值重合时共享位置/标架，不可分辨的不同关键站失败。周期曲线允许中间变比例，但末比例必须为 1；联合律末角须为 0 或 ±2π（`1e-10 rad` 容差），首末环焊接、无端盖、不推断截面对称顶点置换。此能力不改变 `sweep_scaled` 仅接受周期单位终端比例的合同。
+
+实际截面、盖片、推进/折叠、侧壁交叠/容差接触和质量积分在分配前检查；曲线保守曲率/间距门禁用最大比例，宽相候选上限 2000000。成功有真实拓扑、中间 bbox 和多面体质量；失败保留模型和活动事务，复用 `AXM-CORE-E-0002`（扫掠空标签/无效导轨为 `E-0001`）。扫掠律的采样/物化/周期扭角失败可查 `sweep_law_sampling/materialization/seam` 阶段和数值证据；输入预检沿用既有诊断。不支持零/负比例、尖顶、至平面组合、嵌套复合导轨、一般非线性解析律、解析扫掠/螺旋曲面或任意截面匹配。
 
 ## 6.2 旋转
 
@@ -422,7 +475,7 @@ if (rail.value) {
 }
 ```
 
-Bezier/BSpline/NURBS 开放导轨、显式端点重合且首尾切向连续的闭合样条，以及整圆/椭圆周期导轨使用旋转最小标架；空间闭环会做 holonomy 校正。`make_composite_chain(children)` 创建的复合导轨也可直接传入，相邻子段必须端点重合且 G1 切向连续；开放链有两个端盖，闭合链无端盖。周期带孔截面的外边界与各孔边界分别物化为独立闭壳，因此壳数和网格连通分量都为 `1 + holes_xyz.size()`；开放带孔导轨由端盖连成单壳。`sweep_scaled` 对直线、CompositePolyline 和上述开放曲线/复合导轨支持正比例收缩与扩张，`end_scale=1` 与 `sweep` 兼容。非单位比例不适用于周期导轨；零/负比例、非线性比例律、过小比例、伪闭合、切向断裂、嵌套复合链、抛物/双曲子段、尖点、过紧曲率和自靠近导轨保守拒绝；这是采样多面体 BRep，不是解析扫掠曲面。
+Bezier/BSpline/NURBS 开放导轨、显式端点重合且首尾切向连续的闭合样条，以及整圆/椭圆周期导轨使用旋转最小标架；空间闭环会做 holonomy 校正。`make_composite_chain(children)` 创建的复合导轨也可直接传入，相邻子段必须端点重合且 G1 切向连续；开放链有两个端盖，闭合链无端盖。周期带孔截面的外边界与各孔边界分别物化为独立闭壳，因此壳数和网格连通分量都为 `1 + holes_xyz.size()`；开放带孔导轨由端盖连成单壳。`sweep_scaled` 对直线、CompositePolyline 和上述开放曲线/复合导轨支持正比例收缩与扩张，`end_scale=1` 与 `sweep` 兼容。非单位比例不适用于周期导轨；零/负比例、一般非线性解析比例律、过小比例、伪闭合、切向断裂、嵌套复合链、抛物/双曲子段、尖点、过紧曲率和自靠近导轨保守拒绝；这是采样多面体 BRep，不是解析扫掠曲面。
 
 ## 6.4 放样
 
@@ -1054,4 +1107,46 @@ if (box.value) {
 }
 ```
 
-这两个入口仅支持平面、Line/LineSegment 边组成的双边流形闭壳，面可凹且可带孔。实体含多个互不重叠的独立实体壳时使用平行轴定理汇总；独立内壳不解释为空腔，相交/重叠多壳也不在支持范围。曲面、曲边、开壳、非流形或零体积壳失败且无部分值。查询每次从当前拓扑重算，不分配网格、不写缓存或改变 Eval 状态。
+这两个入口仅支持平面、Line/LineSegment 边组成的双边流形闭壳，面可凹且可带孔。实体壳按严格包含深度判定材料、空腔及材料岛，并以平行轴定理汇总；`body_shell_regions` 可查询深度、角色与直接父壳。相交/重叠/建模容差接触多壳不在支持范围。曲面、曲边（含显式 trim）、开壳、非流形或零体积壳失败且无部分值，面边界必须位于支撑平面。查询每次从当前拓扑重算，不分配网格、不写缓存或改变 Eval 状态。
+
+### 实体点定位与有限线段裁剪（cycle-0074，已通过完整门禁）
+
+```cpp
+auto spatial_box = kernel.primitives().box({0,0,0}, 2,3,4);
+if (spatial_box.value) {
+    auto& topology_query = kernel.topology().query();
+    axiom::BodySpatialQueryOptions options;
+    options.position_tolerance = 1e-6;  // 模型长度单位；0 使用内核有效容差
+    options.max_triangle_tests = 1000000;  // 不包含质量/壳关系前置检查
+    auto point = topology_query.locate_point(*spatial_box.value, {-1,1,2}, options);
+    if (point.value && point.value->nearest_boundary) {
+        // Outside；最近点 (0,1,2)，距离 1，返回真实 face/shell 归属。
+        auto nearest_face = point.value->nearest_boundary->face;
+        auto nearest_shell = point.value->nearest_boundary->shell;
+        auto actual_work = point.value->triangle_tests;
+    } else if (!point.value) {
+        auto report = kernel.diagnostics().get(point.diagnostic_id);
+        handle_query_error(report);
+    }
+    auto clipped = topology_query.clip_segment(
+        *spatial_box.value, {-1,1,2}, {3,1,2}, options);
+    if (clipped.value) {
+        // 一个 Inside 区间 [0.25,0.75]（无量纲），material_length=2 模型长度单位。
+        auto intervals = clipped.value->intervals;
+        auto material_length = clipped.value->material_length;
+    } else {
+        auto report = kernel.diagnostics().get(clipped.diagnostic_id);
+        handle_query_error(report);
+    }
+    auto coplanar = topology_query.clip_segment(*spatial_box.value, {-1,0,2}, {3,0,2}, options);
+    // 成功时 Boundary [0.25,0.75]，材料长度 0；须检查 coplanar.value。
+    auto tangent = topology_query.clip_segment(*spatial_box.value, {-1,1,2}, {1,-1,2}, options);
+    // 成功时孤立接触 Boundary [0.5,0.5]，材料长度 0。
+    auto empty = topology_query.clip_segment(*spatial_box.value, {-2,1,2}, {-1,1,2}, options);
+    // 无交集是成功空 intervals，材料长度 0。
+}
+```
+
+Inside/Outside 按闭壳包含奇偶判断，支持空腔和材料岛；非空实体总给最近面内/边/顶点边界，等距按稳定 ShellId、FaceId 选择，空实体返回 Outside 和空最近边界。Boundary 点定位是距离容差带；线段裁剪不按该容差膨胀材料或合并可分辨薄层，长度不大于容差的线段失败。裁剪区间按参数排序、内部不重叠，省略 Outside，孤立相切点不与已覆盖区间重复，Boundary 段不计材料长度。
+
+仅支持无自交的嵌入平面直边双边流形闭壳，曲面/显式裁剪曲边拒绝，面边界须在支撑平面上；壳间相交/重叠/建模容差接触失败。本批未新增壳自身全局自交证明或大规模空间加速。预算仅计前置检查之后的新三角形计算；耗尽或事件数值分辨率不足时无部分值。查询增加诊断和只读审计，不发布 MeshId，不写缓存、Eval 或事务；当前编辑即时可见，回滚后恢复。门禁和完整失败码见 [接口合同](AxiomKernel_详细模块接口清单.md#611-实体空间查询cycle-0074已通过完整门禁) 与 [错误码字典](../diagnostics/AxiomKernel_错误码与诊断码字典.md)。

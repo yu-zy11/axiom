@@ -313,8 +313,8 @@
 
 | 错误码 | 严重级别 | 含义 |
 |---|---|---|
-| `AXM-QUERY-E-0001` | Error | 最近点查询失败 |
-| `AXM-QUERY-E-0002` | Error | 截面计算失败 |
+| `AXM-QUERY-E-0001` | Error | 最近点查询失败（含实体点定位距离/绕数数值失败） |
+| `AXM-QUERY-E-0002` | Error | 截面计算失败（含实体线段裁剪/事件分辨率/绕数数值失败） |
 | `AXM-QUERY-E-0003` | Error | 质量属性或解析修剪面积的数值积分失败 |
 | `AXM-QUERY-E-0004` | Error | 距离计算失败 |
 | `AXM-QUERY-E-0005` | Warning | 质量属性基于近似网格计算 |
@@ -717,3 +717,30 @@ Plane/Cylinder/Cone/规则 Sphere/Torus 及其嵌套 Offset 的成功解析路�
 - `AXM-VAL-E-0004`：包围盒反转/无效或轴退化；返回 `DegenerateGeometry`，绑定 `io.import.<format>.validation`。
 
 三种格式的物化前失败都返回可检索 `diagnostic_id`，不写 Body/Mesh store、不推进模型 `next_id`；修复文件后可原位重试。标准 IGES 实体仍沿用 `NotImplemented / AXM-IO-E-0011` 和 `io.import.iges`，不纳入 Axiom 子集的 `.parse/.validation` 承诺。
+
+### FR-OPS-001 分段截面律诊断（cycle-0074，未新增错误码）
+
+- `AXM-CORE-E-0002 / InvalidInput`：`extrude_with_law` 无显式轮廓/标签、中心非有限或离面、方向非有限/非零法向合同不满足、距离非正/非有限；三个律入口的关键站数量不在 2 至 4097、fraction 非有限/未严格递增或首末不为 0/1、首比例不为 1（带扭角时首角不为 0）、比例非有限或不严格正、扭角非有限、累计绝对扭角超过一周、联合采样超过 4096 区间；实际截面舍入坍塌、孔非法、壁片交叠/容差接触、盖片失配、折叠或闭壳质量积分失败也复用此码。
+- `AXM-CORE-E-0001 / InvalidInput`：`sweep_with_scale_law/sweep_with_law` 的空轮廓标签或无效导轨句柄。`extrude_with_law` 的空标签走前述 `E-0002`。
+- `AXM-CORE-E-0002 / InvalidInput`：扫掠起点/截面平面失配、直线/折线不严格同向推进、曲线标架退化、全律最大比例下曲率/间距门禁失败、周期末比例不为 1、联合周期末扭角不是 0 或 ±2π（`1e-10 rad` 容差）、数值不可分辨关键站、曲线接触宽相候选超过 2000000。不推断对称截面的顶点置换。
+
+扫掠律的 `sweep_law_sampling` 表示站点分辨率/联合采样/插值标架失败，`sweep_law_materialization` 表示实际截面/壁片/接触候选/闭壳质量失败，`sweep_law_seam` 表示周期末扭角失配。这些分支附导轨实体及 `law_key_count/sampled_intervals/maximum_intervals/minimum_scale/maximum_scale/maximum_scale_step_ratio/maximum_contact_candidates` 数值证据；联合律另附 `absolute_twist_travel/maximum_twist_step/terminal_twist`（rad）。输入和曲率等前置失败仍走既有诊断，不承诺所有输入失败都有这三个阶段。拉伸律当前复用输入/物化根因文案及 `diagnostic_id`，未增加上述扫掠阶段。
+
+失败不返回 BodyId，检查在模型/几何/拓扑/ID 分配前完成，保留活动事务、缓存与 Eval；可增加诊断。正比例/分段线性律及停顿/反向属于已验收子域；零/负比例、尖顶、至平面组合、一般非线性解析律和解析扫掠/螺旋曲面仍未实现。
+
+### FR-QUERY-001 多面体实体空间查询诊断（cycle-0074，未新增错误码）
+
+| 码 / 状态 | `locate_point / clip_segment` 触发条件 |
+|---|---|
+| `AXM-CORE-E-0001 / InvalidInput` | BodyId 无效、已删除或已回滚 |
+| `AXM-CORE-E-0002 / InvalidInput` | 坐标非有限、位置容差为负/非有限、三角形预算为零或耗尽、线段长度超出 Scalar 有限范围 |
+| `AXM-GEO-E-0003 / DegenerateGeometry` | 线段长度不大于有效位置容差；亦沿用质量前置检查的几何退化语义 |
+| `AXM-QUERY-E-0001 / NumericalInstability` | 点到三角形距离退化/溢出或点定位绕数无法可靠判定 |
+| `AXM-QUERY-E-0002 / NumericalInstability` | 局部面片求交退化/溢出、不同边界事件在归一化参数中无法可靠分离、区间绕数无法可靠判定或材料长度溢出 |
+| `AXM-CORE-E-0004 / NotImplemented` | 闭壳含曲面或曲边（包括显式 trim 曲边），拒绝以端点弦替代曲边 |
+| `AXM-TOPO-E-0008 / InvalidTopology` | 面边界不位于支撑平面；共享质量属性前置检查同样加严 |
+| `AXM-QUERY-E-0006 / InvalidTopology` | 壳间相交、重叠、建模容差接触或矛盾包含关系 |
+
+其余闭壳/面/环/边/质量失败沿用上文质量属性与包含层级诊断并原样传播，不返回部分最近点、区间或材料长度。无交集、空实体为成功空结果。位置容差不膨胀材料，事件分辨率不足闭合失败；新三角形预算仅覆盖质量/壳关系前置检查之后的距离、求交与绕数，成功公开实际 `triangle_tests`。诊断与一次顶层 Topo 查询审计允许增加；模型、MeshId、缓存、Eval 和活动事务写计数不变。要求无自交的嵌入平面直边双边流形闭壳，本批未新增壳自身全局自交证明。
+
+上述 Ops/Query 失败码、阶段、数值证据、预算及事务/只读回归分别纳入 `axiom_ops_heal_test` 与 `axiom_query_eval_test`；[cycle-0074 门禁日志](../../.axiom-agent/logs/cycle-0074-gates.log) 记录完整 CTest 16/16、0 失败、134.05 s。本轮未重新构建或运行测试。
