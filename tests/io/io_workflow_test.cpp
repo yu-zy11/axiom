@@ -97,7 +97,8 @@ bool check_mesh_export_failure_package(const std::filesystem::path& root) {
             const auto* issue = report.value ? find_issue(*report.value, code) : nullptr;
             if (result.status != status || result.diagnostic_id.value == 0 || issue == nullptr ||
                 issue->severity != axiom::IssueSeverity::Error || issue->stage != stage ||
-                issue->related_entities != std::vector<std::uint64_t> {target.value}) {
+                issue->related_entities != std::vector<std::uint64_t> {target.value} ||
+                issue->numeric_evidence.empty()) {
                 std::cerr << format.name << " missing failure evidence for " << stage << '\n';
                 return false;
             }
@@ -389,7 +390,9 @@ bool check_exact_brep_import_failure_package(const std::filesystem::path& root) 
             const auto* issue = report.value ? find_issue(*report.value, code) : nullptr;
             if (result.status != status || result.value || result.diagnostic_id.value == 0 ||
                 issue == nullptr || issue->severity != axiom::IssueSeverity::Error ||
-                issue->stage != stage || !issue->related_entities.empty()) return false;
+                issue->stage != stage ||
+                issue->related_entities != std::vector<std::uint64_t> {0} ||
+                issue->numeric_evidence.empty()) return false;
             const auto exact = diagnostics.find_by_issue_stage(stage, 20);
             const auto by_prefix = diagnostics.find_by_issue_stage_prefix(prefix, 20);
             const auto by_code = diagnostics.find_by_issue_code(code, 20);
@@ -449,9 +452,217 @@ bool check_exact_brep_import_failure_package(const std::filesystem::path& root) 
     return true;
 }
 
+bool check_io_failure_evidence_and_batch_rollback(
+    const std::filesystem::path& root) {
+    std::filesystem::create_directories(root);
+    auto state = std::make_shared<axiom::detail::KernelState>(axiom::KernelConfig {});
+    axiom::IOService io {state};
+    axiom::DiagnosticService diagnostics {state};
+    axiom::SweepService sweeps {state};
+
+    axiom::ProfileRef profile;
+    profile.label = "io_audit_source";
+    profile.polygon_xyz = {{0, 0, 0}, {3, 0, 0}, {0, 2, 0}};
+    const auto source = sweeps.extrude(profile, {0, 0, 1}, 4);
+    if (source.status != axiom::StatusCode::Ok || !source.value) return false;
+
+    axiom::ExportOptions export_options;
+    const auto valid_json = root / "valid.axmjson";
+    const auto valid_obj = root / "valid.obj";
+    if (io.export_axmjson(*source.value, valid_json.string(), export_options).status !=
+            axiom::StatusCode::Ok ||
+        io.export_obj(*source.value, valid_obj.string(), export_options).status !=
+            axiom::StatusCode::Ok) {
+        return false;
+    }
+
+    const auto model_counts = [&]() {
+        return std::array<std::size_t, 12> {
+            state->curves.size(), state->pcurves.size(), state->surfaces.size(),
+            state->vertices.size(), state->edges.size(), state->coedges.size(),
+            state->loops.size(), state->faces.size(), state->shells.size(),
+            state->bodies.size(), state->meshes.size(), state->intersections.size()};
+    };
+    std::vector<axiom::DiagnosticId> failures;
+    const auto record_failure = [&](const auto& result) {
+        if (result.status == axiom::StatusCode::Ok ||
+            result.diagnostic_id.value == 0) {
+            return false;
+        }
+        failures.push_back(result.diagnostic_id);
+        return true;
+    };
+
+    axiom::ImportOptions import_options;
+    import_options.run_validation = false;
+    const auto missing_json = root / "missing.axmjson";
+    const std::array<std::string, 2> late_json_failure {
+        valid_json.string(), missing_json.string()};
+    const auto before_json_counts = model_counts();
+    const auto before_json_next_id = state->next_id;
+    const auto before_json_body_cache = state->tessellation_cache;
+    const auto before_json_face_cache = state->face_tessellation_cache;
+    const auto rejected_json = io.import_many_axmjson(late_json_failure, import_options);
+    if (!record_failure(rejected_json) || model_counts() != before_json_counts ||
+        state->next_id != before_json_next_id ||
+        state->tessellation_cache != before_json_body_cache ||
+        state->face_tessellation_cache != before_json_face_cache) {
+        std::cerr << "AXMJSON late batch failure was not model/cache atomic\n";
+        return false;
+    }
+    const auto json_retry = io.import_axmjson(valid_json.string(), import_options);
+    if (!json_retry.value || json_retry.value->value != before_json_next_id) {
+        std::cerr << "AXMJSON in-place retry did not reuse rolled-back id\n";
+        return false;
+    }
+
+    const auto missing_stl = root / "missing.stl";
+    const std::array<std::string, 2> late_mesh_failure {
+        valid_obj.string(), missing_stl.string()};
+    const auto before_mesh_counts = model_counts();
+    const auto before_mesh_next_id = state->next_id;
+    const auto rejected_mesh = io.import_many_auto(late_mesh_failure, import_options);
+    if (!record_failure(rejected_mesh) || model_counts() != before_mesh_counts ||
+        state->next_id != before_mesh_next_id) {
+        std::cerr << "mesh late batch failure was not Body/Mesh atomic\n";
+        return false;
+    }
+    const auto mesh_retry = io.import_obj(valid_obj.string(), import_options);
+    if (!mesh_retry.value || mesh_retry.value->value != before_mesh_next_id ||
+        state->next_id != before_mesh_next_id + 2) {
+        std::cerr << "mesh in-place retry did not reuse Body/Mesh ids\n";
+        return false;
+    }
+
+    const auto degenerate_stl = root / "degenerate.stl";
+    {
+        std::ofstream out {degenerate_stl};
+        out << "solid degenerate\n"
+               "facet normal 0 0 1\nouter loop\n"
+               "vertex 0 0 0\nvertex 0 0 0\nvertex 1 0 0\n"
+               "endloop\nendfacet\nendsolid degenerate\n";
+    }
+    if (!record_failure(io.import_stl(degenerate_stl.string(), import_options)) ||
+        !record_failure(io.import_auto((root / "unknown.xyz").string(), import_options)) ||
+        !record_failure(io.export_step({999000001}, (root / "bad.step").string(), export_options)) ||
+        !record_failure(io.export_axmjson({999000002}, (root / "bad.axmjson").string(), export_options)) ||
+        !record_failure(io.export_iges({999000003}, (root / "bad.iges").string(), export_options)) ||
+        !record_failure(io.export_brep({999000004}, (root / "bad.brep").string(), export_options)) ||
+        !record_failure(io.export_auto(*source.value, (root / "bad.unknown").string(), export_options))) {
+        return false;
+    }
+    const std::span<const std::string> no_paths;
+    const std::span<const axiom::BodyId> no_bodies;
+    if (!record_failure(io.import_many_auto(no_paths, import_options)) ||
+        !record_failure(io.export_many_auto(no_bodies, no_paths, export_options))) {
+        return false;
+    }
+    const std::array<std::string, 1> missing_candidates {
+        (root / "missing_candidate.step").string()};
+    const std::array<axiom::BodyId, 1> invalid_export_bodies {
+        axiom::BodyId {999000005}};
+    const std::array<axiom::BodyId, 1> source_body {*source.value};
+    const std::array<std::string, 1> conditional_paths {
+        (root / "conditional.step").string()};
+    if (!record_failure(io.import_auto_from_candidates(
+            missing_candidates, import_options)) ||
+        !record_failure(io.import_auto_existing_strict(
+            missing_candidates, import_options)) ||
+        !record_failure(io.export_auto_to_directory(
+            source_body, root.string(), "unsupported", export_options)) ||
+        !record_failure(io.export_auto_existing_only(
+            invalid_export_bodies, conditional_paths, export_options)) ||
+        std::filesystem::exists(conditional_paths.front())) {
+        std::cerr << "candidate/directory/conditional workflow failure was silent\n";
+        return false;
+    }
+
+    axiom::DiagnosticEvidencePolicy policy;
+    policy.issue_code_prefix = "AXM-";
+    policy.stage_prefix = "io.";
+    const auto first_before = diagnostics.get(failures.front());
+    const auto audit = diagnostics.audit_evidence(failures, policy);
+    if (!first_before.value || !audit.value || !audit.value->passed() ||
+        audit.value->reports_inspected != failures.size() ||
+        audit.value->matching_issues != audit.value->complete_issues ||
+        audit.value->matching_issues < failures.size() || !audit.value->findings.empty()) {
+        std::cerr << "IO failure evidence audit did not pass\n";
+        return false;
+    }
+    const auto audit_json = root / "io_failure_audit.json";
+    const auto failure_json = root / "io_failure_report.json";
+    if (diagnostics.export_report_json(
+            failures.front(), failure_json.string()).status != axiom::StatusCode::Ok) {
+        return false;
+    }
+    std::ifstream failure_in {failure_json};
+    const std::string failure_text {std::istreambuf_iterator<char>(failure_in),
+                                    std::istreambuf_iterator<char>()};
+    if (failure_text.find("\"stage\":\"io.batch_import\"") == std::string::npos ||
+        failure_text.find("\"numeric_evidence\":[") == std::string::npos ||
+        failure_text.find("\"name\":\"status_code\"") == std::string::npos ||
+        failure_text.find("\"name\":\"failed_item_index\"") == std::string::npos) {
+        return false;
+    }
+    if (diagnostics.export_evidence_audit_json(
+            failures, policy, audit_json.string()).status != axiom::StatusCode::Ok) {
+        return false;
+    }
+    std::ifstream audit_in {audit_json};
+    const std::string audit_text {std::istreambuf_iterator<char>(audit_in),
+                                  std::istreambuf_iterator<char>()};
+    const auto first_after = diagnostics.get(failures.front());
+    if (audit_text.find("\"passed\":true") == std::string::npos ||
+        audit_text.find("\"issues_missing_numeric_evidence\":0") == std::string::npos ||
+        !first_after.value ||
+        first_after.value->issues.size() != first_before.value->issues.size()) {
+        return false;
+    }
+
+    axiom::KernelConfig invalid_tolerance;
+    invalid_tolerance.tolerance.linear = 0.0;
+    auto post_state = std::make_shared<axiom::detail::KernelState>(invalid_tolerance);
+    axiom::IOService post_io {post_state};
+    axiom::DiagnosticService post_diagnostics {post_state};
+    axiom::ImportOptions post_options;
+    post_options.run_validation = true;
+    post_options.auto_repair = true;
+    const auto post_import = post_io.import_axmjson(valid_json.string(), post_options);
+    if (post_import.status != axiom::StatusCode::Ok || !post_import.value) return false;
+    const auto post_report = post_diagnostics.get(post_import.diagnostic_id);
+    bool saw_validation = false;
+    bool saw_repair = false;
+    if (post_report.value) {
+        for (const auto& issue : post_report.value->issues) {
+            saw_validation = saw_validation || issue.stage == "io.post_import.validation";
+            saw_repair = saw_repair || issue.stage == "io.post_import.repair";
+        }
+    }
+    const std::array<axiom::DiagnosticId, 1> post_ids {post_import.diagnostic_id};
+    const auto post_audit = post_diagnostics.audit_evidence(post_ids, policy);
+    if (!saw_validation || !saw_repair || !post_audit.value ||
+        !post_audit.value->passed() ||
+        post_audit.value->matching_issues != post_audit.value->complete_issues) {
+        std::cerr << "post-import validation/repair evidence is incomplete\n";
+        return false;
+    }
+
+    std::filesystem::remove_all(root);
+    return true;
+}
+
 }  // namespace
 
 int main() {
+    const auto evidence_root = std::filesystem::temp_directory_path() /
+        ("axiom_io_failure_evidence_" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    if (!check_io_failure_evidence_and_batch_rollback(evidence_root)) {
+        std::cerr << "IO failure evidence or batch rollback regression\n";
+        std::filesystem::remove_all(evidence_root);
+        return 1;
+    }
+
     {
         auto state = std::make_shared<axiom::detail::KernelState>(axiom::KernelConfig {});
         axiom::RepresentationConversionService convert {state};
@@ -546,7 +757,8 @@ int main() {
         const auto* issue = report.value ? find_issue(*report.value, axiom::diag_codes::kIoImportFailure) : nullptr;
         return result.status == expected_status && !result.value.has_value() && issue != nullptr &&
                issue->severity == axiom::IssueSeverity::Error && issue->stage == expected_stage &&
-               issue->related_entities.empty();
+               issue->related_entities == std::vector<std::uint64_t> {0} &&
+               !issue->numeric_evidence.empty();
     };
     const auto empty_step_import = kernel.io().import_step("", axiom::ImportOptions {});
     const auto missing_step_import = kernel.io().import_step(missing_import_path.string(), axiom::ImportOptions {});
@@ -597,7 +809,8 @@ int main() {
         const auto* issue = report.value ? find_issue(*report.value, expected_code) : nullptr;
         return result.status == expected_status && !result.value.has_value() && issue != nullptr &&
                issue->severity == axiom::IssueSeverity::Error && issue->stage == expected_stage &&
-               issue->related_entities.empty();
+               issue->related_entities == std::vector<std::uint64_t> {0} &&
+               !issue->numeric_evidence.empty();
     };
     const auto empty_obj_import = kernel.io().import_obj("", axiom::ImportOptions {});
     const auto missing_obj_import = kernel.io().import_obj(missing_obj_path.string(), axiom::ImportOptions {});
@@ -669,7 +882,8 @@ int main() {
         const auto* issue = report.value ? find_issue(*report.value, code) : nullptr;
         return result.status == status && !result.value.has_value() && issue != nullptr &&
                issue->severity == axiom::IssueSeverity::Error && issue->stage == stage &&
-               issue->related_entities.empty();
+               issue->related_entities == std::vector<std::uint64_t> {0} &&
+               !issue->numeric_evidence.empty();
     };
     const auto empty_stl = kernel.io().import_stl("", axiom::ImportOptions {});
     const auto missing_stl = kernel.io().import_stl(missing_stl_path.string(), axiom::ImportOptions {});
@@ -748,7 +962,8 @@ int main() {
         const auto* issue = report.value ? find_issue(*report.value, code) : nullptr;
         return result.status == status && !result.value.has_value() && issue != nullptr &&
                issue->severity == axiom::IssueSeverity::Error && issue->stage == stage &&
-               issue->related_entities.empty();
+               issue->related_entities == std::vector<std::uint64_t> {0} &&
+               !issue->numeric_evidence.empty();
     };
     const auto empty_gltf = kernel.io().import_gltf("", axiom::ImportOptions {});
     const auto missing_gltf = kernel.io().import_gltf(missing_gltf_path.string(), axiom::ImportOptions {});
@@ -845,7 +1060,8 @@ int main() {
         const auto* issue = report.value ? find_issue(*report.value, code) : nullptr;
         return result.status == status && !result.value.has_value() && issue != nullptr &&
                issue->severity == axiom::IssueSeverity::Error && issue->stage == stage &&
-               issue->related_entities.empty();
+               issue->related_entities == std::vector<std::uint64_t> {0} &&
+               !issue->numeric_evidence.empty();
     };
     const auto empty_3mf = kernel.io().import_3mf("", axiom::ImportOptions {});
     const auto missing_3mf = kernel.io().import_3mf(missing_3mf_path.string(), axiom::ImportOptions {});

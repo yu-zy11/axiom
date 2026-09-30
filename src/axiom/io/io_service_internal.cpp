@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -21,6 +22,122 @@
 
 namespace axiom {
 namespace io_internal {
+
+namespace {
+
+std::vector<NumericEvidence> complete_io_failure_evidence(
+    StatusCode status, std::size_t related_entity_count,
+    std::vector<NumericEvidence> evidence) {
+    const auto before_filter = evidence.size();
+    evidence.erase(
+        std::remove_if(evidence.begin(), evidence.end(),
+                       [](const NumericEvidence& item) {
+                           return item.name.empty() || !std::isfinite(item.value);
+                       }),
+        evidence.end());
+    const auto dropped = before_filter - evidence.size();
+    if (dropped != 0) {
+        evidence.push_back(NumericEvidence {
+            "non_finite_evidence_omitted", static_cast<Scalar>(dropped), "count"});
+    }
+    evidence.insert(evidence.begin(), NumericEvidence {
+        "related_entity_count", static_cast<Scalar>(related_entity_count), "count"});
+    evidence.insert(evidence.begin(), NumericEvidence {
+        "status_code", static_cast<Scalar>(status), "enum"});
+    return evidence;
+}
+
+void complete_io_failure_issue(Issue& issue, StatusCode status,
+                               const std::vector<std::uint64_t>& related_entities,
+                               std::string_view stage,
+                               const std::vector<NumericEvidence>& evidence,
+                               bool replace_stage) {
+    if (issue.related_entities.empty()) {
+        issue.related_entities = related_entities;
+    }
+    if (replace_stage || issue.stage.empty()) {
+        issue.stage.assign(stage.begin(), stage.end());
+    }
+    auto combined = issue.numeric_evidence;
+    combined.insert(combined.end(), evidence.begin(), evidence.end());
+    issue.numeric_evidence = complete_io_failure_evidence(
+        status, issue.related_entities.size(), std::move(combined));
+}
+
+void append_completed_child_issues(
+    const detail::KernelState& state, DiagnosticId child_diagnostic,
+    std::vector<Issue>& issues, StatusCode status,
+    const std::vector<std::uint64_t>& related_entities,
+    std::string_view fallback_stage,
+    const std::vector<NumericEvidence>& evidence = {}) {
+    const auto child_it = state.diagnostics.find(child_diagnostic.value);
+    if (child_it == state.diagnostics.end()) {
+        return;
+    }
+    for (auto issue : child_it->second.issues) {
+        if (issue.severity == IssueSeverity::Error ||
+            issue.severity == IssueSeverity::Fatal) {
+            complete_io_failure_issue(issue, status, related_entities,
+                                      fallback_stage, evidence, false);
+        }
+        issues.push_back(std::move(issue));
+    }
+}
+
+}  // namespace
+
+DiagnosticId create_io_failure_diagnostic(
+    detail::KernelState& state, StatusCode status, std::string_view code,
+    std::string message, std::string summary,
+    std::vector<std::uint64_t> related_entities, std::string_view stage,
+    std::vector<NumericEvidence> evidence) {
+    if (related_entities.empty()) {
+        // Pre-materialization file failures have no kernel object yet. Keep an
+        // explicit zero token so evidence audits can distinguish that state
+        // from an accidentally omitted problem entity.
+        related_entities.push_back(0);
+    }
+    auto issue = detail::make_error_issue(code, std::move(message),
+                                          std::move(related_entities));
+    issue.stage.assign(stage.begin(), stage.end());
+    issue.numeric_evidence = complete_io_failure_evidence(
+        status, issue.related_entities.size(), std::move(evidence));
+    return state.create_diagnostic(std::move(summary), {std::move(issue)});
+}
+
+DiagnosticId wrap_io_failure_diagnostic(
+    detail::KernelState& state, StatusCode status, DiagnosticId child_diagnostic,
+    std::string_view fallback_code, std::string fallback_message,
+    std::string summary, std::vector<std::uint64_t> related_entities,
+    std::string_view stage, std::vector<NumericEvidence> evidence,
+    bool replace_child_stage) {
+    if (related_entities.empty()) {
+        related_entities.push_back(0);
+    }
+    std::vector<Issue> issues;
+    const auto child_it = state.diagnostics.find(child_diagnostic.value);
+    if (child_it != state.diagnostics.end()) {
+        issues = child_it->second.issues;
+    }
+    bool completed_error = false;
+    for (auto& issue : issues) {
+        if (issue.severity != IssueSeverity::Error &&
+            issue.severity != IssueSeverity::Fatal) {
+            continue;
+        }
+        complete_io_failure_issue(issue, status, related_entities, stage,
+                                  evidence, replace_child_stage);
+        completed_error = true;
+    }
+    if (!completed_error) {
+        auto issue = detail::make_error_issue(
+            fallback_code, std::move(fallback_message), related_entities);
+        complete_io_failure_issue(issue, status, related_entities, stage,
+                                  evidence, true);
+        issues.push_back(std::move(issue));
+    }
+    return state.create_diagnostic(std::move(summary), std::move(issues));
+}
 
 Result<void> reject_if_export_directory_not_writable(detail::KernelState& state, std::string_view path_sv) {
     if (path_sv.empty()) {
@@ -1394,15 +1511,16 @@ DiagnosticId merge_batch_import_failure_diagnostic(detail::KernelState& state, s
             std::string(path));
     ctx.stage = "io.batch_import";
     ctx.related_entities = {static_cast<std::uint64_t>(index)};
+    ctx.numeric_evidence = complete_io_failure_evidence(
+        StatusCode::OperationFailed, ctx.related_entities.size(),
+        {{"failed_item_index", static_cast<Scalar>(index), "index"},
+         {"completed_item_count", static_cast<Scalar>(index), "count"},
+         {"path_length", static_cast<Scalar>(path.size()), "byte"}});
     issues.push_back(std::move(ctx));
-    if (child_diag_id.value != 0) {
-        const auto it = state.diagnostics.find(child_diag_id.value);
-        if (it != state.diagnostics.end()) {
-            for (const auto& iss : it->second.issues) {
-                issues.push_back(iss);
-            }
-        }
-    }
+    append_completed_child_issues(
+        state, child_diag_id, issues, StatusCode::OperationFailed,
+        {static_cast<std::uint64_t>(index)}, "io.batch_import",
+        {{"failed_item_index", static_cast<Scalar>(index), "index"}});
     return state.create_diagnostic(std::string("批量") + std::string(format_label_cn) + "导入失败", std::move(issues));
 }
 
@@ -1416,15 +1534,16 @@ DiagnosticId merge_batch_export_failure_diagnostic(detail::KernelState& state, s
             std::string(path));
     ctx.stage = "io.batch_export";
     ctx.related_entities = {body_id.value, static_cast<std::uint64_t>(index)};
+    ctx.numeric_evidence = complete_io_failure_evidence(
+        StatusCode::OperationFailed, ctx.related_entities.size(),
+        {{"failed_item_index", static_cast<Scalar>(index), "index"},
+         {"completed_item_count", static_cast<Scalar>(index), "count"},
+         {"path_length", static_cast<Scalar>(path.size()), "byte"}});
     issues.push_back(std::move(ctx));
-    if (child_diag_id.value != 0) {
-        const auto it = state.diagnostics.find(child_diag_id.value);
-        if (it != state.diagnostics.end()) {
-            for (const auto& iss : it->second.issues) {
-                issues.push_back(iss);
-            }
-        }
-    }
+    append_completed_child_issues(
+        state, child_diag_id, issues, StatusCode::OperationFailed,
+        {body_id.value, static_cast<std::uint64_t>(index)}, "io.batch_export",
+        {{"failed_item_index", static_cast<Scalar>(index), "index"}});
     return state.create_diagnostic(std::string("批量") + std::string(format_label_cn) + "导出失败", std::move(issues));
 }
 
@@ -1436,15 +1555,15 @@ DiagnosticId merge_batch_detect_format_failure_diagnostic(detail::KernelState& s
         std::string("批量格式识别在第 ") + std::to_string(index + 1) + " 项失败，路径: " + std::string(path));
     ctx.stage = "io.batch_detect_format";
     ctx.related_entities = {static_cast<std::uint64_t>(index)};
+    ctx.numeric_evidence = complete_io_failure_evidence(
+        StatusCode::OperationFailed, ctx.related_entities.size(),
+        {{"failed_item_index", static_cast<Scalar>(index), "index"},
+         {"path_length", static_cast<Scalar>(path.size()), "byte"}});
     issues.push_back(std::move(ctx));
-    if (child_diag_id.value != 0) {
-        const auto it = state.diagnostics.find(child_diag_id.value);
-        if (it != state.diagnostics.end()) {
-            for (const auto& iss : it->second.issues) {
-                issues.push_back(iss);
-            }
-        }
-    }
+    append_completed_child_issues(
+        state, child_diag_id, issues, StatusCode::OperationFailed,
+        {static_cast<std::uint64_t>(index)}, "io.batch_detect_format",
+        {{"failed_item_index", static_cast<Scalar>(index), "index"}});
     return state.create_diagnostic("批量格式识别失败", std::move(issues));
 }
 
@@ -1456,15 +1575,15 @@ DiagnosticId merge_batch_read_failure_diagnostic(detail::KernelState& state, std
                                             std::string(path));
     ctx.stage = "io.batch_read";
     ctx.related_entities = {static_cast<std::uint64_t>(index)};
+    ctx.numeric_evidence = complete_io_failure_evidence(
+        StatusCode::OperationFailed, ctx.related_entities.size(),
+        {{"failed_item_index", static_cast<Scalar>(index), "index"},
+         {"path_length", static_cast<Scalar>(path.size()), "byte"}});
     issues.push_back(std::move(ctx));
-    if (child_diag_id.value != 0) {
-        const auto it = state.diagnostics.find(child_diag_id.value);
-        if (it != state.diagnostics.end()) {
-            for (const auto& iss : it->second.issues) {
-                issues.push_back(iss);
-            }
-        }
-    }
+    append_completed_child_issues(
+        state, child_diag_id, issues, StatusCode::OperationFailed,
+        {static_cast<std::uint64_t>(index)}, "io.batch_read",
+        {{"failed_item_index", static_cast<Scalar>(index), "index"}});
     return state.create_diagnostic("批量读取失败", std::move(issues));
 }
 
@@ -1477,15 +1596,16 @@ DiagnosticId merge_batch_compare_failure_diagnostic(detail::KernelState& state, 
             " 右路径: " + std::string(rhs_path));
     ctx.stage = "io.batch_compare";
     ctx.related_entities = {static_cast<std::uint64_t>(index)};
+    ctx.numeric_evidence = complete_io_failure_evidence(
+        StatusCode::OperationFailed, ctx.related_entities.size(),
+        {{"failed_item_index", static_cast<Scalar>(index), "index"},
+         {"lhs_path_length", static_cast<Scalar>(lhs_path.size()), "byte"},
+         {"rhs_path_length", static_cast<Scalar>(rhs_path.size()), "byte"}});
     issues.push_back(std::move(ctx));
-    if (child_diag_id.value != 0) {
-        const auto it = state.diagnostics.find(child_diag_id.value);
-        if (it != state.diagnostics.end()) {
-            for (const auto& iss : it->second.issues) {
-                issues.push_back(iss);
-            }
-        }
-    }
+    append_completed_child_issues(
+        state, child_diag_id, issues, StatusCode::OperationFailed,
+        {static_cast<std::uint64_t>(index)}, "io.batch_compare",
+        {{"failed_item_index", static_cast<Scalar>(index), "index"}});
     return state.create_diagnostic("批量文本比较失败", std::move(issues));
 }
 
@@ -1497,15 +1617,15 @@ DiagnosticId merge_batch_path_op_failure_diagnostic(detail::KernelState& state, 
         std::string("批量") + std::string(op_label_cn) + "在第 " + std::to_string(index + 1) + " 项失败，路径: " + std::string(path));
     ctx.stage = "io.batch_path_op";
     ctx.related_entities = {static_cast<std::uint64_t>(index)};
+    ctx.numeric_evidence = complete_io_failure_evidence(
+        StatusCode::OperationFailed, ctx.related_entities.size(),
+        {{"failed_item_index", static_cast<Scalar>(index), "index"},
+         {"path_length", static_cast<Scalar>(path.size()), "byte"}});
     issues.push_back(std::move(ctx));
-    if (child_diag_id.value != 0) {
-        const auto it = state.diagnostics.find(child_diag_id.value);
-        if (it != state.diagnostics.end()) {
-            for (const auto& iss : it->second.issues) {
-                issues.push_back(iss);
-            }
-        }
-    }
+    append_completed_child_issues(
+        state, child_diag_id, issues, StatusCode::OperationFailed,
+        {static_cast<std::uint64_t>(index)}, "io.batch_path_op",
+        {{"failed_item_index", static_cast<Scalar>(index), "index"}});
     return state.create_diagnostic(std::string("批量") + std::string(op_label_cn) + "失败", std::move(issues));
 }
 
@@ -1519,15 +1639,15 @@ DiagnosticId merge_batch_path_transform_failure_diagnostic(detail::KernelState& 
             std::string(path_hint));
     ctx.stage = std::string(stage_sv);
     ctx.related_entities = {static_cast<std::uint64_t>(index)};
+    ctx.numeric_evidence = complete_io_failure_evidence(
+        StatusCode::OperationFailed, ctx.related_entities.size(),
+        {{"failed_item_index", static_cast<Scalar>(index), "index"},
+         {"context_length", static_cast<Scalar>(path_hint.size()), "byte"}});
     issues.push_back(std::move(ctx));
-    if (child_diag_id.value != 0) {
-        const auto it = state.diagnostics.find(child_diag_id.value);
-        if (it != state.diagnostics.end()) {
-            for (const auto& iss : it->second.issues) {
-                issues.push_back(iss);
-            }
-        }
-    }
+    append_completed_child_issues(
+        state, child_diag_id, issues, StatusCode::OperationFailed,
+        {static_cast<std::uint64_t>(index)}, stage_sv,
+        {{"failed_item_index", static_cast<Scalar>(index), "index"}});
     return state.create_diagnostic(std::string("批量") + std::string(op_label_cn) + "失败", std::move(issues));
 }
 
@@ -1584,8 +1704,12 @@ bool export_format_from_extension_token(std::string_view token, std::string& out
     return false;
 }
 
-void append_issues_from_import_diag(detail::KernelState* state, std::vector<Issue>& issues, std::vector<Warning>& warnings,
-                                    DiagnosticId diagnostic_id, std::initializer_list<std::uint64_t> fallback_related_entities) {
+void append_issues_from_import_diag(
+    detail::KernelState* state, std::vector<Issue>& issues,
+    std::vector<Warning>& warnings, DiagnosticId diagnostic_id,
+    std::initializer_list<std::uint64_t> fallback_related_entities,
+    StatusCode status, std::string_view stage,
+    std::vector<NumericEvidence> evidence) {
     if (diagnostic_id.value == 0 || state == nullptr) {
         return;
     }
@@ -1595,8 +1719,14 @@ void append_issues_from_import_diag(detail::KernelState* state, std::vector<Issu
     }
     for (const auto& issue : diag_it->second.issues) {
         auto tracked_issue = issue;
-        if (tracked_issue.related_entities.empty()) {
-            tracked_issue.related_entities.assign(fallback_related_entities.begin(), fallback_related_entities.end());
+        const std::vector<std::uint64_t> fallback(
+            fallback_related_entities.begin(), fallback_related_entities.end());
+        if (tracked_issue.severity == IssueSeverity::Error ||
+            tracked_issue.severity == IssueSeverity::Fatal) {
+            complete_io_failure_issue(tracked_issue, status, fallback, stage,
+                                      evidence, true);
+        } else if (tracked_issue.related_entities.empty()) {
+            tracked_issue.related_entities = fallback;
         }
         const bool also_warn = tracked_issue.severity == IssueSeverity::Warning ||
                                tracked_issue.severity == IssueSeverity::Error ||
@@ -1625,11 +1755,19 @@ BodyId run_post_import_validation_pipeline(const std::shared_ptr<detail::KernelS
     ValidationService validation {state};
     const auto validation_result = validation.validate_all(result_body_id, ValidationMode::Standard);
     if (validation_result.status != StatusCode::Ok) {
-        append_issues_from_import_diag(state.get(), issues, warnings, validation_result.diagnostic_id, {result_body_id.value});
+        append_issues_from_import_diag(
+            state.get(), issues, warnings, validation_result.diagnostic_id,
+            {result_body_id.value}, validation_result.status,
+            "io.post_import.validation",
+            {{"validation_mode", static_cast<Scalar>(ValidationMode::Standard), "enum"}});
         if (validation_result.diagnostic_id.value == 0) {
             const auto message = format_cn + " 导入后自动验证失败";
             auto fallback_issue = detail::make_warning_issue(diag_codes::kIoImportFailure, message);
             fallback_issue.related_entities = {result_body_id.value};
+            fallback_issue.stage = "io.post_import.validation";
+            fallback_issue.numeric_evidence = complete_io_failure_evidence(
+                validation_result.status, fallback_issue.related_entities.size(),
+                {{"validation_mode", static_cast<Scalar>(ValidationMode::Standard), "enum"}});
             issues.push_back(std::move(fallback_issue));
             warnings.push_back(Warning {std::string(diag_codes::kIoImportFailure), message});
         }
@@ -1648,16 +1786,29 @@ BodyId run_post_import_validation_pipeline(const std::shared_ptr<detail::KernelS
             const auto repair_result = repair.auto_repair(result_body_id, repair_mode);
             if (repair_result.status == StatusCode::Ok && repair_result.value.has_value()) {
                 result_body_id = repair_result.value->output;
-                append_issues_from_import_diag(state.get(), issues, warnings, repair_result.value->diagnostic_id,
-                                               {body_id.value, result_body_id.value});
+                append_issues_from_import_diag(
+                    state.get(), issues, warnings,
+                    repair_result.value->diagnostic_id,
+                    {body_id.value, result_body_id.value}, repair_result.status,
+                    "io.post_import.repair",
+                    {{"repair_mode", static_cast<Scalar>(repair_mode), "enum"}});
 
                 const auto repaired_validation = validation.validate_all(result_body_id, ValidationMode::Standard);
                 if (repaired_validation.status != StatusCode::Ok) {
-                    append_issues_from_import_diag(state.get(), issues, warnings, repaired_validation.diagnostic_id,
-                                                   {result_body_id.value});
+                    append_issues_from_import_diag(
+                        state.get(), issues, warnings,
+                        repaired_validation.diagnostic_id,
+                        {result_body_id.value}, repaired_validation.status,
+                        "io.post_import.post_validate",
+                        {{"validation_mode", static_cast<Scalar>(ValidationMode::Standard), "enum"},
+                         {"repair_mode", static_cast<Scalar>(repair_mode), "enum"}});
                 }
             } else {
-                append_issues_from_import_diag(state.get(), issues, warnings, repair_result.diagnostic_id, {body_id.value});
+                append_issues_from_import_diag(
+                    state.get(), issues, warnings, repair_result.diagnostic_id,
+                    {body_id.value}, repair_result.status,
+                    "io.post_import.repair",
+                    {{"repair_mode", static_cast<Scalar>(repair_mode), "enum"}});
             }
         }
     }

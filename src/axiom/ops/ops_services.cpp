@@ -497,6 +497,75 @@ Result<BodyId> SweepService::extrude_scaled(const ProfileRef& profile, const Vec
     return ok_result(body, state_->create_diagnostic("已完成等比变截面拉伸"));
 }
 
+Result<BodyId> SweepService::extrude_twisted(const ProfileRef& profile, const Vec3& direction, Scalar distance,
+                                            const Point3& center, Scalar twist_angle) {
+    constexpr Scalar kPi = 3.1415926535897932384626433832795;
+    constexpr Scalar kTwoPi = 2.0 * kPi;
+    constexpr Scalar kMaxStationAngle = kPi / 24.0;
+    const Scalar direction_length = std::hypot(direction.x, direction.y, direction.z);
+    if (profile.label.empty() || profile.polygon_xyz.size() < 3 ||
+        !std::isfinite(direction_length) || direction_length <= 1e-14 ||
+        !std::isfinite(distance) || distance <= 0.0 ||
+        !std::isfinite(center.x) || !std::isfinite(center.y) || !std::isfinite(center.z) ||
+        !std::isfinite(twist_angle) || std::abs(twist_angle) > kTwoPi + 1e-10) {
+        return detail::invalid_input_result<BodyId>(
+            *state_, diag_codes::kCoreParameterOutOfRange,
+            "扭转拉伸失败：须有显式轮廓、有限平面内中心、有效方向、有限正距离，且扭角须位于 [-2π, 2π]",
+            "扭转拉伸失败");
+    }
+
+    const Vec3 axis = detail::scale(direction, 1.0 / direction_length);
+    const Vec3 raw_normal = detail::newell_normal_unnormalized_poly(profile.polygon_xyz);
+    const Scalar normal_length = detail::norm(raw_normal);
+    const Scalar plane_tol = std::max(Scalar(1e-7), state_->config.tolerance.linear * Scalar(100.0));
+    if (!std::isfinite(normal_length) || normal_length <= 1e-14) {
+        return detail::invalid_input_result<BodyId>(
+            *state_, diag_codes::kCoreParameterOutOfRange,
+            "扭转拉伸失败：轮廓面积退化", "扭转拉伸失败");
+    }
+    const Vec3 normal = detail::scale(raw_normal, 1.0 / normal_length);
+    const Scalar center_offset = detail::dot(normal, detail::subtract(center, profile.polygon_xyz.front()));
+    const Scalar axis_alignment = std::abs(detail::dot(normal, axis));
+    if (!std::isfinite(center_offset) || std::abs(center_offset) > plane_tol ||
+        !std::isfinite(axis_alignment) || axis_alignment < 1.0 - 1e-10) {
+        return detail::invalid_input_result<BodyId>(
+            *state_, diag_codes::kCoreParameterOutOfRange,
+            "扭转拉伸失败：中心必须位于轮廓平面内，且方向必须垂直于轮廓平面", "扭转拉伸失败");
+    }
+    if (std::abs(twist_angle) <= 1e-14) {
+        return extrude(profile, axis, distance);
+    }
+
+    const std::size_t segment_count = static_cast<std::size_t>(
+        std::max(Scalar(1.0), std::ceil(std::abs(twist_angle) / kMaxStationAngle)));
+    detail::BodyRecord record;
+    record.kind = detail::BodyKind::Sweep;
+    record.rep_kind = RepKind::ExactBRep;
+    record.label = "extrude:twisted:" + profile.label;
+    record.axis = axis;
+    record.b = distance;
+    record.extrude_profile_xyz = profile.polygon_xyz;
+    record.extrude_holes_xyz = profile.holes_xyz;
+    record.extrude_scale_center = center;
+    record.sweep_station_offsets.reserve(segment_count + 1);
+    record.sweep_station_angles.reserve(segment_count + 1);
+    for (std::size_t i = 0; i <= segment_count; ++i) {
+        const Scalar fraction = static_cast<Scalar>(i) / static_cast<Scalar>(segment_count);
+        record.sweep_station_offsets.push_back(detail::scale(axis, distance * fraction));
+        record.sweep_station_angles.push_back(twist_angle * fraction);
+    }
+    // The shared materializer validates every sampled section, triangle and mass
+    // integral before allocating geometry/topology/model IDs.
+    record.bbox = detail::make_bbox(profile.polygon_xyz.front(), profile.polygon_xyz.front());
+    const auto body = make_body(state_, std::move(record), "已完成扭转拉伸");
+    if (body.value == 0) {
+        return detail::invalid_input_result<BodyId>(
+            *state_, diag_codes::kCoreParameterOutOfRange,
+            "扭转拉伸失败：轮廓、孔洞或采样侧壁发生数值退化，无法形成有效闭壳", "扭转拉伸失败");
+    }
+    return ok_result(body, state_->create_diagnostic("已完成扭转拉伸"));
+}
+
 Result<BodyId> SweepService::extrude_to_plane(const ProfileRef& profile, const Vec3& direction,
                                             const Plane& end_plane) {
     const auto length = std::hypot(direction.x, direction.y, direction.z);

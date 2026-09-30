@@ -790,6 +790,8 @@ public:
   Result<BodyId> extrude(const ProfileRef&, const Vec3& direction, Scalar distance);
   Result<BodyId> extrude_scaled(const ProfileRef&, const Vec3& direction, Scalar distance,
                                 const Point3& center, Scalar end_scale);
+  Result<BodyId> extrude_twisted(const ProfileRef&, const Vec3& direction, Scalar distance,
+                                 const Point3& center, Scalar twist_angle);
   Result<BodyId> extrude_to_plane(const ProfileRef&, const Vec3& direction, const Plane& end_plane);
   Result<BodyId> revolve(const ProfileRef&, const Axis3&, Scalar angle);
   Result<BodyId> revolve_between(const ProfileRef&, const Axis3&,
@@ -834,6 +836,10 @@ public:
 当前只有常量正终端比例与线性弧长插值；不支持零比例尖顶、负比例/反射、非线性比例律和嵌套复合导轨。过小比例或相对曲率过大的截面可因数值退化/自交风险被保守拒绝。结果仍是采样多面体 BRep，不是解析扫掠曲面。
 
 曲线扫掠的端点伪闭合、首尾切向断裂、接缝错位/折角/尖点、嵌套复合链、抛物线/双曲线复合子段、过紧曲率、非局部弦段自靠近、局部不前进及退化物化都以 `InvalidInput / AXM-CORE-E-0002` 拒绝，不产生模型、拓扑、ID、事务写或求值/网格缓存污染。当前仅支持显式平面多边形截面，不保留显式轮廓历史。结果是保守采样多面体 BRep，不是解析扫掠曲面；无显式轮廓仍为历史 bbox 占位路径。
+
+第 73 批（cycle-0073）新增 `extrude_twisted`，已通过修复后的完整门禁。仅接受有标签的显式平面简单多边形，可凹且可含严格分离、非嵌套孔洞；轮廓可任意空间朝向、独立环绕向和起点。`center` 须有限且位于轮廓平面内，`direction` 须有限、非零且垂直于该平面，按单位方向使用，`distance` 须有限且为正。`twist_angle` 以弧度表示，沿单位方向按右手规则旋转，允许正负部分角及正负整周，限于 `[-2π,2π]`；反转方向也反转旋转轴。满足上述法向合同后，零扭角兼容 `extrude`。
+
+截面按高度均匀旋转，站间角差不超过 `π/24`（7.5°）；非零扭转路径的分段数为 `max(1,ceil(abs(twist_angle)/(π/24)))`，`abs(twist_angle)≤1e-14` 时委托 `extrude`。实际三角端盖和侧壁物化可查询的 Body/Shell/Face/Edge/Vertex 闭壳、bbox 与多面体质量属性；共面中心、法向、站点严格推进、端盖、三角退化及有限积分检查在对象分配前完成。非法/数值退化输入返回 `InvalidInput / AXM-CORE-E-0002`，不分配模型或拓扑对象。repair 仅在扭转站间交替侧壁四边形的剖分对角线，消除固定对角线累积的一阶有向体积偏差，保持站点数及非扭转物化路径。结果虽使用 `ExactBRep` 表示标签，仍是保守采样多面体，不是解析螺旋面；质量属性描述实际剖分体，不承诺解析螺旋体精度。暂不支持斜方向、多于一周或与变比例/至平面拉伸组合，极端尺度与近退化输入可保守拒绝。
 
 ### 8.2 布尔操作接口
 
@@ -923,7 +929,7 @@ enum class ValidationMode {
 
 class ValidationService {
 public:
-  // 失败报告使用 heal.validate_geometry.* 阶段，并关联目标 Body 及可定位的问题子实体。
+  // 失败报告使用 heal.* 阶段，关联目标及问题子实体，并携带有限数值证据。
   Result<void> validate_geometry(BodyId, ValidationMode) const;
   Result<void> validate_topology(BodyId, ValidationMode) const;
   Result<void> validate_self_intersection(BodyId, ValidationMode) const;
@@ -944,13 +950,22 @@ enum class RepairMode {
 
 class RepairService {
 public:
+  Result<void> repair_face_trim_pcurves(FaceId, RepairMode);
   Result<OpReport> sew_faces(std::span<const FaceId>, Scalar tolerance, RepairMode);
   Result<OpReport> remove_small_edges(BodyId, Scalar threshold, RepairMode);
   Result<OpReport> remove_small_faces(BodyId, Scalar threshold, RepairMode);
   Result<OpReport> merge_near_coplanar_faces(BodyId, Scalar angle_tol, RepairMode);
   Result<OpReport> auto_repair(BodyId, RepairMode);
+  Result<std::vector<OpReport>> repair_many_auto(std::span<const BodyId>, RepairMode);
+  Result<std::vector<OpReport>> repair_many_remove_small_edges(std::span<const BodyId>, Scalar threshold, RepairMode);
+  Result<std::vector<OpReport>> repair_many_remove_small_faces(std::span<const BodyId>, Scalar threshold, RepairMode);
+  Result<std::vector<OpReport>> repair_many_merge_near_coplanar_faces(std::span<const BodyId>, Scalar angle_tol, RepairMode);
 };
 ```
+
+第 73 批为 HEAL 验证、修复、后验验证、trim 重建和批量修复的失败报告统一补齐 `heal.*` 阶段、关联实体和有限 `numeric_evidence`，并通过 `axiom_heal_test` 的模块级 `audit_evidence` 门禁。无效/空目标用显式零令牌标识无可关联实体；证据至少含状态与实体数量，并按分支附验证模式、阈值、计数或几何量，非有限测量值被过滤并记录遗漏数量。该诊断合同不扩大验证或修复算法的几何支持范围。
+
+单项修改型修复在物化后验证，后验失败回收本次派生体及拓扑/几何对象并保留失败诊断；`auto_repair` 失败也回收派生结果。`repair_face_trim_pcurves` 支持 Plane/Cylinder/Sphere，投影重建或后验验证失败恢复全部原 coedge PCurve 绑定并删除本次新建 PCurve。四个 `repair_many_*` 入口任一子项失败时回滚此前子项全部派生对象及 Eval 失效状态，不返回半成功结果；批量失败报告关联失败子项目标，并附 `heal.repair_many_*.rollback` 与 `completed_item_count/requested_item_count/rollback_applied`，其中 `repair_many_auto` 另附 `allocated_object_count`（以分配 ID 增量计）；子项原诊断保留在诊断存储中，批量返回报告不合并子项全部根因 issue。HEAL 回滚不恢复 `next_id`，被回收对象占用的 ID 可留下空档，不承诺重试复用原 ID。诊断记录作为失败证据保留。
 
 ## 10. `EvalGraph` 接口清单
 
@@ -1007,10 +1022,25 @@ public:
   Result<BodyId> import_iges(std::string_view path, const ImportOptions&);
   Result<BodyId> import_brep(std::string_view path, const ImportOptions&);
   Result<void> export_step(BodyId, std::string_view path, const ExportOptions&);
+  Result<void> export_axmjson(BodyId, std::string_view path, const ExportOptions&);
+  Result<void> export_iges(BodyId, std::string_view path, const ExportOptions&);
+  Result<void> export_brep(BodyId, std::string_view path, const ExportOptions&);
+  Result<BodyId> import_auto(std::string_view path, const ImportOptions&);
+  Result<void> export_auto(BodyId, std::string_view path, const ExportOptions&);
+  Result<std::vector<BodyId>> import_many_step(std::span<const std::string> paths, const ImportOptions&);
+  Result<std::vector<BodyId>> import_many_axmjson(std::span<const std::string> paths, const ImportOptions&);
+  Result<std::vector<BodyId>> import_many_auto(std::span<const std::string> paths, const ImportOptions&);
+  Result<void> export_many_auto(std::span<const BodyId>, std::span<const std::string> paths, const ExportOptions&);
 };
 ```
 
 `import_axmjson`、`import_iges` 与 `import_brep`（NFR-DIA-001 第 70 批）在分配 `BodyId` 前完成普通文件检查、64 MiB 上限与短读检查、严格结构解析、格式/`BodyKind` 校验，以及有限数值、包围盒顺序和非零轴校验。三者的物化前失败分别绑定 `io.import.<format>.input/path/open/read/parse/validation`；输入/路径/打开/读取失败复用 `AXM-IO-E-0004`，结构/格式失败复用 `AXM-IO-E-0003`，非有限几何复用 `AXM-VAL-E-0010`，包围盒无效或轴退化复用 `AXM-VAL-E-0004`。失败返回可检索 `diagnostic_id`，不写 Body/Mesh store、不推进模型 ID，修复原文件后可用同一路径重试。AXMJSON 兼容既有仅含身份与 bbox 的早期文件；一旦出现扩展几何字段就要求整组完整。BREP 仅接受带 `AXIOM_BREP_INTERCHANGE` 文件头的 `AXIOM_BREP` JSON 子集；IGES 仅物化 Axiom 元数据子集，典型标准 IGES 卡片/DE 实体仍返回既有 `NotImplemented / AXM-IO-E-0011`，并可附 `AXM-IO-D-0017` 扫描摘要。
+
+第 73 批统一 STEP/AXMJSON/IGES/BREP/OBJ/STL/glTF/3MF 主格式导入、导出及 auto 路由失败的 `io.*` 阶段、问题实体令牌与有限数值证据，已通过 `axiom_io_workflow_test` 模块级 `audit_evidence` 门禁。预物化文件失败无内核对象时使用 `related_entities=[0]`；导出通常关联输入 Body。AXMJSON/IGES/BREP 导出补齐 `io.export.<format>.input/path/open/write` 及最终写入/关闭检查，复用既有 IO/VAL 错误码。
+
+STEP 与 AXMJSON 现接入其他主格式共用的导入后验证管线：`run_validation=true` 触发 Standard 验证，失败证据复制到 `io.post_import.validation`；启用 `auto_repair` 后复制修复及复验问题到 `io.post_import.repair/post_validate`，原 HEAL 诊断不被修改。该管线保留既有报告语义：导入可返回 `Ok` 和 Body，同时报告含验证/修复失败 issue；调用者须读取诊断或显式验证，不应把 `Ok` 等同于通过验证。
+
+`import_many_step/import_many_axmjson/import_many_auto` 任一子项实际返回失败时回收本批（含自动修复）新分配的 Body/Mesh/拓扑/几何，恢复链接、缓存、Eval 失效状态及 `next_id`，可原位重试；保留诊断记录。合并报告保留根因并附 `io.batch_import/io.batch_export`、从零开始的 `failed_item_index`、`completed_item_count`、`path_length`。完成数量表示失败前已完成项，并不表示回滚后仍保留这些导入体。候选导入、严格现有文件导入、目录导出与条件导出传播真实失败；`export_auto_existing_only` 仅跳过父目录不存在的目标。批量导出不承诺文件系统事务，设备/侧车失败可能留下已写文件；普通文本/目录等辅助接口未纳入本重量级证据包。标准 STEP/IGES 实体及既有格式子集限制不变。
 
 ## 12. `Diagnostics` 接口清单
 
@@ -1106,7 +1136,7 @@ public:
 
 `NumericEvidence{name, value, unit}` 为可机器读取的计数、阈值、距离或容差证据；名称在单个 issue 内稳定，单位可为空。单条、指定 ID 批量和全量 TXT/JSON 导出均保留该字段；JSON 遇到非有限数值写 `null`，审计则把空名称或非有限值视为证据无效。
 
-`audit_evidence` 按问题码前缀与最低严重级别筛选 issue，并可要求阶段前缀、关联实体及有效数值证据。重复 `DiagnosticId` 只审计一次；没有匹配 issue 的报告计入 `reports_without_matching_issue`；`max_findings` 仅限制明细，额外缺口计入 `omitted_findings`，完整统计不截断。空 ID 集、空问题码前缀、必需但为空的阶段前缀、零明细上限、非法严重级别或无效 ID 均结构化失败，且不修改源报告。`export_evidence_audit_json` 先完成审计再打开文件；空路径、打开或最终写入失败复用 `AXM-IO-E-0005`。当前 BOOL 主运行和预处理统计导出的受覆盖失败分支已写入数值证据并通过该门禁；HEAL 与 IO 的重量级失败分支尚未全面迁移。
+`audit_evidence` 按问题码前缀与最低严重级别筛选 issue，并可要求阶段前缀、关联实体及有效数值证据。重复 `DiagnosticId` 只审计一次；没有匹配 issue 的报告计入 `reports_without_matching_issue`；`max_findings` 仅限制明细，额外缺口计入 `omitted_findings`，完整统计不截断。空 ID 集、空问题码前缀、必需但为空的阶段前缀、零明细上限、非法严重级别或无效 ID 均结构化失败，且不修改源报告。`export_evidence_audit_json` 先完成审计再打开文件；空路径、打开或最终写入失败复用 `AXM-IO-E-0005`。BOOL 受覆盖失败分支及第 73 批 HEAL 验证/修复/回滚、IO 主格式导入导出/后验验证/批处理已接入模块门禁；普通文件文本/目录辅助接口及更广泛的失败注入语料仍待扩充，不能据此宣称所有公开接口全覆盖。
 
 问题码前缀、阶段精确与阶段前缀检索均按 `DiagnosticId` 升序返回最早的前 `max_results` 个匹配报告，单报告的多个匹配 issue 只返回一次。空问题码前缀、空阶段/阶段前缀或零上限返回 `InvalidInput` / `AXM-CORE-E-0002`，源报告保持不变。
 

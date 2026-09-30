@@ -185,12 +185,15 @@ struct BodyRecord {
     Point3 extrude_scale_center {};
     /// Optional terminating plane for a straight extrusion with vertex-dependent travel.
     std::optional<Plane> extrude_end_plane;
-    /// Fixed-orientation polyline sweep: station displacements relative to the rail start.
+    /// Straight sampled sweep station displacements relative to the profile/rail start.
     /// Empty for a single extrusion; otherwise starts at zero and is strictly monotone through the profile plane.
     std::vector<Vec3> sweep_station_offsets;
     /// Optional positive uniform section scale at every fixed-orientation station. When present,
     /// it matches sweep_station_offsets and scales about extrude_scale_center.
     std::vector<Scalar> sweep_station_scales;
+    /// Optional signed rotation about `axis` at every straight-extrusion station. It matches
+    /// sweep_station_offsets, begins at zero and rotates about extrude_scale_center.
+    std::vector<Scalar> sweep_station_angles;
     /// Curve-following sweep stations. `u/v` are a rotation-minimizing section frame at each
     /// rail point; open rails include both endpoints, while a closed rail omits its repeated end.
     /// The materializer reconstructs every section from the original world-space profile in

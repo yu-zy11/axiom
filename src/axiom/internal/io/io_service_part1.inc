@@ -1,10 +1,11 @@
 Result<BodyId> IOService::import_step(std::string_view path, const ImportOptions& options) {
     const auto fail_before_import = [this](StatusCode status, std::string message,
                                            std::string_view stage) {
-        auto issue = detail::make_error_issue(diag_codes::kIoImportFailure, std::move(message));
-        issue.stage = std::string(stage);
         return error_result<BodyId>(
-            status, state_->create_diagnostic("STEP 导入失败", {std::move(issue)}));
+            status, create_io_failure_diagnostic(
+                        *state_, status, diag_codes::kIoImportFailure,
+                        std::move(message), "STEP 导入失败", {0}, stage,
+                        {{"materialized_body_count", 0.0, "count"}}));
     };
     if (path.empty()) {
         return fail_before_import(StatusCode::InvalidInput,
@@ -31,6 +32,11 @@ Result<BodyId> IOService::import_step(std::string_view path, const ImportOptions
             diag_codes::kIoStepStandardEntitiesUnsupported,
             "STEP 导入：检测到 ISO-10303-21 DATA 段含 EXPRESS 实体实例；当前内核仅支持 Axiom 元数据子集。完整 AP 交换需集成 STEP 内核（如 STEPcode/Open CASCADE）。");
         issue.stage = "io.import.step";
+        issue.related_entities = {0};
+        issue.numeric_evidence = {
+            {"status_code", static_cast<Scalar>(StatusCode::NotImplemented), "enum"},
+            {"related_entity_count", 1.0, "count"},
+            {"input_byte_count", static_cast<Scalar>(file_text->size()), "byte"}};
         issues.push_back(std::move(issue));
         std::string scan_msg;
         std::size_t scan_count = 0;
@@ -57,76 +63,8 @@ Result<BodyId> IOService::import_step(std::string_view path, const ImportOptions
 
     std::vector<Issue> issues;
     std::vector<Warning> warnings;
-    auto append_issues_from_diag = [this, &issues, &warnings](DiagnosticId diagnostic_id,
-                                                              std::initializer_list<std::uint64_t> fallback_related_entities) {
-        if (diagnostic_id.value == 0) {
-            return;
-        }
-        const auto diag_it = state_->diagnostics.find(diagnostic_id.value);
-        if (diag_it == state_->diagnostics.end()) {
-            return;
-        }
-        for (const auto& issue : diag_it->second.issues) {
-            auto tracked_issue = issue;
-            if (tracked_issue.related_entities.empty()) {
-                tracked_issue.related_entities.assign(fallback_related_entities.begin(), fallback_related_entities.end());
-            }
-            issues.push_back(tracked_issue);
-            if (tracked_issue.severity == IssueSeverity::Warning ||
-                tracked_issue.severity == IssueSeverity::Error ||
-                tracked_issue.severity == IssueSeverity::Fatal) {
-                warnings.push_back(Warning {tracked_issue.code, tracked_issue.message});
-            }
-        }
-    };
-
-    BodyId result_body_id = body_id;
-    if (options.run_validation) {
-        auto validation_issue = detail::make_info_issue(diag_codes::kIoPostImportValidation, "STEP 导入后已触发自动验证");
-        validation_issue.related_entities = {body_id.value};
-        validation_issue.stage = "io.post_import.validation";
-        issues.push_back(std::move(validation_issue));
-
-        ValidationService validation {state_};
-        const auto validation_result = validation.validate_all(result_body_id, ValidationMode::Standard);
-        if (validation_result.status != StatusCode::Ok) {
-            append_issues_from_diag(validation_result.diagnostic_id, {result_body_id.value});
-            if (validation_result.diagnostic_id.value == 0) {
-                const auto message = std::string("STEP 导入后自动验证失败");
-                auto fallback_issue = detail::make_warning_issue(diag_codes::kIoImportFailure, message);
-                fallback_issue.related_entities = {result_body_id.value};
-                issues.push_back(std::move(fallback_issue));
-                warnings.push_back(Warning {std::string(diag_codes::kIoImportFailure), message});
-            }
-
-            if (options.auto_repair) {
-                const auto repair_mode = options.repair_mode == RepairMode::ReportOnly
-                                             ? RepairMode::Safe
-                                             : options.repair_mode;
-                auto repair_mode_issue = detail::make_info_issue(
-                    diag_codes::kIoPostImportRepairMode,
-                    "STEP 导入后自动修复策略已启用: mode=" +
-                        std::to_string(static_cast<int>(repair_mode)));
-                repair_mode_issue.related_entities = {result_body_id.value};
-                repair_mode_issue.stage = "io.post_import.repair_mode";
-                issues.push_back(std::move(repair_mode_issue));
-
-                RepairService repair {state_};
-                const auto repair_result = repair.auto_repair(result_body_id, repair_mode);
-                if (repair_result.status == StatusCode::Ok && repair_result.value.has_value()) {
-                    result_body_id = repair_result.value->output;
-                    append_issues_from_diag(repair_result.value->diagnostic_id, {body_id.value, result_body_id.value});
-
-                    const auto repaired_validation = validation.validate_all(result_body_id, ValidationMode::Standard);
-                    if (repaired_validation.status != StatusCode::Ok) {
-                        append_issues_from_diag(repaired_validation.diagnostic_id, {result_body_id.value});
-                    }
-                } else {
-                    append_issues_from_diag(repair_result.diagnostic_id, {body_id.value});
-                }
-            }
-        }
-    }
+    const auto result_body_id = run_post_import_validation_pipeline(
+        state_, body_id, options, std::string("STEP"), issues, warnings);
 
     auto result = ok_result(result_body_id, state_->create_diagnostic("已导入STEP模型", std::move(issues)));
     result.warnings = std::move(warnings);
@@ -135,10 +73,12 @@ Result<BodyId> IOService::import_step(std::string_view path, const ImportOptions
 
 Result<void> IOService::export_step(BodyId body_id, std::string_view path, const ExportOptions& options) {
     if (!detail::has_body(*state_, body_id) || path.empty()) {
-        return detail::failed_void(
+        return io_failed_void(
             *state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
             "STEP 导出失败：目标实体不存在或输出路径为空", "STEP 导出失败",
-            {body_id.value}, "io.export.step.input");
+            {body_id.value}, "io.export.step.input",
+            {{"body_exists", detail::has_body(*state_, body_id) ? 1.0 : 0.0, "bool"},
+             {"path_length", static_cast<Scalar>(path.size()), "byte"}});
     }
     const auto wx = reject_if_export_directory_not_writable(*state_, path);
     if (wx.status != StatusCode::Ok) {
@@ -151,15 +91,20 @@ Result<void> IOService::export_step(BodyId body_id, std::string_view path, const
                 }
             }
         }
-        return wx;
+        return wrap_io_failed_void(
+            *state_, wx, diag_codes::kIoExportFailure,
+            "STEP 导出路径校验失败", "STEP 导出失败", {body_id.value},
+            "io.export.step.path",
+            {{"path_length", static_cast<Scalar>(path.size()), "byte"}});
     }
 
     std::ofstream out {std::string(path)};
     if (!out) {
-        return detail::failed_void(
+        return io_failed_void(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
             "STEP 导出失败：无法打开输出文件", "STEP 导出失败", {body_id.value},
-            "io.export.step.open");
+            "io.export.step.open",
+            {{"path_length", static_cast<Scalar>(path.size()), "byte"}});
     }
 
     const auto body_it = state_->bodies.find(body_id.value);
@@ -195,10 +140,11 @@ Result<void> IOService::export_step(BodyId body_id, std::string_view path, const
     out.flush();
     out.close();
     if (!out) {
-        return detail::failed_void(
+        return io_failed_void(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
             "STEP 导出失败：写入输出文件失败", "STEP 导出失败", {body_id.value},
-            "io.export.step.write");
+            "io.export.step.write",
+            {{"metadata_enabled", options.embed_metadata ? 1.0 : 0.0, "bool"}});
     }
 
     return ok_void(state_->create_diagnostic("已导出STEP模型"));
@@ -270,76 +216,8 @@ Result<BodyId> IOService::import_axmjson(std::string_view path, const ImportOpti
 
     std::vector<Issue> issues;
     std::vector<Warning> warnings;
-    auto append_issues_from_diag = [this, &issues, &warnings](DiagnosticId diagnostic_id,
-                                                              std::initializer_list<std::uint64_t> fallback_related_entities) {
-        if (diagnostic_id.value == 0) {
-            return;
-        }
-        const auto diag_it = state_->diagnostics.find(diagnostic_id.value);
-        if (diag_it == state_->diagnostics.end()) {
-            return;
-        }
-        for (const auto& issue : diag_it->second.issues) {
-            auto tracked_issue = issue;
-            if (tracked_issue.related_entities.empty()) {
-                tracked_issue.related_entities.assign(fallback_related_entities.begin(), fallback_related_entities.end());
-            }
-            issues.push_back(tracked_issue);
-            if (tracked_issue.severity == IssueSeverity::Warning ||
-                tracked_issue.severity == IssueSeverity::Error ||
-                tracked_issue.severity == IssueSeverity::Fatal) {
-                warnings.push_back(Warning {tracked_issue.code, tracked_issue.message});
-            }
-        }
-    };
-
-    BodyId result_body_id = body_id;
-    if (options.run_validation) {
-        auto validation_issue = detail::make_info_issue(diag_codes::kIoPostImportValidation, "AXMJSON 导入后已触发自动验证");
-        validation_issue.related_entities = {body_id.value};
-        validation_issue.stage = "io.post_import.validation";
-        issues.push_back(std::move(validation_issue));
-
-        ValidationService validation {state_};
-        const auto validation_result = validation.validate_all(result_body_id, ValidationMode::Standard);
-        if (validation_result.status != StatusCode::Ok) {
-            append_issues_from_diag(validation_result.diagnostic_id, {result_body_id.value});
-            if (validation_result.diagnostic_id.value == 0) {
-                const auto message = std::string("AXMJSON 导入后自动验证失败");
-                auto fallback_issue = detail::make_warning_issue(diag_codes::kIoImportFailure, message);
-                fallback_issue.related_entities = {result_body_id.value};
-                issues.push_back(std::move(fallback_issue));
-                warnings.push_back(Warning {std::string(diag_codes::kIoImportFailure), message});
-            }
-
-            if (options.auto_repair) {
-                const auto repair_mode = options.repair_mode == RepairMode::ReportOnly
-                                             ? RepairMode::Safe
-                                             : options.repair_mode;
-                auto repair_mode_issue = detail::make_info_issue(
-                    diag_codes::kIoPostImportRepairMode,
-                    "AXMJSON 导入后自动修复策略已启用: mode=" +
-                        std::to_string(static_cast<int>(repair_mode)));
-                repair_mode_issue.related_entities = {result_body_id.value};
-                repair_mode_issue.stage = "io.post_import.repair_mode";
-                issues.push_back(std::move(repair_mode_issue));
-
-                RepairService repair {state_};
-                const auto repair_result = repair.auto_repair(result_body_id, repair_mode);
-                if (repair_result.status == StatusCode::Ok && repair_result.value.has_value()) {
-                    result_body_id = repair_result.value->output;
-                    append_issues_from_diag(repair_result.value->diagnostic_id, {body_id.value, result_body_id.value});
-
-                    const auto repaired_validation = validation.validate_all(result_body_id, ValidationMode::Standard);
-                    if (repaired_validation.status != StatusCode::Ok) {
-                        append_issues_from_diag(repaired_validation.diagnostic_id, {result_body_id.value});
-                    }
-                } else {
-                    append_issues_from_diag(repair_result.diagnostic_id, {body_id.value});
-                }
-            }
-        }
-    }
+    const auto result_body_id = run_post_import_validation_pipeline(
+        state_, body_id, options, std::string("AXMJSON"), issues, warnings);
 
     auto result = ok_result(result_body_id, state_->create_diagnostic("已导入AXMJSON模型", std::move(issues)));
     result.warnings = std::move(warnings);
@@ -349,9 +227,11 @@ Result<BodyId> IOService::import_axmjson(std::string_view path, const ImportOpti
 Result<BodyId> IOService::import_stl(std::string_view path, const ImportOptions& options) {
     const auto fail_before_import = [this](StatusCode status, std::string_view code, std::string message,
                                            std::string_view stage) {
-        auto issue = detail::make_error_issue(code, std::move(message));
-        issue.stage = std::string(stage);
-        return error_result<BodyId>(status, state_->create_diagnostic("STL 导入失败", {std::move(issue)}));
+        return error_result<BodyId>(
+            status, create_io_failure_diagnostic(
+                        *state_, status, code, std::move(message),
+                        "STL 导入失败", {0}, stage,
+                        {{"materialized_body_count", 0.0, "count"}}));
     };
     if (path.empty()) {
         return fail_before_import(StatusCode::InvalidInput, diag_codes::kIoImportFailure,
@@ -417,9 +297,11 @@ Result<BodyId> IOService::import_stl(std::string_view path, const ImportOptions&
 Result<BodyId> IOService::import_gltf(std::string_view path, const ImportOptions& options) {
     const auto fail_before_import = [this](StatusCode status, std::string_view code, std::string message,
                                            std::string_view stage) {
-        auto issue = detail::make_error_issue(code, std::move(message));
-        issue.stage = std::string(stage);
-        return error_result<BodyId>(status, state_->create_diagnostic("glTF 导入失败", {std::move(issue)}));
+        return error_result<BodyId>(
+            status, create_io_failure_diagnostic(
+                        *state_, status, code, std::move(message),
+                        "glTF 导入失败", {0}, stage,
+                        {{"materialized_body_count", 0.0, "count"}}));
     };
     if (path.empty()) {
         return fail_before_import(StatusCode::InvalidInput, diag_codes::kIoImportFailure,
@@ -531,6 +413,11 @@ Result<BodyId> IOService::import_iges(std::string_view path, const ImportOptions
             diag_codes::kIgesStandardEntitiesUnsupported,
             "IGES 导入：检测到典型 IGES 卡片/DE 形态；当前内核仅支持 Axiom 元数据子集。完整实体交换需集成 IGES 内核。");
         issue.stage = "io.import.iges";
+        issue.related_entities = {0};
+        issue.numeric_evidence = {
+            {"status_code", static_cast<Scalar>(StatusCode::NotImplemented), "enum"},
+            {"related_entity_count", 1.0, "count"},
+            {"input_byte_count", static_cast<Scalar>(file_text->size()), "byte"}};
         issues.push_back(std::move(issue));
         std::string scan_msg;
         std::size_t de_lines = 0;
@@ -650,9 +537,11 @@ Result<BodyId> IOService::import_brep(std::string_view path, const ImportOptions
 Result<BodyId> IOService::import_obj(std::string_view path, const ImportOptions& options) {
     const auto fail_before_import = [this](StatusCode status, std::string_view code, std::string message,
                                            std::string_view stage) {
-        auto issue = detail::make_error_issue(code, std::move(message));
-        issue.stage = std::string(stage);
-        return error_result<BodyId>(status, state_->create_diagnostic("OBJ 导入失败", {std::move(issue)}));
+        return error_result<BodyId>(
+            status, create_io_failure_diagnostic(
+                        *state_, status, code, std::move(message),
+                        "OBJ 导入失败", {0}, stage,
+                        {{"materialized_body_count", 0.0, "count"}}));
     };
     if (path.empty()) {
         return fail_before_import(StatusCode::InvalidInput, diag_codes::kIoImportFailure,
@@ -709,9 +598,11 @@ Result<BodyId> IOService::import_obj(std::string_view path, const ImportOptions&
 Result<BodyId> IOService::import_3mf(std::string_view path, const ImportOptions& options) {
     const auto fail_before_import = [this](StatusCode status, std::string_view code, std::string message,
                                            std::string_view stage) {
-        auto issue = detail::make_error_issue(code, std::move(message));
-        issue.stage = std::string(stage);
-        return error_result<BodyId>(status, state_->create_diagnostic("3MF 导入失败", {std::move(issue)}));
+        return error_result<BodyId>(
+            status, create_io_failure_diagnostic(
+                        *state_, status, code, std::move(message),
+                        "3MF 导入失败", {0}, stage,
+                        {{"materialized_body_count", 0.0, "count"}}));
     };
     if (path.empty()) {
         return fail_before_import(StatusCode::InvalidInput, diag_codes::kIoImportFailure,
@@ -795,41 +686,73 @@ Result<BodyId> IOService::import_3mf(std::string_view path, const ImportOptions&
 
 Result<void> IOService::export_axmjson(BodyId body_id, std::string_view path, const ExportOptions& options) {
     if (!detail::has_body(*state_, body_id) || path.empty()) {
-        return detail::invalid_input_void(
-            *state_, diag_codes::kIoExportFailure,
-            "AXMJSON 导出失败：目标实体不存在或输出路径为空", "AXMJSON 导出失败");
+        return io_failed_void(
+            *state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
+            "AXMJSON 导出失败：目标实体不存在或输出路径为空", "AXMJSON 导出失败",
+            {body_id.value}, "io.export.axmjson.input",
+            {{"body_exists", detail::has_body(*state_, body_id) ? 1.0 : 0.0, "bool"},
+             {"path_length", static_cast<Scalar>(path.size()), "byte"}});
     }
     const auto wx = reject_if_export_directory_not_writable(*state_, path);
     if (wx.status != StatusCode::Ok) {
-        return wx;
+        return wrap_io_failed_void(
+            *state_, wx, diag_codes::kIoExportFailure,
+            "AXMJSON 导出路径校验失败", "AXMJSON 导出失败",
+            {body_id.value}, "io.export.axmjson.path",
+            {{"path_length", static_cast<Scalar>(path.size()), "byte"}});
     }
     std::ofstream out {std::string(path)};
     if (!out) {
-        return detail::failed_void(
+        return io_failed_void(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
-            "AXMJSON 导出失败：无法打开输出文件", "AXMJSON 导出失败");
+            "AXMJSON 导出失败：无法打开输出文件", "AXMJSON 导出失败",
+            {body_id.value}, "io.export.axmjson.open",
+            {{"path_length", static_cast<Scalar>(path.size()), "byte"}});
     }
     const auto body_it = state_->bodies.find(body_id.value);
     const auto& body = body_it->second;
     write_axmjson_payload(out, body, options, "AXMJSON");
+    out.flush();
+    out.close();
+    if (!out) {
+        return io_failed_void(
+            *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+            "AXMJSON 导出失败：写入输出文件失败", "AXMJSON 导出失败",
+            {body_id.value}, "io.export.axmjson.write",
+            {{"metadata_enabled", options.embed_metadata ? 1.0 : 0.0, "bool"}});
+    }
     return ok_void(state_->create_diagnostic("已导出AXMJSON模型"));
 }
 
 Result<void> IOService::export_iges(BodyId body_id, std::string_view path, const ExportOptions& options) {
     if (!detail::has_body(*state_, body_id) || path.empty()) {
-        return detail::invalid_input_void(
-            *state_, diag_codes::kIoExportFailure,
-            "IGES 导出失败：目标实体不存在或输出路径为空", "IGES 导出失败");
+        return io_failed_void(
+            *state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
+            "IGES 导出失败：目标实体不存在或输出路径为空", "IGES 导出失败",
+            {body_id.value}, "io.export.iges.input",
+            {{"body_exists", detail::has_body(*state_, body_id) ? 1.0 : 0.0, "bool"},
+             {"path_length", static_cast<Scalar>(path.size()), "byte"}});
     }
     const auto ensured = ensure_parent_directory(path);
-    if (ensured.status != StatusCode::Ok) return ensured;
+    if (ensured.status != StatusCode::Ok) {
+        return wrap_io_failed_void(
+            *state_, ensured, diag_codes::kIoExportFailure,
+            "IGES 导出父目录创建失败", "IGES 导出失败", {body_id.value},
+            "io.export.iges.path");
+    }
     const auto wx_iges = reject_if_export_directory_not_writable(*state_, path);
-    if (wx_iges.status != StatusCode::Ok) return wx_iges;
+    if (wx_iges.status != StatusCode::Ok) {
+        return wrap_io_failed_void(
+            *state_, wx_iges, diag_codes::kIoExportFailure,
+            "IGES 导出路径校验失败", "IGES 导出失败", {body_id.value},
+            "io.export.iges.path");
+    }
     std::ofstream out {std::string(path)};
     if (!out) {
-        return detail::failed_void(
+        return io_failed_void(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
-            "IGES 导出失败：无法打开输出文件", "IGES 导出失败");
+            "IGES 导出失败：无法打开输出文件", "IGES 导出失败",
+            {body_id.value}, "io.export.iges.open");
     }
     const auto body_it = state_->bodies.find(body_id.value);
     const auto& body = body_it->second;
@@ -850,37 +773,72 @@ Result<void> IOService::export_iges(BodyId body_id, std::string_view path, const
     }
     out << "S 1\n";
     out << "TERMINATE\n";
+    out.flush();
+    out.close();
+    if (!out) {
+        return io_failed_void(
+            *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+            "IGES 导出失败：写入输出文件失败", "IGES 导出失败",
+            {body_id.value}, "io.export.iges.write",
+            {{"metadata_enabled", options.embed_metadata ? 1.0 : 0.0, "bool"}});
+    }
     return ok_void(state_->create_diagnostic("已导出IGES模型"));
 }
 
 Result<void> IOService::export_brep(BodyId body_id, std::string_view path, const ExportOptions& options) {
     if (!detail::has_body(*state_, body_id) || path.empty()) {
-        return detail::invalid_input_void(
-            *state_, diag_codes::kIoExportFailure,
-            "BREP 导出失败：目标实体不存在或输出路径为空", "BREP 导出失败");
+        return io_failed_void(
+            *state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
+            "BREP 导出失败：目标实体不存在或输出路径为空", "BREP 导出失败",
+            {body_id.value}, "io.export.brep.input",
+            {{"body_exists", detail::has_body(*state_, body_id) ? 1.0 : 0.0, "bool"},
+             {"path_length", static_cast<Scalar>(path.size()), "byte"}});
     }
     const auto ensured = ensure_parent_directory(path);
-    if (ensured.status != StatusCode::Ok) return ensured;
+    if (ensured.status != StatusCode::Ok) {
+        return wrap_io_failed_void(
+            *state_, ensured, diag_codes::kIoExportFailure,
+            "BREP 导出父目录创建失败", "BREP 导出失败", {body_id.value},
+            "io.export.brep.path");
+    }
     const auto wx_brep = reject_if_export_directory_not_writable(*state_, path);
-    if (wx_brep.status != StatusCode::Ok) return wx_brep;
+    if (wx_brep.status != StatusCode::Ok) {
+        return wrap_io_failed_void(
+            *state_, wx_brep, diag_codes::kIoExportFailure,
+            "BREP 导出路径校验失败", "BREP 导出失败", {body_id.value},
+            "io.export.brep.path");
+    }
     std::ofstream out {std::string(path)};
     if (!out) {
-        return detail::failed_void(
+        return io_failed_void(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
-            "BREP 导出失败：无法打开输出文件", "BREP 导出失败");
+            "BREP 导出失败：无法打开输出文件", "BREP 导出失败",
+            {body_id.value}, "io.export.brep.open");
     }
     const auto body_it = state_->bodies.find(body_id.value);
     const auto& body = body_it->second;
     out << "# AXIOM_BREP_INTERCHANGE v1\n";
     write_axmjson_payload(out, body, options, "AXIOM_BREP");
+    out.flush();
+    out.close();
+    if (!out) {
+        return io_failed_void(
+            *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+            "BREP 导出失败：写入输出文件失败", "BREP 导出失败",
+            {body_id.value}, "io.export.brep.write",
+            {{"metadata_enabled", options.embed_metadata ? 1.0 : 0.0, "bool"}});
+    }
     return ok_void(state_->create_diagnostic("已导出BREP模型"));
 }
 
 Result<void> IOService::export_obj(BodyId body_id, std::string_view path, const ExportOptions& options) {
     if (!detail::has_body(*state_, body_id) || path.empty()) {
-        return detail::failed_void(
+        return io_failed_void(
             *state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
-            "OBJ 导出失败：目标实体不存在或输出路径为空", "OBJ 导出失败", {body_id.value}, "io.export.obj.input");
+            "OBJ 导出失败：目标实体不存在或输出路径为空", "OBJ 导出失败", {body_id.value},
+            "io.export.obj.input",
+            {{"body_exists", detail::has_body(*state_, body_id) ? 1.0 : 0.0, "bool"},
+             {"path_length", static_cast<Scalar>(path.size()), "byte"}});
     }
     const auto ensured = ensure_parent_directory(path);
     if (ensured.status != StatusCode::Ok) {
@@ -904,8 +862,9 @@ Result<void> IOService::export_obj(BodyId body_id, std::string_view path, const 
     }
     const auto mesh_it = state_->meshes.find(mesh_id.value->value);
     if (mesh_it == state_->meshes.end()) {
-        return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
-                                   "OBJ 导出失败：网格记录不存在", "OBJ 导出失败", {body_id.value}, "io.export.obj.mesh");
+        return io_failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+                              "OBJ 导出失败：网格记录不存在", "OBJ 导出失败", {body_id.value},
+                              "io.export.obj.mesh", {{"mesh_exists", 0.0, "bool"}});
     }
     const auto& mesh = mesh_it->second;
     if (mesh.vertices.empty() || mesh.indices.empty() || (mesh.indices.size() % 3) != 0 ||
@@ -913,16 +872,20 @@ Result<void> IOService::export_obj(BodyId body_id, std::string_view path, const 
         std::any_of(mesh.vertices.begin(), mesh.vertices.end(), [](const Point3& point) {
             return !std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z);
         })) {
-        return detail::failed_void(*state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
-                                   "OBJ 导出失败：网格数据无效", "OBJ 导出失败", {body_id.value},
-                                   "io.export.obj.mesh");
+        return io_failed_void(
+            *state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
+            "OBJ 导出失败：网格数据无效", "OBJ 导出失败", {body_id.value},
+            "io.export.obj.mesh",
+            {{"vertex_count", static_cast<Scalar>(mesh.vertices.size()), "count"},
+             {"index_count", static_cast<Scalar>(mesh.indices.size()), "count"}});
     }
 
     std::ofstream out {std::string(path)};
     if (!out) {
-        return detail::failed_void(
+        return io_failed_void(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
-            "OBJ 导出失败：无法打开输出文件", "OBJ 导出失败", {body_id.value}, "io.export.obj.open");
+            "OBJ 导出失败：无法打开输出文件", "OBJ 导出失败", {body_id.value},
+            "io.export.obj.open", {{"path_length", static_cast<Scalar>(path.size()), "byte"}});
     }
     out << "# AxiomKernel OBJ\n";
     out << "o axiom_body_" << body_id.value << "\n";
@@ -939,9 +902,12 @@ Result<void> IOService::export_obj(BodyId body_id, std::string_view path, const 
     out.flush();
     out.close();
     if (!out) {
-        return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
-                                   "OBJ 导出失败：写入输出文件失败", "OBJ 导出失败", {body_id.value},
-                                   "io.export.obj.write");
+        return io_failed_void(
+            *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+            "OBJ 导出失败：写入输出文件失败", "OBJ 导出失败", {body_id.value},
+            "io.export.obj.write",
+            {{"vertex_count", static_cast<Scalar>(mesh.vertices.size()), "count"},
+             {"triangle_count", static_cast<Scalar>(mesh.indices.size() / 3), "count"}});
     }
     const auto sidecar = mesh_export_write_validation_sidecar(*state_, convert, *mesh_id.value, path, options);
     if (sidecar.status != StatusCode::Ok) {
@@ -953,9 +919,12 @@ Result<void> IOService::export_obj(BodyId body_id, std::string_view path, const 
 
 Result<void> IOService::export_3mf(BodyId body_id, std::string_view path, const ExportOptions& options) {
     if (!detail::has_body(*state_, body_id) || path.empty()) {
-        return detail::failed_void(
+        return io_failed_void(
             *state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
-            "3MF 导出失败：目标实体不存在或输出路径为空", "3MF 导出失败", {body_id.value}, "io.export.3mf.input");
+            "3MF 导出失败：目标实体不存在或输出路径为空", "3MF 导出失败", {body_id.value},
+            "io.export.3mf.input",
+            {{"body_exists", detail::has_body(*state_, body_id) ? 1.0 : 0.0, "bool"},
+             {"path_length", static_cast<Scalar>(path.size()), "byte"}});
     }
     const auto ensured = ensure_parent_directory(path);
     if (ensured.status != StatusCode::Ok) {
@@ -979,8 +948,9 @@ Result<void> IOService::export_3mf(BodyId body_id, std::string_view path, const 
     }
     const auto mesh_it = state_->meshes.find(mesh_id.value->value);
     if (mesh_it == state_->meshes.end()) {
-        return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
-                                   "3MF 导出失败：网格记录不存在", "3MF 导出失败", {body_id.value}, "io.export.3mf.mesh");
+        return io_failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+                              "3MF 导出失败：网格记录不存在", "3MF 导出失败", {body_id.value},
+                              "io.export.3mf.mesh", {{"mesh_exists", 0.0, "bool"}});
     }
     const auto& mesh = mesh_it->second;
     if (mesh.vertices.empty() || mesh.indices.empty() || (mesh.indices.size() % 3) != 0 ||
@@ -988,9 +958,12 @@ Result<void> IOService::export_3mf(BodyId body_id, std::string_view path, const 
         std::any_of(mesh.vertices.begin(), mesh.vertices.end(), [](const Point3& point) {
             return !std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z);
         })) {
-        return detail::failed_void(*state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
-                                   "3MF 导出失败：网格数据无效", "3MF 导出失败", {body_id.value},
-                                   "io.export.3mf.mesh");
+        return io_failed_void(
+            *state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
+            "3MF 导出失败：网格数据无效", "3MF 导出失败", {body_id.value},
+            "io.export.3mf.mesh",
+            {{"vertex_count", static_cast<Scalar>(mesh.vertices.size()), "count"},
+             {"index_count", static_cast<Scalar>(mesh.indices.size()), "count"}});
     }
 
     const std::string model_xml = build_3mf_model_xml_from_mesh(mesh);
@@ -1018,18 +991,21 @@ Result<void> IOService::export_3mf(BodyId body_id, std::string_view path, const 
     const std::vector<std::uint8_t> zip_bytes = build_zip_store_archive(pack);
     std::ofstream out {std::string(path), std::ios::binary};
     if (!out) {
-        return detail::failed_void(
+        return io_failed_void(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
-            "3MF 导出失败：无法打开输出文件", "3MF 导出失败", {body_id.value}, "io.export.3mf.open");
+            "3MF 导出失败：无法打开输出文件", "3MF 导出失败", {body_id.value},
+            "io.export.3mf.open", {{"archive_byte_count", static_cast<Scalar>(zip_bytes.size()), "byte"}});
     }
     out.write(reinterpret_cast<const char*>(zip_bytes.data()),
               static_cast<std::streamsize>(zip_bytes.size()));
     out.flush();
     out.close();
     if (!out) {
-        return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
-                                   "3MF 导出失败：写入输出文件失败", "3MF 导出失败", {body_id.value},
-                                   "io.export.3mf.write");
+        return io_failed_void(
+            *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+            "3MF 导出失败：写入输出文件失败", "3MF 导出失败", {body_id.value},
+            "io.export.3mf.write",
+            {{"archive_byte_count", static_cast<Scalar>(zip_bytes.size()), "byte"}});
     }
     const auto sidecar = mesh_export_write_validation_sidecar(*state_, convert, *mesh_id.value, path, options);
     if (sidecar.status != StatusCode::Ok) {
@@ -1041,9 +1017,12 @@ Result<void> IOService::export_3mf(BodyId body_id, std::string_view path, const 
 
 Result<void> IOService::export_gltf(BodyId body_id, std::string_view path, const ExportOptions& options) {
     if (!detail::has_body(*state_, body_id) || path.empty()) {
-        return detail::failed_void(
+        return io_failed_void(
             *state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
-            "glTF 导出失败：目标实体不存在或输出路径为空", "glTF 导出失败", {body_id.value}, "io.export.gltf.input");
+            "glTF 导出失败：目标实体不存在或输出路径为空", "glTF 导出失败", {body_id.value},
+            "io.export.gltf.input",
+            {{"body_exists", detail::has_body(*state_, body_id) ? 1.0 : 0.0, "bool"},
+             {"path_length", static_cast<Scalar>(path.size()), "byte"}});
     }
     const auto ensured = ensure_parent_directory(path);
     if (ensured.status != StatusCode::Ok) {
@@ -1068,8 +1047,9 @@ Result<void> IOService::export_gltf(BodyId body_id, std::string_view path, const
 
     const auto mesh_it = state_->meshes.find(mesh_id.value->value);
     if (mesh_it == state_->meshes.end()) {
-        return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
-                                   "glTF 导出失败：网格记录不存在", "glTF 导出失败", {body_id.value}, "io.export.gltf.mesh");
+        return io_failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+                              "glTF 导出失败：网格记录不存在", "glTF 导出失败", {body_id.value},
+                              "io.export.gltf.mesh", {{"mesh_exists", 0.0, "bool"}});
     }
     const auto& mesh = mesh_it->second;
     if (mesh.vertices.empty() || mesh.indices.empty() || (mesh.indices.size() % 3) != 0 ||
@@ -1077,9 +1057,12 @@ Result<void> IOService::export_gltf(BodyId body_id, std::string_view path, const
         std::any_of(mesh.vertices.begin(), mesh.vertices.end(), [](const Point3& point) {
             return !std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z);
         })) {
-        return detail::failed_void(*state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
-                                   "glTF 导出失败：网格数据无效", "glTF 导出失败", {body_id.value},
-                                   "io.export.gltf.mesh");
+        return io_failed_void(
+            *state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
+            "glTF 导出失败：网格数据无效", "glTF 导出失败", {body_id.value},
+            "io.export.gltf.mesh",
+            {{"vertex_count", static_cast<Scalar>(mesh.vertices.size()), "count"},
+             {"index_count", static_cast<Scalar>(mesh.indices.size()), "count"}});
     }
 
     const auto float_limit = static_cast<Scalar>(std::numeric_limits<float>::max());
@@ -1087,9 +1070,12 @@ Result<void> IOService::export_gltf(BodyId body_id, std::string_view path, const
             return std::abs(point.x) > float_limit || std::abs(point.y) > float_limit ||
                    std::abs(point.z) > float_limit;
         })) {
-        return detail::failed_void(*state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
-                                   "glTF 导出失败：坐标超出 float32 范围", "glTF 导出失败", {body_id.value},
-                                   "io.export.gltf.mesh");
+        return io_failed_void(
+            *state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
+            "glTF 导出失败：坐标超出 float32 范围", "glTF 导出失败", {body_id.value},
+            "io.export.gltf.mesh",
+            {{"float32_max", float_limit, "model_unit"},
+             {"vertex_count", static_cast<Scalar>(mesh.vertices.size()), "count"}});
     }
 
     std::vector<std::uint8_t> buffer;
@@ -1126,9 +1112,10 @@ Result<void> IOService::export_gltf(BodyId body_id, std::string_view path, const
 
     std::ofstream out {std::string(path)};
     if (!out) {
-        return detail::failed_void(
+        return io_failed_void(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
-            "glTF 导出失败：无法打开输出文件", "glTF 导出失败", {body_id.value}, "io.export.gltf.open");
+            "glTF 导出失败：无法打开输出文件", "glTF 导出失败", {body_id.value},
+            "io.export.gltf.open", {{"buffer_byte_count", static_cast<Scalar>(buffer.size()), "byte"}});
     }
 
     const auto vertex_count = static_cast<std::uint64_t>(mesh.vertices.size());
@@ -1157,9 +1144,13 @@ Result<void> IOService::export_gltf(BodyId body_id, std::string_view path, const
     out.flush();
     out.close();
     if (!out) {
-        return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
-                                   "glTF 导出失败：写入输出文件失败", "glTF 导出失败", {body_id.value},
-                                   "io.export.gltf.write");
+        return io_failed_void(
+            *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+            "glTF 导出失败：写入输出文件失败", "glTF 导出失败", {body_id.value},
+            "io.export.gltf.write",
+            {{"buffer_byte_count", static_cast<Scalar>(buffer.size()), "byte"},
+             {"vertex_count", static_cast<Scalar>(vertex_count), "count"},
+             {"index_count", static_cast<Scalar>(index_count), "count"}});
     }
     const auto sidecar = mesh_export_write_validation_sidecar(*state_, convert, *mesh_id.value, path, options);
     if (sidecar.status != StatusCode::Ok) {
@@ -1171,9 +1162,12 @@ Result<void> IOService::export_gltf(BodyId body_id, std::string_view path, const
 
 Result<void> IOService::export_stl(BodyId body_id, std::string_view path, const ExportOptions& options) {
     if (!detail::has_body(*state_, body_id) || path.empty()) {
-        return detail::failed_void(
+        return io_failed_void(
             *state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
-            "STL 导出失败：目标实体不存在或输出路径为空", "STL 导出失败", {body_id.value}, "io.export.stl.input");
+            "STL 导出失败：目标实体不存在或输出路径为空", "STL 导出失败", {body_id.value},
+            "io.export.stl.input",
+            {{"body_exists", detail::has_body(*state_, body_id) ? 1.0 : 0.0, "bool"},
+             {"path_length", static_cast<Scalar>(path.size()), "byte"}});
     }
     const auto ensured = ensure_parent_directory(path);
     if (ensured.status != StatusCode::Ok) {
@@ -1197,8 +1191,9 @@ Result<void> IOService::export_stl(BodyId body_id, std::string_view path, const 
     }
     const auto mesh_it = state_->meshes.find(mesh_id.value->value);
     if (mesh_it == state_->meshes.end()) {
-        return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
-                                   "STL 导出失败：网格记录不存在", "STL 导出失败", {body_id.value}, "io.export.stl.mesh");
+        return io_failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+                              "STL 导出失败：网格记录不存在", "STL 导出失败", {body_id.value},
+                              "io.export.stl.mesh", {{"mesh_exists", 0.0, "bool"}});
     }
     const auto& mesh = mesh_it->second;
     if (mesh.vertices.empty() || mesh.indices.empty() || (mesh.indices.size() % 3) != 0 ||
@@ -1206,16 +1201,20 @@ Result<void> IOService::export_stl(BodyId body_id, std::string_view path, const 
         std::any_of(mesh.vertices.begin(), mesh.vertices.end(), [](const Point3& point) {
             return !std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z);
         })) {
-        return detail::failed_void(*state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
-                                   "STL 导出失败：网格数据无效", "STL 导出失败", {body_id.value},
-                                   "io.export.stl.mesh");
+        return io_failed_void(
+            *state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
+            "STL 导出失败：网格数据无效", "STL 导出失败", {body_id.value},
+            "io.export.stl.mesh",
+            {{"vertex_count", static_cast<Scalar>(mesh.vertices.size()), "count"},
+             {"index_count", static_cast<Scalar>(mesh.indices.size()), "count"}});
     }
 
     std::ofstream out {std::string(path)};
     if (!out) {
-        return detail::failed_void(
+        return io_failed_void(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
-            "STL 导出失败：无法打开输出文件", "STL 导出失败", {body_id.value}, "io.export.stl.open");
+            "STL 导出失败：无法打开输出文件", "STL 导出失败", {body_id.value},
+            "io.export.stl.open", {{"triangle_count", static_cast<Scalar>(mesh.indices.size() / 3), "count"}});
     }
 
     out << "solid axiom\n";
@@ -1243,9 +1242,11 @@ Result<void> IOService::export_stl(BodyId body_id, std::string_view path, const 
     out.flush();
     out.close();
     if (!out) {
-        return detail::failed_void(*state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
-                                   "STL 导出失败：写入输出文件失败", "STL 导出失败", {body_id.value},
-                                   "io.export.stl.write");
+        return io_failed_void(
+            *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+            "STL 导出失败：写入输出文件失败", "STL 导出失败", {body_id.value},
+            "io.export.stl.write",
+            {{"triangle_count", static_cast<Scalar>(mesh.indices.size() / 3), "count"}});
     }
     const auto sidecar = mesh_export_write_validation_sidecar(*state_, convert, *mesh_id.value, path, options);
     if (sidecar.status != StatusCode::Ok) {

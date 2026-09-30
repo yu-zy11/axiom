@@ -413,6 +413,203 @@ Issue with_related_entities(Issue issue, std::initializer_list<std::uint64_t> re
     return issue;
 }
 
+std::vector<NumericEvidence> heal_failure_evidence(
+    StatusCode status, std::size_t related_entity_count,
+    std::vector<NumericEvidence> evidence = {}) {
+    const auto before_filter = evidence.size();
+    evidence.erase(std::remove_if(evidence.begin(), evidence.end(),
+                                  [](const NumericEvidence& item) {
+                                      return item.name.empty() || !std::isfinite(item.value);
+                                  }),
+                   evidence.end());
+    const auto dropped = before_filter - evidence.size();
+    if (dropped != 0) {
+        evidence.push_back(NumericEvidence {
+            "non_finite_evidence_omitted", static_cast<Scalar>(dropped), "count"});
+    }
+    evidence.insert(evidence.begin(),
+                    NumericEvidence {"related_entity_count",
+                                     static_cast<Scalar>(related_entity_count), "count"});
+    evidence.insert(evidence.begin(),
+                    NumericEvidence {"status_code", static_cast<Scalar>(status), "enum"});
+    return evidence;
+}
+
+Issue make_heal_failure_issue(std::string_view code, std::string message,
+                              std::vector<std::uint64_t> related_entities,
+                              std::string_view stage, StatusCode status,
+                              std::vector<NumericEvidence> evidence = {}) {
+    Issue issue = detail::make_error_issue(code, std::move(message), std::move(related_entities));
+    issue.stage.assign(stage.begin(), stage.end());
+    issue.numeric_evidence =
+        heal_failure_evidence(status, issue.related_entities.size(), std::move(evidence));
+    return issue;
+}
+
+Result<void> heal_failed_void(detail::KernelState& state, StatusCode status,
+                              std::string_view code, std::string message,
+                              std::string summary,
+                              std::vector<std::uint64_t> related_entities,
+                              std::string_view stage,
+                              std::vector<NumericEvidence> evidence = {}) {
+    auto issue = make_heal_failure_issue(code, std::move(message),
+                                         std::move(related_entities), stage, status,
+                                         std::move(evidence));
+    return error_void(status,
+                      state.create_diagnostic(std::move(summary), {std::move(issue)}));
+}
+
+template <typename T>
+Result<T> heal_failed_result(detail::KernelState& state, StatusCode status,
+                             std::string_view code, std::string message,
+                             std::string summary,
+                             std::vector<std::uint64_t> related_entities,
+                             std::string_view stage,
+                             std::vector<NumericEvidence> evidence = {}) {
+    auto issue = make_heal_failure_issue(code, std::move(message),
+                                         std::move(related_entities), stage, status,
+                                         std::move(evidence));
+    return error_result<T>(
+        status, state.create_diagnostic(std::move(summary), {std::move(issue)}));
+}
+
+Result<void> propagate_heal_failure(detail::KernelState& state,
+                                    const Result<void>& child,
+                                    std::string summary,
+                                    std::vector<std::uint64_t> related_entities,
+                                    std::string_view stage,
+                                    std::vector<NumericEvidence> evidence = {}) {
+    std::vector<Issue> issues;
+    const auto child_it = state.diagnostics.find(child.diagnostic_id.value);
+    if (child_it != state.diagnostics.end()) {
+        issues = child_it->second.issues;
+    }
+    if (issues.empty()) {
+        issues.push_back(make_heal_failure_issue(
+            diag_codes::kHealAutoRepairFailure,
+            "HEAL 子流程失败且未提供可传播的问题记录", related_entities,
+            stage, child.status, evidence));
+    } else {
+        for (auto& issue : issues) {
+            if (issue.severity != IssueSeverity::Error &&
+                issue.severity != IssueSeverity::Fatal) {
+                continue;
+            }
+            if (issue.related_entities.empty()) {
+                issue.related_entities = related_entities;
+            }
+            issue.stage.assign(stage.begin(), stage.end());
+            if (issue.numeric_evidence.empty()) {
+                issue.numeric_evidence = heal_failure_evidence(
+                    child.status, issue.related_entities.size(), evidence);
+            }
+        }
+    }
+    return error_void(child.status,
+                      state.create_diagnostic(std::move(summary), std::move(issues)));
+}
+
+template <typename Map>
+void erase_heal_allocations_since(Map& records, std::uint64_t first_allocated_id) {
+    for (auto it = records.begin(); it != records.end();) {
+        if (it->first >= first_allocated_id) {
+            it = records.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+class HealModelMutationRollback {
+public:
+    explicit HealModelMutationRollback(detail::KernelState& state,
+                                       bool snapshot_eval_state = false)
+        : state_(state), first_allocated_id_(state.next_id),
+          snapshot_eval_state_(snapshot_eval_state) {
+        if (snapshot_eval_state_) {
+            original_eval_invalid_ = state.eval_invalid;
+            original_eval_invalidation_bridge_ = state.eval_invalidation_bridge;
+        }
+    }
+
+    HealModelMutationRollback(const HealModelMutationRollback&) = delete;
+    HealModelMutationRollback& operator=(const HealModelMutationRollback&) = delete;
+
+    ~HealModelMutationRollback() {
+        if (committed_) {
+            return;
+        }
+        if (snapshot_eval_state_) {
+            state_.eval_invalid = std::move(original_eval_invalid_);
+            state_.eval_invalidation_bridge = original_eval_invalidation_bridge_;
+        }
+        for (const auto& [coedge_id, pcurve_id] : original_coedge_pcurves_) {
+            const auto it = state_.coedges.find(coedge_id);
+            if (it != state_.coedges.end()) {
+                it->second.pcurve_id = pcurve_id;
+            }
+        }
+        erase_heal_allocations_since(state_.curves, first_allocated_id_);
+        erase_heal_allocations_since(state_.pcurves, first_allocated_id_);
+        erase_heal_allocations_since(state_.surfaces, first_allocated_id_);
+        erase_heal_allocations_since(state_.vertices, first_allocated_id_);
+        erase_heal_allocations_since(state_.edges, first_allocated_id_);
+        erase_heal_allocations_since(state_.coedges, first_allocated_id_);
+        erase_heal_allocations_since(state_.loops, first_allocated_id_);
+        erase_heal_allocations_since(state_.faces, first_allocated_id_);
+        erase_heal_allocations_since(state_.shells, first_allocated_id_);
+        erase_heal_allocations_since(state_.bodies, first_allocated_id_);
+        erase_heal_allocations_since(state_.meshes, first_allocated_id_);
+        erase_heal_allocations_since(state_.intersections, first_allocated_id_);
+        for (auto it = state_.tessellation_cache.begin();
+             it != state_.tessellation_cache.end();) {
+            if (it->second.value >= first_allocated_id_) {
+                it = state_.tessellation_cache.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        for (auto it = state_.face_tessellation_cache.begin();
+             it != state_.face_tessellation_cache.end();) {
+            if (it->second.value >= first_allocated_id_) {
+                it = state_.face_tessellation_cache.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        detail::rebuild_topology_links(state_);
+    }
+
+    [[nodiscard]] std::uint64_t first_allocated_id() const {
+        return first_allocated_id_;
+    }
+
+    void remember_coedge_pcurve(CoedgeId coedge_id) {
+        const auto it = state_.coedges.find(coedge_id.value);
+        if (it == state_.coedges.end()) {
+            return;
+        }
+        const auto already_recorded = std::any_of(
+            original_coedge_pcurves_.begin(), original_coedge_pcurves_.end(),
+            [coedge_id](const auto& entry) { return entry.first == coedge_id.value; });
+        if (!already_recorded) {
+            original_coedge_pcurves_.emplace_back(coedge_id.value,
+                                                  it->second.pcurve_id);
+        }
+    }
+
+    void commit() { committed_ = true; }
+
+private:
+    detail::KernelState& state_;
+    std::uint64_t first_allocated_id_ {};
+    std::vector<std::pair<std::uint64_t, PCurveId>> original_coedge_pcurves_;
+    std::unordered_map<std::uint64_t, bool> original_eval_invalid_;
+    EvalInvalidationBridgeMetrics original_eval_invalidation_bridge_ {};
+    bool snapshot_eval_state_ {false};
+    bool committed_ {false};
+};
+
 Scalar min_extent(const BoundingBox& bbox) {
     return std::min({bbox.max.x - bbox.min.x, bbox.max.y - bbox.min.y, bbox.max.z - bbox.min.z});
 }

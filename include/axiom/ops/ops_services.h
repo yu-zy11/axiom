@@ -40,6 +40,15 @@ public:
     /// at one shared apex (center + unit(direction)*distance); holes and numerical degeneracy are rejected.
     Result<BodyId> extrude_scaled(const ProfileRef& profile, const Vec3& direction, Scalar distance,
                                  const Point3& center, Scalar end_scale);
+    /// Extrude an explicit planar polygon while rotating its section uniformly about the
+    /// extrusion axis. The finite center lies in the profile plane, direction must be normal
+    /// to that plane, distance is positive, and the signed twist is limited to one full turn.
+    /// For inputs satisfying this normal-direction contract, zero twist is equivalent to extrude.
+    /// Positive/negative twists, concavities and disjoint holes are conservatively subdivided into
+    /// an owned triangulated closed BRep. The result is a sampled polyhedron rather than an analytic
+    /// helicoidal surface.
+    Result<BodyId> extrude_twisted(const ProfileRef& profile, const Vec3& direction, Scalar distance,
+                                  const Point3& center, Scalar twist_angle);
     /// Extrude an explicit planar polygon (including concavities/holes) along direction to a plane.
     /// Every boundary point must reach the plane strictly forward, beyond the planarity tolerance.
     /// Direction must be transverse to both planes; normal sign and vector magnitudes are immaterial.

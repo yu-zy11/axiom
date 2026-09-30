@@ -148,20 +148,43 @@ Result<std::string> IOService::first_writable_path(std::span<const std::string> 
 }
 
 Result<std::uint64_t> IOService::export_auto_existing_only(std::span<const BodyId> body_ids, std::span<const std::string> paths, const ExportOptions& options) {
-    if (body_ids.size() != paths.size()) return detail::invalid_input_result<std::uint64_t>(*state_, diag_codes::kIoExportFailure, "条件导出失败：输入数量不一致", "条件导出失败");
+    if (body_ids.size() != paths.size()) {
+        return error_result<std::uint64_t>(
+            StatusCode::InvalidInput,
+            create_io_failure_diagnostic(
+                *state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
+                "条件导出失败：输入数量不一致", "条件导出失败", {0},
+                "io.batch_export.input",
+                {{"body_count", static_cast<Scalar>(body_ids.size()), "count"},
+                 {"path_count", static_cast<Scalar>(paths.size()), "count"}}));
+    }
     std::uint64_t exported = 0;
     for (std::size_t i = 0; i < paths.size(); ++i) {
         if (!std::filesystem::exists(std::filesystem::path(paths[i]).parent_path())) continue;
         const auto r = export_auto(body_ids[i], paths[i], options);
-        if (r.status == StatusCode::Ok) ++exported;
+        if (r.status != StatusCode::Ok) {
+            return error_result<std::uint64_t>(
+                r.status, merge_batch_export_failure_diagnostic(
+                              *state_, "条件自动", i, body_ids[i], paths[i],
+                              r.diagnostic_id));
+        }
+        ++exported;
     }
     return ok_result<std::uint64_t>(exported, state_->create_diagnostic("已完成条件自动导出"));
 }
 
 Result<std::vector<BodyId>> IOService::import_auto_existing_strict(std::span<const std::string> paths, const ImportOptions& options) {
-    for (const auto& p : paths) {
-        if (!std::filesystem::exists(p)) {
-            return detail::failed_result<std::vector<BodyId>>(*state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure, "严格导入失败：包含不存在路径", "严格导入失败");
+    for (std::size_t i = 0; i < paths.size(); ++i) {
+        if (!std::filesystem::exists(paths[i])) {
+            return error_result<std::vector<BodyId>>(
+                StatusCode::OperationFailed,
+                create_io_failure_diagnostic(
+                    *state_, StatusCode::OperationFailed,
+                    diag_codes::kIoImportFailure,
+                    "严格导入失败：包含不存在路径", "严格导入失败",
+                    {static_cast<std::uint64_t>(i)}, "io.batch_import.path",
+                    {{"failed_item_index", static_cast<Scalar>(i), "index"},
+                     {"path_count", static_cast<Scalar>(paths.size()), "count"}}));
         }
     }
     return import_many_auto(paths, options);
@@ -175,4 +198,3 @@ Result<std::vector<std::string>> IOService::summarize_format_histogram_txt(std::
     for (const auto& kv : *counts.value) out.push_back(kv.first + ": " + std::to_string(kv.second));
     return ok_result(std::move(out), state_->create_diagnostic("已汇总格式直方文本"));
 }
-

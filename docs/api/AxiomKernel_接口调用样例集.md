@@ -353,6 +353,28 @@ auto to_plane_mass = kernel.query().mass_properties(*to_plane.value);
 
 该入口支持凹多边形和孔，方向缩放及目标法向反号不改变几何。目标面必须在每条顶点射线的严格前方；切向、反向、接触/交叉平面或近退化输入返回 `InvalidInput / AXM-CORE-E-0002`，不留下部分实体。
 
+### 扭转拉伸（cycle-0073，已通过完整门禁）
+
+```cpp
+ProfileRef twisted_profile;
+twisted_profile.label = "twisted_plate";
+twisted_profile.polygon_xyz = {{-2,-1,0}, {2,-1,0}, {2,1,0}, {-2,1,0}};
+twisted_profile.holes_xyz = {{{-0.5,-0.4,0}, {0.5,-0.4,0},
+                             {0.5,0.4,0}, {-0.5,0.4,0}}};
+constexpr Scalar pi = 3.14159265358979323846;
+auto twisted = kernel.sweeps().extrude_twisted(
+    twisted_profile, Vec3{0,0,5}, 8.0, Point3{0,0,0}, -pi / 2);
+if (twisted.value) {
+  auto valid = kernel.validate().validate_all(*twisted.value, ValidationMode::Strict);
+  use_if_valid(valid);
+} else {
+  auto report = kernel.diagnostics().get(twisted.diagnostic_id);
+  handle_query_error(report);
+}
+```
+
+方向按单位化使用，必须垂直于轮廓平面；中心须在该平面内，距离为有限正数。支持凸/凹外环、非嵌套分离孔洞和任意空间朝向，扭角以弧度表示，正负部分角及正负整周均可，限于一周。沿方向按右手规则扭转，零扭角在该法向合同下兼容 `extrude`。角站差不超过 7.5°，站间侧壁交替对角线剖分以避免系统性体积偏差。结果为有真实共享拓扑的采样多面体 BRep，质量属性来自该多面体；不是解析螺旋面，未与变比例或至平面拉伸组合。非法中心/方向/扭角或退化轮廓在模型分配前以 `InvalidInput / AXM-CORE-E-0002` 拒绝。
+
 ## 6.2 旋转
 
 ```cpp
@@ -625,6 +647,44 @@ if (imported.status == StatusCode::Ok) {
 }
 ```
 
+### 批量导入失败、后验诊断与原位重试
+
+```cpp
+ImportOptions batch_opts;
+batch_opts.run_validation = true;
+batch_opts.auto_repair = true;
+std::vector<std::string> paths = {"/data/part.axmjson", "/data/missing.axmjson"};
+auto imported_batch = kernel.io().import_many_axmjson(paths, batch_opts);
+if (!imported_batch.value) {
+  auto report = kernel.diagnostics().get(imported_batch.diagnostic_id);
+  // io.batch_import 记录从零开始的失败项索引、失败前完成数量和路径字节长度。
+  // 本批新分配的模型/网格/拓扑/几何及 next_id 已恢复，可修复输入后原位重试。
+  handle_query_error(report);
+} else {
+  for (BodyId body : *imported_batch.value) {
+    auto valid = kernel.validate().validate_all(body, ValidationMode::Standard);
+    use_if_valid(valid);
+  }
+}
+```
+
+`import_many_step` 和 `import_many_auto` 具有相同模型存储原子性；单项实际失败触发整批回滚，诊断证据仍保留。STEP/AXMJSON 的后验验证、自动修复及修复后复验问题复制为 `io.post_import.validation/repair/post_validate`，保留有限数值证据且不改源 HEAL 报告。导入后验证或修复问题可能随成功导入报告返回，`Ok` 本身不保证有效体，须读取诊断或显式验证。批量导出不回滚已写文件，普通文本/目录辅助接口尚未纳入本批证据门禁。
+
+### HEAL 修复失败与批量原子性
+
+```cpp
+std::vector<BodyId> inputs = {body_id, BodyId{0}};
+auto repaired_batch = kernel.repair().repair_many_remove_small_faces(
+    inputs, 0.01, RepairMode::Aggressive);
+if (!repaired_batch.value) {
+  auto report = kernel.diagnostics().get(repaired_batch.diagnostic_id);
+  // 后项失败时，前项派生对象和 Eval 失效状态也回滚。
+  handle_query_error(report);
+}
+```
+
+单项修改型修复后验失败会回收本次物化对象；`repair_many_auto/remove_small_edges/remove_small_faces/merge_near_coplanar_faces` 均不泄漏半成功结果。`repair_face_trim_pcurves(face_id, RepairMode::Safe)` 支持 Plane/Cylinder/Sphere，重建或后验失败恢复原 coedge PCurve 绑定并回收新增 PCurve。失败报告使用 `heal.*` 阶段、实体与有限数值证据，不扩大现有修复规则或曲面支持范围。HEAL 回滚不恢复 `next_id`，重试不保证复用被回收对象的 ID；批量子项根因保留在原诊断，返回的批量报告记录失败目标与回滚上下文。
+
 ## 12. 三角化样例
 
 ## 12.1 实体转网格
@@ -823,7 +883,17 @@ if (!audit.value || !audit.value->passed()) {
 }
 ```
 
-重复 `DiagnosticId` 只审计一次；未匹配到目标 issue 的报告也会使门禁失败。`max_findings` 只截断明细，遗漏数由 `omitted_findings` 记录，统计总数保持完整。当前系统化覆盖门禁已接入 BOOL 的受支持失败分支；HEAL/IO 尚待迁移。
+重复 `DiagnosticId` 只审计一次；未匹配到目标 issue 的报告也会使门禁失败。`max_findings` 只截断明细，遗漏数由 `omitted_findings` 记录，统计总数保持完整。BOOL 受支持失败分支和 cycle-0073 的 HEAL/IO 重量级包均已接入模块门禁。对 HEAL 与 IO 应使用 `issue_code_prefix="AXM-"`，因为根因也会复用 CORE/VAL/TOPO 等码，并分别设置 `stage_prefix="heal."` 或 `"io."`：
+
+```cpp
+policy.issue_code_prefix = "AXM-";
+policy.stage_prefix = "heal.";
+auto heal_audit = kernel.diagnostics().audit_evidence(heal_failure_ids, policy);
+policy.stage_prefix = "io.";
+auto io_audit = kernel.diagnostics().audit_evidence(io_failure_ids, policy);
+```
+
+`heal_failure_ids/io_failure_ids` 分别收集目标工作流的失败诊断 ID。IO 预物化失败用 `[0]` 明确表示尚无内核实体，不能把令牌当成有效句柄。证据至少含有限的 `status_code/related_entity_count`，按分支另附阈值、模式、计数或路径长度；非有限测量值过滤后以 `non_finite_evidence_omitted` 计数。审计检查结构完整性，不证明算法正确或格式工业完备；普通文本/目录辅助接口仍在本批范围外。
 
 ## 15. Python绑定样例
 

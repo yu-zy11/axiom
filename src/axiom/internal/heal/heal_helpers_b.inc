@@ -231,14 +231,19 @@ Result<void> strict_owned_brep_mesh_self_intersection_with_builder(
     };
     auto si_first = run_si(tess_opts);
     if (si_first.first == detail::MeshSelfIntersectionStatus::InvalidMesh) {
-        return detail::failed_void(*state, StatusCode::DegenerateGeometry, diag_codes::kTesFailure,
-                                   std::string(fail_title) + "：分析网格无效或索引越界", std::string(fail_title),
-                                   std::move(related_entities), failure_stage);
+        return heal_failed_void(*state, StatusCode::DegenerateGeometry, diag_codes::kTesFailure,
+                                std::string(fail_title) + "：分析网格无效或索引越界", std::string(fail_title),
+                                std::move(related_entities), failure_stage,
+                                {{"linear_tolerance", rlin, "model_unit"},
+                                 {"chordal_error", tess_opts.chordal_error, "model_unit"},
+                                 {"triangle_budget", static_cast<Scalar>(k_self_intersection_max_tris), "count"}});
     }
     if (si_first.first == detail::MeshSelfIntersectionStatus::TooManyTriangles) {
-        return detail::failed_void(*state, StatusCode::OperationFailed, diag_codes::kValSelfIntersectionMeshBudget,
-                                   std::string(fail_title) + "：三角化三角形数量超过检测预算", std::string(fail_title),
-                                   std::move(related_entities), failure_stage);
+        return heal_failed_void(*state, StatusCode::OperationFailed, diag_codes::kValSelfIntersectionMeshBudget,
+                                std::string(fail_title) + "：三角化三角形数量超过检测预算", std::string(fail_title),
+                                std::move(related_entities), failure_stage,
+                                {{"triangle_budget", static_cast<Scalar>(k_self_intersection_max_tris), "count"},
+                                 {"chordal_error", tess_opts.chordal_error, "model_unit"}});
     }
     if (si_first.first == detail::MeshSelfIntersectionStatus::Hit) {
         TessellationOptions coarse = tess_opts;
@@ -259,15 +264,21 @@ Result<void> strict_owned_brep_mesh_self_intersection_with_builder(
             if (!extra_hit_suffix.empty()) {
                 msg.append(extra_hit_suffix.data(), extra_hit_suffix.size());
             }
-            return detail::failed_void(*state, StatusCode::OperationFailed, diag_codes::kValSelfIntersection,
-                                       std::move(msg), std::string(fail_title), std::move(related_entities),
-                                       failure_stage);
+            return heal_failed_void(*state, StatusCode::OperationFailed, diag_codes::kValSelfIntersection,
+                                    std::move(msg), std::string(fail_title), std::move(related_entities),
+                                    failure_stage,
+                                    {{"triangle_a", static_cast<Scalar>(si_second.second.first), "index"},
+                                     {"triangle_b", static_cast<Scalar>(si_second.second.second), "index"},
+                                     {"retry_chordal_error", coarse.chordal_error, "model_unit"}});
         }
         if (si_second.first == detail::MeshSelfIntersectionStatus::InvalidMesh ||
             si_second.first == detail::MeshSelfIntersectionStatus::TooManyTriangles) {
-            return detail::failed_void(*state, StatusCode::OperationFailed, diag_codes::kValSelfIntersection,
-                                       std::string(fail_title) + "：粗化重试后仍无法完成自交分析", std::string(fail_title),
-                                       std::move(related_entities), failure_stage);
+            return heal_failed_void(*state, StatusCode::OperationFailed, diag_codes::kValSelfIntersection,
+                                    std::string(fail_title) + "：粗化重试后仍无法完成自交分析", std::string(fail_title),
+                                    std::move(related_entities), failure_stage,
+                                    {{"retry_status", static_cast<Scalar>(si_second.first), "enum"},
+                                     {"retry_chordal_error", coarse.chordal_error, "model_unit"},
+                                     {"triangle_budget", static_cast<Scalar>(k_self_intersection_max_tris), "count"}});
         }
     }
     return ok_void(state->create_diagnostic(std::string(ok_summary)));

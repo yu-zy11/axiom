@@ -32,6 +32,114 @@ using namespace io_internal;
 
 namespace {
 
+template <typename Map>
+void erase_io_allocations_since(Map& records, std::uint64_t first_id) {
+    for (auto it = records.begin(); it != records.end();) {
+        if (it->first >= first_id) {
+            it = records.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+// Batch imports can invoke validation and auto-repair, so their transaction
+// boundary covers every model store and derived cache touched by that pipeline.
+class IOImportBatchRollback {
+public:
+    explicit IOImportBatchRollback(detail::KernelState& state)
+        : state_(state), first_id_(state.next_id),
+          edge_to_coedges_(state.edge_to_coedges),
+          coedge_to_loop_(state.coedge_to_loop),
+          loop_to_faces_(state.loop_to_faces),
+          face_to_shells_(state.face_to_shells),
+          shell_to_bodies_(state.shell_to_bodies),
+          tessellation_cache_(state.tessellation_cache),
+          face_tessellation_cache_(state.face_tessellation_cache),
+          tessellation_cache_stats_(state.tessellation_cache_stats),
+          curve_eval_cache_(state.curve_eval_cache),
+          surface_eval_cache_(state.surface_eval_cache),
+          eval_invalid_(state.eval_invalid),
+          eval_invalidation_bridge_(state.eval_invalidation_bridge) {}
+
+    IOImportBatchRollback(const IOImportBatchRollback&) = delete;
+    IOImportBatchRollback& operator=(const IOImportBatchRollback&) = delete;
+
+    ~IOImportBatchRollback() {
+        if (committed_) {
+            return;
+        }
+        erase_io_allocations_since(state_.curves, first_id_);
+        erase_io_allocations_since(state_.pcurves, first_id_);
+        erase_io_allocations_since(state_.surfaces, first_id_);
+        erase_io_allocations_since(state_.vertices, first_id_);
+        erase_io_allocations_since(state_.edges, first_id_);
+        erase_io_allocations_since(state_.coedges, first_id_);
+        erase_io_allocations_since(state_.loops, first_id_);
+        erase_io_allocations_since(state_.faces, first_id_);
+        erase_io_allocations_since(state_.shells, first_id_);
+        erase_io_allocations_since(state_.bodies, first_id_);
+        erase_io_allocations_since(state_.meshes, first_id_);
+        erase_io_allocations_since(state_.intersections, first_id_);
+        state_.edge_to_coedges = std::move(edge_to_coedges_);
+        state_.coedge_to_loop = std::move(coedge_to_loop_);
+        state_.loop_to_faces = std::move(loop_to_faces_);
+        state_.face_to_shells = std::move(face_to_shells_);
+        state_.shell_to_bodies = std::move(shell_to_bodies_);
+        state_.tessellation_cache = std::move(tessellation_cache_);
+        state_.face_tessellation_cache = std::move(face_tessellation_cache_);
+        state_.tessellation_cache_stats = tessellation_cache_stats_;
+        state_.curve_eval_cache = std::move(curve_eval_cache_);
+        state_.surface_eval_cache = std::move(surface_eval_cache_);
+        state_.eval_invalid = std::move(eval_invalid_);
+        state_.eval_invalidation_bridge = eval_invalidation_bridge_;
+        state_.next_id = first_id_;
+    }
+
+    void commit() { committed_ = true; }
+
+private:
+    detail::KernelState& state_;
+    std::uint64_t first_id_ {};
+    std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> edge_to_coedges_;
+    std::unordered_map<std::uint64_t, std::uint64_t> coedge_to_loop_;
+    std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> loop_to_faces_;
+    std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> face_to_shells_;
+    std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> shell_to_bodies_;
+    std::unordered_map<std::string, MeshId> tessellation_cache_;
+    std::unordered_map<std::string, MeshId> face_tessellation_cache_;
+    TessellationCacheStats tessellation_cache_stats_ {};
+    std::unordered_map<std::string, CurveEvalResult> curve_eval_cache_;
+    std::unordered_map<std::string, SurfaceEvalResult> surface_eval_cache_;
+    std::unordered_map<std::uint64_t, bool> eval_invalid_;
+    EvalInvalidationBridgeMetrics eval_invalidation_bridge_ {};
+    bool committed_ {false};
+};
+
+Result<void> io_failed_void(
+    detail::KernelState& state, StatusCode status, std::string_view code,
+    std::string message, std::string summary,
+    std::vector<std::uint64_t> related_entities, std::string_view stage,
+    std::vector<NumericEvidence> evidence = {}) {
+    return error_void(
+        status, create_io_failure_diagnostic(
+                    state, status, code, std::move(message), std::move(summary),
+                    std::move(related_entities), stage, std::move(evidence)));
+}
+
+Result<void> wrap_io_failed_void(
+    detail::KernelState& state, const Result<void>& child,
+    std::string_view code, std::string message, std::string summary,
+    std::vector<std::uint64_t> related_entities, std::string_view stage,
+    std::vector<NumericEvidence> evidence = {}) {
+    return error_void(
+        child.status,
+        wrap_io_failure_diagnostic(
+            state, child.status, child.diagnostic_id, code, std::move(message),
+            std::move(summary), std::move(related_entities), stage,
+            std::move(evidence)));
+}
+
 // Only meshes and tessellation caches are written by export conversion. Keep
 // existing embedded/cached meshes; discard this call's allocations on failure.
 struct MeshExportRollback {
@@ -59,26 +167,23 @@ struct MeshExportRollback {
 
 Result<void> bind_mesh_export_failure(detail::KernelState& state, Result<void> result,
                                       BodyId body_id, std::string_view stage) {
-    const auto it = state.diagnostics.find(result.diagnostic_id.value);
-    if (it != state.diagnostics.end()) {
-        for (auto& issue : it->second.issues) {
-            issue.stage = std::string(stage);
-            if (std::find(issue.related_entities.begin(), issue.related_entities.end(), body_id.value) ==
-                issue.related_entities.end()) {
-                issue.related_entities.push_back(body_id.value);
-            }
-        }
-    }
-    return result;
+    return error_void(
+        result.status,
+        wrap_io_failure_diagnostic(
+            state, result.status, result.diagnostic_id,
+            diag_codes::kIoExportFailure,
+            "网格导出子流程失败且未提供可传播的问题记录",
+            "网格导出失败", {body_id.value}, stage,
+            {{"body_id", static_cast<Scalar>(body_id.value), "id"}}));
 }
 
 Result<BodyId> exact_brep_import_failure(detail::KernelState& state, StatusCode status,
                                          std::string_view code, std::string message,
                                          std::string summary, std::string_view stage) {
-    auto issue = detail::make_error_issue(code, std::move(message));
-    issue.stage = std::string(stage);
-    return error_result<BodyId>(status,
-                                state.create_diagnostic(std::move(summary), {std::move(issue)}));
+    return error_result<BodyId>(
+        status, create_io_failure_diagnostic(
+                    state, status, code, std::move(message), std::move(summary),
+                    {0}, stage, {{"materialized_body_count", 0.0, "count"}}));
 }
 
 std::optional<Result<BodyId>> reject_invalid_exact_brep_record(

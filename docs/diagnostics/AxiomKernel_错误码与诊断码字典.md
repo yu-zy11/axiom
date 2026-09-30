@@ -196,6 +196,8 @@
 - `参数超出允许范围`
 - `请求的对象不存在于当前版本中`
 
+第 73 批 `SweepService::extrude_twisted` 同样复用 `AXM-CORE-E-0002 / InvalidInput`：缺失显式轮廓/标签、非有限参数、非正距离、无效或非垂直方向、中心离开轮廓平面、扭角超出正负一周，以及轮廓/孔洞/采样侧壁数值退化均在模型分配前拒绝。正负部分角、正负整周和满足法向合同的零扭角均支持；该码不表示解析螺旋面已实现。
+
 ## 7.2 `MATH` 数学与谓词错误码
 
 | 错误码 | 严重级别 | 含义 |
@@ -352,7 +354,7 @@
 | `AXM-IO-E-0001` | Error | 文件不存在（如 `IOService::validate_import_path` 校验时目标路径不存在） |
 | `AXM-IO-E-0002` | Error | 文件格式无法识别 |
 | `AXM-IO-E-0003` | Error | 文件内容损坏；第 70 批 AXMJSON/Axiom IGES 元数据/Axiom BREP JSON 子集的截断结构、缺失必需字段、错误 `format`、不支持的 `body_kind` 或缺失 BREP 文件头均绑定 `io.import.<format>.parse` |
-| `AXM-IO-E-0004` | Error | 导入失败；STEP 早期失败绑定 `io.import.step.input/path/open`；OBJ 物化前失败绑定 `io.import.obj.input/path/open/parse`；STL、glTF 与 3MF 物化前失败分别绑定 `io.import.stl.*`、`io.import.gltf.*`、`io.import.3mf.*` 的 `input/path/open/read/parse/validation` 阶段。第 70 批为 AXMJSON/Axiom IGES 元数据/Axiom BREP JSON 子集补齐 `io.import.<format>.input/path/open/read`：非普通文件在读取前拒绝，超过 64 MiB 或短读归入 `.read`。OBJ/STL/glTF/3MF 退化三角形复用 `AXM-VAL-E-0002` 与各自的 `.validation` 阶段。3MF 非有限顶点在 `.validation` 阶段复用本码，非法数值及索引溢出在 `.parse` 阶段复用本码；物化前无模型实体可关联。 |
+| `AXM-IO-E-0004` | Error | 导入失败；STEP 早期失败绑定 `io.import.step.input/path/open`；OBJ 物化前失败绑定 `io.import.obj.input/path/open/parse`；STL、glTF 与 3MF 物化前失败分别绑定 `io.import.stl.*`、`io.import.gltf.*`、`io.import.3mf.*` 的 `input/path/open/read/parse/validation` 阶段。第 70 批为 AXMJSON/Axiom IGES 元数据/Axiom BREP JSON 子集补齐 `io.import.<format>.input/path/open/read`：非普通文件在读取前拒绝，超过 64 MiB 或短读归入 `.read`。OBJ/STL/glTF/3MF 退化三角形复用 `AXM-VAL-E-0002` 与各自的 `.validation` 阶段。3MF 非有限顶点在 `.validation` 阶段复用本码，非法数值及索引溢出在 `.parse` 阶段复用本码；物化前无模型实体，cycle-0073 起显式关联零实体令牌。 |
 | `AXM-IO-E-0005` | Error | 导出失败 |
 | `AXM-IO-E-0006` | Error | 严格网格导出 QA 失败（越界索引、退化三角形或检查不可用；`Issue.stage=io.export.mesh_strict_qa`，关联输入 Body） |
 | `AXM-IO-E-0007` | Warning | 导入后存在未映射属性 |
@@ -360,6 +362,24 @@
 | `AXM-IO-E-0009` | Error | 导出目标目录不可写（`kIoExportPathNotWritable`，默认 `Issue.stage=io.export.path`；STEP/OBJ/STL/glTF/3MF 导出使用各自 `io.export.<format>.path`） |
 | `AXM-IO-E-0010` | Error | 检测到标准 STEP 物理文件 DATA 段含 EXPRESS 实例，非 Axiom 子集；完整交换未实现（`kIoStepStandardEntitiesUnsupported`，`Issue.stage=io.import.step`） |
 | `AXM-IO-E-0011` | Error | 检测到典型 IGES 卡片/DE 流，非 Axiom 子集；完整交换未实现（`kIgesStandardEntitiesUnsupported`，`Issue.stage=io.import.iges`） |
+
+### cycle-0073 HEAL/IO 重量级失败证据合同（已通过门禁）
+
+本批未新增错误码常量，复用 CORE/TOPO/VAL/HEAL/IO 的既有根因码。`Issue.stage` 是定位流程的标签，不是新的错误码；复制子报告时保留根因码和实体，不修改源诊断。
+
+| 工作流 | 阶段与证据 | 一致性及限制 |
+|---|---|---|
+| HEAL 验证 | `heal.validate_geometry.*`、`heal.validate_topology.*`、`heal.validate_self_intersection.*`、`heal.validate_tolerance.*` 及聚合验证；关联 Body/Shell/问题子实体 | 有限状态、实体数量及分支模式/计数/几何量，不扩大验证算法范围 |
+| HEAL 修复 | `heal.sew_faces/remove_small_edges/remove_small_faces/merge_near_coplanar_faces/auto_repair.*`；后验失败为相应 `.post_validate` | 失败回收本次派生体与物化对象，保留原模型和失败证据 |
+| Trim 重建 | `heal.repair_trim.input/surface/loop/rebuild/post_validate`；关联 Face/Surface/Loop 等 | Plane/Cylinder/Sphere；重建或复验失败恢复原 PCurve 绑定、删除新增 PCurve |
+| 批量修复 | `heal.repair_many_*.input/rollback`，关联失败子项目标；回滚记录 `completed_item_count/requested_item_count/rollback_applied`；`repair_many_auto` 另附 `allocated_object_count`（分配 ID 增量） | 任一子项失败回滚此前全部派生对象和 Eval 失效状态；子项根因保留在原诊断，批量报告不合并全部子项 issue；不恢复 `next_id` |
+| 主格式 IO 与 auto | `io.import.<format>.*`、`io.export.<format>.*`、auto 路由阶段；有限状态、实体数量及分支路径/计数证据 | STEP/AXMJSON/IGES/BREP/OBJ/STL/glTF/3MF；导出关联输入 Body，预物化文件失败显式使用 `[0]` 令牌 |
+| 导入后验管线 | `io.post_import.validation/repair/post_validate`；复制 HEAL 问题，附验证/修复模式 | STEP/AXMJSON 接入共享管线；失败 issue 可随 `Ok` 导入结果返回，调用者须读取报告或显式验证 |
+| 批量导入/导出 | `io.batch_import/io.batch_export`；保留根因及 `failed_item_index`（从零开始）、`completed_item_count`、`path_length`（byte） | STEP/AXMJSON/auto 批量导入实际失败恢复模型/网格/拓扑/几何、链接、缓存、Eval 失效及 `next_id`；批量导出不承诺文件回滚 |
+
+失败数值证据至少含 `status_code`（enum）与 `related_entity_count`（count）。空名称或非有限测量值被过滤；过滤数量非零时记录有限的 `non_finite_evidence_omitted`（count），避免将 NaN/Inf 冒充有效证据。零实体令牌说明尚无模型对象或无有效目标，不可用于句柄查询。候选导入、严格现有文件导入、目录导出及条件导出传播真实失败；AXMJSON/IGES/BREP 导出补齐 `input/path/open/write` 与最终流检查。
+
+`axiom_heal_test`、`axiom_io_workflow_test` 用 `issue_code_prefix="AXM-"` 与 `stage_prefix="heal."/"io."` 审计 Error 及以上 issue，并覆盖 JSON 数值证据、源报告不污染和回滚重试；cycle-0073 修复后完整 CTest **16/16 通过**。普通文本/目录工具等非主格式辅助接口尚未纳入该重量级包。标准 STEP/IGES 实体交换限制不变，IGES 仍按 `NotImplemented / AXM-IO-E-0011` 拒绝；设备或侧车写入失败不保证恢复目标文件。
 
 ## 7.12 `TES` 三角化错误码
 

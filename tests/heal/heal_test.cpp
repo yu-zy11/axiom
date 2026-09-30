@@ -56,9 +56,167 @@ bool has_related_entity(const axiom::Issue& issue, std::uint64_t entity) {
            issue.related_entities.end();
 }
 
+bool check_heal_failure_evidence_and_rollback() {
+    axiom::Kernel kernel;
+    const auto box = kernel.primitives().box({0.0, 0.0, 0.0}, 10.0, 10.0, 10.0);
+    if (box.status != axiom::StatusCode::Ok || !box.value.has_value()) return false;
+
+    std::vector<axiom::DiagnosticId> failure_diagnostics;
+    const auto record_failure = [&](const auto& result) {
+        if (result.status == axiom::StatusCode::Ok || result.diagnostic_id.value == 0) return false;
+        failure_diagnostics.push_back(result.diagnostic_id);
+        return true;
+    };
+
+    const axiom::BodyId missing_body {900000001};
+    if (!record_failure(kernel.validate().validate_geometry(missing_body, axiom::ValidationMode::Strict)) ||
+        !record_failure(kernel.validate().validate_topology(missing_body, axiom::ValidationMode::Strict)) ||
+        !record_failure(kernel.validate().validate_manifold(missing_body, axiom::ValidationMode::Strict)) ||
+        !record_failure(kernel.validate().validate_self_intersection(missing_body,
+                                                                      axiom::ValidationMode::Strict)) ||
+        !record_failure(kernel.validate().validate_bbox(missing_body)) ||
+        !record_failure(kernel.repair().remove_small_edges(missing_body, 0.1,
+                                                            axiom::RepairMode::Safe)) ||
+        !record_failure(kernel.repair().remove_small_faces(*box.value, 0.0,
+                                                            axiom::RepairMode::Safe)) ||
+        !record_failure(kernel.repair().merge_near_coplanar_faces(
+            *box.value, 0.0, axiom::RepairMode::Safe)) ||
+        !record_failure(kernel.repair().repair_face_trim_pcurves(
+            axiom::FaceId {900000002}, axiom::RepairMode::Safe))) {
+        return false;
+    }
+
+    const std::span<const axiom::BodyId> no_bodies;
+    const std::span<const axiom::FaceId> no_faces;
+    if (!record_failure(kernel.validate().validate_geometry_many(
+            no_bodies, axiom::ValidationMode::Standard)) ||
+        !record_failure(kernel.validate().validate_topology_many(
+            no_bodies, axiom::ValidationMode::Standard)) ||
+        !record_failure(kernel.validate().validate_all_many(
+            no_bodies, axiom::ValidationMode::Standard)) ||
+        !record_failure(kernel.validate().validate_tolerance_many(
+            no_bodies, axiom::ValidationMode::Standard)) ||
+        !record_failure(kernel.validate().validate_bbox_many(no_bodies)) ||
+        !record_failure(kernel.repair().sew_faces(no_faces, 1e-6,
+                                                   axiom::RepairMode::Safe)) ||
+        !record_failure(kernel.repair().repair_many_auto(
+            no_bodies, axiom::RepairMode::Safe))) {
+        return false;
+    }
+
+    const auto objects_before_single_rollback = kernel.object_count_total();
+    const auto bodies_before_single_rollback = kernel.body_count();
+    const auto rejected_large_edge = kernel.repair().remove_small_edges(
+        *box.value, 1000.0, axiom::RepairMode::Safe);
+    const auto objects_after_single_rollback = kernel.object_count_total();
+    const auto bodies_after_single_rollback = kernel.body_count();
+    if (!record_failure(rejected_large_edge) ||
+        !objects_before_single_rollback.value || !objects_after_single_rollback.value ||
+        !bodies_before_single_rollback.value || !bodies_after_single_rollback.value ||
+        *objects_before_single_rollback.value != *objects_after_single_rollback.value ||
+        *bodies_before_single_rollback.value != *bodies_after_single_rollback.value) {
+        return false;
+    }
+
+    const std::array<axiom::BodyId, 2> batch_with_late_failure {*box.value, missing_body};
+    const auto objects_before_batch_rollback = kernel.object_count_total();
+    const auto bodies_before_batch_rollback = kernel.body_count();
+    const auto rejected_batch = kernel.repair().repair_many_remove_small_faces(
+        batch_with_late_failure, 0.01, axiom::RepairMode::Aggressive);
+    const auto objects_after_batch_rollback = kernel.object_count_total();
+    const auto bodies_after_batch_rollback = kernel.body_count();
+    if (!record_failure(rejected_batch) ||
+        !objects_before_batch_rollback.value || !objects_after_batch_rollback.value ||
+        !bodies_before_batch_rollback.value || !bodies_after_batch_rollback.value ||
+        *objects_before_batch_rollback.value != *objects_after_batch_rollback.value ||
+        *bodies_before_batch_rollback.value != *bodies_after_batch_rollback.value) {
+        return false;
+    }
+
+    axiom::DiagnosticEvidencePolicy policy;
+    policy.issue_code_prefix = "AXM-";
+    policy.stage_prefix = "heal.";
+    const auto first_before = kernel.diagnostics().get(failure_diagnostics.front());
+    const auto audit = kernel.diagnostics().audit_evidence(failure_diagnostics, policy);
+    if (!first_before.value || audit.status != axiom::StatusCode::Ok || !audit.value ||
+        !audit.value->passed() || audit.value->reports_inspected != failure_diagnostics.size() ||
+        audit.value->matching_issues != audit.value->complete_issues ||
+        audit.value->matching_issues < failure_diagnostics.size() || !audit.value->findings.empty()) {
+        return false;
+    }
+
+    const auto report_path = std::filesystem::temp_directory_path() /
+                             "axiom_heal_failure_evidence_report.json";
+    if (kernel.diagnostics().export_report_json(
+            failure_diagnostics.front(), report_path.string()).status != axiom::StatusCode::Ok) {
+        return false;
+    }
+    std::ifstream report_in {report_path};
+    const std::string report_json((std::istreambuf_iterator<char>(report_in)),
+                                  std::istreambuf_iterator<char>());
+    report_in.close();
+    std::error_code remove_error;
+    std::filesystem::remove(report_path, remove_error);
+    if (report_json.find("\"stage\":\"heal.") == std::string::npos ||
+        report_json.find("\"numeric_evidence\":[") == std::string::npos ||
+        report_json.find("\"name\":\"status_code\"") == std::string::npos) {
+        return false;
+    }
+
+    const auto audit_path = std::filesystem::temp_directory_path() /
+                            "axiom_heal_failure_evidence_audit.json";
+    if (kernel.diagnostics().export_evidence_audit_json(
+            failure_diagnostics, policy, audit_path.string()).status != axiom::StatusCode::Ok) {
+        return false;
+    }
+    std::ifstream audit_in {audit_path};
+    const std::string audit_json((std::istreambuf_iterator<char>(audit_in)),
+                                 std::istreambuf_iterator<char>());
+    audit_in.close();
+    std::filesystem::remove(audit_path, remove_error);
+    const auto first_after = kernel.diagnostics().get(failure_diagnostics.front());
+    if (audit_json.find("\"passed\":true") == std::string::npos ||
+        audit_json.find("\"issues_missing_numeric_evidence\":0") == std::string::npos ||
+        !first_after.value || first_after.value->issues.size() != first_before.value->issues.size() ||
+        first_after.value->issues.front().numeric_evidence.size() !=
+            first_before.value->issues.front().numeric_evidence.size()) {
+        return false;
+    }
+
+    axiom::KernelConfig invalid_tolerance_config;
+    invalid_tolerance_config.tolerance.linear = 0.0;
+    axiom::Kernel invalid_tolerance_kernel {invalid_tolerance_config};
+    const auto invalid_tol_box = invalid_tolerance_kernel.primitives().box(
+        {0.0, 0.0, 0.0}, 2.0, 2.0, 2.0);
+    if (!invalid_tol_box.value) return false;
+    const auto invalid_tol_objects_before = invalid_tolerance_kernel.object_count_total();
+    const auto invalid_tol_bodies_before = invalid_tolerance_kernel.body_count();
+    const auto rejected_auto = invalid_tolerance_kernel.repair().auto_repair(
+        *invalid_tol_box.value, axiom::RepairMode::Aggressive);
+    const auto invalid_tol_objects_after = invalid_tolerance_kernel.object_count_total();
+    const auto invalid_tol_bodies_after = invalid_tolerance_kernel.body_count();
+    if (rejected_auto.status != axiom::StatusCode::OperationFailed ||
+        !invalid_tol_objects_before.value || !invalid_tol_objects_after.value ||
+        !invalid_tol_bodies_before.value || !invalid_tol_bodies_after.value ||
+        *invalid_tol_objects_before.value != *invalid_tol_objects_after.value ||
+        *invalid_tol_bodies_before.value != *invalid_tol_bodies_after.value) {
+        return false;
+    }
+    const std::array<axiom::DiagnosticId, 1> auto_failure_ids {rejected_auto.diagnostic_id};
+    const auto auto_audit = invalid_tolerance_kernel.diagnostics().audit_evidence(
+        auto_failure_ids, policy);
+    return auto_audit.value && auto_audit.value->passed() &&
+           auto_audit.value->matching_issues == auto_audit.value->complete_issues &&
+           auto_audit.value->matching_issues >= 2;
+}
+
 }  // namespace
 
 int main() {
+    if (!check_heal_failure_evidence_and_rollback()) {
+        std::cerr << "HEAL failure evidence audit or rollback regression\n";
+        return 1;
+    }
     axiom::Kernel kernel;
 
     const auto bodies_before_invalid_validation = kernel.body_count();

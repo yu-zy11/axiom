@@ -1616,7 +1616,7 @@ inline bool triangulate_extrude_region(const std::vector<Point3>& outer,
            std::abs(cap_area - expected_area) <= area_tol * points.size();
 }
 
-/// 简单平面多边形（可凹、可带孔）直线/至平面拉伸、等比变截面拉伸或折线平移扫掠：三角端盖 + 平面侧壁。
+/// 简单平面多边形（可凹、可带孔）直线/至平面/扭转拉伸、等比变截面拉伸或折线平移扫掠：三角端盖 + 平面侧壁。
 /// 所有可失败检查在对象分配前完成，禁止失败时留下部分拓扑。
 inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRecord& record) {
     if (record.kind != BodyKind::Sweep || record.rep_kind != RepKind::ExactBRep || !record.bbox.is_valid ||
@@ -1687,6 +1687,30 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
                 return !std::isfinite(value) || !(value > 0.0);
             }) || std::abs(station_scales.front() - 1.0) > 1e-12) return false;
     }
+    std::vector<Scalar> station_angles(offsets.size(), 0.0);
+    const bool twisted_stations = !record.sweep_station_angles.empty();
+    if (twisted_stations) {
+        constexpr Scalar kMaxStationAngle = 3.1415926535897932384626433832795 / 24.0;
+        if (record.sweep_station_offsets.empty() || record.sweep_station_angles.size() != offsets.size() ||
+            scaled_stations || record.extrude_end_plane.has_value() || record.extrude_end_scale != 1.0 ||
+            std::abs(dot(n_unit, D)) < 1.0 - 1e-10 ||
+            !std::isfinite(record.extrude_scale_center.x) ||
+            !std::isfinite(record.extrude_scale_center.y) ||
+            !std::isfinite(record.extrude_scale_center.z) ||
+            std::abs(dot(n_unit, subtract(record.extrude_scale_center, p0r))) > plane_tol) return false;
+        station_angles = record.sweep_station_angles;
+        if (std::abs(station_angles.front()) > 1e-12 ||
+            std::any_of(station_angles.begin(), station_angles.end(), [](Scalar value) {
+                return !std::isfinite(value);
+            })) return false;
+        const Scalar direction = station_angles.back() < 0.0 ? -1.0 : 1.0;
+        if (station_angles.back() == 0.0 ||
+            std::abs(station_angles.back()) > 2.0 * 3.1415926535897932384626433832795 + 1e-10) return false;
+        for (std::size_t k = 1; k < station_angles.size(); ++k) {
+            const Scalar step = station_angles[k] - station_angles[k - 1];
+            if (step * direction <= 0.0 || std::abs(step) > kMaxStationAngle + 1e-12) return false;
+        }
+    }
     const Scalar sign = dot(n_unit, D) < 0.0 ? -1.0 : 1.0;
     for (std::size_t k = 1; k < offsets.size(); ++k) {
         const Vec3 step {offsets[k].x - offsets[k-1].x, offsets[k].y - offsets[k-1].y,
@@ -1718,13 +1742,24 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
         if (plane_direction * sign < 0.0) end_normal = scale(end_normal, -1.0);
     }
     const Scalar final_scale = scaled_stations ? station_scales.back() : end_scale;
+    const auto station_point = [&](const Point3& p, std::size_t station) {
+        const Scalar section_scale = scaled_stations ? station_scales[station] :
+            (station == 0 ? 1.0 : end_scale);
+        Point3 section_point = section_scale == 1.0 ? p : add_point_vec(
+            record.extrude_scale_center, scale(subtract(p, record.extrude_scale_center), section_scale));
+        if (twisted_stations) {
+            const Scalar angle = station_angles[station];
+            section_point = rodrigues_rotate_point_revolve(
+                section_point, record.extrude_scale_center, D, std::cos(angle), std::sin(angle));
+        }
+        return add_point_vec(section_point, offsets[station]);
+    };
     const auto end_point = [&](const Point3& p) {
         if (to_plane) {
             const auto& plane = *record.extrude_end_plane;
             return add_point_vec(p, scale(D, dot(plane.normal, subtract(plane.origin, p)) / plane_direction));
         }
-        return add_point_vec(add_point_vec(record.extrude_scale_center,
-            scale(subtract(p, record.extrude_scale_center), final_scale)), offsets.back());
+        return station_point(p, offsets.size() - 1);
     };
     std::vector<Point3> pos;
     pos.reserve(base.size() * offsets.size());
@@ -1748,10 +1783,7 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
                 pos.push_back(top);
                 continue;
             }
-            const Scalar section_scale = scaled_stations ? station_scales[k] : (k == 0 ? 1.0 : end_scale);
-            const auto section_point = section_scale == 1.0 ? p : add_point_vec(
-                record.extrude_scale_center, scale(subtract(p, record.extrude_scale_center), section_scale));
-            pos.push_back(add_point_vec(section_point, offsets[k]));
+            pos.push_back(station_point(p, k));
         }
     }
 
@@ -1766,6 +1798,11 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
         for (const auto& [i, j] : boundary) {
             if (apex) {
                 tris.push_back({i, j, n});
+            } else if (twisted_stations && k % 2 != 0) {
+                // Alternating the ruled-quad diagonal prevents a consistent
+                // first-order volume bias over a sampled helicoidal wall.
+                tris.push_back({lo + i, lo + j, hi + i});
+                tris.push_back({lo + j, hi + j, hi + i});
             } else {
                 tris.push_back({lo + i, lo + j, hi + j});
                 tris.push_back({lo + i, hi + j, hi + i});
@@ -1779,7 +1816,7 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
     for (const auto& p : pos) {
         if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) return false;
     }
-    if (!record.sweep_station_offsets.empty() || end_scale != 1.0 || scaled_stations || to_plane) {
+    if (!record.sweep_station_offsets.empty() || end_scale != 1.0 || scaled_stations || twisted_stations || to_plane) {
         // Check the actual rounded coordinates too: sections (including a final
         // apex) must retain their order, even for planarity within tolerance.
         Scalar previous_max = -std::numeric_limits<Scalar>::infinity();
@@ -1796,7 +1833,7 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
             previous_max = high;
         }
     }
-    if ((final_scale != 1.0 && !apex) || to_plane) {
+    if ((final_scale != 1.0 && !apex) || twisted_stations || to_plane) {
         // In exact arithmetic a positive homothety preserves the entire planar
         // region. Recheck rounded end coordinates to reject collapsed gaps/edges
         // at extreme scales or world offsets, before allocating model objects.
