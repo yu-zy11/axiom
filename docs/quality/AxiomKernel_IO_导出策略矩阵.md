@@ -22,19 +22,19 @@
 
 | `ImportOptions` | 与导出的关系 |
 |-----------------|-------------|
-| `run_validation` | 导入后 `validate_all`；失败进入诊断与可选 `auto_repair`。 |
+| `run_validation` | 导入后 `validate_all(Standard)`；失败进入诊断与可选 `auto_repair`。主格式共享管线可返回 `Ok` 和 Body，同时携带后验失败 issue；调用者须读取诊断或显式验证。 |
 | `auto_repair` | 仅在验证失败且为真时触发修复管线；与导出策略独立。 |
 
 ## 4. 回归入口
 
-- `axiom_io_workflow_test`：主链路 + 非法路径 + 批处理失败诊断；第 64 包新增四种网格格式与严格/兼容、侧车开关组合，失败诊断检索/JSON、缓存与模型不污染、设备写入失败、重试及重新导入（待统一验收）。
+- `axiom_io_workflow_test`：主链路 + 非法路径 + 批处理失败诊断；第 64 包四种网格格式与严格/兼容、侧车开关组合，失败诊断检索/JSON、缓存与模型不污染、设备写入失败、重试及重新导入已纳入第 68 批完整门禁。cycle-0073 又补齐主格式有限数值证据与模块 `audit_evidence`，修复后完整 CTest **16/16 通过、0 失败、126.44 s**（本测试 13.45 s），见 [门禁日志](../../.axiom-agent/logs/cycle-0073-gates.log)；本次文档同步未重跑测试。
 - `axiom_io_dataset_test`：`tests/data/io` 最小 STEP/OBJ 数据集 + STL 策略组合烟测。
 
 ## 5. 刻意不覆盖（避免误解）
 
 - 标准 **STEP/AP203/AP214 全实体**、**通用工业 3MF/OBJ** 读写不在本矩阵承诺范围内；当前为 **Axiom 子集 + 渐进鲁棒性**。
 
-## 6. 网格导出失败合同（第 64 包，待统一验收）
+## 6. 网格导出失败合同（第 64 包，已通过完整门禁）
 
 四种网格格式以 `io.export.<format>.` 为前缀（`format` 为 `obj/stl/gltf/3mf`）：
 
@@ -48,7 +48,7 @@
 | `write` | 主文件写入、刷新或关闭失败，`OperationFailed / AXM-IO-E-0005` |
 | `sidecar` | 主文件成功关闭后，网格报告侧车写出失败，保留下层错误码 |
 
-严格 QA 仍使用 `AXM-IO-E-0006 / io.export.mesh_strict_qa`，所有失败关联输入 Body；不改变现有错误码含义或公开签名。
+严格 QA 仍使用 `AXM-IO-E-0006 / io.export.mesh_strict_qa`，所有失败关联输入 Body；不改变现有错误码含义或公开签名。cycle-0073 的 Error 及以上失败 issue 补齐有限 `status_code/related_entity_count` 与分支证据，非有限测量值过滤并计入 `non_finite_evidence_omitted`；审计使用 `issue_code_prefix="AXM-"` 和 `stage_prefix="io."`，覆盖复用下层根因码的失败。
 
 失败保留输入模型、已有网格、实体 ID 及三角化缓存/统计；成功仍保留转换缓存。回滚范围仅为本次导出的三角化状态，诊断报告保留以供检索。输入、转换和网格校验失败不创建或截断主文件；主文件失败不尝试写侧车。输出文件不具有原子替换保证：设备失败可能留下部分文件，侧车失败时主文件可能已经完整写出，调用仍返回失败；调用方可修复路径后重试。
 

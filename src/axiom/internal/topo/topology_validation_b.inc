@@ -594,6 +594,8 @@ TopologyValidationService::validate_body_topology_indices(BodyId body_id) const 
     return ok_void(state_->create_diagnostic("体索引验证跳过（无拓扑面）"));
   }
   std::unordered_set<std::uint64_t> loop_ids;
+  std::unordered_map<std::uint64_t, std::unordered_set<std::uint64_t>> loop_owner_faces;
+  loop_owner_faces.reserve(face_ids.size());
   for (const auto face_value : face_ids) {
     const auto fit = state_->faces.find(face_value);
     if (fit == state_->faces.end()) {
@@ -603,12 +605,16 @@ TopologyValidationService::validate_body_topology_indices(BodyId body_id) const 
           {body_id.value, face_value});
     }
     loop_ids.insert(fit->second.outer_loop.value);
+    loop_owner_faces[fit->second.outer_loop.value].insert(face_value);
     for (const auto inner : fit->second.inner_loops) {
       loop_ids.insert(inner.value);
+      loop_owner_faces[inner.value].insert(face_value);
     }
   }
   std::unordered_set<std::uint64_t> coedge_ids;
   std::unordered_set<std::uint64_t> edge_ids;
+  std::unordered_map<std::uint64_t, std::unordered_set<std::uint64_t>> edge_body_coedges;
+  edge_body_coedges.reserve(loop_ids.size());
   for (const auto loop_value : loop_ids) {
     const auto lit = state_->loops.find(loop_value);
     if (lit == state_->loops.end()) {
@@ -635,18 +641,12 @@ TopologyValidationService::validate_body_topology_indices(BodyId body_id) const 
             {coedge_id.value, loop_value});
       }
       edge_ids.insert(cit->second.edge_id.value);
+      edge_body_coedges[cit->second.edge_id.value].insert(coedge_id.value);
     }
   }
   for (const auto loop_value : loop_ids) {
-    std::uint64_t owner_face = 0;
-    unsigned owner_count = 0;
-    for (const auto face_value : face_ids) {
-      const auto& fr = state_->faces.at(face_value);
-      if (face_record_references_loop(fr, loop_value)) {
-        ++owner_count;
-        owner_face = face_value;
-      }
-    }
+    const auto owner_it = loop_owner_faces.find(loop_value);
+    const std::size_t owner_count = owner_it == loop_owner_faces.end() ? 0U : owner_it->second.size();
     if (owner_count != 1U) {
       return detail::failed_void(
           *state_, StatusCode::InvalidTopology,
@@ -655,6 +655,7 @@ TopologyValidationService::validate_body_topology_indices(BodyId body_id) const 
           "体索引验证失败：环在体的面集合中缺少唯一所属面", "体索引验证失败",
           {body_id.value, loop_value});
     }
+    const std::uint64_t owner_face = *owner_it->second.begin();
     const auto ltf = state_->loop_to_faces.find(loop_value);
     if (ltf == state_->loop_to_faces.end() || ltf->second.empty()) {
       return detail::failed_void(
@@ -705,12 +706,15 @@ TopologyValidationService::validate_body_topology_indices(BodyId body_id) const 
             {edge_value, co_value});
       }
     }
-    for (const auto co_value : coedge_ids) {
-      const auto cit = state_->coedges.find(co_value);
-      if (cit == state_->coedges.end() ||
-          cit->second.edge_id.value != edge_value) {
-        continue;
-      }
+    const auto body_coedges = edge_body_coedges.find(edge_value);
+    if (body_coedges == edge_body_coedges.end()) {
+      return detail::failed_void(
+          *state_, StatusCode::InvalidTopology,
+          diag_codes::kTopoRelationInconsistent,
+          "体索引验证失败：体的边缺少正向定向边成员", "体索引验证失败",
+          {edge_value, body_id.value});
+    }
+    for (const auto co_value : body_coedges->second) {
       if (rev_seen.count(co_value) == 0U) {
         return detail::failed_void(
             *state_, StatusCode::InvalidTopology,
@@ -721,18 +725,13 @@ TopologyValidationService::validate_body_topology_indices(BodyId body_id) const 
     }
   }
   // Shell ↔ face_to_shells: every (body shell, face) membership must appear in reverse index.
-  for (const auto face_value : face_ids) {
-    for (const auto shell_id : body_it->second.shells) {
-      const auto shell_it = state_->shells.find(shell_id.value);
-      if (shell_it == state_->shells.end()) {
-        continue;
-      }
-      const bool shell_has_face = std::any_of(
-          shell_it->second.faces.begin(), shell_it->second.faces.end(),
-          [face_value](FaceId fid) { return fid.value == face_value; });
-      if (!shell_has_face) {
-        continue;
-      }
+  for (const auto shell_id : body_it->second.shells) {
+    const auto shell_it = state_->shells.find(shell_id.value);
+    if (shell_it == state_->shells.end()) {
+      continue;
+    }
+    for (const auto face_id : shell_it->second.faces) {
+      const auto face_value = face_id.value;
       const auto fts_it = state_->face_to_shells.find(face_value);
       if (fts_it == state_->face_to_shells.end()) {
         return detail::failed_void(

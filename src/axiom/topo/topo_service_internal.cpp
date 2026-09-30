@@ -376,8 +376,8 @@ face_cross_loop_coincident_vertices(const detail::KernelState &state,
   return std::nullopt;
 }
 
-std::optional<FaceBoundaryConflict> face_cross_loop_boundary_conflict(
-    const detail::KernelState &state, LoopId outer_loop,
+FaceBoundaryConflictSearchResult face_cross_loop_boundary_conflict(
+    detail::KernelState &state, LoopId outer_loop,
     std::span<const LoopId> inner_loops, Scalar linear_tolerance) {
   using WidePoint = std::array<long double, 3>;
   struct Segment {
@@ -388,7 +388,6 @@ std::optional<FaceBoundaryConflict> face_cross_loop_boundary_conflict(
     bool start_is_edge_endpoint {true};
     bool end_is_edge_endpoint {true};
   };
-  std::vector<Segment> seen;
   const auto subtract = [](const WidePoint &a, const WidePoint &b) {
     return WidePoint{a[0] - b[0], a[1] - b[1], a[2] - b[2]};
   };
@@ -537,7 +536,7 @@ std::optional<FaceBoundaryConflict> face_cross_loop_boundary_conflict(
                                      ? FaceBoundaryConflictKind::EndpointTouch
                                      : FaceBoundaryConflictKind::ProperIntersection),
               first.loop, second.loop, first.edge, second.edge,
-              to_point3(point), to_point3(point), 0.0};
+              to_point3(point), to_point3(point), 0.0, false, 0.0, 0, 0};
         }
       }
     }
@@ -569,13 +568,15 @@ std::optional<FaceBoundaryConflict> face_cross_loop_boundary_conflict(
           endpoint ? FaceBoundaryConflictKind::EndpointTouch
                    : FaceBoundaryConflictKind::ProperIntersection,
           first.loop, second.loop, first.edge, second.edge,
-          to_point3(closest.first_point), to_point3(closest.second_point), 0.0};
+          to_point3(closest.first_point), to_point3(closest.second_point), 0.0,
+          false, 0.0, 0, 0};
     }
     if (distance <= static_cast<long double>(linear_tolerance)) {
       return FaceBoundaryConflict{
           FaceBoundaryConflictKind::NearContact, first.loop, second.loop,
           first.edge, second.edge, to_point3(closest.first_point),
-          to_point3(closest.second_point), static_cast<Scalar>(distance)};
+          to_point3(closest.second_point), static_cast<Scalar>(distance), false,
+          0.0, 0, 0};
     }
     return std::nullopt;
   };
@@ -663,6 +664,17 @@ std::optional<FaceBoundaryConflict> face_cross_loop_boundary_conflict(
     return true;
   };
 
+  struct BoundaryEdge {
+    LoopId loop;
+    EdgeId edge;
+    CurveId curve;
+    Range1D interval;
+    bool has_solver_interval {false};
+    bool entirely_linear {false};
+    std::vector<Segment> segments;
+  };
+  std::vector<BoundaryEdge> boundary_edges;
+
   for (std::size_t i = 0; i <= inner_loops.size(); ++i) {
     const auto loop_id = i == 0 ? outer_loop : inner_loops[i - 1];
     const auto loop_it = state.loops.find(loop_id.value);
@@ -683,36 +695,214 @@ std::optional<FaceBoundaryConflict> face_cross_loop_boundary_conflict(
       if (!std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(a.z) ||
           !std::isfinite(b.x) || !std::isfinite(b.y) || !std::isfinite(b.z))
         continue;
+      BoundaryEdge boundary{loop_id, edge_id, edge_it->second.curve_id};
       std::vector<LinearPiece> pieces;
       if (curve_it->second.kind == detail::CurveKind::Line ||
           curve_it->second.kind == detail::CurveKind::LineSegment) {
         pieces.push_back({a, b});
-      } else if (!edge_it->second.has_parameter_interval ||
-                 !append_linear_curve_pieces(
-                     append_linear_curve_pieces, edge_it->second.curve_id,
-                     edge_it->second.start_parameter,
-                     edge_it->second.end_parameter, pieces, 0)) {
-        continue;
+        boundary.entirely_linear = true;
+      } else if (edge_it->second.has_parameter_interval) {
+        boundary.entirely_linear = append_linear_curve_pieces(
+            append_linear_curve_pieces, edge_it->second.curve_id,
+            edge_it->second.start_parameter, edge_it->second.end_parameter,
+            pieces, 0);
       }
+
+      if (edge_it->second.has_parameter_interval) {
+        boundary.interval = {
+            std::min(edge_it->second.start_parameter,
+                     edge_it->second.end_parameter),
+            std::max(edge_it->second.start_parameter,
+                     edge_it->second.end_parameter)};
+        boundary.has_solver_interval = true;
+      } else if (curve_it->second.kind == detail::CurveKind::LineSegment) {
+        boundary.interval = {0.0, 1.0};
+        boundary.has_solver_interval = true;
+      } else if (curve_it->second.kind == detail::CurveKind::Line) {
+        const auto &origin = curve_it->second.origin;
+        const auto &direction = curve_it->second.direction;
+        const auto parameter = [&](const Point3 &point) {
+          return (point.x - origin.x) * direction.x +
+                 (point.y - origin.y) * direction.y +
+                 (point.z - origin.z) * direction.z;
+        };
+        const Scalar first_parameter = parameter(a);
+        const Scalar second_parameter = parameter(b);
+        boundary.interval = {std::min(first_parameter, second_parameter),
+                             std::max(first_parameter, second_parameter)};
+        Point3 evaluated_first{};
+        Point3 evaluated_second{};
+        boundary.has_solver_interval =
+            std::isfinite(first_parameter) && std::isfinite(second_parameter) &&
+            geo_internal::evaluate_curve_point_no_cache(
+                state, boundary.curve, first_parameter, evaluated_first) &&
+            geo_internal::evaluate_curve_point_no_cache(
+                state, boundary.curve, second_parameter, evaluated_second);
+      }
+
       for (std::size_t piece_index = 0; piece_index < pieces.size();
            ++piece_index) {
         const auto &piece = pieces[piece_index];
-        const Segment current{
+        boundary.segments.push_back(Segment{
             loop_id, edge_id,
             {piece.start.x, piece.start.y, piece.start.z},
             {piece.end.x, piece.end.y, piece.end.z},
-            piece_index == 0, piece_index + 1 == pieces.size()};
-        for (const auto &prior : seen) {
-          if (prior.loop.value == loop_id.value) continue;
-          if (auto conflict = inspect_pair(prior, current)) {
-            return conflict;
+            piece_index == 0, piece_index + 1 == pieces.size()});
+      }
+      boundary_edges.push_back(std::move(boundary));
+    }
+  }
+
+  const auto evaluated_conflict = [&](FaceBoundaryConflictKind kind,
+                                      const BoundaryEdge &first,
+                                      const BoundaryEdge &second,
+                                      Scalar first_parameter,
+                                      Scalar second_parameter,
+                                      Scalar distance,
+                                      Scalar solver_tolerance,
+                                      std::uint32_t evaluations,
+                                      std::uint32_t rectangles)
+      -> std::optional<FaceBoundaryConflict> {
+    Point3 first_point{};
+    Point3 second_point{};
+    if (!geo_internal::evaluate_curve_point_no_cache(
+            state, first.curve, first_parameter, first_point) ||
+        !geo_internal::evaluate_curve_point_no_cache(
+            state, second.curve, second_parameter, second_point)) {
+      return std::nullopt;
+    }
+    return FaceBoundaryConflict{kind, first.loop, second.loop, first.edge,
+                                second.edge, first_point, second_point,
+                                distance, true, solver_tolerance, evaluations,
+                                rectangles};
+  };
+
+  const auto result_from_curve_intersection = [&evaluated_conflict](
+      const BoundaryEdge &first, const BoundaryEdge &second,
+      const CurveCurveIntersectionResult &intersection, bool proximity_pass,
+      Scalar solver_tolerance)
+      -> std::optional<FaceBoundaryConflict> {
+    if (!intersection.overlaps.empty()) {
+      const auto &overlap = intersection.overlaps.front();
+      const Scalar first_parameter =
+          overlap.first_interval.min +
+          (overlap.first_interval.max - overlap.first_interval.min) * 0.5;
+      const Scalar second_parameter =
+          overlap.second_interval.min +
+          (overlap.second_interval.max - overlap.second_interval.min) * 0.5;
+      return evaluated_conflict(
+          FaceBoundaryConflictKind::CurveOverlap, first, second,
+          first_parameter, second_parameter, overlap.maximum_separation,
+          solver_tolerance, intersection.evaluations,
+          intersection.parameter_rectangles_processed);
+    }
+    if (intersection.points.empty()) return std::nullopt;
+    const auto &point = intersection.points.front();
+    const auto kind = proximity_pass
+                          ? FaceBoundaryConflictKind::NearContact
+                          : (point.kind == CurveCurveIntersectionKind::Endpoint
+                                 ? FaceBoundaryConflictKind::EndpointTouch
+                                 : FaceBoundaryConflictKind::ProperIntersection);
+    return evaluated_conflict(kind, first, second, point.first_parameter,
+                              point.second_parameter,
+                              point.residual_distance, solver_tolerance,
+                              intersection.evaluations,
+                              intersection.parameter_rectangles_processed);
+  };
+
+  for (std::size_t first_index = 0; first_index < boundary_edges.size();
+       ++first_index) {
+    const auto &first = boundary_edges[first_index];
+    for (std::size_t second_index = first_index + 1;
+         second_index < boundary_edges.size(); ++second_index) {
+      const auto &second = boundary_edges[second_index];
+      if (first.loop.value == second.loop.value) continue;
+
+      if (first.entirely_linear && second.entirely_linear) {
+        for (const auto &first_segment : first.segments) {
+          for (const auto &second_segment : second.segments) {
+            if (auto conflict = inspect_pair(first_segment, second_segment)) {
+              return {StatusCode::Ok, std::move(conflict), first.edge,
+                      second.edge};
+            }
           }
         }
-        seen.push_back(current);
+        continue;
+      }
+
+      if (!first.has_solver_interval || !second.has_solver_interval) {
+        return {StatusCode::InvalidTopology, std::nullopt, first.edge,
+                second.edge};
+      }
+
+      Point3 first_begin{};
+      Point3 first_end{};
+      Point3 second_begin{};
+      Point3 second_end{};
+      if (!geo_internal::evaluate_curve_point_no_cache(
+              state, first.curve, first.interval.min, first_begin) ||
+          !geo_internal::evaluate_curve_point_no_cache(
+              state, first.curve, first.interval.max, first_end) ||
+          !geo_internal::evaluate_curve_point_no_cache(
+              state, second.curve, second.interval.min, second_begin) ||
+          !geo_internal::evaluate_curve_point_no_cache(
+              state, second.curve, second.interval.max, second_end)) {
+        return {StatusCode::NumericalInstability, std::nullopt, first.edge,
+                second.edge};
+      }
+      const auto coordinate_scale = [&]() {
+        long double scale = 1.0L;
+        for (const auto &point :
+             {first_begin, first_end, second_begin, second_end}) {
+          scale = std::max(
+              scale, std::max({std::abs(static_cast<long double>(point.x)),
+                               std::abs(static_cast<long double>(point.y)),
+                               std::abs(static_cast<long double>(point.z))}));
+        }
+        return scale;
+      }();
+      const Scalar roundoff_floor = static_cast<Scalar>(std::min<long double>(
+          linear_tolerance,
+          256.0L * std::numeric_limits<Scalar>::epsilon() * coordinate_scale));
+      const Scalar exact_tolerance = std::max(
+          roundoff_floor,
+          std::min(linear_tolerance, linear_tolerance * Scalar{1e-3}));
+
+      CurveCurveIntersectionOptions options;
+      options.position_tolerance = exact_tolerance;
+      options.parameter_tolerance = 1e-10;
+      options.angular_tolerance = 1e-7;
+      options.max_evaluations = 200000;
+      options.max_subdivisions = 100000;
+      options.first_interval = first.interval;
+      options.second_interval = second.interval;
+      auto intersection = geo_internal::intersect_curve_curve_no_diagnostics(
+          state, first.curve, second.curve, options);
+      if (intersection.status != StatusCode::Ok || !intersection.value) {
+        return {intersection.status, std::nullopt, first.edge, second.edge};
+      }
+      if (auto conflict = result_from_curve_intersection(
+              first, second, *intersection.value, false, exact_tolerance)) {
+        return {StatusCode::Ok, std::move(conflict), first.edge, second.edge};
+      }
+
+      if (linear_tolerance > exact_tolerance) {
+        options.position_tolerance = linear_tolerance;
+        intersection = geo_internal::intersect_curve_curve_no_diagnostics(
+            state, first.curve, second.curve, options);
+        if (intersection.status != StatusCode::Ok || !intersection.value) {
+          return {intersection.status, std::nullopt, first.edge, second.edge};
+        }
+        if (auto conflict = result_from_curve_intersection(
+                first, second, *intersection.value, true,
+                linear_tolerance)) {
+          return {StatusCode::Ok, std::move(conflict), first.edge,
+                  second.edge};
+        }
       }
     }
   }
-  return std::nullopt;
+  return {};
 }
 
 bool face_record_references_loop(const detail::FaceRecord &face,

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <utility>
 #include <vector>
@@ -112,11 +113,13 @@ struct CurveClosestPointResult {
     CurveClosestPointConvergence convergence {CurveClosestPointConvergence::Analytic};
 };
 
-/// 有界曲面最近点全域搜索的终止原因。两种成功终止都覆盖完整有效参数域，
-/// 包括多边形修剪的外环、孔边界以及样条的每个非空结点片。
+/// 曲面最近点全域搜索的终止原因。所有成功终止都覆盖完整有效参数域，
+/// 包括多边形修剪的外环、孔边界、样条的每个非空结点片以及可解析证明的无界域。
 enum class SurfaceClosestPointConvergence : std::uint8_t {
-    DistanceTolerance,
-    ParameterTolerance
+    DistanceTolerance = 0,
+    ParameterTolerance = 1,
+    /// 由解析投影及全域几何下界直接证明，不消耗数值求值预算。
+    Analytic = 2
 };
 
 struct SurfaceClosestPointOptions {
@@ -124,7 +127,7 @@ struct SurfaceClosestPointOptions {
     Scalar distance_tolerance {1e-8};
     /// 距离界不能提前证明时，候选参数矩形的 u/v 边长须分别细分到此阈值。
     Scalar parameter_tolerance {1e-4};
-    /// 无缓存点值求值总预算；须至少为 5。预算耗尽时失败且不返回部分结果。
+    /// 无缓存数值点值求值总预算；须至少为 5。解析终止不消耗此预算；预算耗尽时失败且不返回部分结果。
     std::uint32_t max_evaluations {250000};
 };
 
@@ -140,7 +143,16 @@ struct SurfaceClosestPointResult {
     Scalar v_uncertainty {};
     std::uint32_t evaluations {};
     std::uint32_t patches_processed {};
+    /// 以 Bezier/BSpline/NURBS（含 Trimmed/Offset 包装）局部有理控制网凸包建立空间下界的参数片数量。
+    /// 该计数可用于确认高阶曲面查询实际启用了随细分收紧的全域证书；解析路径为 0。
+    std::uint32_t control_net_bound_patches {};
+    /// 已由保守下界证明不可能改进当前最优值、因而未继续细分的参数片数量。
+    std::uint32_t pruned_patches {};
     SurfaceClosestPointConvergence convergence {SurfaceClosestPointConvergence::DistanceTolerance};
+    /// 数值搜索覆盖的原有有界域，或解析证明包含至少一个全域极小点的有限化参数域。
+    Range2D effective_domain {};
+    /// true 表示原始曲面含无界参数方向，`effective_domain` 由本次查询自动构造。
+    bool domain_was_finiteized {false};
 };
 
 class CurveService {
@@ -203,9 +215,12 @@ public:
     Result<SurfaceEvalResult> eval(SurfaceId surface_id, Scalar u, Scalar v, int deriv_order) const;
     Result<std::vector<SurfaceEvalResult>> eval_batch(
         SurfaceId surface_id, std::span<const std::pair<Scalar, Scalar>> uvs, int deriv_order) const;
-    /// 对完整有界参数域执行确定性分支限界搜索。Bezier/BSpline/NURBS、旋转/线性扫掠、
-    /// 偏置及修剪包装均受支持；样条按非空结点片覆盖，修剪多边形的外环和孔边界均参与搜索。
-    /// 无限参数域须先修剪；预算耗尽、选项非法或数值界不可建立时失败，不写 surface eval 缓存。
+    /// 对完整参数域求全域最近点。Plane/Cylinder/Cone 等无界解析面及可解析的嵌套
+    /// Offset 自动构造包含全域极小点的有限参数域并给出解析证书；它们不消耗数值预算。
+    /// Bezier/BSpline/NURBS 使用随子片收紧的（有理）控制网凸包空间界；旋转/线性扫掠、
+    /// 通用偏置及修剪包装执行确定性分支限界。样条按非空结点片覆盖，修剪多边形的外环和
+    /// 孔边界均参与搜索；结果公开控制网界与剪枝计数作为预算/性能证据。预算耗尽、选项非法、
+    /// 偏置退化/自交或数值界不可建立时失败，不返回部分结果且不写 surface eval 缓存。
     Result<SurfaceClosestPointResult> closest_point_detailed(
         SurfaceId surface_id, const Point3& point,
         const SurfaceClosestPointOptions& options = {}) const;
@@ -241,9 +256,75 @@ struct CurveSurfaceIntersection {
     Scalar surface_v{0.0};
 };
 
+/// 两条有界曲线的离散交点类型。重合区间不伪装成若干离散点，见
+/// `CurveCurveIntersectionResult::overlaps`。
+enum class CurveCurveIntersectionKind : std::uint8_t {
+    /// 两条曲线在交点处具有非平行切向。
+    Transverse = 0,
+    /// 两条曲线在交点处切向平行或至少一侧速度退化。
+    Tangent = 1,
+    /// 交点位于任一请求参数区间的端点；优先于切向分类。
+    Endpoint = 2,
+};
+
+struct CurveCurveIntersectionPoint {
+    /// 两侧求值点的中点，单位为模型长度单位。
+    Point3 point {};
+    Scalar first_parameter {};
+    Scalar second_parameter {};
+    /// 两侧求值点间距；不大于请求的 `position_tolerance`。
+    Scalar residual_distance {};
+    CurveCurveIntersectionKind kind {CurveCurveIntersectionKind::Transverse};
+};
+
+/// 连续重合曲线段。两个区间均按参数递增顺序返回；`same_direction`
+/// 描述参数递增时几何方向是否一致。
+struct CurveCurveOverlap {
+    Range1D first_interval {};
+    Range1D second_interval {};
+    bool same_direction {true};
+    /// 已验证对应点的最大分离距离；解析分段直线路径通常为 0。
+    Scalar maximum_separation {};
+};
+
+struct CurveCurveIntersectionOptions {
+    /// 模型长度单位下的相交/重合判定容差；必须有限且大于零。
+    Scalar position_tolerance {1e-8};
+    /// 每条曲线自身参数单位下的细分终止宽度；必须有限且大于零。
+    Scalar parameter_tolerance {1e-8};
+    /// 归一化切向叉积阈值，用于区分横交和相切；范围为 [0, 1]。
+    Scalar angular_tolerance {1e-7};
+    /// 无缓存点值求值总预算；预算耗尽时失败且不返回部分结果。
+    std::uint32_t max_evaluations {200000};
+    /// 候选参数矩形处理预算；用于限制相切、近重合等困难输入。
+    std::uint32_t max_subdivisions {100000};
+    /// 未指定时使用曲线完整定义域；无限定义域（Line）必须显式指定有限区间。
+    std::optional<Range1D> first_interval;
+    std::optional<Range1D> second_interval;
+};
+
+struct CurveCurveIntersectionResult {
+    std::vector<CurveCurveIntersectionPoint> points;
+    std::vector<CurveCurveOverlap> overlaps;
+    std::uint32_t evaluations {};
+    std::uint32_t parameter_rectangles_processed {};
+};
+
 class GeometryIntersectionService {
 public:
     explicit GeometryIntersectionService(std::shared_ptr<detail::KernelState> state);
+
+    /// 查询两条曲线在有限参数区间内的全部离散交点与连续重合段。
+    /// Line/LineSegment/CompositePolyline 的各线性参数段使用解析 3D 求交；
+    /// Bezier、B-spline、NURBS、圆锥曲线和 CompositeChain 按连续参数片进行
+    /// 保守包围、确定性细分及阻尼 Gauss-Newton 精化。样条满重数断点两侧独立处理。
+    /// 空交集是成功的空结果；非法句柄/区间、退化数值界或预算耗尽返回结构化失败，
+    /// 不返回部分结果，也不写曲线求值缓存、拓扑、Intersection 存储或事务状态。
+    /// 同一曲线同参区间及分段直线共线覆盖返回 `overlaps`；一般高阶曲线的连续
+    /// 重合仅在记录可证明相同且参数对应一致时返回，避免把密集离散命中误报为重合。
+    Result<CurveCurveIntersectionResult> intersect_curve_curve(
+        CurveId first_curve, CurveId second_curve,
+        const CurveCurveIntersectionOptions& options = {}) const;
 
     // Minimal intersection service for Stage 2/3: analytic pairs first (Line/Segment/Circle with Plane/Sphere/Cylinder).
     Result<std::vector<CurveSurfaceIntersection>> intersect_curve_surface(CurveId curve_id, SurfaceId surface_id) const;

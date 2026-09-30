@@ -2,24 +2,29 @@ RepairService::RepairService(std::shared_ptr<detail::KernelState> state) : state
 
 Result<void> RepairService::repair_face_trim_pcurves(FaceId face_id, RepairMode mode) {
     if (!detail::has_face(*state_, face_id)) {
-        return detail::invalid_input_void(*state_, diag_codes::kHealAutoRepairFailure,
-                                          "修剪参数曲线修复失败：目标面不存在", "修剪参数曲线修复失败");
+        return heal_failed_void(*state_, StatusCode::InvalidInput, diag_codes::kHealAutoRepairFailure,
+                                "修剪参数曲线修复失败：目标面不存在", "修剪参数曲线修复失败",
+                                {face_id.value}, "heal.repair_trim.input",
+                                {{"face_exists", 0.0, "bool"},
+                                 {"repair_mode", static_cast<Scalar>(mode), "enum"}});
     }
     const auto& face = state_->faces.at(face_id.value);
     if (!detail::has_surface(*state_, face.surface_id)) {
-        return detail::failed_void(*state_, StatusCode::InvalidTopology,
-                                   diag_codes::kTopoFaceOuterLoopInvalid,
-                                   "修剪参数曲线修复失败：面引用的曲面不存在", "修剪参数曲线修复失败",
-                                   {face_id.value, face.surface_id.value});
+        return heal_failed_void(*state_, StatusCode::InvalidTopology,
+                                diag_codes::kTopoFaceOuterLoopInvalid,
+                                "修剪参数曲线修复失败：面引用的曲面不存在", "修剪参数曲线修复失败",
+                                {face_id.value, face.surface_id.value}, "heal.repair_trim.surface",
+                                {{"surface_exists", 0.0, "bool"}});
     }
     const auto& surf = state_->surfaces.at(face.surface_id.value);
     if (surf.kind != detail::SurfaceKind::Plane &&
         surf.kind != detail::SurfaceKind::Cylinder &&
         surf.kind != detail::SurfaceKind::Sphere) {
-        return detail::failed_void(*state_, StatusCode::NotImplemented,
-                                   diag_codes::kCoreOperationUnsupported,
-                                   "修剪参数曲线修复失败：暂仅支持平面/圆柱/球面修剪面", "修剪参数曲线修复失败",
-                                   {face_id.value, face.surface_id.value});
+        return heal_failed_void(*state_, StatusCode::NotImplemented,
+                                diag_codes::kCoreOperationUnsupported,
+                                "修剪参数曲线修复失败：暂仅支持平面/圆柱/球面修剪面", "修剪参数曲线修复失败",
+                                {face_id.value, face.surface_id.value}, "heal.repair_trim.surface",
+                                {{"surface_kind", static_cast<Scalar>(surf.kind), "enum"}});
     }
     if (mode == RepairMode::ReportOnly) {
         const auto diag_ro = state_->create_diagnostic("修剪参数曲线修复预检完成（ReportOnly）");
@@ -32,6 +37,8 @@ Result<void> RepairService::repair_face_trim_pcurves(FaceId face_id, RepairMode 
     SurfaceService surface_service{state_};
     CurveService curve_service{state_};
     TopologyValidationService topo_validation{state_};
+    HealModelMutationRollback rollback {*state_};
+    std::uint64_t rebuilt_coedge_count = 0;
 
     auto oriented_vertices_for_coedge = [&](CoedgeId coedge_id) -> std::optional<std::array<VertexId, 2>> {
         const auto ce_it = state_->coedges.find(coedge_id.value);
@@ -49,10 +56,12 @@ Result<void> RepairService::repair_face_trim_pcurves(FaceId face_id, RepairMode 
     auto rebuild_loop = [&](LoopId loop_id) -> Result<void> {
         const auto loop_it = state_->loops.find(loop_id.value);
         if (loop_it == state_->loops.end()) {
-            return detail::failed_void(*state_, StatusCode::InvalidTopology,
-                                       diag_codes::kTopoLoopNotClosed,
-                                       "修剪参数曲线修复失败：面引用的环不存在", "修剪参数曲线修复失败",
-                                       {face_id.value, loop_id.value});
+            return heal_failed_void(*state_, StatusCode::InvalidTopology,
+                                    diag_codes::kTopoLoopNotClosed,
+                                    "修剪参数曲线修复失败：面引用的环不存在", "修剪参数曲线修复失败",
+                                    {face_id.value, loop_id.value}, "heal.repair_trim.loop",
+                                    {{"loop_exists", 0.0, "bool"},
+                                     {"rebuilt_coedge_count", static_cast<Scalar>(rebuilt_coedge_count), "count"}});
         }
         for (const auto coedge_id : loop_it->second.coedges) {
             const auto oriented = oriented_vertices_for_coedge(coedge_id);
@@ -191,7 +200,9 @@ Result<void> RepairService::repair_face_trim_pcurves(FaceId face_id, RepairMode 
             pc.poles = std::move(uv_poly);
             const auto pc_id = PCurveId{state_->allocate_id()};
             state_->pcurves.emplace(pc_id.value, std::move(pc));
+            rollback.remember_coedge_pcurve(coedge_id);
             state_->coedges[coedge_id.value].pcurve_id = pc_id;
+            ++rebuilt_coedge_count;
         }
         return ok_void(state_->create_diagnostic("已重建环参数曲线"));
     };
@@ -204,42 +215,70 @@ Result<void> RepairService::repair_face_trim_pcurves(FaceId face_id, RepairMode 
     }
 
     detail::rebuild_topology_links(*state_);
+    if (rebuilt_coedge_count == 0) {
+        return heal_failed_void(
+            *state_, StatusCode::OperationFailed, diag_codes::kHealAutoRepairFailure,
+            "修剪参数曲线修复失败：未能从任何空间边生成有效参数曲线，已回滚本次尝试",
+            "修剪参数曲线修复失败", {face_id.value, face.surface_id.value},
+            "heal.repair_trim.rebuild",
+            {{"rebuilt_coedge_count", 0.0, "count"},
+             {"outer_loop_id", static_cast<Scalar>(face.outer_loop.value), "id"},
+             {"rollback_applied", 1.0, "bool"}});
+    }
 
     const auto post = topo_validation.validate_face_trim_consistency(face_id);
     if (post.status != StatusCode::Ok) {
-        return detail::failed_void(*state_, StatusCode::OperationFailed,
-                                   diag_codes::kHealAutoRepairFailure,
-                                   "修剪参数曲线修复失败：重建后仍未通过修剪一致性验证", "修剪参数曲线修复失败",
-                                   {face_id.value, face.surface_id.value});
+        return heal_failed_void(
+            *state_, StatusCode::OperationFailed, diag_codes::kHealAutoRepairFailure,
+            "修剪参数曲线修复失败：重建后仍未通过修剪一致性验证，已回滚全部新绑定",
+            "修剪参数曲线修复失败", {face_id.value, face.surface_id.value},
+            "heal.repair_trim.post_validate",
+            {{"rebuilt_coedge_count", static_cast<Scalar>(rebuilt_coedge_count), "count"},
+             {"rollback_applied", 1.0, "bool"},
+             {"child_status_code", static_cast<Scalar>(post.status), "enum"}});
     }
     const auto diag_trim = state_->create_diagnostic("修剪参数曲线修复完成");
     append_repair_pipeline_trace(*state_, diag_trim, "repair_face_trim_pcurves",
                                  {face_id.value, face.surface_id.value});
     append_repair_replay_summary_issue(*state_, diag_trim);
+    rollback.commit();
     return ok_void(diag_trim);
 }
 
-Result<OpReport> RepairService::sew_faces(std::span<const FaceId> faces, Scalar, RepairMode) {
-    if (faces.empty()) {
-        return detail::invalid_input_result<OpReport>(
-            *state_, diag_codes::kHealSewFailure,
-            "缝合失败：输入面集合为空", "缝合失败");
+Result<OpReport> RepairService::sew_faces(std::span<const FaceId> faces, Scalar tolerance, RepairMode mode) {
+    if (faces.empty() || !std::isfinite(tolerance) || tolerance <= 0.0) {
+        return heal_failed_result<OpReport>(
+            *state_, StatusCode::InvalidInput, diag_codes::kHealSewFailure,
+            "缝合失败：输入面集合为空或缝合容差非法", "缝合失败",
+            {faces.empty() ? 0 : faces.front().value}, "heal.sew_faces.input",
+            {{"face_count", static_cast<Scalar>(faces.size()), "count"},
+             {"tolerance_is_finite", std::isfinite(tolerance) ? 1.0 : 0.0, "bool"},
+             {"tolerance_is_positive", tolerance > 0.0 ? 1.0 : 0.0, "bool"},
+             {"repair_mode", static_cast<Scalar>(mode), "enum"}});
     }
     if (!std::all_of(faces.begin(), faces.end(), [this](const FaceId face_id) { return detail::has_face(*state_, face_id); })) {
-        return detail::invalid_input_result<OpReport>(
-            *state_, diag_codes::kHealSewFailure,
-            "缝合失败：输入面集合包含无效面", "缝合失败");
+        const auto invalid = std::find_if(
+            faces.begin(), faces.end(),
+            [this](FaceId face_id) { return !detail::has_face(*state_, face_id); });
+        return heal_failed_result<OpReport>(
+            *state_, StatusCode::InvalidInput, diag_codes::kHealSewFailure,
+            "缝合失败：输入面集合包含无效面", "缝合失败",
+            {invalid->value}, "heal.sew_faces.input",
+            {{"face_count", static_cast<Scalar>(faces.size()), "count"},
+             {"invalid_face_id", static_cast<Scalar>(invalid->value), "id"}});
     }
-    const auto body_id = BodyId {state_->allocate_id()};
     detail::BodyRecord record;
     record.kind = detail::BodyKind::Generic;
     record.rep_kind = RepKind::ExactBRep;
     record.label = "sewn_body";
     record.bbox = detail::compute_faces_bbox(*state_, faces);
     if (!record.bbox.is_valid) {
-        return detail::failed_result<OpReport>(
+        return heal_failed_result<OpReport>(
             *state_, StatusCode::InvalidTopology, diag_codes::kHealSewFailure,
-            "缝合失败：无法从输入面推导有效包围盒，拓扑链路可能不完整", "缝合失败");
+            "缝合失败：无法从输入面推导有效包围盒，拓扑链路可能不完整", "缝合失败",
+            {faces.front().value}, "heal.sew_faces.bounds",
+            {{"face_count", static_cast<Scalar>(faces.size()), "count"},
+             {"bbox_valid_flag", 0.0, "bool"}});
     }
     for (const auto face_id : faces) {
         append_unique_face(record.source_faces, face_id);
@@ -251,9 +290,23 @@ Result<OpReport> RepairService::sew_faces(std::span<const FaceId> faces, Scalar,
             append_unique_shell(record.source_shells, ShellId {shell_value});
         }
     }
+    HealModelMutationRollback rollback {*state_};
+    const auto body_id = BodyId {state_->allocate_id()};
     detail::materialize_body_bbox_topology(*state_, record);
     state_->bodies.emplace(body_id.value, record);
     detail::rebuild_topology_links(*state_);
+    ValidationService validation {state_};
+    const auto post = validation.validate_all(body_id, ValidationMode::Standard);
+    if (post.status != StatusCode::Ok) {
+        return heal_failed_result<OpReport>(
+            *state_, StatusCode::OperationFailed, diag_codes::kHealSewFailure,
+            "缝合失败：派生体后验验证未通过，已回滚本次物化", "缝合失败",
+            {faces.front().value, body_id.value}, "heal.sew_faces.post_validate",
+            {{"face_count", static_cast<Scalar>(faces.size()), "count"},
+             {"tolerance", tolerance, "model_unit"},
+             {"allocated_object_count", static_cast<Scalar>(state_->next_id - rollback.first_allocated_id()), "count"},
+             {"rollback_applied", 1.0, "bool"}});
+    }
     detail::invalidate_eval_for_faces(*state_, faces);
     const auto diag = state_->create_diagnostic("已完成缝合");
     append_repair_pipeline_trace(*state_, diag, "sew_faces", {faces.front().value, body_id.value});
@@ -264,22 +317,41 @@ Result<OpReport> RepairService::sew_faces(std::span<const FaceId> faces, Scalar,
         info.related_entities = {faces.front().value, body_id.value};
         state_->append_diagnostic_issue(diag, std::move(info));
     }
+    rollback.commit();
     return ok_result(OpReport {StatusCode::Ok, body_id, diag, {}}, diag);
 }
 
 Result<OpReport> RepairService::remove_small_edges(BodyId body_id, Scalar threshold, RepairMode mode) {
-    if (!detail::has_body(*state_, body_id) || threshold <= 0.0) {
-        return detail::invalid_input_result<OpReport>(
-            *state_, diag_codes::kHealSmallEdgeFailure,
-            "小边清理失败：目标实体不存在或阈值非法", "小边清理失败");
+    if (!detail::has_body(*state_, body_id) || !std::isfinite(threshold) || threshold <= 0.0) {
+        return heal_failed_result<OpReport>(
+            *state_, StatusCode::InvalidInput, diag_codes::kHealSmallEdgeFailure,
+            "小边清理失败：目标实体不存在或阈值非法", "小边清理失败", {body_id.value},
+            "heal.remove_small_edges.input",
+            {{"body_exists", detail::has_body(*state_, body_id) ? 1.0 : 0.0, "bool"},
+             {"threshold_is_finite", std::isfinite(threshold) ? 1.0 : 0.0, "bool"},
+             {"threshold_is_positive", threshold > 0.0 ? 1.0 : 0.0, "bool"}});
     }
     const auto& source = state_->bodies.at(body_id.value);
+    const auto source_minimum_extent = min_extent(source.bbox);
     auto bbox = source.bbox;
     if (mode != RepairMode::ReportOnly) {
         bbox = detail::make_bbox(bbox.min, {bbox.max.x - threshold * 0.1, bbox.max.y, bbox.max.z});
     }
+    HealModelMutationRollback rollback {*state_};
     const auto output = mode == RepairMode::ReportOnly ? body_id : clone_modified_body(state_, body_id, "remove_small_edges", bbox);
     if (mode != RepairMode::ReportOnly) {
+        ValidationService validation {state_};
+        const auto post = validation.validate_all(output, ValidationMode::Standard);
+        if (post.status != StatusCode::Ok) {
+            return heal_failed_result<OpReport>(
+                *state_, StatusCode::OperationFailed, diag_codes::kHealSmallEdgeFailure,
+                "小边清理失败：派生体后验验证未通过，已回滚本次修复", "小边清理失败",
+                {body_id.value, output.value}, "heal.remove_small_edges.post_validate",
+                {{"requested_threshold", threshold, "model_unit"},
+                 {"source_minimum_extent", source_minimum_extent, "model_unit"},
+                 {"allocated_object_count", static_cast<Scalar>(state_->next_id - rollback.first_allocated_id()), "count"},
+                 {"rollback_applied", 1.0, "bool"}});
+        }
         detail::invalidate_eval_for_bodies(*state_, {body_id});
     }
     const auto diag = state_->create_diagnostic("已完成小边清理");
@@ -290,25 +362,45 @@ Result<OpReport> RepairService::remove_small_edges(BodyId body_id, Scalar thresh
         state_->append_diagnostic_issue(diag, std::move(w));
     }
     append_repair_replay_summary_issue(*state_, diag);
+    rollback.commit();
     return ok_result(make_repair_report(StatusCode::Ok, output, diag,
                                         {detail::make_warning(diag_codes::kHealFeatureRemovedWarning, "已清理局部小边")}),
                      diag);
 }
 
 Result<OpReport> RepairService::remove_small_faces(BodyId body_id, Scalar threshold, RepairMode mode) {
-    if (!detail::has_body(*state_, body_id) || threshold <= 0.0) {
-        return detail::invalid_input_result<OpReport>(
-            *state_, diag_codes::kHealSmallFaceFailure,
-            "小面清理失败：目标实体不存在或阈值非法", "小面清理失败");
+    if (!detail::has_body(*state_, body_id) || !std::isfinite(threshold) || threshold <= 0.0) {
+        return heal_failed_result<OpReport>(
+            *state_, StatusCode::InvalidInput, diag_codes::kHealSmallFaceFailure,
+            "小面清理失败：目标实体不存在或阈值非法", "小面清理失败", {body_id.value},
+            "heal.remove_small_faces.input",
+            {{"body_exists", detail::has_body(*state_, body_id) ? 1.0 : 0.0, "bool"},
+             {"threshold_is_finite", std::isfinite(threshold) ? 1.0 : 0.0, "bool"},
+             {"threshold_is_positive", threshold > 0.0 ? 1.0 : 0.0, "bool"}});
     }
     const auto& source = state_->bodies.at(body_id.value);
+    const auto source_minimum_extent = min_extent(source.bbox);
     const auto effective_threshold = adaptive_linear_threshold(*state_, body_id, threshold, mode);
     auto bbox = source.bbox;
     if (mode == RepairMode::Aggressive) {
         bbox = detail::make_bbox(bbox.min, {bbox.max.x, bbox.max.y - effective_threshold * 0.1, bbox.max.z});
     }
+    HealModelMutationRollback rollback {*state_};
     const auto output = mode == RepairMode::ReportOnly ? body_id : clone_modified_body(state_, body_id, "remove_small_faces", bbox);
     if (mode != RepairMode::ReportOnly) {
+        ValidationService validation {state_};
+        const auto post = validation.validate_all(output, ValidationMode::Standard);
+        if (post.status != StatusCode::Ok) {
+            return heal_failed_result<OpReport>(
+                *state_, StatusCode::OperationFailed, diag_codes::kHealSmallFaceFailure,
+                "小面清理失败：派生体后验验证未通过，已回滚本次修复", "小面清理失败",
+                {body_id.value, output.value}, "heal.remove_small_faces.post_validate",
+                {{"requested_threshold", threshold, "model_unit"},
+                 {"effective_threshold", effective_threshold, "model_unit"},
+                 {"source_minimum_extent", source_minimum_extent, "model_unit"},
+                 {"allocated_object_count", static_cast<Scalar>(state_->next_id - rollback.first_allocated_id()), "count"},
+                 {"rollback_applied", 1.0, "bool"}});
+        }
         detail::invalidate_eval_for_bodies(*state_, {body_id});
     }
     const auto diag = state_->create_diagnostic("已完成小面清理");
@@ -325,22 +417,40 @@ Result<OpReport> RepairService::remove_small_faces(BodyId body_id, Scalar thresh
         state_->append_diagnostic_issue(diag, std::move(w));
     }
     append_repair_replay_summary_issue(*state_, diag);
+    rollback.commit();
     return ok_result(make_repair_report(StatusCode::Ok, output, diag,
                                         {detail::make_warning(diag_codes::kHealFeatureRemovedWarning, "已清理局部小面")}),
                      diag);
 }
 
 Result<OpReport> RepairService::merge_near_coplanar_faces(BodyId body_id, Scalar angle_tolerance, RepairMode mode) {
-    if (!detail::has_body(*state_, body_id) || angle_tolerance <= 0.0) {
-        return detail::invalid_input_result<OpReport>(
-            *state_, diag_codes::kHealAutoRepairFailure,
-            "近共面面合并失败：目标实体不存在或角度阈值非法", "近共面面合并失败");
+    if (!detail::has_body(*state_, body_id) || !std::isfinite(angle_tolerance) || angle_tolerance <= 0.0) {
+        return heal_failed_result<OpReport>(
+            *state_, StatusCode::InvalidInput, diag_codes::kHealAutoRepairFailure,
+            "近共面面合并失败：目标实体不存在或角度阈值非法", "近共面面合并失败",
+            {body_id.value}, "heal.merge_near_coplanar_faces.input",
+            {{"body_exists", detail::has_body(*state_, body_id) ? 1.0 : 0.0, "bool"},
+             {"angle_tolerance_is_finite", std::isfinite(angle_tolerance) ? 1.0 : 0.0, "bool"},
+             {"angle_tolerance_is_positive", angle_tolerance > 0.0 ? 1.0 : 0.0, "bool"}});
     }
     const auto effective_angle = adaptive_angle_threshold(*state_, body_id, angle_tolerance, mode);
+    HealModelMutationRollback rollback {*state_};
     const auto output = mode == RepairMode::ReportOnly
                             ? body_id
                             : clone_modified_body(state_, body_id, "merge_near_coplanar_faces", state_->bodies.at(body_id.value).bbox);
     if (mode != RepairMode::ReportOnly) {
+        ValidationService validation {state_};
+        const auto post = validation.validate_all(output, ValidationMode::Standard);
+        if (post.status != StatusCode::Ok) {
+            return heal_failed_result<OpReport>(
+                *state_, StatusCode::OperationFailed, diag_codes::kHealAutoRepairFailure,
+                "近共面面合并失败：派生体后验验证未通过，已回滚本次修复", "近共面面合并失败",
+                {body_id.value, output.value}, "heal.merge_near_coplanar_faces.post_validate",
+                {{"requested_angle_tolerance", angle_tolerance, "radian"},
+                 {"effective_angle_tolerance", effective_angle, "radian"},
+                 {"allocated_object_count", static_cast<Scalar>(state_->next_id - rollback.first_allocated_id()), "count"},
+                 {"rollback_applied", 1.0, "bool"}});
+        }
         detail::invalidate_eval_for_bodies(*state_, {body_id});
     }
     const auto diag = state_->create_diagnostic("已完成近共面面合并");
@@ -354,14 +464,18 @@ Result<OpReport> RepairService::merge_near_coplanar_faces(BodyId body_id, Scalar
         state_->append_diagnostic_issue(diag, std::move(w));
     }
     append_repair_replay_summary_issue(*state_, diag);
+    rollback.commit();
     return ok_result(make_repair_report(StatusCode::Ok, output, diag, std::move(warnings)), diag);
 }
 
-Result<OpReport> RepairService::auto_repair(BodyId body_id, RepairMode) {
+Result<OpReport> RepairService::auto_repair(BodyId body_id, RepairMode mode) {
     if (!detail::has_body(*state_, body_id)) {
-        return detail::invalid_input_result<OpReport>(
-            *state_, diag_codes::kHealAutoRepairFailure,
-            "自动修复失败：目标实体不存在", "自动修复失败");
+        return heal_failed_result<OpReport>(
+            *state_, StatusCode::InvalidInput, diag_codes::kHealAutoRepairFailure,
+            "自动修复失败：目标实体不存在", "自动修复失败", {body_id.value},
+            "heal.auto_repair.input",
+            {{"body_exists", 0.0, "bool"},
+             {"repair_mode", static_cast<Scalar>(mode), "enum"}});
     }
 
     ValidationService validation {state_};
@@ -370,9 +484,9 @@ Result<OpReport> RepairService::auto_repair(BodyId body_id, RepairMode) {
     if (!has_valid_bbox(state_->bodies.at(body_id.value)) || min_extent(state_->bodies.at(body_id.value).bbox) <= 0.0) {
         bbox = detail::make_bbox({0.0, 0.0, 0.0}, {1.0, 1.0, 1.0});
     }
+    HealModelMutationRollback rollback {*state_};
     const auto output = clone_modified_body(state_, body_id, "auto_repair", bbox);
-    detail::invalidate_eval_for_bodies(*state_, {body_id});
-    const auto diag = state_->create_diagnostic("已完成自动修复");
+    const auto diag = state_->create_diagnostic("自动修复执行中");
     append_repair_pipeline_trace(*state_, diag, "auto_repair", {body_id.value, output.value});
     if (pre_validation.status != StatusCode::Ok && pre_validation.diagnostic_id.value != 0) {
         const auto pre_diag_it = state_->diagnostics.find(pre_validation.diagnostic_id.value);
@@ -381,6 +495,12 @@ Result<OpReport> RepairService::auto_repair(BodyId body_id, RepairMode) {
                 auto tracked = with_related_entities(issue, {body_id.value});
                 if (tracked.stage.empty()) {
                     tracked.stage = "heal.auto_repair.pre_validate";
+                }
+                if ((tracked.severity == IssueSeverity::Error || tracked.severity == IssueSeverity::Fatal) &&
+                    tracked.numeric_evidence.empty()) {
+                    tracked.numeric_evidence = heal_failure_evidence(
+                        pre_validation.status, tracked.related_entities.size(),
+                        {{"repair_mode", static_cast<Scalar>(mode), "enum"}});
                 }
                 state_->append_diagnostic_issue(diag, std::move(tracked));
             }
@@ -400,6 +520,9 @@ Result<OpReport> RepairService::auto_repair(BodyId body_id, RepairMode) {
         validated_issue.stage = "heal.auto_repair.post_validate";
         state_->append_diagnostic_issue(diag, std::move(validated_issue));
         append_repair_replay_summary_issue(*state_, diag);
+        detail::invalidate_eval_for_bodies(*state_, {body_id});
+        state_->diagnostics.at(diag.value).summary = "已完成自动修复";
+        rollback.commit();
         return ok_result(make_repair_report(StatusCode::Ok, output, diag,
                                             {detail::make_warning(diag_codes::kHealFeatureRemovedWarning, "自动修复可能改变局部小特征")}),
                          diag);
@@ -410,21 +533,31 @@ Result<OpReport> RepairService::auto_repair(BodyId body_id, RepairMode) {
         if (post_diag_it != state_->diagnostics.end()) {
             for (const auto& issue : post_diag_it->second.issues) {
                 auto tracked = with_related_entities(issue, {output.value});
-                if (tracked.stage.empty()) {
+                if (tracked.severity == IssueSeverity::Error || tracked.severity == IssueSeverity::Fatal) {
                     tracked.stage = "heal.auto_repair.post_validate";
+                    if (tracked.numeric_evidence.empty()) {
+                        tracked.numeric_evidence = heal_failure_evidence(
+                            post_validation.status, tracked.related_entities.size(),
+                            {{"repair_mode", static_cast<Scalar>(mode), "enum"},
+                             {"rollback_applied", 1.0, "bool"}});
+                    }
                 }
                 state_->append_diagnostic_issue(diag, std::move(tracked));
             }
         }
     }
-    Issue failure_issue;
-    failure_issue.code = std::string(diag_codes::kHealAutoRepairFailure);
-    failure_issue.severity = IssueSeverity::Error;
-    failure_issue.message = "自动修复后模型仍未通过验证";
-    failure_issue.related_entities = {body_id.value, output.value};
-    failure_issue.stage = "heal.auto_repair.post_validate";
+    Issue failure_issue = make_heal_failure_issue(
+        diag_codes::kHealAutoRepairFailure,
+        "自动修复后模型仍未通过验证，已回滚派生体及其物化拓扑",
+        {body_id.value, output.value}, "heal.auto_repair.post_validate",
+        StatusCode::OperationFailed,
+        {{"repair_mode", static_cast<Scalar>(mode), "enum"},
+         {"allocated_object_count", static_cast<Scalar>(state_->next_id - rollback.first_allocated_id()), "count"},
+         {"rollback_applied", 1.0, "bool"},
+         {"post_validation_status", static_cast<Scalar>(post_validation.status), "enum"}});
     state_->append_diagnostic_issue(diag, std::move(failure_issue));
     append_repair_replay_summary_issue(*state_, diag);
+    state_->diagnostics.at(diag.value).summary = "自动修复失败并已回滚";
     return error_result<OpReport>(
         StatusCode::OperationFailed, diag,
         {detail::make_warning(diag_codes::kHealFeatureRemovedWarning, "自动修复可能改变局部小特征")});
@@ -432,10 +565,14 @@ Result<OpReport> RepairService::auto_repair(BodyId body_id, RepairMode) {
 
 Result<Scalar> RepairService::estimate_adaptive_linear_threshold(
     BodyId body_id, Scalar input, RepairMode mode) const {
-  if (!detail::has_body(*state_, body_id) || input <= 0.0) {
-    return detail::invalid_input_result<Scalar>(
-        *state_, diag_codes::kHealSmallFaceFailure,
-        "线性阈值估计失败：目标体不存在或输入阈值非法", "线性阈值估计失败");
+  if (!detail::has_body(*state_, body_id) || !std::isfinite(input) || input <= 0.0) {
+    return heal_failed_result<Scalar>(
+        *state_, StatusCode::InvalidInput, diag_codes::kHealSmallFaceFailure,
+        "线性阈值估计失败：目标体不存在或输入阈值非法", "线性阈值估计失败",
+        {body_id.value}, "heal.estimate_linear_threshold.input",
+        {{"body_exists", detail::has_body(*state_, body_id) ? 1.0 : 0.0, "bool"},
+         {"input_is_finite", std::isfinite(input) ? 1.0 : 0.0, "bool"},
+         {"input_is_positive", input > 0.0 ? 1.0 : 0.0, "bool"}});
   }
   return ok_result(adaptive_linear_threshold(*state_, body_id, input, mode),
                    state_->create_diagnostic("已估计线性阈值"));
@@ -443,10 +580,14 @@ Result<Scalar> RepairService::estimate_adaptive_linear_threshold(
 
 Result<Scalar> RepairService::estimate_adaptive_angle_threshold(
     BodyId body_id, Scalar input, RepairMode mode) const {
-  if (!detail::has_body(*state_, body_id) || input <= 0.0) {
-    return detail::invalid_input_result<Scalar>(
-        *state_, diag_codes::kHealAutoRepairFailure,
-        "角度阈值估计失败：目标体不存在或输入阈值非法", "角度阈值估计失败");
+  if (!detail::has_body(*state_, body_id) || !std::isfinite(input) || input <= 0.0) {
+    return heal_failed_result<Scalar>(
+        *state_, StatusCode::InvalidInput, diag_codes::kHealAutoRepairFailure,
+        "角度阈值估计失败：目标体不存在或输入阈值非法", "角度阈值估计失败",
+        {body_id.value}, "heal.estimate_angle_threshold.input",
+        {{"body_exists", detail::has_body(*state_, body_id) ? 1.0 : 0.0, "bool"},
+         {"input_is_finite", std::isfinite(input) ? 1.0 : 0.0, "bool"},
+         {"input_is_positive", input > 0.0 ? 1.0 : 0.0, "bool"}});
   }
   return ok_result(adaptive_angle_threshold(*state_, body_id, input, mode),
                    state_->create_diagnostic("已估计角度阈值"));
@@ -478,44 +619,87 @@ Result<OpReport> RepairService::auto_repair_default(BodyId body_id) {
 
 Result<std::vector<OpReport>> RepairService::repair_many_auto(
     std::span<const BodyId> body_ids, RepairMode mode) {
+  if (body_ids.empty()) {
+    return heal_failed_result<std::vector<OpReport>>(
+        *state_, StatusCode::InvalidInput, diag_codes::kHealAutoRepairFailure,
+        "批量自动修复失败：输入为空", "批量自动修复失败", {0},
+        "heal.repair_many_auto.input", {{"body_count", 0.0, "count"}});
+  }
+  HealModelMutationRollback rollback {*state_, true};
   std::vector<OpReport> out;
   out.reserve(body_ids.size());
   for (const auto body_id : body_ids) {
     const auto r = auto_repair(body_id, mode);
     if (r.status != StatusCode::Ok || !r.value.has_value()) {
-      return error_result<std::vector<OpReport>>(r.status, r.diagnostic_id);
+      return heal_failed_result<std::vector<OpReport>>(
+          *state_, r.status, diag_codes::kHealAutoRepairFailure,
+          "批量自动修复失败：子项失败，已回滚此前全部派生结果", "批量自动修复失败",
+          {body_id.value}, "heal.repair_many_auto.rollback",
+          {{"completed_item_count", static_cast<Scalar>(out.size()), "count"},
+           {"requested_item_count", static_cast<Scalar>(body_ids.size()), "count"},
+           {"allocated_object_count", static_cast<Scalar>(state_->next_id - rollback.first_allocated_id()), "count"},
+           {"rollback_applied", 1.0, "bool"}});
     }
     out.push_back(*r.value);
   }
+  rollback.commit();
   return ok_result(std::move(out), state_->create_diagnostic("已批量自动修复"));
 }
 
 Result<std::vector<OpReport>> RepairService::repair_many_remove_small_edges(
     std::span<const BodyId> body_ids, Scalar threshold, RepairMode mode) {
+  if (body_ids.empty()) {
+    return heal_failed_result<std::vector<OpReport>>(
+        *state_, StatusCode::InvalidInput, diag_codes::kHealSmallEdgeFailure,
+        "批量小边清理失败：输入为空", "批量小边清理失败", {0},
+        "heal.repair_many_remove_small_edges.input", {{"body_count", 0.0, "count"}});
+  }
+  HealModelMutationRollback rollback {*state_, true};
   std::vector<OpReport> out;
   out.reserve(body_ids.size());
   for (const auto body_id : body_ids) {
     const auto r = remove_small_edges(body_id, threshold, mode);
     if (r.status != StatusCode::Ok || !r.value.has_value()) {
-      return error_result<std::vector<OpReport>>(r.status, r.diagnostic_id);
+      return heal_failed_result<std::vector<OpReport>>(
+          *state_, r.status, diag_codes::kHealSmallEdgeFailure,
+          "批量小边清理失败：子项失败，已回滚此前全部派生结果", "批量小边清理失败",
+          {body_id.value}, "heal.repair_many_remove_small_edges.rollback",
+          {{"completed_item_count", static_cast<Scalar>(out.size()), "count"},
+           {"requested_item_count", static_cast<Scalar>(body_ids.size()), "count"},
+           {"rollback_applied", 1.0, "bool"}});
     }
     out.push_back(*r.value);
   }
+  rollback.commit();
   return ok_result(std::move(out),
                    state_->create_diagnostic("已批量执行小边清理"));
 }
 
 Result<std::vector<OpReport>> RepairService::repair_many_remove_small_faces(
     std::span<const BodyId> body_ids, Scalar threshold, RepairMode mode) {
+  if (body_ids.empty()) {
+    return heal_failed_result<std::vector<OpReport>>(
+        *state_, StatusCode::InvalidInput, diag_codes::kHealSmallFaceFailure,
+        "批量小面清理失败：输入为空", "批量小面清理失败", {0},
+        "heal.repair_many_remove_small_faces.input", {{"body_count", 0.0, "count"}});
+  }
+  HealModelMutationRollback rollback {*state_, true};
   std::vector<OpReport> out;
   out.reserve(body_ids.size());
   for (const auto body_id : body_ids) {
     const auto r = remove_small_faces(body_id, threshold, mode);
     if (r.status != StatusCode::Ok || !r.value.has_value()) {
-      return error_result<std::vector<OpReport>>(r.status, r.diagnostic_id);
+      return heal_failed_result<std::vector<OpReport>>(
+          *state_, r.status, diag_codes::kHealSmallFaceFailure,
+          "批量小面清理失败：子项失败，已回滚此前全部派生结果", "批量小面清理失败",
+          {body_id.value}, "heal.repair_many_remove_small_faces.rollback",
+          {{"completed_item_count", static_cast<Scalar>(out.size()), "count"},
+           {"requested_item_count", static_cast<Scalar>(body_ids.size()), "count"},
+           {"rollback_applied", 1.0, "bool"}});
     }
     out.push_back(*r.value);
   }
+  rollback.commit();
   return ok_result(std::move(out),
                    state_->create_diagnostic("已批量执行小面清理"));
 }
@@ -523,24 +707,39 @@ Result<std::vector<OpReport>> RepairService::repair_many_remove_small_faces(
 Result<std::vector<OpReport>>
 RepairService::repair_many_merge_near_coplanar_faces(
     std::span<const BodyId> body_ids, Scalar angle_tolerance, RepairMode mode) {
+  if (body_ids.empty()) {
+    return heal_failed_result<std::vector<OpReport>>(
+        *state_, StatusCode::InvalidInput, diag_codes::kHealAutoRepairFailure,
+        "批量近共面合并失败：输入为空", "批量近共面合并失败", {0},
+        "heal.repair_many_merge_near_coplanar_faces.input", {{"body_count", 0.0, "count"}});
+  }
+  HealModelMutationRollback rollback {*state_, true};
   std::vector<OpReport> out;
   out.reserve(body_ids.size());
   for (const auto body_id : body_ids) {
     const auto r = merge_near_coplanar_faces(body_id, angle_tolerance, mode);
     if (r.status != StatusCode::Ok || !r.value.has_value()) {
-      return error_result<std::vector<OpReport>>(r.status, r.diagnostic_id);
+      return heal_failed_result<std::vector<OpReport>>(
+          *state_, r.status, diag_codes::kHealAutoRepairFailure,
+          "批量近共面合并失败：子项失败，已回滚此前全部派生结果", "批量近共面合并失败",
+          {body_id.value}, "heal.repair_many_merge_near_coplanar_faces.rollback",
+          {{"completed_item_count", static_cast<Scalar>(out.size()), "count"},
+           {"requested_item_count", static_cast<Scalar>(body_ids.size()), "count"},
+           {"rollback_applied", 1.0, "bool"}});
     }
     out.push_back(*r.value);
   }
+  rollback.commit();
   return ok_result(std::move(out),
                    state_->create_diagnostic("已批量执行近共面合并"));
 }
 
 Result<bool> RepairService::was_modified_output(const OpReport& report) const {
   if (!detail::has_body(*state_, report.output)) {
-    return detail::invalid_input_result<bool>(
-        *state_, diag_codes::kHealAutoRepairFailure,
-        "修复结果查询失败：输出体不存在", "修复结果查询失败");
+    return heal_failed_result<bool>(
+        *state_, StatusCode::InvalidInput, diag_codes::kHealAutoRepairFailure,
+        "修复结果查询失败：输出体不存在", "修复结果查询失败", {report.output.value},
+        "heal.query.modified_output", {{"output_exists", 0.0, "bool"}});
   }
   return ok_result(state_->bodies.at(report.output.value).kind ==
                        detail::BodyKind::Modified,
@@ -550,9 +749,12 @@ Result<bool> RepairService::was_modified_output(const OpReport& report) const {
 Result<bool> RepairService::output_is_new_body(const OpReport& report,
                                                BodyId input) const {
   if (!detail::has_body(*state_, report.output) || !detail::has_body(*state_, input)) {
-    return detail::invalid_input_result<bool>(
-        *state_, diag_codes::kHealAutoRepairFailure,
-        "修复输出比较失败：输入或输出体不存在", "修复输出比较失败");
+    return heal_failed_result<bool>(
+        *state_, StatusCode::InvalidInput, diag_codes::kHealAutoRepairFailure,
+        "修复输出比较失败：输入或输出体不存在", "修复输出比较失败",
+        {input.value, report.output.value}, "heal.query.output_identity",
+        {{"input_exists", detail::has_body(*state_, input) ? 1.0 : 0.0, "bool"},
+         {"output_exists", detail::has_body(*state_, report.output) ? 1.0 : 0.0, "bool"}});
   }
   return ok_result(report.output.value != input.value,
                    state_->create_diagnostic("已比较修复输出是否新体"));
@@ -561,16 +763,21 @@ Result<bool> RepairService::output_is_new_body(const OpReport& report,
 Result<Scalar> RepairService::body_bbox_shrink_ratio(BodyId before,
                                                      BodyId after) const {
   if (!detail::has_body(*state_, before) || !detail::has_body(*state_, after)) {
-    return detail::invalid_input_result<Scalar>(
-        *state_, diag_codes::kHealAutoRepairFailure,
-        "修复体积比查询失败：输入体不存在", "修复体积比查询失败");
+    return heal_failed_result<Scalar>(
+        *state_, StatusCode::InvalidInput, diag_codes::kHealAutoRepairFailure,
+        "修复体积比查询失败：输入体不存在", "修复体积比查询失败", {before.value, after.value},
+        "heal.query.bbox_shrink_ratio",
+        {{"before_exists", detail::has_body(*state_, before) ? 1.0 : 0.0, "bool"},
+         {"after_exists", detail::has_body(*state_, after) ? 1.0 : 0.0, "bool"}});
   }
   const auto v0 = min_extent(state_->bodies.at(before.value).bbox);
   const auto v1 = min_extent(state_->bodies.at(after.value).bbox);
   if (v0 <= 0.0) {
-    return detail::failed_result<Scalar>(
+    return heal_failed_result<Scalar>(
         *state_, StatusCode::OperationFailed, diag_codes::kValDegenerateGeometry,
-        "修复体积比查询失败：基准体尺度无效", "修复体积比查询失败");
+        "修复体积比查询失败：基准体尺度无效", "修复体积比查询失败", {before.value, after.value},
+        "heal.query.bbox_shrink_ratio", {{"before_minimum_extent", v0, "model_unit"},
+                                          {"after_minimum_extent", v1, "model_unit"}});
   }
   return ok_result(v1 / v0, state_->create_diagnostic("已查询修复尺度比"));
 }
@@ -578,9 +785,12 @@ Result<Scalar> RepairService::body_bbox_shrink_ratio(BodyId before,
 Result<Scalar> RepairService::compare_bbox_extent_change(BodyId before,
                                                          BodyId after) const {
   if (!detail::has_body(*state_, before) || !detail::has_body(*state_, after)) {
-    return detail::invalid_input_result<Scalar>(
-        *state_, diag_codes::kHealAutoRepairFailure,
-        "修复尺度变化查询失败：输入体不存在", "修复尺度变化查询失败");
+    return heal_failed_result<Scalar>(
+        *state_, StatusCode::InvalidInput, diag_codes::kHealAutoRepairFailure,
+        "修复尺度变化查询失败：输入体不存在", "修复尺度变化查询失败", {before.value, after.value},
+        "heal.query.bbox_extent_change",
+        {{"before_exists", detail::has_body(*state_, before) ? 1.0 : 0.0, "bool"},
+         {"after_exists", detail::has_body(*state_, after) ? 1.0 : 0.0, "bool"}});
   }
   const auto v0 = min_extent(state_->bodies.at(before.value).bbox);
   const auto v1 = min_extent(state_->bodies.at(after.value).bbox);

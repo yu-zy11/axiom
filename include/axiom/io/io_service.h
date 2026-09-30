@@ -18,8 +18,10 @@ class IOService {
 public:
   explicit IOService(std::shared_ptr<detail::KernelState> state);
 
+  /// 重量级导入及导入后验证/修复失败均带 `io.*` 阶段、问题实体令牌和有限数值证据，可直接纳入 `audit_evidence` 门禁。
   Result<BodyId> import_step(std::string_view path,
                              const ImportOptions &options);
+  /// 重量级导出失败均带 `io.export.*` 阶段、目标 Body（预物化失败使用零实体令牌）及有限数值证据。
   Result<void> export_step(BodyId body_id, std::string_view path,
                            const ExportOptions &options);
   Result<void> export_gltf(BodyId body_id, std::string_view path,
@@ -84,6 +86,7 @@ public:
                              const ImportOptions &options);
   Result<void> export_auto(BodyId body_id, std::string_view path,
                            const ExportOptions &options);
+  /// 批量导入为模型存储原子操作：任一后项失败会回收此前项目（含自动修复）的全部派生对象并恢复缓存/失效状态。
   Result<std::vector<BodyId>>
   import_many_step(std::span<const std::string> paths,
                    const ImportOptions &options);
@@ -99,6 +102,7 @@ public:
   Result<std::vector<BodyId>>
   import_many_auto(std::span<const std::string> paths,
                    const ImportOptions &options);
+  /// 批量失败报告保留子项根因，并增加 `io.batch_export` 项索引、Body 与数值上下文。
   Result<void> export_many_auto(std::span<const BodyId> body_ids,
                                 std::span<const std::string> paths,
                                 const ExportOptions &options);
@@ -300,6 +304,7 @@ public:
                             std::string_view ext, std::uint64_t count) const;
   Result<std::string>
   first_writable_path(std::span<const std::string> paths) const;
+  /// 仅跳过父目录不存在的目标；对已选择项目的真实导出失败返回结构化批次根因，不再静默计为未导出。
   Result<std::uint64_t>
   export_auto_existing_only(std::span<const BodyId> body_ids,
                             std::span<const std::string> paths,

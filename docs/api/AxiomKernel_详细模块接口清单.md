@@ -340,7 +340,7 @@ public:
 
 `closest_point_detailed`（FR-GEO-001 第 69 批）对完整有效参数域给出最近参数、最近点、距离、保守距离下界、参数不确定度、求值/区间计数及终止原因。Line、LineSegment、Circle 与 CompositePolyline 走解析路径（`Analytic`，不消耗点值预算）；Ellipse、Parabola、Hyperbola、Bezier、BSpline、NURBS 与 CompositeChain 走确定性分支限界，样条的每个非空结点段独立覆盖，并用保守速度/加速度界剪枝。`DistanceTolerance` 保证 `distance - distance_lower_bound` 不超过请求的距离容差；`ParameterTolerance` 表示仍可能改进区间的最大宽度不超过请求的参数容差。非解析的旧 `closest_parameter/closest_point` 复用该主流程，并在全域证书收敛后用剩余预算做下降式参数精修。
 
-选项要求 `distance_tolerance` 有限且非负、`parameter_tolerance` 有限且大于零、`max_evaluations >= 3`。非法选项或不可表示的有限输入返回结构化失败；预算耗尽返回 `OperationFailed / AXM-GEO-E-0006`，不返回部分结果。查询不写几何求值缓存。该合同只覆盖曲线；Bezier/BSpline/NURBS 及派生/修剪曲面的完整参数域、修剪边界、预算与收敛证书尚未提供。
+选项要求 `distance_tolerance` 有限且非负、`parameter_tolerance` 有限且大于零、`max_evaluations >= 3`。非法选项或不可表示的有限输入返回结构化失败；预算耗尽返回 `OperationFailed / AXM-GEO-E-0006`，不返回部分结果。查询不写几何求值缓存。该类型是曲线查询的一维参数证据；曲面的二维参数域、预算和收敛证据由下文 `SurfaceClosestPointResult` 单独表达。
 
 `CurveService::length`（FR-QUERY-001 第 63/67 功能包）以模型长度单位返回弧长。Line 有限区间、LineSegment、Circle 和 CompositePolyline 使用解析计算；Ellipse、Parabola、Hyperbola、Bezier、BSpline 和 NURBS 对真实一阶导数的速度做自适应 Simpson 积分，不使用 bbox、网格或采样弦长冒充弧长。差值、速度和累加使用 `long double` 中间量，最终舍入到 `Scalar`；数值路径的容差是误差估计目标，不是任意曲线的严格误差界。
 
@@ -366,6 +366,35 @@ struct SurfaceEvalResult {
   Scalar k2;
 };
 
+enum class SurfaceClosestPointConvergence : std::uint8_t {
+  DistanceTolerance = 0,
+  ParameterTolerance = 1,
+  Analytic = 2
+};
+
+struct SurfaceClosestPointOptions {
+  Scalar distance_tolerance{1e-8};
+  Scalar parameter_tolerance{1e-4};
+  std::uint32_t max_evaluations{250000};
+};
+
+struct SurfaceClosestPointResult {
+  Scalar u;
+  Scalar v;
+  Point3 point;
+  Scalar distance;
+  Scalar distance_lower_bound;
+  Scalar u_uncertainty;
+  Scalar v_uncertainty;
+  std::uint32_t evaluations;
+  std::uint32_t patches_processed;
+  std::uint32_t control_net_bound_patches;
+  std::uint32_t pruned_patches;
+  SurfaceClosestPointConvergence convergence;
+  Range2D effective_domain;
+  bool domain_was_finiteized;
+};
+
 class SurfaceService {
 public:
   Result<SurfaceEvalResult> eval(SurfaceId, Scalar u, Scalar v, int deriv_order) const;
@@ -378,7 +407,11 @@ public:
 };
 ```
 
-`closest_point_detailed` 对有界参数域返回最近 UV/点、距离、保守距离下界、参数不确定度、求值/片计数和终止原因。Bezier/BSpline/NURBS、Revolved/Swept、Trimmed/Offset 走完整域分支限界，样条逐个非空结点片覆盖，修剪外环与孔边界参与搜索；平面包装、共面张量面及直线轮廓线性扫掠在可认证时走解析/支撑平面快路径。无限域须先修剪；非法选项、预算耗尽或无法建立有限变化界时失败且不返回部分值，不写 surface eval 缓存。旧 `closest_uv/closest_point` 对复杂有界曲面复用该流程。
+`closest_point_detailed` 返回最近 UV/点、距离与保守下界、参数不确定度、工作量和终止原因。Plane、Cylinder、Cone、规则 Sphere/Torus 及其嵌套 Offset 链可走 `Analytic`：无界方向自动构造包含至少一个全域极小点的 `effective_domain`，以 `domain_was_finiteized=true` 显式标识，且 `evaluations/patches_processed` 为 0。周期缝、柱轴、球心、锥顶和环管中心等非唯一参数位置返回确定性规范参数。
+
+Bezier/BSpline/NURBS 对每个非空结点片及递归子片提取正权有理 Bezier 控制网，以欧氏凸包 AABB 建立随细分收紧的全域距离下界；Trimmed 保留该证书，嵌套 Offset 按各层绝对偏置保守扩张。`control_net_bound_patches` 和 `pruned_patches` 分别记录启用控制网界的参数片和被下界剪枝的参数片；它们是本次查询证据，不是续算游标。Revolved/Swept、通用派生面与其他有界路径继续使用保守变化界和确定性分支限界，修剪外环与孔边界参与搜索。
+
+解析偏置链的有效半径坍缩、负向完整圆锥偏置自交返回 `DegenerateGeometry / AXM-GEO-E-0010`；解析有限化或结果超出表示范围返回 `NumericalInstability / AXM-GEO-E-0006`。非法选项、数值搜索预算耗尽或无法建立保守界同样结构化失败。所有失败都不返回部分值、不写 surface eval 缓存；旧 `closest_uv/closest_point` 复用同一主流程。当前仅规则环面使用解析证书，spindle/horn 环面仍走既有有界数值路径；通用无限派生曲面尚不自动有限化，极小齐次权重可在分母保护下回退速度界，旋转/扫掠面尚无独立大模型性能基线证书。
 
 ### 5.3 几何变换接口
 
@@ -390,6 +423,63 @@ public:
 };
 ```
 
+### 5.4 曲线-曲线求交接口
+
+```cpp
+enum class CurveCurveIntersectionKind : std::uint8_t {
+  Transverse,
+  Tangent,
+  Endpoint
+};
+
+struct CurveCurveIntersectionPoint {
+  Point3 point;
+  Scalar first_parameter;
+  Scalar second_parameter;
+  Scalar residual_distance;
+  CurveCurveIntersectionKind kind;
+};
+
+struct CurveCurveOverlap {
+  Range1D first_interval;
+  Range1D second_interval;
+  bool same_direction;
+  Scalar maximum_separation;
+};
+
+struct CurveCurveIntersectionOptions {
+  Scalar position_tolerance{1e-8};
+  Scalar parameter_tolerance{1e-8};
+  Scalar angular_tolerance{1e-7};
+  std::uint32_t max_evaluations{200000};
+  std::uint32_t max_subdivisions{100000};
+  std::optional<Range1D> first_interval;
+  std::optional<Range1D> second_interval;
+};
+
+struct CurveCurveIntersectionResult {
+  std::vector<CurveCurveIntersectionPoint> points;
+  std::vector<CurveCurveOverlap> overlaps;
+  std::uint32_t evaluations;
+  std::uint32_t parameter_rectangles_processed;
+};
+
+class GeometryIntersectionService {
+public:
+  Result<CurveCurveIntersectionResult> intersect_curve_curve(
+      CurveId first, CurveId second,
+      const CurveCurveIntersectionOptions& options = {}) const;
+};
+```
+
+`intersect_curve_curve` 只搜索有限参数域。未显式指定区间时使用曲线完整定义域；无限 `Line` 必须通过 `first_interval/second_interval` 提供有限窗口。区间可以为零宽点查询，输入的递减端点会按无向搜索域规范化。空交集是成功的空 `points/overlaps`，不是失败。
+
+Line、LineSegment、CompositePolyline 及可证明为线性的样条/复合子段使用解析 3D 最近线段与共线覆盖路径；Bezier、BSpline、NURBS、圆锥曲线及 CompositeChain 按连续参数片建立保守包围，进行确定性参数矩形细分和阻尼 Gauss-Newton 精化；满重数结点两侧独立处理。离散交点返回双侧参数、两求值点中点、残差距离及 `Transverse/Tangent/Endpoint`（端点分类优先）；连续重合单独返回 `overlaps`，区间均按参数递增排列，`same_direction` 说明几何方向。一般高阶曲线仅在记录可证明同参时报告连续重合；异参同轨不做完备证明。
+
+`evaluations` 与 `parameter_rectangles_processed` 分别给出本次查询实际消耗的无缓存点值求值数和候选参数矩形数，调用方可据此归档工作量；它们不是下一次调用的续算游标。相切邻域以曲线片相对端点弦的保守偏差决定是否继续非线性细分；非连续 CompositeChain 建界时分别使用子片起点右极限和终点左极限，避免接缝另一侧的公开求值语义遮蔽当前子片。
+
+`position_tolerance` 和 `parameter_tolerance` 必须有限且大于零，`angular_tolerance` 必须位于 `[0,1]`，求值预算至少为 6，细分预算必须非零。无效句柄、非法/越域区间、无法建立有限数值界或预算耗尽均结构化失败且不返回部分结果。该查询不写曲线求值缓存、Intersection/拓扑存储或活动事务计数。位置容差内的近交按容差命中；无限曲线不自动推断搜索窗口。
+
 ## 6. `TopoCore` 接口清单
 
 ### 6.1 拓扑只读查询接口
@@ -399,7 +489,8 @@ enum class FaceBoundaryConflictKind : std::uint8_t {
   ProperIntersection,
   EndpointTouch,
   CollinearOverlap,
-  NearContact
+  NearContact,
+  CurveOverlap
 };
 
 struct FaceBoundaryConflict {
@@ -411,6 +502,10 @@ struct FaceBoundaryConflict {
   Point3 first_point;
   Point3 second_point;
   Scalar distance;
+  bool error_controlled;
+  Scalar solver_tolerance;
+  std::uint32_t curve_evaluations;
+  std::uint32_t parameter_rectangles_processed;
 };
 
 enum class BodyShellRole : std::uint8_t { Material, Void };
@@ -493,6 +588,21 @@ struct TopologyCancellationMetrics {
   std::uint64_t last_rolled_back_write_operations;
 };
 
+class TopologySavepoint {
+public:
+  TopologySavepoint() = default;
+  bool is_valid() const noexcept;
+};
+
+struct TopologySavepointMetrics {
+  std::uint64_t created_count;
+  std::uint64_t rollback_count;
+  std::uint64_t released_count;
+  std::uint64_t discarded_nested_count;
+  std::uint64_t rolled_back_write_operations_total;
+  std::uint64_t last_rolled_back_write_operations;
+};
+
 class TopologyTransaction {
 public:
   TopologyTransaction(TopologyTransaction&&);
@@ -524,6 +634,10 @@ public:
 
   Result<VersionId> commit();
   Result<void> rollback();
+  Result<TopologySavepoint> create_savepoint();
+  Result<void> rollback_to_savepoint(TopologySavepoint);
+  Result<void> release_savepoint(TopologySavepoint);
+  Result<std::uint64_t> active_savepoint_count() const;
   Result<void> poll_cancellation();
   Result<bool> cancellation_requested() const;
   Result<bool> cancellation_observed() const;
@@ -538,7 +652,9 @@ public:
 
 > 说明：`TopologyTransaction` 的完整签名见 `include/axiom/topo/topology_service.h`；事务具有唯一所有权，只能移动构造，不能复制或移动赋值。移动后的源对象处于可安全查询的关闭状态，写入、提交和回滚均被拒绝，事务权限仅由目标对象持有。活动事务若未显式提交或回滚便离开作用域，`noexcept` 析构会自动回滚成功写入；空事务析构是纯 no-op，已关闭事务与移动后的源对象析构不改变模型。另含 `set_coedge_pcurve`、删除壳/体、以及 trim 桥接审计读数 `coedge_pcurve_bind_count()` / `coedge_pcurve_clear_count()` 等。`write_operation_count()` 统计本事务内每次**成功**的写操作（创建/删除实体、`replace_surface`、每次 `set_coedge_pcurve` 含清除）；回滚或 `clear_tracking_records()` 归零。`clear_tracking_records()` 仅在提交或回滚后允许调用，可重复清理且不改变模型；活动事务（含空事务）返回 `OperationFailed` / `AXM-TX-E-0006`，保留创建记录、修改快照与计数。`effective_isolation_level()` 当前实现返回 `SnapshotSerializable`（单事务 + 快照回滚的工程占位，见头文件注释）。
 
-第 69 批支持把 `TopologyCancellationSource::token()` 传给 `begin_transaction(token)`。默认令牌不可取消；源及其副本共享幂等信号。预取消事务不取得写者槽；活动事务在显式 `poll_cancellation`、全部拓扑写入口、`commit`、显式 `rollback` 或作用域退出边界观察取消，随后用完整快照恢复创建、删除、曲面替换与反向索引，释放写者槽，不推进版本或成功提交审计，并返回 `OperationFailed / AXM-TX-E-0007`。重叠而被拒绝的事务不能通过取消影响实际所有者，移动事务唯一转移取消权限。`TopologyService::has_active_write_transaction()` 与 `cancellation_metrics()` 提供只读状态和累计审计，`core_runtime_invariants_hold()` 已包含取消审计自洽性。取消是协作式边界轮询，不会抢占单个正在执行的拓扑调用；长耗时 BOOL/HEAL/IO 内部阶段轮询、子事务和保存点仍未实现。
+第 69 批支持把 `TopologyCancellationSource::token()` 传给 `begin_transaction(token)`。默认令牌不可取消；源及其副本共享幂等信号。预取消事务不取得写者槽；活动事务在显式 `poll_cancellation`、全部拓扑写入口、`commit`、显式 `rollback` 或作用域退出边界观察取消，随后用完整快照恢复创建、删除、曲面替换与反向索引，释放写者槽，不推进版本或成功提交审计，并返回 `OperationFailed / AXM-TX-E-0007`。重叠而被拒绝的事务不能通过取消影响实际所有者，移动事务唯一转移取消权限。`TopologyService::has_active_write_transaction()` 与 `cancellation_metrics()` 提供只读状态和累计审计。
+
+第 74 批新增嵌套保存点。`create_savepoint()` 捕获拓扑主存储、完整撤销基线和事务写审计；`rollback_to_savepoint()` 保留目标供重复回滚，回滚到外层时使所有更内层句柄失效；`release_savepoint()` 只允许 LIFO 释放最内层点，并保留其后写入供最终提交。默认、跨事务、已失效和非栈顶句柄以 `OperationFailed / AXM-TX-E-0003` 失败且不改模型；对已请求取消的事务，完整事务恢复优先于局部保存点回滚，返回 `AXM-TX-E-0007` 并清空保存点。移动构造会转移保存点所有权。`TopologyService::savepoint_metrics()` 返回创建、回滚、释放、失效内层点与丢弃写次数的累计审计；`core_runtime_invariants_hold()` 同时检查取消与保存点审计自洽性。当前保存点是内存全拓扑快照，不回收已分配对象 ID；仍为单活动写者，取消不抢占正在执行的单次调用，BOOL/HEAL/IO 内部阶段轮询和更细粒度隔离仍待实现。
 
 ### 6.3 拓扑验证接口
 
@@ -558,7 +674,9 @@ public:
 };
 ```
 
-`first_boundary_conflict` 返回不同边界环间按稳定遍历顺序遇到的首个冲突及两环、两边、两最近点和距离；无冲突是成功的空 `optional`。精确检测覆盖 Line/LineSegment，以及带显式裁剪区间的 CompositePolyline 和仅含线性子曲线的 CompositeChain，分类为 `ProperIntersection`、`EndpointTouch`、`CollinearOverlap` 或 `NearContact`。复合曲线内部分段点保持为拓扑边内部，不会误分类为边端点相接；递减裁剪区间同样支持。默认 `linear_tolerance == 0` 使用内核线性容差；有限正值按策略上下限钳制，负值或非有限值返回 `InvalidInput`。`create_face` 与 `validate_face` 复用同一流程；共线正长度重叠和容差内正距离邻近分别使用 `AXM-TOPO-E-0028/0029`。预检和验证均为只读，不分配 `FaceId`、不修改反向索引或事务写计数。圆锥曲线和样条的误差受控跨环求交仍是下一子里程碑。
+`first_boundary_conflict` 返回不同边界环间按稳定遍历顺序遇到的首个冲突；无冲突是成功的空 `optional`。Line/LineSegment、CompositePolyline 和纯线性 CompositeChain 保持解析分段谓词；带显式 trim 区间的圆锥曲线、Bezier、BSpline、NURBS 及含真曲线子项的 CompositeChain 复用 Geo 层无诊断/无缓存的有限区间求交。除 `ProperIntersection/EndpointTouch/CollinearOverlap/NearContact` 外，连续曲线重合返回 `CurveOverlap`。`error_controlled`、`solver_tolerance`、`curve_evaluations` 与 `parameter_rectangles_processed` 区分求解路径并给出容差/工作量证据；解析线性路径的这些字段为 false/0。递减区间可用，复合曲线内部分段点不冒充拓扑边端点。
+
+默认 `linear_tolerance == 0` 使用内核线性容差；有限正值按策略上下限钳制，负值或非有限值返回 `InvalidInput`。`create_face` 与 `validate_face` 复用同一流程；真曲线内部交、端点接触和连续重合分别使用 `AXM-TOPO-E-0032/0033/0031`，缺少必要 trim、曲线损坏或预算/数值失败使用 `AXM-TOPO-E-0030` 闭合失败。失败不返回部分冲突；建面拒绝不分配 `FaceId`、不改反向索引或事务写计数。一般高阶曲线连续重合仍只在 Geo 求交器可证明相同参数化或解析分段重合时报告，近接能力受统一求交预算约束。
 
 ## 7. `RepCore` 接口清单
 
@@ -672,9 +790,14 @@ public:
   Result<BodyId> extrude(const ProfileRef&, const Vec3& direction, Scalar distance);
   Result<BodyId> extrude_scaled(const ProfileRef&, const Vec3& direction, Scalar distance,
                                 const Point3& center, Scalar end_scale);
+  Result<BodyId> extrude_twisted(const ProfileRef&, const Vec3& direction, Scalar distance,
+                                 const Point3& center, Scalar twist_angle);
   Result<BodyId> extrude_to_plane(const ProfileRef&, const Vec3& direction, const Plane& end_plane);
   Result<BodyId> revolve(const ProfileRef&, const Axis3&, Scalar angle);
+  Result<BodyId> revolve_between(const ProfileRef&, const Axis3&,
+                                 Scalar start_angle, Scalar end_angle);
   Result<BodyId> sweep(const ProfileRef&, CurveId rail);
+  Result<BodyId> sweep_scaled(const ProfileRef&, CurveId rail, Scalar end_scale);
   Result<BodyId> loft(std::span<const ProfileRef> profiles);
   Result<BodyId> thicken(FaceId, Scalar distance);
 };
@@ -702,11 +825,21 @@ public:
 
 `revolve` 的角度单位为弧度，必须位于 `(0, 2π]`。显式多边形路径以每周 48 段的角分辨率物化真实三角面、共享边/顶点和闭壳；部分角旋转增加约束剖分的首尾端盖，整周路径无端盖缝。支持与轴严格分离的凸/凹外环及分离孔洞；无孔轮廓还可仅通过一条唯一连续轴边闭合。轮廓/孔绕向、起点、孔序、轴方向反号/缩放和任意空间子午面保持等价；带孔区域触轴、跨轴、孤立轴点、近轴、自交、非共面或偏轴轮廓在分配前返回 `InvalidInput / AXM-CORE-E-0002`。结果体积、面积、质心和惯性来自闭合多面体积分。整周与部分角结果均是保守分片多面体 BRep，不是解析圆柱/圆锥/圆环面。
 
+`revolve_between` 以弧度解释有向区间 `[start_angle,end_angle]`，有符号跨度必须有限、非零且绝对值不超过 `2π`。递增/递减区间分别按轴方向的正向/反向旋转，支持偏置起始角和对称区间；部分角结果的首尾端盖绕向与方向匹配。正负整周保留周期多壳语义且几何与起始角无关。`revolve(profile,axis,angle)` 的正角合同不变，等价委托 `[0,angle]`。轮廓、轴分离和数值退化限制与 `revolve` 相同。
+
 `loft` 要求至少两个显式平面多边形截面。各站外环以及同索引孔环必须保持相同顶点数，以顶点顺序定义直纹侧壁对应关系；环绕向可独立变化。截面须沿共同横向严格有序，站间插值区域不得退化、翻折或相交。成功时生成真实共享面边点的单闭壳并缓存闭合多面体质量属性；不同环拓扑、自动顶点匹配、分支、尖顶/坍塌截面和无显式轮廓路径拒绝，不再返回 bbox 占位体。
 
 `sweep` 还支持显式凹多边形或带孔截面沿 Bezier/BSpline/NURBS 开放导轨、显式端点重合且首尾切向连续的闭合样条、整圆/椭圆周期导轨，以及 `CompositeChain` 复合导轨。复合链子段可为有界直线/线段、圆/椭圆弧、Bezier、BSpline、NURBS 或 polyline 首段，按公开链语义的子曲线局部参数 `[0,1]` 取值；接缝必须位置连续且 G1 切向连续。截面必须位于导轨起点且其平面法向与起始切向对齐；开放导轨生成两端盖，闭合样条与闭合复合链生成无端盖周期闭壳。空间闭环使用沿采样弧长分布的旋转最小标架 holonomy 校正，避免首尾截面隐藏扭转缝。周期带孔截面的外边界与每个孔边界是互不连通的闭壳，因此一个 Body 含 `1 + holes_xyz.size()` 个 Shell，`owned_topo_welded` 网格也报告同数量的连通分量；开放带孔导轨由端盖连成单壳，周期无孔也为单壳。
 
+`sweep_scaled` 在上述路径上把截面统一缩放比从起点的 1 按采样弧长线性插值到有限且严格为正的 `end_scale`。直线与 CompositePolyline 以导轨起点为截面平面内缩放中心；曲线导轨在旋转最小标架中逐站缩放。凹轮廓和带孔轮廓均生成真实共享面边点闭壳；物化前检查比例、截面平面、前向非折叠、端盖、流形边和质量属性。非单位比例仅支持开放导轨；周期导轨仅接受 1，因为缝两侧截面必须一致。`sweep(profile,rail)` 与 `sweep_scaled(profile,rail,1)` 兼容。
+
+当前只有常量正终端比例与线性弧长插值；不支持零比例尖顶、负比例/反射、非线性比例律和嵌套复合导轨。过小比例或相对曲率过大的截面可因数值退化/自交风险被保守拒绝。结果仍是采样多面体 BRep，不是解析扫掠曲面。
+
 曲线扫掠的端点伪闭合、首尾切向断裂、接缝错位/折角/尖点、嵌套复合链、抛物线/双曲线复合子段、过紧曲率、非局部弦段自靠近、局部不前进及退化物化都以 `InvalidInput / AXM-CORE-E-0002` 拒绝，不产生模型、拓扑、ID、事务写或求值/网格缓存污染。当前仅支持显式平面多边形截面，不保留显式轮廓历史。结果是保守采样多面体 BRep，不是解析扫掠曲面；无显式轮廓仍为历史 bbox 占位路径。
+
+第 73 批（cycle-0073）新增 `extrude_twisted`，已通过修复后的完整门禁。仅接受有标签的显式平面简单多边形，可凹且可含严格分离、非嵌套孔洞；轮廓可任意空间朝向、独立环绕向和起点。`center` 须有限且位于轮廓平面内，`direction` 须有限、非零且垂直于该平面，按单位方向使用，`distance` 须有限且为正。`twist_angle` 以弧度表示，沿单位方向按右手规则旋转，允许正负部分角及正负整周，限于 `[-2π,2π]`；反转方向也反转旋转轴。满足上述法向合同后，零扭角兼容 `extrude`。
+
+截面按高度均匀旋转，站间角差不超过 `π/24`（7.5°）；非零扭转路径的分段数为 `max(1,ceil(abs(twist_angle)/(π/24)))`，`abs(twist_angle)≤1e-14` 时委托 `extrude`。实际三角端盖和侧壁物化可查询的 Body/Shell/Face/Edge/Vertex 闭壳、bbox 与多面体质量属性；共面中心、法向、站点严格推进、端盖、三角退化及有限积分检查在对象分配前完成。非法/数值退化输入返回 `InvalidInput / AXM-CORE-E-0002`，不分配模型或拓扑对象。repair 仅在扭转站间交替侧壁四边形的剖分对角线，消除固定对角线累积的一阶有向体积偏差，保持站点数及非扭转物化路径。结果虽使用 `ExactBRep` 表示标签，仍是保守采样多面体，不是解析螺旋面；质量属性描述实际剖分体，不承诺解析螺旋体精度。暂不支持斜方向、多于一周或与变比例/至平面拉伸组合，极端尺度与近退化输入可保守拒绝。
 
 ### 8.2 布尔操作接口
 
@@ -796,7 +929,7 @@ enum class ValidationMode {
 
 class ValidationService {
 public:
-  // 失败报告使用 heal.validate_geometry.* 阶段，并关联目标 Body 及可定位的问题子实体。
+  // 失败报告使用 heal.* 阶段，关联目标及问题子实体，并携带有限数值证据。
   Result<void> validate_geometry(BodyId, ValidationMode) const;
   Result<void> validate_topology(BodyId, ValidationMode) const;
   Result<void> validate_self_intersection(BodyId, ValidationMode) const;
@@ -817,13 +950,22 @@ enum class RepairMode {
 
 class RepairService {
 public:
+  Result<void> repair_face_trim_pcurves(FaceId, RepairMode);
   Result<OpReport> sew_faces(std::span<const FaceId>, Scalar tolerance, RepairMode);
   Result<OpReport> remove_small_edges(BodyId, Scalar threshold, RepairMode);
   Result<OpReport> remove_small_faces(BodyId, Scalar threshold, RepairMode);
   Result<OpReport> merge_near_coplanar_faces(BodyId, Scalar angle_tol, RepairMode);
   Result<OpReport> auto_repair(BodyId, RepairMode);
+  Result<std::vector<OpReport>> repair_many_auto(std::span<const BodyId>, RepairMode);
+  Result<std::vector<OpReport>> repair_many_remove_small_edges(std::span<const BodyId>, Scalar threshold, RepairMode);
+  Result<std::vector<OpReport>> repair_many_remove_small_faces(std::span<const BodyId>, Scalar threshold, RepairMode);
+  Result<std::vector<OpReport>> repair_many_merge_near_coplanar_faces(std::span<const BodyId>, Scalar angle_tol, RepairMode);
 };
 ```
+
+第 73 批为 HEAL 验证、修复、后验验证、trim 重建和批量修复的失败报告统一补齐 `heal.*` 阶段、关联实体和有限 `numeric_evidence`，并通过 `axiom_heal_test` 的模块级 `audit_evidence` 门禁。无效/空目标用显式零令牌标识无可关联实体；证据至少含状态与实体数量，并按分支附验证模式、阈值、计数或几何量，非有限测量值被过滤并记录遗漏数量。该诊断合同不扩大验证或修复算法的几何支持范围。
+
+单项修改型修复在物化后验证，后验失败回收本次派生体及拓扑/几何对象并保留失败诊断；`auto_repair` 失败也回收派生结果。`repair_face_trim_pcurves` 支持 Plane/Cylinder/Sphere，投影重建或后验验证失败恢复全部原 coedge PCurve 绑定并删除本次新建 PCurve。四个 `repair_many_*` 入口任一子项失败时回滚此前子项全部派生对象及 Eval 失效状态，不返回半成功结果；批量失败报告关联失败子项目标，并附 `heal.repair_many_*.rollback` 与 `completed_item_count/requested_item_count/rollback_applied`，其中 `repair_many_auto` 另附 `allocated_object_count`（以分配 ID 增量计）；子项原诊断保留在诊断存储中，批量返回报告不合并子项全部根因 issue。HEAL 回滚不恢复 `next_id`，被回收对象占用的 ID 可留下空档，不承诺重试复用原 ID。诊断记录作为失败证据保留。
 
 ## 10. `EvalGraph` 接口清单
 
@@ -880,10 +1022,25 @@ public:
   Result<BodyId> import_iges(std::string_view path, const ImportOptions&);
   Result<BodyId> import_brep(std::string_view path, const ImportOptions&);
   Result<void> export_step(BodyId, std::string_view path, const ExportOptions&);
+  Result<void> export_axmjson(BodyId, std::string_view path, const ExportOptions&);
+  Result<void> export_iges(BodyId, std::string_view path, const ExportOptions&);
+  Result<void> export_brep(BodyId, std::string_view path, const ExportOptions&);
+  Result<BodyId> import_auto(std::string_view path, const ImportOptions&);
+  Result<void> export_auto(BodyId, std::string_view path, const ExportOptions&);
+  Result<std::vector<BodyId>> import_many_step(std::span<const std::string> paths, const ImportOptions&);
+  Result<std::vector<BodyId>> import_many_axmjson(std::span<const std::string> paths, const ImportOptions&);
+  Result<std::vector<BodyId>> import_many_auto(std::span<const std::string> paths, const ImportOptions&);
+  Result<void> export_many_auto(std::span<const BodyId>, std::span<const std::string> paths, const ExportOptions&);
 };
 ```
 
 `import_axmjson`、`import_iges` 与 `import_brep`（NFR-DIA-001 第 70 批）在分配 `BodyId` 前完成普通文件检查、64 MiB 上限与短读检查、严格结构解析、格式/`BodyKind` 校验，以及有限数值、包围盒顺序和非零轴校验。三者的物化前失败分别绑定 `io.import.<format>.input/path/open/read/parse/validation`；输入/路径/打开/读取失败复用 `AXM-IO-E-0004`，结构/格式失败复用 `AXM-IO-E-0003`，非有限几何复用 `AXM-VAL-E-0010`，包围盒无效或轴退化复用 `AXM-VAL-E-0004`。失败返回可检索 `diagnostic_id`，不写 Body/Mesh store、不推进模型 ID，修复原文件后可用同一路径重试。AXMJSON 兼容既有仅含身份与 bbox 的早期文件；一旦出现扩展几何字段就要求整组完整。BREP 仅接受带 `AXIOM_BREP_INTERCHANGE` 文件头的 `AXIOM_BREP` JSON 子集；IGES 仅物化 Axiom 元数据子集，典型标准 IGES 卡片/DE 实体仍返回既有 `NotImplemented / AXM-IO-E-0011`，并可附 `AXM-IO-D-0017` 扫描摘要。
+
+第 73 批统一 STEP/AXMJSON/IGES/BREP/OBJ/STL/glTF/3MF 主格式导入、导出及 auto 路由失败的 `io.*` 阶段、问题实体令牌与有限数值证据，已通过 `axiom_io_workflow_test` 模块级 `audit_evidence` 门禁。预物化文件失败无内核对象时使用 `related_entities=[0]`；导出通常关联输入 Body。AXMJSON/IGES/BREP 导出补齐 `io.export.<format>.input/path/open/write` 及最终写入/关闭检查，复用既有 IO/VAL 错误码。
+
+STEP 与 AXMJSON 现接入其他主格式共用的导入后验证管线：`run_validation=true` 触发 Standard 验证，失败证据复制到 `io.post_import.validation`；启用 `auto_repair` 后复制修复及复验问题到 `io.post_import.repair/post_validate`，原 HEAL 诊断不被修改。该管线保留既有报告语义：导入可返回 `Ok` 和 Body，同时报告含验证/修复失败 issue；调用者须读取诊断或显式验证，不应把 `Ok` 等同于通过验证。
+
+`import_many_step/import_many_axmjson/import_many_auto` 任一子项实际返回失败时回收本批（含自动修复）新分配的 Body/Mesh/拓扑/几何，恢复链接、缓存、Eval 失效状态及 `next_id`，可原位重试；保留诊断记录。合并报告保留根因并附 `io.batch_import/io.batch_export`、从零开始的 `failed_item_index`、`completed_item_count`、`path_length`。完成数量表示失败前已完成项，并不表示回滚后仍保留这些导入体。候选导入、严格现有文件导入、目录导出与条件导出传播真实失败；`export_auto_existing_only` 仅跳过父目录不存在的目标。批量导出不承诺文件系统事务，设备/侧车失败可能留下已写文件；普通文本/目录等辅助接口未纳入本重量级证据包。标准 STEP/IGES 实体及既有格式子集限制不变。
 
 ## 12. `Diagnostics` 接口清单
 
@@ -979,7 +1136,7 @@ public:
 
 `NumericEvidence{name, value, unit}` 为可机器读取的计数、阈值、距离或容差证据；名称在单个 issue 内稳定，单位可为空。单条、指定 ID 批量和全量 TXT/JSON 导出均保留该字段；JSON 遇到非有限数值写 `null`，审计则把空名称或非有限值视为证据无效。
 
-`audit_evidence` 按问题码前缀与最低严重级别筛选 issue，并可要求阶段前缀、关联实体及有效数值证据。重复 `DiagnosticId` 只审计一次；没有匹配 issue 的报告计入 `reports_without_matching_issue`；`max_findings` 仅限制明细，额外缺口计入 `omitted_findings`，完整统计不截断。空 ID 集、空问题码前缀、必需但为空的阶段前缀、零明细上限、非法严重级别或无效 ID 均结构化失败，且不修改源报告。`export_evidence_audit_json` 先完成审计再打开文件；空路径、打开或最终写入失败复用 `AXM-IO-E-0005`。当前 BOOL 主运行和预处理统计导出的受覆盖失败分支已写入数值证据并通过该门禁；HEAL 与 IO 的重量级失败分支尚未全面迁移。
+`audit_evidence` 按问题码前缀与最低严重级别筛选 issue，并可要求阶段前缀、关联实体及有效数值证据。重复 `DiagnosticId` 只审计一次；没有匹配 issue 的报告计入 `reports_without_matching_issue`；`max_findings` 仅限制明细，额外缺口计入 `omitted_findings`，完整统计不截断。空 ID 集、空问题码前缀、必需但为空的阶段前缀、零明细上限、非法严重级别或无效 ID 均结构化失败，且不修改源报告。`export_evidence_audit_json` 先完成审计再打开文件；空路径、打开或最终写入失败复用 `AXM-IO-E-0005`。BOOL 受覆盖失败分支及第 73 批 HEAL 验证/修复/回滚、IO 主格式导入导出/后验验证/批处理已接入模块门禁；普通文件文本/目录辅助接口及更广泛的失败注入语料仍待扩充，不能据此宣称所有公开接口全覆盖。
 
 问题码前缀、阶段精确与阶段前缀检索均按 `DiagnosticId` 升序返回最早的前 `max_results` 个匹配报告，单报告的多个匹配 issue 只返回一次。空问题码前缀、空阶段/阶段前缀或零上限返回 `InvalidInput` / `AXM-CORE-E-0002`，源报告保持不变。
 
@@ -1004,6 +1161,7 @@ public:
   TopologyTransaction begin_transaction(const TopologyCancellationToken&);
   Result<bool> has_active_write_transaction() const;
   Result<TopologyCancellationMetrics> cancellation_metrics() const;
+  Result<TopologySavepointMetrics> savepoint_metrics() const;
   TopologyQueryService& query();
   TopologyValidationService& validate();
 };

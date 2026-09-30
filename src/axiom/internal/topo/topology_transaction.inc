@@ -459,24 +459,42 @@ TopologyTransaction::create_face(SurfaceId surface_id, LoopId outer_loop,
   }
   const auto boundary_tolerance = detail::resolve_linear_tolerance(
       0.0, state_->config.tolerance);
-  if (const auto conflict = face_cross_loop_boundary_conflict(
-          *state_, outer_loop, inner_loops, boundary_tolerance)) {
+  const auto boundary_search = face_cross_loop_boundary_conflict(
+      *state_, outer_loop, inner_loops, boundary_tolerance);
+  if (boundary_search.status != StatusCode::Ok) {
+    return detail::failed_result<FaceId>(
+        *state_, boundary_search.status,
+        diag_codes::kTopoFaceBoundaryIntersectionIndeterminate,
+        "创建面失败：显式裁剪曲线求交无法在预算和数值误差约束内完成",
+        "创建面失败",
+        {outer_loop.value, boundary_search.first_edge.value,
+         boundary_search.second_edge.value});
+  }
+  if (const auto &conflict = boundary_search.conflict) {
     std::string_view code =
-        diag_codes::kTopoFaceCrossLoopStraightEdgeIntersection;
+        conflict->error_controlled
+            ? diag_codes::kTopoFaceCrossLoopCurveIntersection
+            : diag_codes::kTopoFaceCrossLoopStraightEdgeIntersection;
     std::string message =
-        "创建面失败：不同边界环的线性边界片段在内部相交";
+        "创建面失败：不同边界环的边界曲线在内部相交";
     switch (conflict->kind) {
       case FaceBoundaryConflictKind::EndpointTouch:
-        code = diag_codes::kTopoFaceCrossLoopStraightEdgeEndpointTouch;
-        message = "创建面失败：不同边界环的线性边界片段在拓扑边端点相接";
+        code = conflict->error_controlled
+                   ? diag_codes::kTopoFaceCrossLoopCurveEndpointTouch
+                   : diag_codes::kTopoFaceCrossLoopStraightEdgeEndpointTouch;
+        message = "创建面失败：不同边界环的边界曲线在拓扑边端点相接";
         break;
       case FaceBoundaryConflictKind::CollinearOverlap:
         code = diag_codes::kTopoFaceCrossLoopCollinearOverlap;
         message = "创建面失败：不同边界环的共线边界片段发生重叠";
         break;
+      case FaceBoundaryConflictKind::CurveOverlap:
+        code = diag_codes::kTopoFaceCrossLoopCurveOverlap;
+        message = "创建面失败：不同边界环的曲线边界存在连续重合区间";
+        break;
       case FaceBoundaryConflictKind::NearContact:
         code = diag_codes::kTopoFaceCrossLoopNearContact;
-        message = "创建面失败：不同边界环的线性边界片段在拓扑容差内邻近相接（间距=" +
+        message = "创建面失败：不同边界环的边界曲线在拓扑容差内邻近相接（间距=" +
                   std::to_string(conflict->distance) + "，容差=" +
                   std::to_string(boundary_tolerance) + "）";
         break;
@@ -873,6 +891,7 @@ Result<VersionId> TopologyTransaction::commit() {
       owner.get() == transaction_state_.get()) {
     state_->active_topology_transaction.reset();
   }
+  transaction_state_->savepoints.clear();
   active_ = false;
   const VersionId assigned = state_->next_version;
   state_->topology_commit_success_count += 1;
@@ -924,6 +943,188 @@ Result<void> TopologyTransaction::rollback() {
   restore_model_and_close();
   return ok_void(state_->create_diagnostic(
       cancellation_observed_ ? "事务已响应取消并回滚" : "事务已回滚"));
+}
+
+Result<TopologySavepoint> TopologyTransaction::create_savepoint() {
+  if (const auto cancelled = observe_cancellation("创建事务保存点")) {
+    return error_result<TopologySavepoint>(StatusCode::OperationFailed,
+                                           *cancelled);
+  }
+  if (!active_) {
+    return detail::failed_result<TopologySavepoint>(
+        *state_, StatusCode::OperationFailed, diag_codes::kTxCommitFailure,
+        "创建事务保存点失败：事务已关闭", "创建事务保存点失败");
+  }
+
+  detail::TopologySavepointSnapshot snapshot;
+  snapshot.handle = TopologySavepoint{
+      transaction_state_->transaction_cookie,
+      transaction_state_->next_savepoint_sequence};
+  snapshot.vertices = state_->vertices;
+  snapshot.edges = state_->edges;
+  snapshot.coedges = state_->coedges;
+  snapshot.loops = state_->loops;
+  snapshot.faces = state_->faces;
+  snapshot.shells = state_->shells;
+  snapshot.bodies = state_->bodies;
+  snapshot.created_vertices = created_vertices_;
+  snapshot.created_edges = created_edges_;
+  snapshot.created_coedges = created_coedges_;
+  snapshot.created_loops = created_loops_;
+  snapshot.created_faces = created_faces_;
+  snapshot.created_shells = created_shells_;
+  snapshot.created_bodies = created_bodies_;
+  snapshot.original_coedge_pcurves =
+      transaction_state_->original_coedge_pcurves;
+  snapshot.original_faces = transaction_state_->original_faces;
+  snapshot.original_shells = transaction_state_->original_shells;
+  snapshot.original_bodies = transaction_state_->original_bodies;
+  snapshot.deleted_faces = txn_deleted_faces_;
+  snapshot.deleted_shells = txn_deleted_shells_;
+  snapshot.deleted_bodies = txn_deleted_bodies_;
+  snapshot.replaced_surfaces = txn_replaced_surfaces_;
+  snapshot.coedge_pcurve_binds = txn_coedge_pcurve_binds_;
+  snapshot.coedge_pcurve_clears = txn_coedge_pcurve_clears_;
+  snapshot.write_operations = txn_write_ops_;
+
+  const auto handle = snapshot.handle;
+  transaction_state_->savepoints.push_back(std::move(snapshot));
+  ++transaction_state_->next_savepoint_sequence;
+  ++state_->topology_savepoint_created_count;
+  return ok_result(handle, state_->create_diagnostic("已创建拓扑事务保存点"));
+}
+
+Result<void>
+TopologyTransaction::rollback_to_savepoint(TopologySavepoint savepoint) {
+  if (const auto cancelled = observe_cancellation("回滚到事务保存点")) {
+    return error_void(StatusCode::OperationFailed, *cancelled);
+  }
+  if (!active_) {
+    return detail::failed_void(*state_, StatusCode::OperationFailed,
+                               diag_codes::kTxRollbackFailure,
+                               "回滚到事务保存点失败：事务已关闭",
+                               "回滚到事务保存点失败");
+  }
+  const auto matches = [savepoint](const auto &snapshot) {
+    return snapshot.handle.transaction_cookie_ == savepoint.transaction_cookie_ &&
+           snapshot.handle.sequence_ == savepoint.sequence_;
+  };
+  const auto found = std::find_if(transaction_state_->savepoints.begin(),
+                                  transaction_state_->savepoints.end(), matches);
+  if (savepoint.transaction_cookie_ != transaction_state_->transaction_cookie ||
+      savepoint.sequence_ == 0 || found == transaction_state_->savepoints.end()) {
+    return detail::failed_void(
+        *state_, StatusCode::OperationFailed, diag_codes::kTxConflict,
+        "回滚到事务保存点失败：句柄不属于当前事务或已失效",
+        "回滚到事务保存点失败");
+  }
+
+  // Copy every baseline first. If snapshot allocation fails, the live topology
+  // and transaction audit remain untouched.
+  auto vertices = found->vertices;
+  auto edges = found->edges;
+  auto coedges = found->coedges;
+  auto loops = found->loops;
+  auto faces = found->faces;
+  auto shells = found->shells;
+  auto bodies = found->bodies;
+  auto created_vertices = found->created_vertices;
+  auto created_edges = found->created_edges;
+  auto created_coedges = found->created_coedges;
+  auto created_loops = found->created_loops;
+  auto created_faces = found->created_faces;
+  auto created_shells = found->created_shells;
+  auto created_bodies = found->created_bodies;
+  auto original_coedge_pcurves = found->original_coedge_pcurves;
+  auto original_faces = found->original_faces;
+  auto original_shells = found->original_shells;
+  auto original_bodies = found->original_bodies;
+  const auto deleted_faces = found->deleted_faces;
+  const auto deleted_shells = found->deleted_shells;
+  const auto deleted_bodies = found->deleted_bodies;
+  const auto replaced_surfaces = found->replaced_surfaces;
+  const auto coedge_pcurve_binds = found->coedge_pcurve_binds;
+  const auto coedge_pcurve_clears = found->coedge_pcurve_clears;
+  const auto restored_write_operations = found->write_operations;
+  const auto rolled_back_write_operations =
+      txn_write_ops_ >= restored_write_operations
+          ? txn_write_ops_ - restored_write_operations
+          : 0;
+  const auto nested_count = static_cast<std::uint64_t>(
+      std::distance(found, transaction_state_->savepoints.end()) - 1);
+
+  state_->vertices = std::move(vertices);
+  state_->edges = std::move(edges);
+  state_->coedges = std::move(coedges);
+  state_->loops = std::move(loops);
+  state_->faces = std::move(faces);
+  state_->shells = std::move(shells);
+  state_->bodies = std::move(bodies);
+  created_vertices_ = std::move(created_vertices);
+  created_edges_ = std::move(created_edges);
+  created_coedges_ = std::move(created_coedges);
+  created_loops_ = std::move(created_loops);
+  created_faces_ = std::move(created_faces);
+  created_shells_ = std::move(created_shells);
+  created_bodies_ = std::move(created_bodies);
+  transaction_state_->original_coedge_pcurves =
+      std::move(original_coedge_pcurves);
+  transaction_state_->original_faces = std::move(original_faces);
+  transaction_state_->original_shells = std::move(original_shells);
+  transaction_state_->original_bodies = std::move(original_bodies);
+  txn_deleted_faces_ = deleted_faces;
+  txn_deleted_shells_ = deleted_shells;
+  txn_deleted_bodies_ = deleted_bodies;
+  txn_replaced_surfaces_ = replaced_surfaces;
+  txn_coedge_pcurve_binds_ = coedge_pcurve_binds;
+  txn_coedge_pcurve_clears_ = coedge_pcurve_clears;
+  txn_write_ops_ = restored_write_operations;
+  rebuild_topology_indices(*state_);
+
+  transaction_state_->savepoints.erase(std::next(found),
+                                        transaction_state_->savepoints.end());
+  ++state_->topology_savepoint_rollback_count;
+  state_->topology_savepoint_discarded_nested_count += nested_count;
+  state_->topology_savepoint_rolled_back_write_operations_total +=
+      rolled_back_write_operations;
+  state_->topology_savepoint_last_rolled_back_write_operations =
+      rolled_back_write_operations;
+  return ok_void(state_->create_diagnostic("已回滚到拓扑事务保存点"));
+}
+
+Result<void>
+TopologyTransaction::release_savepoint(TopologySavepoint savepoint) {
+  if (const auto cancelled = observe_cancellation("释放事务保存点")) {
+    return error_void(StatusCode::OperationFailed, *cancelled);
+  }
+  if (!active_) {
+    return detail::failed_void(*state_, StatusCode::OperationFailed,
+                               diag_codes::kTxCommitFailure,
+                               "释放事务保存点失败：事务已关闭",
+                               "释放事务保存点失败");
+  }
+  if (transaction_state_->savepoints.empty() || savepoint.sequence_ == 0 ||
+      savepoint.transaction_cookie_ != transaction_state_->transaction_cookie ||
+      transaction_state_->savepoints.back().handle.transaction_cookie_ !=
+          savepoint.transaction_cookie_ ||
+      transaction_state_->savepoints.back().handle.sequence_ !=
+          savepoint.sequence_) {
+    return detail::failed_void(
+        *state_, StatusCode::OperationFailed, diag_codes::kTxConflict,
+        "释放事务保存点失败：仅可释放当前事务最内层的有效保存点",
+        "释放事务保存点失败");
+  }
+  transaction_state_->savepoints.pop_back();
+  ++state_->topology_savepoint_released_count;
+  return ok_void(state_->create_diagnostic("已释放拓扑事务保存点"));
+}
+
+Result<std::uint64_t> TopologyTransaction::active_savepoint_count() const {
+  return ok_result<std::uint64_t>(
+      active_ ? static_cast<std::uint64_t>(
+                    transaction_state_->savepoints.size())
+              : 0,
+      state_->create_diagnostic("已查询事务活动保存点数量"));
 }
 
 bool TopologyTransaction::token_cancellation_requested() const noexcept {
@@ -1061,6 +1262,7 @@ void TopologyTransaction::restore_model_and_close() {
   txn_coedge_pcurve_binds_ = 0;
   txn_coedge_pcurve_clears_ = 0;
   txn_write_ops_ = 0;
+  transaction_state_->savepoints.clear();
   if (const auto owner = state_->active_topology_transaction.lock();
       owner.get() == transaction_state_.get()) {
     state_->active_topology_transaction.reset();
@@ -1331,6 +1533,7 @@ Result<void> TopologyTransaction::clear_tracking_records() {
   transaction_state_->original_faces.clear();
   transaction_state_->original_shells.clear();
   transaction_state_->original_bodies.clear();
+  transaction_state_->savepoints.clear();
   return ok_void(state_->create_diagnostic("已清空事务跟踪记录"));
 }
 

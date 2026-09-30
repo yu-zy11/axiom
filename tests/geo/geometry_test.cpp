@@ -2412,6 +2412,121 @@ int main() {
             return 1;
         }
 
+        // High-order rational patches use a homogeneous knot-insertion hull for every
+        // branch-and-bound cell.  This remains finite for large positive weight ratios,
+        // shrinks after subdivision, and exposes work/pruning evidence to callers.
+        axiom::NURBSSurfaceDesc certified_desc;
+        certified_desc.degree_u = 3;
+        certified_desc.degree_v = 3;
+        certified_desc.knots_u = {0.0, 0.0, 0.0, 0.0, 2.0,
+                                  4.0, 4.0, 4.0, 4.0};
+        certified_desc.knots_v = certified_desc.knots_u;
+        for (int i = 0; i < 5; ++i) {
+            for (int j = 0; j < 5; ++j) {
+                const double di = static_cast<double>(i - 2);
+                const double dj = static_cast<double>(j - 2);
+                certified_desc.poles.push_back(
+                    {2.0 * i, 1.5 * j,
+                     0.18 * di * di + 0.11 * dj * dj + 0.07 * di * dj});
+                switch ((i + 2 * j) % 4) {
+                case 0:
+                    certified_desc.weights.push_back(1e-8);
+                    break;
+                case 1:
+                    certified_desc.weights.push_back(1e-2);
+                    break;
+                case 2:
+                    certified_desc.weights.push_back(1.0);
+                    break;
+                default:
+                    certified_desc.weights.push_back(1e4);
+                    break;
+                }
+            }
+        }
+        const auto certified_nurbs = kernel.surfaces().make_nurbs(certified_desc);
+        const auto certified_known = certified_nurbs.value
+            ? kernel.surface_service().eval(*certified_nurbs.value, 3.5, 0.5, 0)
+            : axiom::Result<axiom::SurfaceEvalResult>{};
+        axiom::SurfaceClosestPointOptions certified_options;
+        certified_options.distance_tolerance = 2e-5;
+        certified_options.parameter_tolerance = 2e-4;
+        certified_options.max_evaluations = 120000;
+        const auto certified_global = certified_known.value && certified_nurbs.value
+            ? kernel.surface_service().closest_point_detailed(
+                  *certified_nurbs.value, certified_known.value->point,
+                  certified_options)
+            : axiom::Result<axiom::SurfaceClosestPointResult>{};
+        if (!certified_nurbs.value || !certified_known.value ||
+            !certified_global.value || certified_global.value->distance > 2e-5 ||
+            std::abs(certified_global.value->point.x -
+                     certified_known.value->point.x) > 5e-4 ||
+            std::abs(certified_global.value->point.y -
+                     certified_known.value->point.y) > 5e-4 ||
+            std::abs(certified_global.value->point.z -
+                     certified_known.value->point.z) > 5e-4 ||
+            certified_global.value->control_net_bound_patches <= 4 ||
+            certified_global.value->pruned_patches >
+                certified_global.value->patches_processed ||
+            certified_global.value->evaluations >=
+                certified_options.max_evaluations) {
+            std::cerr << "high-order rational local hull certificate is invalid\n";
+            return 1;
+        }
+
+        // Trim and Offset preserve the base tensor hull.  Each offset layer expands
+        // the certified box by its absolute distance, so the bound stays conservative
+        // without assuming a curvature bound for the derived surface.
+        const auto certified_trim = certified_nurbs.value
+            ? kernel.surfaces().make_trimmed(*certified_nurbs.value,
+                                             2.0, 4.0, 0.0, 2.0)
+            : axiom::Result<axiom::SurfaceId>{};
+        const auto certified_offset = certified_trim.value
+            ? kernel.surfaces().make_offset(*certified_trim.value, 0.05)
+            : axiom::Result<axiom::SurfaceId>{};
+        const auto certified_offset_known = certified_offset.value
+            ? kernel.surface_service().eval(*certified_offset.value, 3.0, 1.0, 0)
+            : axiom::Result<axiom::SurfaceEvalResult>{};
+        const auto certified_offset_global =
+            certified_offset.value && certified_offset_known.value
+                ? kernel.surface_service().closest_point_detailed(
+                      *certified_offset.value,
+                      certified_offset_known.value->point, certified_options)
+                : axiom::Result<axiom::SurfaceClosestPointResult>{};
+        if (!certified_trim.value || !certified_offset.value ||
+            !certified_offset_known.value || !certified_offset_global.value ||
+            certified_offset_global.value->distance > 2e-5 ||
+            certified_offset_global.value->control_net_bound_patches == 0 ||
+            certified_offset_global.value->effective_domain.u.min != 2.0 ||
+            certified_offset_global.value->effective_domain.u.max != 4.0 ||
+            certified_offset_global.value->effective_domain.v.min != 0.0 ||
+            certified_offset_global.value->effective_domain.v.max != 2.0) {
+            std::cerr << "derived rational surface did not preserve hull certificate\n";
+            return 1;
+        }
+
+        // A rank-one Bezier surface is a legitimate degenerate parameterization:
+        // the spatial hull proves the global distance even though one tangent is zero.
+        std::vector<axiom::Point3> rank_one_poles;
+        for (int i = 0; i < 4; ++i) {
+            for (int j = 0; j < 4; ++j) {
+                rank_one_poles.push_back({static_cast<double>(i), 0.0, 0.0});
+            }
+        }
+        const auto rank_one_surface = kernel.surfaces().make_bezier(rank_one_poles);
+        const auto rank_one_global = rank_one_surface.value
+            ? kernel.surface_service().closest_point_detailed(
+                  *rank_one_surface.value, {1.5, 2.0, 0.0}, certified_options)
+            : axiom::Result<axiom::SurfaceClosestPointResult>{};
+        if (!rank_one_surface.value || !rank_one_global.value ||
+            !approx(rank_one_global.value->point.x, 1.5, 1e-12) ||
+            !approx(rank_one_global.value->point.y, 0.0, 1e-12) ||
+            !approx(rank_one_global.value->distance, 2.0, 1e-12) ||
+            rank_one_global.value->control_net_bound_patches == 0) {
+            std::cerr << "rank-one Bezier hull certificate is invalid\n";
+            return 1;
+        }
+
         const std::vector<axiom::Point2> outer{{0.0, 0.0}, {4.0, 0.0},
                                                 {4.0, 4.0}, {0.0, 4.0}};
         const std::vector<std::vector<axiom::Point2>> holes{
@@ -2478,6 +2593,249 @@ int main() {
             return 1;
         }
 
+        // Unbounded analytic surfaces are solved over their complete domains.  The
+        // returned effective domain is a finite witness containing a global minimizer,
+        // while periodic directions retain their complete principal interval.
+        const auto analytic_stores_before = kernel.runtime_store_counts();
+        const auto plane_global = kernel.surface_service().closest_point_detailed(
+            *plane.value, {12.0, -7.0, 3.0}, accurate);
+        if (!plane_global.value ||
+            plane_global.value->convergence !=
+                axiom::SurfaceClosestPointConvergence::Analytic ||
+            !plane_global.value->domain_was_finiteized ||
+            plane_global.value->evaluations != 0 ||
+            plane_global.value->patches_processed != 0 ||
+            !approx(plane_global.value->u, 12.0, 1e-12) ||
+            !approx(plane_global.value->v, -7.0, 1e-12) ||
+            !approx(plane_global.value->point.x, 12.0, 1e-12) ||
+            !approx(plane_global.value->point.y, -7.0, 1e-12) ||
+            !approx(plane_global.value->point.z, 0.0, 1e-12) ||
+            !approx(plane_global.value->distance, 3.0, 1e-12) ||
+            plane_global.value->distance_lower_bound != plane_global.value->distance ||
+            plane_global.value->effective_domain.u.min != plane_global.value->u ||
+            plane_global.value->effective_domain.u.max != plane_global.value->u ||
+            plane_global.value->effective_domain.v.min != plane_global.value->v ||
+            plane_global.value->effective_domain.v.max != plane_global.value->v) {
+            std::cerr << "unbounded plane closest point was not analytically finiteized\n";
+            return 1;
+        }
+
+        const auto cylinder = kernel.surfaces().make_cylinder(
+            {0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, 2.0);
+        const auto cylinder_global = cylinder.value
+            ? kernel.surface_service().closest_point_detailed(
+                  *cylinder.value, {3.0, 4.0, 7.0}, accurate)
+            : axiom::Result<axiom::SurfaceClosestPointResult>{};
+        const auto cylinder_axis = cylinder.value
+            ? kernel.surface_service().closest_point_detailed(
+                  *cylinder.value, {0.0, 0.0, -9.0}, accurate)
+            : axiom::Result<axiom::SurfaceClosestPointResult>{};
+        const double two_pi = 2.0 * std::acos(-1.0);
+        if (!cylinder_global.value || !cylinder_axis.value ||
+            cylinder_global.value->convergence !=
+                axiom::SurfaceClosestPointConvergence::Analytic ||
+            !cylinder_global.value->domain_was_finiteized ||
+            !approx(cylinder_global.value->u, std::atan2(4.0, 3.0), 1e-12) ||
+            !approx(cylinder_global.value->v, 7.0, 1e-12) ||
+            !approx(cylinder_global.value->point.x, 1.2, 1e-12) ||
+            !approx(cylinder_global.value->point.y, 1.6, 1e-12) ||
+            !approx(cylinder_global.value->point.z, 7.0, 1e-12) ||
+            !approx(cylinder_global.value->distance, 3.0, 1e-12) ||
+            !approx(cylinder_global.value->effective_domain.u.min, 0.0, 1e-12) ||
+            !approx(cylinder_global.value->effective_domain.u.max, two_pi, 1e-12) ||
+            cylinder_global.value->effective_domain.v.min != 7.0 ||
+            cylinder_global.value->effective_domain.v.max != 7.0 ||
+            !approx(cylinder_axis.value->u, 0.0, 1e-12) ||
+            !approx(cylinder_axis.value->point.x, 2.0, 1e-12) ||
+            !approx(cylinder_axis.value->point.z, -9.0, 1e-12) ||
+            !approx(cylinder_axis.value->distance, 2.0, 1e-12)) {
+            std::cerr << "unbounded cylinder complete-domain analytic result is invalid\n";
+            return 1;
+        }
+
+        const auto cone = kernel.surfaces().make_cone(
+            {0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, std::acos(-1.0) * 0.25);
+        const auto cone_global = cone.value
+            ? kernel.surface_service().closest_point_detailed(
+                  *cone.value, {4.0, 0.0, 1.0}, accurate)
+            : axiom::Result<axiom::SurfaceClosestPointResult>{};
+        const auto cone_apex = cone.value
+            ? kernel.surface_service().closest_point_detailed(
+                  *cone.value, {0.0, 0.0, -2.0}, accurate)
+            : axiom::Result<axiom::SurfaceClosestPointResult>{};
+        if (!cone_global.value || !cone_apex.value ||
+            cone_global.value->convergence !=
+                axiom::SurfaceClosestPointConvergence::Analytic ||
+            !cone_global.value->domain_was_finiteized ||
+            !approx(cone_global.value->u, 0.0, 1e-12) ||
+            !approx(cone_global.value->v, 2.5, 1e-12) ||
+            !approx(cone_global.value->point.x, 2.5, 1e-12) ||
+            !approx(cone_global.value->point.z, 2.5, 1e-12) ||
+            !approx(cone_global.value->distance, std::sqrt(4.5), 1e-12) ||
+            cone_global.value->effective_domain.v.min != 0.0 ||
+            cone_global.value->effective_domain.v.max != cone_global.value->v ||
+            !approx(cone_apex.value->v, 0.0, 1e-12) ||
+            !approx(cone_apex.value->point.x, 0.0, 1e-12) ||
+            !approx(cone_apex.value->point.z, 0.0, 1e-12) ||
+            !approx(cone_apex.value->distance, 2.0, 1e-12)) {
+            std::cerr << "semi-infinite cone complete-domain analytic result is invalid\n";
+            return 1;
+        }
+
+        // Offset chains are flattened for the certificate, avoiding a synthetic
+        // [0,1]^2 domain on an unbounded base.  The legacy point/UV facades reuse
+        // the same detailed result for offset surfaces.
+        const auto cylinder_offset_a = cylinder.value
+            ? kernel.surfaces().make_offset(*cylinder.value, 0.75)
+            : axiom::Result<axiom::SurfaceId>{};
+        const auto cylinder_offset_b = cylinder_offset_a.value
+            ? kernel.surfaces().make_offset(*cylinder_offset_a.value, 0.25)
+            : axiom::Result<axiom::SurfaceId>{};
+        const auto cylinder_offset_global = cylinder_offset_b.value
+            ? kernel.surface_service().closest_point_detailed(
+                  *cylinder_offset_b.value, {4.0, 0.0, 6.0}, accurate)
+            : axiom::Result<axiom::SurfaceClosestPointResult>{};
+        const auto offset_point = cylinder_offset_b.value
+            ? kernel.surface_service().closest_point(
+                  *cylinder_offset_b.value, {4.0, 0.0, 6.0})
+            : axiom::Result<axiom::Point3>{};
+        const auto offset_uv = cylinder_offset_b.value
+            ? kernel.surface_service().closest_uv(
+                  *cylinder_offset_b.value, {4.0, 0.0, 6.0})
+            : axiom::Result<std::pair<axiom::Scalar, axiom::Scalar>>{};
+        if (!cylinder_offset_global.value || !offset_point.value || !offset_uv.value ||
+            cylinder_offset_global.value->convergence !=
+                axiom::SurfaceClosestPointConvergence::Analytic ||
+            !cylinder_offset_global.value->domain_was_finiteized ||
+            !approx(cylinder_offset_global.value->point.x, 3.0, 1e-12) ||
+            !approx(cylinder_offset_global.value->point.y, 0.0, 1e-12) ||
+            !approx(cylinder_offset_global.value->point.z, 6.0, 1e-12) ||
+            !approx(cylinder_offset_global.value->distance, 1.0, 1e-12) ||
+            !approx(offset_point.value->x, 3.0, 1e-12) ||
+            !approx(offset_point.value->z, 6.0, 1e-12) ||
+            !approx(offset_uv.value->first, 0.0, 1e-12) ||
+            !approx(offset_uv.value->second, 6.0, 1e-12)) {
+            std::cerr << "nested unbounded cylinder offset did not reuse analytic solver\n";
+            return 1;
+        }
+
+        const double root_half = std::sqrt(0.5);
+        const auto cone_offset = cone.value
+            ? kernel.surfaces().make_offset(*cone.value, 1.0)
+            : axiom::Result<axiom::SurfaceId>{};
+        const axiom::Point3 cone_offset_point{2.0 + root_half, 0.0,
+                                               2.0 - root_half};
+        const axiom::Point3 cone_offset_query{
+            cone_offset_point.x + 3.0 * root_half, 0.0,
+            cone_offset_point.z - 3.0 * root_half};
+        const auto cone_offset_global = cone_offset.value
+            ? kernel.surface_service().closest_point_detailed(
+                  *cone_offset.value, cone_offset_query, accurate)
+            : axiom::Result<axiom::SurfaceClosestPointResult>{};
+        if (!cone_offset_global.value ||
+            cone_offset_global.value->convergence !=
+                axiom::SurfaceClosestPointConvergence::Analytic ||
+            !approx(cone_offset_global.value->v, 2.0, 1e-12) ||
+            !approx(cone_offset_global.value->point.x, cone_offset_point.x, 1e-12) ||
+            !approx(cone_offset_global.value->point.z, cone_offset_point.z, 1e-12) ||
+            !approx(cone_offset_global.value->distance, 3.0, 1e-12)) {
+            std::cerr << "positive parallel cone closest point is invalid\n";
+            return 1;
+        }
+
+        // Bounded primitives use the same exact path but keep their complete finite
+        // domains.  Singular query positions have deterministic canonical parameters.
+        const auto analytic_sphere = kernel.surfaces().make_sphere({5.0, 6.0, 7.0}, 2.0);
+        const auto sphere_center = analytic_sphere.value
+            ? kernel.surface_service().closest_point_detailed(
+                  *analytic_sphere.value, {5.0, 6.0, 7.0}, accurate)
+            : axiom::Result<axiom::SurfaceClosestPointResult>{};
+        const auto analytic_torus = kernel.surfaces().make_torus(
+            {0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, 5.0, 1.0);
+        const auto torus_ring_center = analytic_torus.value
+            ? kernel.surface_service().closest_point_detailed(
+                  *analytic_torus.value, {5.0, 0.0, 0.0}, accurate)
+            : axiom::Result<axiom::SurfaceClosestPointResult>{};
+        if (!sphere_center.value || !torus_ring_center.value ||
+            sphere_center.value->domain_was_finiteized ||
+            torus_ring_center.value->domain_was_finiteized ||
+            sphere_center.value->convergence !=
+                axiom::SurfaceClosestPointConvergence::Analytic ||
+            torus_ring_center.value->convergence !=
+                axiom::SurfaceClosestPointConvergence::Analytic ||
+            !approx(sphere_center.value->u, 0.0, 1e-12) ||
+            !approx(sphere_center.value->v, 0.0, 1e-12) ||
+            !approx(sphere_center.value->point.z, 9.0, 1e-12) ||
+            !approx(sphere_center.value->distance, 2.0, 1e-12) ||
+            !approx(torus_ring_center.value->u, 0.0, 1e-12) ||
+            !approx(torus_ring_center.value->v, 0.0, 1e-12) ||
+            !approx(torus_ring_center.value->point.x, 6.0, 1e-12) ||
+            !approx(torus_ring_center.value->distance, 1.0, 1e-12)) {
+            std::cerr << "bounded analytic surface certificate is invalid\n";
+            return 1;
+        }
+
+        // A collapse hidden behind an Offset wrapper and an inward cone parallel
+        // surface are rejected without a partial value.  These factories succeed
+        // because the degeneracy only becomes visible after flattening the chain.
+        const auto collapsed_offset = cylinder_offset_a.value
+            ? kernel.surfaces().make_offset(*cylinder_offset_a.value, -2.75)
+            : axiom::Result<axiom::SurfaceId>{};
+        const auto collapsed_result = collapsed_offset.value
+            ? kernel.surface_service().closest_point_detailed(
+                  *collapsed_offset.value, {1.0, 0.0, 0.0}, accurate)
+            : axiom::Result<axiom::SurfaceClosestPointResult>{};
+        const auto recovered_after_collapse = collapsed_offset.value
+            ? kernel.surfaces().make_offset(*collapsed_offset.value, 1.0)
+            : axiom::Result<axiom::SurfaceId>{};
+        const auto recovered_after_collapse_result = recovered_after_collapse.value
+            ? kernel.surface_service().closest_point_detailed(
+                  *recovered_after_collapse.value, {2.0, 0.0, 0.0}, accurate)
+            : axiom::Result<axiom::SurfaceClosestPointResult>{};
+        const auto inward_cone_offset = cone.value
+            ? kernel.surfaces().make_offset(*cone.value, -0.25)
+            : axiom::Result<axiom::SurfaceId>{};
+        const auto inward_cone_result = inward_cone_offset.value
+            ? kernel.surface_service().closest_point_detailed(
+                  *inward_cone_offset.value, {1.0, 0.0, 1.0}, accurate)
+            : axiom::Result<axiom::SurfaceClosestPointResult>{};
+        const auto collapsed_code = kernel.diagnostics().has_issue_code(
+            collapsed_result.diagnostic_id, "AXM-GEO-E-0010");
+        const auto inward_cone_code = kernel.diagnostics().has_issue_code(
+            inward_cone_result.diagnostic_id, "AXM-GEO-E-0010");
+        if (!collapsed_offset.value || !recovered_after_collapse.value ||
+            !inward_cone_offset.value ||
+            collapsed_result.status != axiom::StatusCode::DegenerateGeometry ||
+            collapsed_result.value ||
+            recovered_after_collapse_result.status !=
+                axiom::StatusCode::DegenerateGeometry ||
+            recovered_after_collapse_result.value ||
+            inward_cone_result.status != axiom::StatusCode::DegenerateGeometry ||
+            inward_cone_result.value ||
+            !collapsed_code.value || !*collapsed_code.value ||
+            !inward_cone_code.value || !*inward_cone_code.value) {
+            std::cerr << "analytic offset degeneracy was not diagnosed transactionally\n";
+            return 1;
+        }
+
+        const double scalar_max = std::numeric_limits<double>::max();
+        const auto extreme_plane = kernel.surfaces().make_plane(
+            {-scalar_max, 0.0, 0.0}, {0.0, 0.0, 1.0});
+        const auto extreme_result = extreme_plane.value
+            ? kernel.surface_service().closest_point_detailed(
+                  *extreme_plane.value, {scalar_max, 0.0, 1.0}, accurate)
+            : axiom::Result<axiom::SurfaceClosestPointResult>{};
+        const auto analytic_stores_after = kernel.runtime_store_counts();
+        if (!extreme_plane.value ||
+            extreme_result.status != axiom::StatusCode::NumericalInstability ||
+            extreme_result.value || !analytic_stores_before.value ||
+            !analytic_stores_after.value ||
+            analytic_stores_before.value->surface_eval_cache_entries !=
+                analytic_stores_after.value->surface_eval_cache_entries) {
+            std::cerr << "analytic surface overflow/no-cache contract is invalid\n";
+            return 1;
+        }
+
         axiom::SurfaceClosestPointOptions exhausted_options;
         exhausted_options.distance_tolerance = 0.0;
         exhausted_options.parameter_tolerance = 1e-14;
@@ -2485,15 +2843,19 @@ int main() {
         const auto stores_before_failure = kernel.runtime_store_counts();
         const auto exhausted = kernel.surface_service().closest_point_detailed(
             *bezier.value, {0.31, 2.27, 1.0}, exhausted_options);
+        const auto exhausted_rational = certified_nurbs.value
+            ? kernel.surface_service().closest_point_detailed(
+                  *certified_nurbs.value, {-30.0, 70.0, 25.0},
+                  exhausted_options)
+            : axiom::Result<axiom::SurfaceClosestPointResult>{};
         const auto invalid = kernel.surface_service().closest_point_detailed(
             *bezier.value, {0.0, 0.0, 0.0},
             axiom::SurfaceClosestPointOptions{1e-6, 0.0, 100});
-        const auto unbounded = kernel.surface_service().closest_point_detailed(
-            *plane.value, {0.0, 0.0, 1.0}, accurate);
         const auto stores_after_failure = kernel.runtime_store_counts();
         if (exhausted.status != axiom::StatusCode::OperationFailed || exhausted.value ||
+            exhausted_rational.status != axiom::StatusCode::OperationFailed ||
+            exhausted_rational.value ||
             invalid.status != axiom::StatusCode::InvalidInput || invalid.value ||
-            unbounded.status != axiom::StatusCode::InvalidInput || unbounded.value ||
             !stores_before_failure.value || !stores_after_failure.value ||
             stores_before_failure.value->surface_eval_cache_entries !=
                 stores_after_failure.value->surface_eval_cache_entries) {
@@ -2505,8 +2867,12 @@ int main() {
         const auto geometry_before_transaction = kernel.geometry_count();
         auto transaction = kernel.topology().begin_transaction();
         const auto temporary_vertex = transaction.create_vertex({99.0, 98.0, 97.0});
-        const auto during_transaction = kernel.surface_service().closest_point_detailed(
-            *bezier.value, {2.1, 0.6, 2.0}, accurate);
+        const auto during_transaction = certified_offset.value &&
+                                                certified_offset_known.value
+            ? kernel.surface_service().closest_point_detailed(
+                  *certified_offset.value,
+                  certified_offset_known.value->point, certified_options)
+            : axiom::Result<axiom::SurfaceClosestPointResult>{};
         const auto rollback = transaction.rollback();
         if (!objects_before_transaction.value || !geometry_before_transaction.value ||
             !temporary_vertex.value ||

@@ -182,7 +182,7 @@
 | 错误码 | 严重级别 | 含义 |
 |---|---|---|
 | `AXM-CORE-E-0001` | Error | 输入对象为空或句柄无效 |
-| `AXM-CORE-E-0002` | Error | 参数越界（含 `TopologyTransaction::create_vertex` 拒绝任一坐标为 NaN/±Inf；返回 `InvalidInput`，不写入拓扑或事务计数；带孔拉伸/线段扫掠的越界、相交/接触/嵌套、非共面/退化环及数值物化失败同样返回该码，失败不分配模型 ID；旋转/放样尚不支持非空内环时也返回该码；第 65 包 `extrude_scaled` 缺失显式轮廓、负/非有限比例、带孔尖顶（第 66 包允许无孔轮廓的零比例尖顶）、离面或非有限中心、无效距离/方向、缩放截面数值退化沿用该码，失败不污染模型） |
+| `AXM-CORE-E-0002` | Error | 参数越界（含 `TopologyTransaction::create_vertex` 拒绝任一坐标为 NaN/±Inf；返回 `InvalidInput`，不写入拓扑或事务计数；带孔拉伸/扫掠/旋转及拓扑兼容放样的越界、相交/接触/嵌套、非共面/退化环及数值物化失败同样返回该码，失败不分配模型 ID；带孔轮廓触轴/形成尖顶、放样环拓扑或顶点数不匹配仍拒绝；第 65/66 包 `extrude_scaled` 缺失显式轮廓、负/非有限比例、带孔尖顶（无孔轮廓允许零比例尖顶）、离面或非有限中心、无效距离/方向、缩放截面数值退化沿用该码；第 71 批 `revolve_between` 非法有向区间和 `sweep_scaled` 非有限/非正比例、非单位比例周期导轨也沿用该码） |
 | `AXM-CORE-E-0003` | Error | 当前对象不存在 |
 | `AXM-CORE-E-0004` | Error | 不支持的操作模式 |
 | `AXM-CORE-E-0005` | Fatal | 内部状态损坏 |
@@ -195,6 +195,8 @@
 - `输入句柄无效或对象已被释放`
 - `参数超出允许范围`
 - `请求的对象不存在于当前版本中`
+
+第 73 批 `SweepService::extrude_twisted` 同样复用 `AXM-CORE-E-0002 / InvalidInput`：缺失显式轮廓/标签、非有限参数、非正距离、无效或非垂直方向、中心离开轮廓平面、扭角超出正负一周，以及轮廓/孔洞/采样侧壁数值退化均在模型分配前拒绝。正负部分角、正负整周和满足法向合同的零扭角均支持；该码不表示解析螺旋面已实现。
 
 ## 7.2 `MATH` 数学与谓词错误码
 
@@ -255,7 +257,11 @@
 | `AXM-TOPO-E-0026` | Error | 同一面中不同边界环的有限线性边界片段在三维空间内部相交；精确覆盖 Line/LineSegment 与显式裁剪的 CompositePolyline/线性 CompositeChain；`create_face` 在写入前拒绝，`validate_face` 检出存量缺陷，关联两个环与两条边 ID |
 | `AXM-TOPO-E-0027` | Error | 上述线性边界片段在至少一条拓扑边的真实端点相接；复合折线/链的内部分段点不会被误当为边端点；创建与验证关联两环两边 ID |
 | `AXM-TOPO-E-0028` | Error | 上述线性边界片段共线且存在正长度重叠；`create_face` 在分配 FaceId 前拒绝，`validate_face` 检出存量缺陷，关联两环两边 ID |
-| `AXM-TOPO-E-0029` | Error | 上述线性边界片段未精确相交，但最近距离为有限正值且不超过有效线性容差；`create_face` 与 `validate_face` 共用该判定。圆锥曲线与样条的误差受控求交仍未覆盖 |
+| `AXM-TOPO-E-0029` | Error | 不同边界环的线性片段或显式裁剪真曲线未以更严格容差命中，但在有效拓扑线性容差内邻近相接；`create_face` 与 `validate_face` 共用该判定 |
+| `AXM-TOPO-E-0030` | Error | 跨环边界冲突无法确定：真曲边缺失必要的显式 trim，支撑曲线损坏，或有限区间求交无法在预算/数值约束内完成；预检、建面和存量面验证都闭合失败且无部分结果 |
+| `AXM-TOPO-E-0031` | Error | 不同边界环的显式裁剪非线性曲线存在可证明的连续重合参数区间 |
+| `AXM-TOPO-E-0032` | Error | 不同边界环的显式裁剪非线性曲线在拓扑边内部相交；使用误差受控 Geo 求交主流程 |
+| `AXM-TOPO-E-0033` | Error | 不同边界环的显式裁剪非线性曲线在至少一条真实拓扑边端点接触 |
 
 ## 7.5 `BOOL` 布尔模块错误码
 
@@ -348,7 +354,7 @@
 | `AXM-IO-E-0001` | Error | 文件不存在（如 `IOService::validate_import_path` 校验时目标路径不存在） |
 | `AXM-IO-E-0002` | Error | 文件格式无法识别 |
 | `AXM-IO-E-0003` | Error | 文件内容损坏；第 70 批 AXMJSON/Axiom IGES 元数据/Axiom BREP JSON 子集的截断结构、缺失必需字段、错误 `format`、不支持的 `body_kind` 或缺失 BREP 文件头均绑定 `io.import.<format>.parse` |
-| `AXM-IO-E-0004` | Error | 导入失败；STEP 早期失败绑定 `io.import.step.input/path/open`；OBJ 物化前失败绑定 `io.import.obj.input/path/open/parse`；STL、glTF 与 3MF 物化前失败分别绑定 `io.import.stl.*`、`io.import.gltf.*`、`io.import.3mf.*` 的 `input/path/open/read/parse/validation` 阶段。第 70 批为 AXMJSON/Axiom IGES 元数据/Axiom BREP JSON 子集补齐 `io.import.<format>.input/path/open/read`：非普通文件在读取前拒绝，超过 64 MiB 或短读归入 `.read`。OBJ/STL/glTF/3MF 退化三角形复用 `AXM-VAL-E-0002` 与各自的 `.validation` 阶段。3MF 非有限顶点在 `.validation` 阶段复用本码，非法数值及索引溢出在 `.parse` 阶段复用本码；物化前无模型实体可关联。 |
+| `AXM-IO-E-0004` | Error | 导入失败；STEP 早期失败绑定 `io.import.step.input/path/open`；OBJ 物化前失败绑定 `io.import.obj.input/path/open/parse`；STL、glTF 与 3MF 物化前失败分别绑定 `io.import.stl.*`、`io.import.gltf.*`、`io.import.3mf.*` 的 `input/path/open/read/parse/validation` 阶段。第 70 批为 AXMJSON/Axiom IGES 元数据/Axiom BREP JSON 子集补齐 `io.import.<format>.input/path/open/read`：非普通文件在读取前拒绝，超过 64 MiB 或短读归入 `.read`。OBJ/STL/glTF/3MF 退化三角形复用 `AXM-VAL-E-0002` 与各自的 `.validation` 阶段。3MF 非有限顶点在 `.validation` 阶段复用本码，非法数值及索引溢出在 `.parse` 阶段复用本码；物化前无模型实体，cycle-0073 起显式关联零实体令牌。 |
 | `AXM-IO-E-0005` | Error | 导出失败 |
 | `AXM-IO-E-0006` | Error | 严格网格导出 QA 失败（越界索引、退化三角形或检查不可用；`Issue.stage=io.export.mesh_strict_qa`，关联输入 Body） |
 | `AXM-IO-E-0007` | Warning | 导入后存在未映射属性 |
@@ -356,6 +362,24 @@
 | `AXM-IO-E-0009` | Error | 导出目标目录不可写（`kIoExportPathNotWritable`，默认 `Issue.stage=io.export.path`；STEP/OBJ/STL/glTF/3MF 导出使用各自 `io.export.<format>.path`） |
 | `AXM-IO-E-0010` | Error | 检测到标准 STEP 物理文件 DATA 段含 EXPRESS 实例，非 Axiom 子集；完整交换未实现（`kIoStepStandardEntitiesUnsupported`，`Issue.stage=io.import.step`） |
 | `AXM-IO-E-0011` | Error | 检测到典型 IGES 卡片/DE 流，非 Axiom 子集；完整交换未实现（`kIgesStandardEntitiesUnsupported`，`Issue.stage=io.import.iges`） |
+
+### cycle-0073 HEAL/IO 重量级失败证据合同（已通过门禁）
+
+本批未新增错误码常量，复用 CORE/TOPO/VAL/HEAL/IO 的既有根因码。`Issue.stage` 是定位流程的标签，不是新的错误码；复制子报告时保留根因码和实体，不修改源诊断。
+
+| 工作流 | 阶段与证据 | 一致性及限制 |
+|---|---|---|
+| HEAL 验证 | `heal.validate_geometry.*`、`heal.validate_topology.*`、`heal.validate_self_intersection.*`、`heal.validate_tolerance.*` 及聚合验证；关联 Body/Shell/问题子实体 | 有限状态、实体数量及分支模式/计数/几何量，不扩大验证算法范围 |
+| HEAL 修复 | `heal.sew_faces/remove_small_edges/remove_small_faces/merge_near_coplanar_faces/auto_repair.*`；后验失败为相应 `.post_validate` | 失败回收本次派生体与物化对象，保留原模型和失败证据 |
+| Trim 重建 | `heal.repair_trim.input/surface/loop/rebuild/post_validate`；关联 Face/Surface/Loop 等 | Plane/Cylinder/Sphere；重建或复验失败恢复原 PCurve 绑定、删除新增 PCurve |
+| 批量修复 | `heal.repair_many_*.input/rollback`，关联失败子项目标；回滚记录 `completed_item_count/requested_item_count/rollback_applied`；`repair_many_auto` 另附 `allocated_object_count`（分配 ID 增量） | 任一子项失败回滚此前全部派生对象和 Eval 失效状态；子项根因保留在原诊断，批量报告不合并全部子项 issue；不恢复 `next_id` |
+| 主格式 IO 与 auto | `io.import.<format>.*`、`io.export.<format>.*`、auto 路由阶段；有限状态、实体数量及分支路径/计数证据 | STEP/AXMJSON/IGES/BREP/OBJ/STL/glTF/3MF；导出关联输入 Body，预物化文件失败显式使用 `[0]` 令牌 |
+| 导入后验管线 | `io.post_import.validation/repair/post_validate`；复制 HEAL 问题，附验证/修复模式 | STEP/AXMJSON 接入共享管线；失败 issue 可随 `Ok` 导入结果返回，调用者须读取报告或显式验证 |
+| 批量导入/导出 | `io.batch_import/io.batch_export`；保留根因及 `failed_item_index`（从零开始）、`completed_item_count`、`path_length`（byte） | STEP/AXMJSON/auto 批量导入实际失败恢复模型/网格/拓扑/几何、链接、缓存、Eval 失效及 `next_id`；批量导出不承诺文件回滚 |
+
+失败数值证据至少含 `status_code`（enum）与 `related_entity_count`（count）。空名称或非有限测量值被过滤；过滤数量非零时记录有限的 `non_finite_evidence_omitted`（count），避免将 NaN/Inf 冒充有效证据。零实体令牌说明尚无模型对象或无有效目标，不可用于句柄查询。候选导入、严格现有文件导入、目录导出及条件导出传播真实失败；AXMJSON/IGES/BREP 导出补齐 `input/path/open/write` 与最终流检查。
+
+`axiom_heal_test`、`axiom_io_workflow_test` 用 `issue_code_prefix="AXM-"` 与 `stage_prefix="heal."/"io."` 审计 Error 及以上 issue，并覆盖 JSON 数值证据、源报告不污染和回滚重试；cycle-0073 修复后完整 CTest **16/16 通过**。普通文本/目录工具等非主格式辅助接口尚未纳入该重量级包。标准 STEP/IGES 实体交换限制不变，IGES 仍按 `NotImplemented / AXM-IO-E-0011` 拒绝；设备或侧车写入失败不保证恢复目标文件。
 
 ## 7.12 `TES` 三角化错误码
 
@@ -400,7 +424,7 @@
 |---|---|---|
 | `AXM-TX-E-0001` | Error | 提交失败 |
 | `AXM-TX-E-0002` | Error | 回滚失败 |
-| `AXM-TX-E-0003` | Error | 写事务冲突 |
+| `AXM-TX-E-0003` | Error | 写事务冲突，或保存点句柄无效/跨事务/已失效，或尝试释放非最内层保存点；均返回 `OperationFailed` 且不改模型 |
 | `AXM-TX-E-0004` | Error | 目标版本不存在 |
 | `AXM-TX-E-0005` | Fatal | 版本图损坏 |
 | `AXM-TX-E-0006` | Error | 活动事务禁止清空跟踪记录；`clear_tracking_records` 返回 `OperationFailed`，保留模型与撤销记录，须先提交或回滚（含空事务） |
@@ -639,13 +663,49 @@
 
 查询从当前真实拓扑重算且不返回部分值；不分配网格、不写缓存、不修改 Eval 状态或事务写计数，仅增加诊断和一次顶层查询审计。
 
-### FR-OPS-001 SweepService 新路径诊断（第 68/70 批）
+### FR-QUERY-001 有界 3D 曲线-曲线求交诊断（第 71 批）
 
-- `AXM-CORE-E-0001`：`sweep` 轮廓标签为空或导轨句柄无效。
+- `AXM-CORE-E-0001`：`intersect_curve_curve` 的任一曲线句柄无效或已回滚；`InvalidInput`。
+- `AXM-CORE-E-0002`：位置/参数容差非有限正数、角容差不在 `[0,1]`、求值预算小于 6、细分预算为 0，或无限 Line 未指定有限参数区间；`InvalidInput`。
+- `AXM-GEO-E-0004`：请求的有限参数区间超出有界曲线定义域；`InvalidInput`。
+- `AXM-GEO-E-0007`：点值求值或候选参数矩形预算耗尽时为 `OperationFailed`；无法建立有限保守界或参数精化停滞时为 `NumericalInstability`。
+
+空交集为成功的空结果，不生成错误码。上述失败均不返回部分交点/重合区间，不写曲线求值缓存、Intersection/拓扑存储或活动事务计数；仅新增可检索诊断。
+
+第 71 批 repair 只修正 Bezier 相切邻域的细分终止判据和非连续 CompositeChain 子片的单侧端点建界；既有位置/参数/角容差、包围排除、最终残差判定和预算失败合同均未放宽，也未新增或改变错误码。
+
+### FR-GEO-001 曲面全域最近点证书（第 74 批）
+
+- `AXM-CORE-E-0002`：查询点非有限，距离/参数容差非法，或数值求值预算小于 5；`InvalidInput`。
+- `AXM-GEO-E-0006`：目标曲面不存在、通用无限派生面尚无有限搜索域，解析有限化/结果超出可表示范围，或有界搜索无法建立保守变化界、初始片或后续细分耗尽预算；状态按根因为 `InvalidInput` / `NumericalInstability` / `OperationFailed` / `DegenerateGeometry`。
+- `AXM-GEO-E-0010`：嵌套 Offset 链在中间层或最终层发生有效半径坍缩，负向完整圆锥偏置在全域自交，或规则环面偏置失去规则性；`DegenerateGeometry`。
+
+Plane/Cylinder/Cone/规则 Sphere/Torus 及其嵌套 Offset 的成功解析路径返回 `Analytic`，无界域同时提供 `effective_domain` 和 `domain_was_finiteized=true`。Bezier/BSpline/NURBS 以正权有理控制网凸包 AABB 建立下界，并通过 `control_net_bound_patches/pruned_patches` 暴露证书工作量。上述失败均无部分值、不写 surface eval 缓存。
+
+### FR-TOPO-001 显式真曲边跨环冲突（第 74 批）
+
+- `AXM-TOPO-E-0030`：真曲边缺少有限 trim、曲线记录损坏，或 Geo 求交预算/数值失败。`first_boundary_conflict` 不返回部分 `optional`；`create_face/validate_face` 闭合失败。
+- `AXM-TOPO-E-0031`：两条显式裁剪非线性边界曲线存在可证明的连续重合区间；`InvalidTopology`。
+- `AXM-TOPO-E-0032`：两条显式裁剪非线性边界曲线在拓扑边内部相交；`InvalidTopology`。
+- `AXM-TOPO-E-0033`：两条显式裁剪非线性边界曲线在真实拓扑边端点接触；`InvalidTopology`。
+- `AXM-TOPO-E-0029`：第二轮统一线性容差求交发现真曲线邻近接触；与既有线性路径复用同一语义。
+
+冲突证据的 `error_controlled/solver_tolerance/curve_evaluations/parameter_rectangles_processed` 标识真曲线求解路径、有效容差和工作量。该路径不写曲线求值缓存或 Intersection 存储；建面失败不分配实体、不增加事务写计数。
+
+### NFR-REL-001 拓扑事务保存点（第 74 批）
+
+- `AXM-TX-E-0003`：`rollback_to_savepoint/release_savepoint` 收到默认、跨事务、已失效句柄，或释放目标不是当前最内层保存点；`OperationFailed`，模型、撤销基线、写审计和保存点栈不变。
+- `AXM-TX-E-0007`：保存点操作入口观察到取消；优先恢复整个事务快照、关闭事务并清空保存点，不执行局部回滚。
+
+正常局部回滚不生成错误码；目标保存点保留供重复回滚，其内层句柄失效。`TopologySavepointMetrics` 累计创建/回滚/释放/内层丢弃及局部回滚写次数，`core_runtime_invariants_hold()` 验证审计自洽性。
+
+### FR-OPS-001 SweepService 新路径诊断（第 68/70/71 批）
+
+- `AXM-CORE-E-0001`：`sweep/sweep_scaled` 轮廓标签为空或导轨句柄无效。
 - `AXM-CORE-E-0002`：`extrude_to_plane` 的轮廓/孔非法、方向或平面非有限/近退化、方向切向或反向、平面接触/相交或舍入塌缩。
-- `AXM-CORE-E-0002`：`revolve` 角度不在 `(0,2π]`、轴非法，或轮廓区域跨轴/孤立触轴/近轴、自交、非共面/偏轴；带孔区域必须与轴严格分离。部分角与整周均在分配前完成闭壳、质量和惯性检查。
+- `AXM-CORE-E-0002`：`revolve` 角度不在 `(0,2π]`，或 `revolve_between` 起止角非有限、有符号跨度为零/绝对值超过 `2π`；也用于轴非法，或轮廓区域跨轴/孤立触轴/近轴、自交、非共面/偏轴。带孔区域必须与轴严格分离。正/负部分角与整周均在分配前完成闭壳、质量和惯性检查。
 - `AXM-CORE-E-0002`：`loft` 截面不足、缺显式轮廓、非共面/自交、环拓扑或顶点数不兼容、站序不严格，或插值截面退化/翻折；失败不回退 bbox 占位体。
-- `AXM-CORE-E-0002`：曲线 `sweep` 截面非法或未与导轨起点/切向对齐，样条伪闭合/首尾切向断裂，复合链接缝错位/折角/尖点、嵌套链或含未支持子段，过紧曲率、非局部弦段自靠近，或周期标架/物化/质量积分失败。
+- `AXM-CORE-E-0002`：曲线 `sweep/sweep_scaled` 截面非法或未与导轨起点/切向对齐，样条伪闭合/首尾切向断裂，复合链接缝错位/折角/尖点、嵌套链或含未支持子段，过紧曲率、非局部弦段自靠近，或周期标架/物化/质量积分失败。`sweep_scaled` 还以此码拒绝非有限/零/负终端比例、非单位比例周期导轨、非显式轮廓、截面折叠/退化和失配端盖。
 
 上述 Ops 失败允许新增诊断，但在模型/拓扑对象和 ID 分配前完成验证，不改变活动拓扑事务写计数，也不污染求值或网格缓存。
 

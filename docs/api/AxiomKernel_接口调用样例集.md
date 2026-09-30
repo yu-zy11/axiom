@@ -166,7 +166,63 @@ print(closest.value->parameter,
       closest.value->intervals_processed);
 ```
 
-Line、LineSegment、Circle 与折线返回 `Analytic`；Ellipse、Parabola、Hyperbola、Bezier、BSpline、NURBS 和 CompositeChain 对完整有效域做分支限界。该入口目前只适用于曲线；曲面的完整参数域和修剪边界证书尚未实现。
+Line、LineSegment、Circle 与折线返回 `Analytic`；Ellipse、Parabola、Hyperbola、Bezier、BSpline、NURBS 和 CompositeChain 对完整有效域做分支限界。此结果类型只用于曲线；曲面使用对应的二维证据：
+
+```cpp
+SurfaceClosestPointOptions surface_options;
+surface_options.distance_tolerance = 1e-8;
+surface_options.parameter_tolerance = 1e-5;
+surface_options.max_evaluations = 250000;
+
+auto surface_closest = kernel.surface_service().closest_point_detailed(
+    surface_id, query_p, surface_options);
+if (!surface_closest.value) {
+  handle_error(surface_closest);  // 失败无部分值，不写 surface eval 缓存
+  return;
+}
+
+print(surface_closest.value->u, surface_closest.value->v,
+      surface_closest.value->point, surface_closest.value->distance,
+      surface_closest.value->distance_lower_bound,
+      surface_closest.value->effective_domain,
+      surface_closest.value->domain_was_finiteized,
+      surface_closest.value->control_net_bound_patches,
+      surface_closest.value->pruned_patches,
+      surface_closest.value->convergence);
+```
+
+Plane、Cylinder、Cone、规则 Sphere/Torus 及嵌套 Offset 链返回 `Analytic`；若原始域含无界方向，`domain_was_finiteized` 为 true，`effective_domain` 给出本次解析证书使用的有限域，且不消耗数值求值预算。Bezier/BSpline/NURBS 的 `control_net_bound_patches` 与 `pruned_patches` 反映有理控制网凸包证书与剪枝工作量，Trimmed 和 Offset 包装保留保守性。当前 spindle/horn 环面仍走有界数值路径，通用无限派生面尚不自动有限化；偏置半径坍缩、负向完整锥面偏置自交或数值溢出都会结构化失败。
+
+## 4.4 有界 3D 曲线-曲线求交
+
+```cpp
+auto arch = kernel.curves().make_bezier(
+    std::array<Point3, 3>{{{0,0,0}, {1,2,0}, {2,0,0}}});
+auto line = kernel.curves().make_line_segment({-1,.5,0}, {3,.5,0});
+
+CurveCurveIntersectionOptions options;
+options.position_tolerance = 1e-7;  // 模型长度单位
+options.parameter_tolerance = 1e-7;
+options.angular_tolerance = 1e-6;
+options.max_evaluations = 200000;
+options.max_subdivisions = 100000;
+
+auto hits = kernel.geometry_intersection().intersect_curve_curve(
+    *arch.value, *line.value, options);
+if (!hits.value) { handle_error(hits); return; }
+for (const auto& hit : hits.value->points) {
+    print(hit.point, hit.first_parameter, hit.second_parameter,
+          hit.residual_distance, hit.kind);
+}
+for (const auto& overlap : hits.value->overlaps) {
+    print(overlap.first_interval, overlap.second_interval,
+          overlap.same_direction, overlap.maximum_separation);
+}
+print(hits.value->evaluations,
+      hits.value->parameter_rectangles_processed);  // 本次查询的工作量证据
+```
+
+空交集会成功返回两个空容器。无限 `Line` 必须在对应的 `first_interval` 或 `second_interval` 中显式给出有限参数窗口，例如 `options.second_interval = Range1D{-10.0, 10.0}`；不会自动从另一条曲线推断搜索域。离散交点分为 `Transverse/Tangent/Endpoint`；共线分段直线和可证明同参的高阶曲线返回连续 `overlaps`，一般高阶异参重合尚不作完备证明。非法句柄/区间/容差、无法建界或任一预算耗尽都不返回部分结果，也不写求值缓存、Intersection/拓扑存储或活动事务计数。
 
 ## 5. 基础体构造样例
 
@@ -252,7 +308,7 @@ if (rail.value) {
 
 ```
 
-孔之间必须分离且不嵌套，不能接触外环；失败不留下部分实体。`revolve/loft` 尚不接受带孔截面。
+孔之间必须分离且不嵌套，不能接触外环；失败不留下部分实体。`revolve/revolve_between` 可接受与轴保持间隙的带孔截面，`loft` 可接受各站环拓扑和顶点数对应的带孔截面；带孔尖顶仍不支持。
 
 ### 等比变截面拉伸（第 65 包，已纳入统一门禁）
 
@@ -297,6 +353,28 @@ auto to_plane_mass = kernel.query().mass_properties(*to_plane.value);
 
 该入口支持凹多边形和孔，方向缩放及目标法向反号不改变几何。目标面必须在每条顶点射线的严格前方；切向、反向、接触/交叉平面或近退化输入返回 `InvalidInput / AXM-CORE-E-0002`，不留下部分实体。
 
+### 扭转拉伸（cycle-0073，已通过完整门禁）
+
+```cpp
+ProfileRef twisted_profile;
+twisted_profile.label = "twisted_plate";
+twisted_profile.polygon_xyz = {{-2,-1,0}, {2,-1,0}, {2,1,0}, {-2,1,0}};
+twisted_profile.holes_xyz = {{{-0.5,-0.4,0}, {0.5,-0.4,0},
+                             {0.5,0.4,0}, {-0.5,0.4,0}}};
+constexpr Scalar pi = 3.14159265358979323846;
+auto twisted = kernel.sweeps().extrude_twisted(
+    twisted_profile, Vec3{0,0,5}, 8.0, Point3{0,0,0}, -pi / 2);
+if (twisted.value) {
+  auto valid = kernel.validate().validate_all(*twisted.value, ValidationMode::Strict);
+  use_if_valid(valid);
+} else {
+  auto report = kernel.diagnostics().get(twisted.diagnostic_id);
+  handle_query_error(report);
+}
+```
+
+方向按单位化使用，必须垂直于轮廓平面；中心须在该平面内，距离为有限正数。支持凸/凹外环、非嵌套分离孔洞和任意空间朝向，扭角以弧度表示，正负部分角及正负整周均可，限于一周。沿方向按右手规则扭转，零扭角在该法向合同下兼容 `extrude`。角站差不超过 7.5°，站间侧壁交替对角线剖分以避免系统性体积偏差。结果为有真实共享拓扑的采样多面体 BRep，质量属性来自该多面体；不是解析螺旋面，未与变比例或至平面拉伸组合。非法中心/方向/扭角或退化轮廓在模型分配前以 `InvalidInput / AXM-CORE-E-0002` 拒绝。
+
 ## 6.2 旋转
 
 ```cpp
@@ -313,9 +391,15 @@ if (quarter.value) {
     auto quarter_valid = kernel.validate().validate_all(*quarter.value, ValidationMode::Strict);
     auto quarter_mass = kernel.topology().query().body_mass_properties(*quarter.value);
 }
+
+// 偏置起始角与负向区间；有符号跨度的绝对值不超过一周。
+auto clockwise = kernel.sweeps().revolve_between(
+    meridian, axis, std::acos(-1.0) / 3, -std::acos(-1.0) / 6);
+auto symmetric = kernel.sweeps().revolve_between(
+    meridian, axis, -std::acos(-1.0) / 4, std::acos(-1.0) / 4);
 ```
 
-整周和部分角显式多边形旋转都支持与轴分离的外环及分离孔洞，也支持无孔且仅有一条连续边位于轴上的实心轮廓。角分辨率为每周 48 段；部分角增加约束剖分的两个端盖。带孔区域触轴、跨轴、孤立轴点、近轴、自交或偏轴轮廓会在分配前被拒绝。结果是保守浮点分片的多面体 BRep，不是解析旋转曲面。
+整周和部分角显式多边形旋转都支持与轴分离的外环及分离孔洞，也支持无孔且仅有一条连续边位于轴上的实心轮廓。`revolve_between` 的递减区间使用相反旋转方向，部分角首尾端盖绕向与之匹配；正负整周的几何与起始角无关，保持周期多壳语义。角分辨率为每周 48 段；部分角增加约束剖分的两个端盖。带孔区域触轴、跨轴、孤立轴点、近轴、自交或偏轴轮廓会在分配前被拒绝。结果是保守浮点分片的多面体 BRep，不是解析旋转曲面。
 
 ## 6.3 曲线导轨扫掠
 
@@ -329,10 +413,16 @@ if (rail.value) {
     if (!swept.value) { handle_error(swept); return; }
     auto strict = kernel.validate().validate_all(*swept.value, ValidationMode::Strict);
     auto mesh = kernel.convert().brep_to_mesh(*swept.value, {});
+
+    // 截面比例按采样弧长从 1 线性过渡到 0.65。
+    auto tapered = kernel.sweeps().sweep_scaled(section, *rail.value, 0.65);
+    if (!tapered.value) { handle_error(tapered); return; }
+    auto tapered_strict = kernel.validate().validate_all(
+        *tapered.value, ValidationMode::Strict);
 }
 ```
 
-Bezier/BSpline/NURBS 开放导轨、显式端点重合且首尾切向连续的闭合样条，以及整圆/椭圆周期导轨使用旋转最小标架；空间闭环会做 holonomy 校正。`make_composite_chain(children)` 创建的复合导轨也可直接传入，相邻子段必须端点重合且 G1 切向连续；开放链有两个端盖，闭合链无端盖。周期带孔截面的外边界与各孔边界分别物化为独立闭壳，因此壳数和网格连通分量都为 `1 + holes_xyz.size()`；开放带孔导轨由端盖连成单壳。伪闭合、切向断裂、嵌套复合链、抛物/双曲子段、尖点、过紧曲率和自靠近导轨保守拒绝；这是采样多面体 BRep，不是解析扫掠曲面。
+Bezier/BSpline/NURBS 开放导轨、显式端点重合且首尾切向连续的闭合样条，以及整圆/椭圆周期导轨使用旋转最小标架；空间闭环会做 holonomy 校正。`make_composite_chain(children)` 创建的复合导轨也可直接传入，相邻子段必须端点重合且 G1 切向连续；开放链有两个端盖，闭合链无端盖。周期带孔截面的外边界与各孔边界分别物化为独立闭壳，因此壳数和网格连通分量都为 `1 + holes_xyz.size()`；开放带孔导轨由端盖连成单壳。`sweep_scaled` 对直线、CompositePolyline 和上述开放曲线/复合导轨支持正比例收缩与扩张，`end_scale=1` 与 `sweep` 兼容。非单位比例不适用于周期导轨；零/负比例、非线性比例律、过小比例、伪闭合、切向断裂、嵌套复合链、抛物/双曲子段、尖点、过紧曲率和自靠近导轨保守拒绝；这是采样多面体 BRep，不是解析扫掠曲面。
 
 ## 6.4 放样
 
@@ -557,6 +647,44 @@ if (imported.status == StatusCode::Ok) {
 }
 ```
 
+### 批量导入失败、后验诊断与原位重试
+
+```cpp
+ImportOptions batch_opts;
+batch_opts.run_validation = true;
+batch_opts.auto_repair = true;
+std::vector<std::string> paths = {"/data/part.axmjson", "/data/missing.axmjson"};
+auto imported_batch = kernel.io().import_many_axmjson(paths, batch_opts);
+if (!imported_batch.value) {
+  auto report = kernel.diagnostics().get(imported_batch.diagnostic_id);
+  // io.batch_import 记录从零开始的失败项索引、失败前完成数量和路径字节长度。
+  // 本批新分配的模型/网格/拓扑/几何及 next_id 已恢复，可修复输入后原位重试。
+  handle_query_error(report);
+} else {
+  for (BodyId body : *imported_batch.value) {
+    auto valid = kernel.validate().validate_all(body, ValidationMode::Standard);
+    use_if_valid(valid);
+  }
+}
+```
+
+`import_many_step` 和 `import_many_auto` 具有相同模型存储原子性；单项实际失败触发整批回滚，诊断证据仍保留。STEP/AXMJSON 的后验验证、自动修复及修复后复验问题复制为 `io.post_import.validation/repair/post_validate`，保留有限数值证据且不改源 HEAL 报告。导入后验证或修复问题可能随成功导入报告返回，`Ok` 本身不保证有效体，须读取诊断或显式验证。批量导出不回滚已写文件，普通文本/目录辅助接口尚未纳入本批证据门禁。
+
+### HEAL 修复失败与批量原子性
+
+```cpp
+std::vector<BodyId> inputs = {body_id, BodyId{0}};
+auto repaired_batch = kernel.repair().repair_many_remove_small_faces(
+    inputs, 0.01, RepairMode::Aggressive);
+if (!repaired_batch.value) {
+  auto report = kernel.diagnostics().get(repaired_batch.diagnostic_id);
+  // 后项失败时，前项派生对象和 Eval 失效状态也回滚。
+  handle_query_error(report);
+}
+```
+
+单项修改型修复后验失败会回收本次物化对象；`repair_many_auto/remove_small_edges/remove_small_faces/merge_near_coplanar_faces` 均不泄漏半成功结果。`repair_face_trim_pcurves(face_id, RepairMode::Safe)` 支持 Plane/Cylinder/Sphere，重建或后验失败恢复原 coedge PCurve 绑定并回收新增 PCurve。失败报告使用 `heal.*` 阶段、实体与有限数值证据，不扩大现有修复规则或曲面支持范围。HEAL 回滚不恢复 `next_id`，重试不保证复用被回收对象的 ID；批量子项根因保留在原诊断，返回的批量报告记录失败目标与回滚上下文。
+
 ## 12. 三角化样例
 
 ## 12.1 实体转网格
@@ -628,7 +756,33 @@ if (cancelled.status == StatusCode::OperationFailed) {
 
 取消只在 API 边界协作式观察，不抢占单个正在执行的拓扑调用。预取消事务不会取得写者槽；移动事务唯一转移取消权限；被单写者规则拒绝的重叠事务不能借取消影响所有者。
 
-## 13.4 创建带显式参数区间的曲边
+## 13.4 嵌套保存点
+
+```cpp
+auto txn = kernel.topology().begin_transaction();
+auto outer = txn.create_savepoint();
+if (!outer.value) { handle_error(outer); return; }
+
+auto tentative_face = txn.create_face(surface_id, candidate_outer, candidate_holes);
+if (!tentative_face.value) {
+  auto restored = txn.rollback_to_savepoint(*outer.value);
+  if (restored.status != StatusCode::Ok) { handle_error(restored); return; }
+  // outer 仍有效，可修正输入后重试，或再次回滚到同一点。
+}
+
+auto inner = txn.create_savepoint();
+if (!inner.value) { handle_error(inner); return; }
+// ... 执行另一个受限阶段 ...
+auto released = txn.release_savepoint(*inner.value); // 只能 LIFO 释放最内层点
+if (released.status != StatusCode::Ok) { handle_error(released); return; }
+
+auto version = txn.commit();
+auto audit = kernel.topology().savepoint_metrics();
+```
+
+`rollback_to_savepoint` 恢复拓扑主存储、完整撤销基线和写审计，保留目标供重复回滚，但会使目标之后的所有内层保存点失效。无效、跨事务、已失效或非栈顶释放句柄返回 `OperationFailed / AXM-TX-E-0003` 且不改模型。保存点随移动事务转移所有权；取消已请求时，整事务恢复和 `AXM-TX-E-0007` 优先，不只回滚局部保存点。当前实现使用内存全拓扑快照，大模型需评估内存成本。
+
+## 13.5 创建带显式参数区间的曲边
 
 ```cpp
 const double pi = std::acos(-1.0);
@@ -648,7 +802,7 @@ auto length = kernel.topology().query().edge_length(*arc.value); // 5*pi/2
 
 参数端点与拓扑顶点须在内核线性容差内一致，且参数位于曲线定义域；创建失败不会分配 EdgeId 或增加事务写计数。旧 `create_edge` 创建的曲边没有显式区间，长度查询仍结构化拒绝，不使用弦长近似。
 
-## 13.5 建面前检查跨环边界冲突
+## 13.6 建面前检查跨环边界冲突
 
 ```cpp
 auto conflict = kernel.topology().validate().first_boundary_conflict(
@@ -662,12 +816,14 @@ if (conflict.value->has_value()) {
   const auto& evidence = conflict.value->value();
   print(evidence.first_loop.value, evidence.second_loop.value,
         evidence.first_edge.value, evidence.second_edge.value,
-        evidence.distance);
+        evidence.distance, evidence.error_controlled,
+        evidence.solver_tolerance, evidence.curve_evaluations,
+        evidence.parameter_rectangles_processed);
   return;  // 不进入 create_face
 }
 ```
 
-当前预检精确覆盖 Line/LineSegment，以及带显式 trim 区间的 CompositePolyline 和线性 CompositeChain，可区分内部相交、真实拓扑边端点相接、共线正长度重叠和容差内正距离邻近；圆锥曲线与样条的误差受控求交仍待接入。
+Line/LineSegment、CompositePolyline 和线性 CompositeChain 使用解析分段谓词；带显式 trim 区间的圆锥曲线、Bezier、BSpline、NURBS 与混合 CompositeChain 使用无缓存、受预算和误差约束的 Geo 求交流程。返回可区分内部相交、真实拓扑边端点接触、线性共线重叠、曲线连续重合和容差邻近；真曲线证据的 `error_controlled` 为 true。缺失必要 trim、曲线损坏或预算/数值失败会以 `AXM-TOPO-E-0030` 失败且不返回部分冲突。一般高阶异参连续重合仍不作完备证明，近接能力受统一求交预算约束。
 
 ## 14. 诊断与错误处理样例
 
@@ -727,7 +883,17 @@ if (!audit.value || !audit.value->passed()) {
 }
 ```
 
-重复 `DiagnosticId` 只审计一次；未匹配到目标 issue 的报告也会使门禁失败。`max_findings` 只截断明细，遗漏数由 `omitted_findings` 记录，统计总数保持完整。当前系统化覆盖门禁已接入 BOOL 的受支持失败分支；HEAL/IO 尚待迁移。
+重复 `DiagnosticId` 只审计一次；未匹配到目标 issue 的报告也会使门禁失败。`max_findings` 只截断明细，遗漏数由 `omitted_findings` 记录，统计总数保持完整。BOOL 受支持失败分支和 cycle-0073 的 HEAL/IO 重量级包均已接入模块门禁。对 HEAL 与 IO 应使用 `issue_code_prefix="AXM-"`，因为根因也会复用 CORE/VAL/TOPO 等码，并分别设置 `stage_prefix="heal."` 或 `"io."`：
+
+```cpp
+policy.issue_code_prefix = "AXM-";
+policy.stage_prefix = "heal.";
+auto heal_audit = kernel.diagnostics().audit_evidence(heal_failure_ids, policy);
+policy.stage_prefix = "io.";
+auto io_audit = kernel.diagnostics().audit_evidence(io_failure_ids, policy);
+```
+
+`heal_failure_ids/io_failure_ids` 分别收集目标工作流的失败诊断 ID。IO 预物化失败用 `[0]` 明确表示尚无内核实体，不能把令牌当成有效句柄。证据至少含有限的 `status_code/related_entity_count`，按分支另附阈值、模式、计数或路径长度；非有限测量值过滤后以 `non_finite_evidence_omitted` 计数。审计检查结构完整性，不证明算法正确或格式工业完备；普通文本/目录辅助接口仍在本批范围外。
 
 ## 15. Python绑定样例
 
@@ -858,7 +1024,7 @@ if (box.value) {
 }
 ```
 
-曲线长度对直线有限区间、线段、圆和折线使用解析计算，对椭圆、抛物线、双曲线、Bezier、BSpline 和 NURBS 使用可配置自适应积分。复合链沿用 eval 的子曲线局部 `[0,1]`，不自动取子曲线全域。拓扑长度目前支持直线边，曲边因缺少裁剪参数返回不支持；不以弦长冒充曲边弧长。
+曲线长度对直线有限区间、线段、圆和折线使用解析计算，对椭圆、抛物线、双曲线、Bezier、BSpline 和 NURBS 使用可配置自适应积分。复合链沿用 eval 的子曲线局部 `[0,1]`，不自动取子曲线全域。显式通过 `create_trimmed_edge` 保存区间的曲边使用真实区间弧长；旧 `create_edge` 创建且未携带区间的曲边仍返回不支持，不以弦长冒充曲边弧长。
 
 ### 解析曲面 PCurve 修剪面积
 

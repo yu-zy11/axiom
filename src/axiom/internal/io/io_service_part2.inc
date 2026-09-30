@@ -74,7 +74,13 @@ Result<void> IOService::export_3mf_default(BodyId body_id, std::string_view path
 Result<BodyId> IOService::import_auto(std::string_view path, const ImportOptions& options) {
     const auto fmt = detect_format(path);
     if (fmt.status != StatusCode::Ok || !fmt.value.has_value()) {
-        return error_result<BodyId>(fmt.status, fmt.diagnostic_id);
+        return error_result<BodyId>(
+            fmt.status, wrap_io_failure_diagnostic(
+                            *state_, fmt.status, fmt.diagnostic_id,
+                            diag_codes::kIoImportFailure,
+                            "自动导入失败：无法识别输入格式", "自动导入失败", {0},
+                            "io.import.auto.detect",
+                            {{"path_length", static_cast<Scalar>(path.size()), "byte"}}));
     }
     if (*fmt.value == "step") return import_step(path, options);
     if (*fmt.value == "axmjson") return import_axmjson(path, options);
@@ -84,14 +90,25 @@ Result<BodyId> IOService::import_auto(std::string_view path, const ImportOptions
     if (*fmt.value == "brep") return import_brep(path, options);
     if (*fmt.value == "obj") return import_obj(path, options);
     if (*fmt.value == "3mf") return import_3mf(path, options);
-    return detail::invalid_input_result<BodyId>(
-        *state_, diag_codes::kIoImportFailure, "自动导入失败：不支持的文件格式", "自动导入失败");
+    return error_result<BodyId>(
+        StatusCode::InvalidInput,
+        create_io_failure_diagnostic(
+            *state_, StatusCode::InvalidInput, diag_codes::kIoImportFailure,
+            "自动导入失败：不支持的文件格式", "自动导入失败", {0},
+            "io.import.auto.format",
+            {{"path_length", static_cast<Scalar>(path.size()), "byte"}}));
 }
 
 Result<void> IOService::export_auto(BodyId body_id, std::string_view path, const ExportOptions& options) {
     const auto fmt = detect_format(path);
     if (fmt.status != StatusCode::Ok || !fmt.value.has_value()) {
-        return error_result<void>(fmt.status, fmt.diagnostic_id);
+        return error_void(
+            fmt.status, wrap_io_failure_diagnostic(
+                            *state_, fmt.status, fmt.diagnostic_id,
+                            diag_codes::kIoExportFailure,
+                            "自动导出失败：无法识别输出格式", "自动导出失败",
+                            {body_id.value}, "io.export.auto.detect",
+                            {{"path_length", static_cast<Scalar>(path.size()), "byte"}}));
     }
     if (*fmt.value == "step") return export_step(body_id, path, options);
     if (*fmt.value == "axmjson") return export_axmjson(body_id, path, options);
@@ -101,15 +118,23 @@ Result<void> IOService::export_auto(BodyId body_id, std::string_view path, const
     if (*fmt.value == "brep") return export_brep(body_id, path, options);
     if (*fmt.value == "obj") return export_obj(body_id, path, options);
     if (*fmt.value == "3mf") return export_3mf(body_id, path, options);
-    return detail::invalid_input_void(
-        *state_, diag_codes::kIoExportFailure, "自动导出失败：不支持的文件格式", "自动导出失败");
+    return io_failed_void(
+        *state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
+        "自动导出失败：不支持的文件格式", "自动导出失败",
+        {body_id.value}, "io.export.auto.format",
+        {{"path_length", static_cast<Scalar>(path.size()), "byte"}});
 }
 
 Result<std::vector<BodyId>> IOService::import_many_step(std::span<const std::string> paths, const ImportOptions& options) {
     if (paths.empty()) {
-        return detail::invalid_input_result<std::vector<BodyId>>(
-            *state_, diag_codes::kIoImportFailure, "批量STEP导入失败：路径列表为空", "批量STEP导入失败");
+        return error_result<std::vector<BodyId>>(
+            StatusCode::InvalidInput,
+            create_io_failure_diagnostic(
+                *state_, StatusCode::InvalidInput, diag_codes::kIoImportFailure,
+                "批量STEP导入失败：路径列表为空", "批量STEP导入失败", {0},
+                "io.batch_import.input", {{"path_count", 0.0, "count"}}));
     }
+    IOImportBatchRollback rollback {*state_};
     std::vector<BodyId> out;
     out.reserve(paths.size());
     for (std::size_t i = 0; i < paths.size(); ++i) {
@@ -121,14 +146,20 @@ Result<std::vector<BodyId>> IOService::import_many_step(std::span<const std::str
         }
         out.push_back(*r.value);
     }
+    rollback.commit();
     return ok_result(std::move(out), state_->create_diagnostic("已完成批量STEP导入"));
 }
 
 Result<std::vector<BodyId>> IOService::import_many_axmjson(std::span<const std::string> paths, const ImportOptions& options) {
     if (paths.empty()) {
-        return detail::invalid_input_result<std::vector<BodyId>>(
-            *state_, diag_codes::kIoImportFailure, "批量AXMJSON导入失败：路径列表为空", "批量AXMJSON导入失败");
+        return error_result<std::vector<BodyId>>(
+            StatusCode::InvalidInput,
+            create_io_failure_diagnostic(
+                *state_, StatusCode::InvalidInput, diag_codes::kIoImportFailure,
+                "批量AXMJSON导入失败：路径列表为空", "批量AXMJSON导入失败", {0},
+                "io.batch_import.input", {{"path_count", 0.0, "count"}}));
     }
+    IOImportBatchRollback rollback {*state_};
     std::vector<BodyId> out;
     out.reserve(paths.size());
     for (std::size_t i = 0; i < paths.size(); ++i) {
@@ -140,12 +171,18 @@ Result<std::vector<BodyId>> IOService::import_many_axmjson(std::span<const std::
         }
         out.push_back(*r.value);
     }
+    rollback.commit();
     return ok_result(std::move(out), state_->create_diagnostic("已完成批量AXMJSON导入"));
 }
 
 Result<void> IOService::export_many_step(std::span<const BodyId> body_ids, std::span<const std::string> paths, const ExportOptions& options) {
     if (body_ids.empty() || body_ids.size() != paths.size()) {
-        return detail::invalid_input_void(*state_, diag_codes::kIoExportFailure, "批量STEP导出失败：输入数量不一致", "批量STEP导出失败");
+        return io_failed_void(
+            *state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
+            "批量STEP导出失败：输入数量不一致", "批量STEP导出失败", {0},
+            "io.batch_export.input",
+            {{"body_count", static_cast<Scalar>(body_ids.size()), "count"},
+             {"path_count", static_cast<Scalar>(paths.size()), "count"}});
     }
     for (std::size_t i = 0; i < body_ids.size(); ++i) {
         const auto r = export_step(body_ids[i], paths[i], options);
@@ -158,7 +195,12 @@ Result<void> IOService::export_many_step(std::span<const BodyId> body_ids, std::
 
 Result<void> IOService::export_many_axmjson(std::span<const BodyId> body_ids, std::span<const std::string> paths, const ExportOptions& options) {
     if (body_ids.empty() || body_ids.size() != paths.size()) {
-        return detail::invalid_input_void(*state_, diag_codes::kIoExportFailure, "批量AXMJSON导出失败：输入数量不一致", "批量AXMJSON导出失败");
+        return io_failed_void(
+            *state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
+            "批量AXMJSON导出失败：输入数量不一致", "批量AXMJSON导出失败", {0},
+            "io.batch_export.input",
+            {{"body_count", static_cast<Scalar>(body_ids.size()), "count"},
+             {"path_count", static_cast<Scalar>(paths.size()), "count"}});
     }
     for (std::size_t i = 0; i < body_ids.size(); ++i) {
         const auto r = export_axmjson(body_ids[i], paths[i], options);
@@ -172,9 +214,14 @@ Result<void> IOService::export_many_axmjson(std::span<const BodyId> body_ids, st
 
 Result<std::vector<BodyId>> IOService::import_many_auto(std::span<const std::string> paths, const ImportOptions& options) {
     if (paths.empty()) {
-        return detail::invalid_input_result<std::vector<BodyId>>(
-            *state_, diag_codes::kIoImportFailure, "批量自动导入失败：路径列表为空", "批量自动导入失败");
+        return error_result<std::vector<BodyId>>(
+            StatusCode::InvalidInput,
+            create_io_failure_diagnostic(
+                *state_, StatusCode::InvalidInput, diag_codes::kIoImportFailure,
+                "批量自动导入失败：路径列表为空", "批量自动导入失败", {0},
+                "io.batch_import.input", {{"path_count", 0.0, "count"}}));
     }
+    IOImportBatchRollback rollback {*state_};
     std::vector<BodyId> out;
     out.reserve(paths.size());
     for (std::size_t i = 0; i < paths.size(); ++i) {
@@ -186,12 +233,18 @@ Result<std::vector<BodyId>> IOService::import_many_auto(std::span<const std::str
         }
         out.push_back(*r.value);
     }
+    rollback.commit();
     return ok_result(std::move(out), state_->create_diagnostic("已完成批量自动导入"));
 }
 
 Result<void> IOService::export_many_auto(std::span<const BodyId> body_ids, std::span<const std::string> paths, const ExportOptions& options) {
     if (body_ids.empty() || body_ids.size() != paths.size()) {
-        return detail::invalid_input_void(*state_, diag_codes::kIoExportFailure, "批量自动导出失败：输入数量不一致", "批量自动导出失败");
+        return io_failed_void(
+            *state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
+            "批量自动导出失败：输入数量不一致", "批量自动导出失败", {0},
+            "io.batch_export.input",
+            {{"body_count", static_cast<Scalar>(body_ids.size()), "count"},
+             {"path_count", static_cast<Scalar>(paths.size()), "count"}});
     }
     for (std::size_t i = 0; i < body_ids.size(); ++i) {
         const auto r = export_auto(body_ids[i], paths[i], options);
@@ -709,14 +762,25 @@ Result<BodyId>
 IOService::import_auto_from_candidates(std::span<const std::string> paths,
                                        const ImportOptions& options) {
     if (paths.empty()) {
-        return detail::invalid_input_result<BodyId>(*state_, diag_codes::kIoImportFailure, "候选导入失败：路径列表为空", "候选导入失败");
+        return error_result<BodyId>(
+            StatusCode::InvalidInput,
+            create_io_failure_diagnostic(
+                *state_, StatusCode::InvalidInput, diag_codes::kIoImportFailure,
+                "候选导入失败：路径列表为空", "候选导入失败", {0},
+                "io.import.candidates.input", {{"path_count", 0.0, "count"}}));
     }
     for (const auto& p : paths) {
         if (!std::filesystem::exists(p)) continue;
         return import_auto(p, options);
     }
-    return detail::failed_result<BodyId>(*state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
-                                         "候选导入失败：没有可用文件", "候选导入失败");
+    return error_result<BodyId>(
+        StatusCode::OperationFailed,
+        create_io_failure_diagnostic(
+            *state_, StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+            "候选导入失败：没有可用文件", "候选导入失败", {0},
+            "io.import.candidates.path",
+            {{"path_count", static_cast<Scalar>(paths.size()), "count"},
+             {"existing_path_count", 0.0, "count"}}));
 }
 
 Result<std::uint64_t> IOService::count_importable_paths(std::span<const std::string> paths) const {
@@ -983,26 +1047,58 @@ Result<std::vector<BodyId>> IOService::import_existing_auto(std::span<const std:
 }
 
 Result<void> IOService::export_auto_to_directory(std::span<const BodyId> body_ids, std::string_view directory, std::string_view ext, const ExportOptions& options) {
-    if (directory.empty()) return detail::invalid_input_void(*state_, diag_codes::kIoExportFailure, "目录导出失败：目录为空", "目录导出失败");
+    if (directory.empty()) {
+        return io_failed_void(
+            *state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
+            "目录导出失败：目录为空", "目录导出失败", {0},
+            "io.batch_export.directory",
+            {{"body_count", static_cast<Scalar>(body_ids.size()), "count"},
+             {"directory_length", 0.0, "byte"}});
+    }
     std::string ext_token;
     if (!normalize_user_export_extension(ext, ext_token)) {
-        return detail::invalid_input_void(*state_, diag_codes::kIoExportFailure, "目录自动导出失败：扩展名为空", "目录自动导出失败");
+        return io_failed_void(
+            *state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
+            "目录自动导出失败：扩展名为空", "目录自动导出失败", {0},
+            "io.batch_export.format",
+            {{"body_count", static_cast<Scalar>(body_ids.size()), "count"},
+             {"extension_length", static_cast<Scalar>(ext.size()), "byte"}});
     }
     std::string fmt_check;
     if (!export_format_from_extension_token(ext_token, fmt_check)) {
-        return detail::invalid_input_void(*state_, diag_codes::kIoUnknownFormat, "目录自动导出失败：扩展名无法映射到支持的导出格式", "目录自动导出失败");
+        return io_failed_void(
+            *state_, StatusCode::InvalidInput, diag_codes::kIoUnknownFormat,
+            "目录自动导出失败：扩展名无法映射到支持的导出格式",
+            "目录自动导出失败", {0}, "io.batch_export.format",
+            {{"body_count", static_cast<Scalar>(body_ids.size()), "count"},
+             {"extension_length", static_cast<Scalar>(ext_token.size()), "byte"}});
     }
     (void)fmt_check;
     {
         const auto probe = (std::filesystem::path(std::string(directory)) / "body_0.step").string();
         const auto w = reject_if_export_directory_not_writable(*state_, probe);
-        if (w.status != StatusCode::Ok) return w;
+        if (w.status != StatusCode::Ok) {
+            return wrap_io_failed_void(
+                *state_, w, diag_codes::kIoExportFailure,
+                "目录自动导出失败：输出目录不可写", "目录自动导出失败",
+                {0}, "io.batch_export.directory",
+                {{"body_count", static_cast<Scalar>(body_ids.size()), "count"}});
+        }
     }
     std::vector<std::string> paths;
     paths.reserve(body_ids.size());
     for (std::size_t i = 0; i < body_ids.size(); ++i) {
         auto p = compose_path(directory, "body_" + std::to_string(i), ext_token);
-        if (p.status != StatusCode::Ok || !p.value.has_value()) return error_result<void>(p.status, p.diagnostic_id);
+        if (p.status != StatusCode::Ok || !p.value.has_value()) {
+            return error_void(
+                p.status, wrap_io_failure_diagnostic(
+                              *state_, p.status, p.diagnostic_id,
+                              diag_codes::kIoExportFailure,
+                              "目录自动导出失败：无法构造输出路径", "目录自动导出失败",
+                              {body_ids[i].value, static_cast<std::uint64_t>(i)},
+                              "io.batch_export.compose_path",
+                              {{"failed_item_index", static_cast<Scalar>(i), "index"}}));
+        }
         paths.push_back(*p.value);
     }
     return export_many_auto(body_ids, std::span<const std::string>(paths), options);

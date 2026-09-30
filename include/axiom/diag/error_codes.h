@@ -48,6 +48,10 @@ inline constexpr std::string_view kTopoFaceCrossLoopStraightEdgeIntersection = "
 inline constexpr std::string_view kTopoFaceCrossLoopStraightEdgeEndpointTouch = "AXM-TOPO-E-0027";
 inline constexpr std::string_view kTopoFaceCrossLoopCollinearOverlap = "AXM-TOPO-E-0028";
 inline constexpr std::string_view kTopoFaceCrossLoopNearContact = "AXM-TOPO-E-0029";
+inline constexpr std::string_view kTopoFaceBoundaryIntersectionIndeterminate = "AXM-TOPO-E-0030";
+inline constexpr std::string_view kTopoFaceCrossLoopCurveOverlap = "AXM-TOPO-E-0031";
+inline constexpr std::string_view kTopoFaceCrossLoopCurveIntersection = "AXM-TOPO-E-0032";
+inline constexpr std::string_view kTopoFaceCrossLoopCurveEndpointTouch = "AXM-TOPO-E-0033";
 
 inline constexpr std::string_view kBoolInvalidInput = "AXM-BOOL-E-0001";
 inline constexpr std::string_view kBoolIntersectionFailure = "AXM-BOOL-E-0003";

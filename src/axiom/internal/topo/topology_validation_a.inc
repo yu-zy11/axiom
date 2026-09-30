@@ -361,10 +361,18 @@ TopologyValidationService::first_boundary_conflict(
 
   const auto tolerance = detail::resolve_linear_tolerance(
       linear_tolerance, state_->config.tolerance);
-  auto conflict = face_cross_loop_boundary_conflict(
+  auto search = face_cross_loop_boundary_conflict(
       *state_, outer_loop, inner_loops, tolerance);
-  if (conflict.has_value()) {
-    return ok_result(std::optional<FaceBoundaryConflict>{*conflict},
+  if (search.status != StatusCode::Ok) {
+    return detail::failed_result<std::optional<FaceBoundaryConflict>>(
+        *state_, search.status,
+        diag_codes::kTopoFaceBoundaryIntersectionIndeterminate,
+        "边界冲突查询失败：显式裁剪曲线求交无法在预算和数值误差约束内完成",
+        "边界冲突查询失败",
+        {outer_loop.value, search.first_edge.value, search.second_edge.value});
+  }
+  if (search.conflict.has_value()) {
+    return ok_result(std::optional<FaceBoundaryConflict>{*search.conflict},
                      state_->create_diagnostic("已发现跨环边界冲突"));
   }
   return ok_result(std::optional<FaceBoundaryConflict>{},
@@ -1414,25 +1422,43 @@ Result<void> TopologyValidationService::validate_face(FaceId face_id) const {
   }
   const auto boundary_tolerance = detail::resolve_linear_tolerance(
       0.0, state_->config.tolerance);
-  if (const auto conflict = face_cross_loop_boundary_conflict(
-          *state_, face_it->second.outer_loop, face_it->second.inner_loops,
-          boundary_tolerance)) {
+  const auto boundary_search = face_cross_loop_boundary_conflict(
+      *state_, face_it->second.outer_loop, face_it->second.inner_loops,
+      boundary_tolerance);
+  if (boundary_search.status != StatusCode::Ok) {
+    return detail::failed_void(
+        *state_, boundary_search.status,
+        diag_codes::kTopoFaceBoundaryIntersectionIndeterminate,
+        "面验证失败：显式裁剪曲线求交无法在预算和数值误差约束内完成",
+        "面验证失败",
+        {face_id.value, face_it->second.outer_loop.value,
+         boundary_search.first_edge.value, boundary_search.second_edge.value});
+  }
+  if (const auto &conflict = boundary_search.conflict) {
     std::string_view code =
-        diag_codes::kTopoFaceCrossLoopStraightEdgeIntersection;
+        conflict->error_controlled
+            ? diag_codes::kTopoFaceCrossLoopCurveIntersection
+            : diag_codes::kTopoFaceCrossLoopStraightEdgeIntersection;
     std::string message =
-        "面验证失败：不同边界环的线性边界片段在内部相交";
+        "面验证失败：不同边界环的边界曲线在内部相交";
     switch (conflict->kind) {
       case FaceBoundaryConflictKind::EndpointTouch:
-        code = diag_codes::kTopoFaceCrossLoopStraightEdgeEndpointTouch;
-        message = "面验证失败：不同边界环的线性边界片段在拓扑边端点相接";
+        code = conflict->error_controlled
+                   ? diag_codes::kTopoFaceCrossLoopCurveEndpointTouch
+                   : diag_codes::kTopoFaceCrossLoopStraightEdgeEndpointTouch;
+        message = "面验证失败：不同边界环的边界曲线在拓扑边端点相接";
         break;
       case FaceBoundaryConflictKind::CollinearOverlap:
         code = diag_codes::kTopoFaceCrossLoopCollinearOverlap;
         message = "面验证失败：不同边界环的共线边界片段发生重叠";
         break;
+      case FaceBoundaryConflictKind::CurveOverlap:
+        code = diag_codes::kTopoFaceCrossLoopCurveOverlap;
+        message = "面验证失败：不同边界环的曲线边界存在连续重合区间";
+        break;
       case FaceBoundaryConflictKind::NearContact:
         code = diag_codes::kTopoFaceCrossLoopNearContact;
-        message = "面验证失败：不同边界环的线性边界片段在拓扑容差内邻近相接（间距=" +
+        message = "面验证失败：不同边界环的边界曲线在拓扑容差内邻近相接（间距=" +
                   std::to_string(conflict->distance) + "，容差=" +
                   std::to_string(boundary_tolerance) + "）";
         break;

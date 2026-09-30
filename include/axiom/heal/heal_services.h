@@ -16,6 +16,7 @@ class ValidationService {
 public:
   explicit ValidationService(std::shared_ptr<detail::KernelState> state);
 
+  /// HEAL 验证失败均返回带 `heal.*` 阶段、关联实体与有限数值证据的诊断，可直接纳入 `audit_evidence` 门禁。
   Result<void> validate_geometry(BodyId body_id, ValidationMode mode) const;
   Result<void> validate_topology(BodyId body_id, ValidationMode mode) const;
   /// 专项：owned B-Rep 壳的边级闭合/流形（两侧各一拓扑面；Standard/Fast 即检；Strict 额外壳内重复面与不连通）。
@@ -73,9 +74,11 @@ public:
   explicit RepairService(std::shared_ptr<detail::KernelState> state);
 
   // Trim bridge (Stage 3 minimal): rebuild / overwrite coedge pcurves from 3D edges by projection onto the face surface.
-  // Currently supports Plane faces (SurfaceKind::Plane).
+  // Currently supports Plane/Cylinder/Sphere faces. Any mid-pipeline or post-validation failure restores every original
+  // coedge binding and removes pcurves allocated by the rejected attempt.
   Result<void> repair_face_trim_pcurves(FaceId face_id, RepairMode mode);
 
+  /// 修改型修复先物化、后验证；验证失败会移除本次分配的体/拓扑/几何对象并返回 `heal.*.post_validate` 数值证据。
   Result<OpReport> sew_faces(std::span<const FaceId> faces, Scalar tolerance,
                              RepairMode mode);
   Result<OpReport> remove_small_edges(BodyId body_id, Scalar threshold,
@@ -97,6 +100,7 @@ public:
   Result<OpReport> merge_near_coplanar_faces_default(BodyId body_id,
                                                      Scalar angle_tolerance);
   Result<OpReport> auto_repair_default(BodyId body_id);
+  /// 批量修复为原子操作：任一子项失败时回滚此前子项的全部派生对象与 Eval 失效状态。
   Result<std::vector<OpReport>>
   repair_many_auto(std::span<const BodyId> body_ids, RepairMode mode);
   Result<std::vector<OpReport>>

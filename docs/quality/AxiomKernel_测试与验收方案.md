@@ -13,6 +13,26 @@
 - 自动化策略
 - 发布前质量门禁
 
+### 1.1 cycle-0073 批次验收记录
+
+依据调度器独立门禁日志 [cycle-0073-gates.log](../../.axiom-agent/logs/cycle-0073-gates.log) 与当前代码/回归 diff，本批 HEAL、IO 和扭转拉伸功能包已验收。开发报告中的“未编译/未运行”仅描述 develop 阶段约束；本记录采用调度器修复后的最终结果。本次文档同步未重新构建或运行测试。
+
+日志记录两轮 `cmake -S . -B /workspaces/axiom/build-agent -DAXM_ENABLE_TESTS=ON -DAXM_ENABLE_EXAMPLES=ON`、`cmake --build /workspaces/axiom/build-agent --parallel 4` 和 `ctest --test-dir /workspaces/axiom/build-agent --output-on-failure --no-tests=error`。首次完整 CTest **15/16 通过、1 失败、106.79 s**，`axiom_ops_heal_test` 在 `twisted_convex` 的拓扑/质量/Strict 检查失败（79.81 s）；HEAL 和 IO 当轮通过。repair 定位到扭转站间四边形固定对角线使一阶有向体积误差累积，改为仅对扭转侧壁交替对角线，保持角站数、实际拓扑、闭壳/反向索引及非扭转路径；未放宽断言或性能阈值。修复报告记录 Ops 定向构建和测试，最终验收以日志中的修复后全量 **16/16 通过、0 失败、126.44 s** 为准。
+
+| 最终门禁 | 结果 | 本批回归证据 |
+|---|---|---|
+| 完整构建（并发 4，测试与示例开启） | 成功 | 全部库、测试与示例目标完成；首次构建仍有 BoundaryEdge/Issue 聚合成员初始化缺失及未使用参数告警，不宣称无告警构建 |
+| `axiom_heal_test` | 通过，0.06 s | `AXM-` / `heal.` 模块 `audit_evidence`、有限数值 JSON 与源报告不污染；单项后验失败回收、批量晚失败及自动修复失败回滚 |
+| `axiom_io_workflow_test` | 通过，13.45 s | `AXM-` / `io.` 模块 `audit_evidence`、JSON 数值/批量上下文、后验验证/修复证据；精确体和网格批量晚失败对象数量/next_id 回滚，精确体批次另核对体/面缓存恢复，并检查原位重试复用 ID；候选/目录/条件工作流真实失败传播 |
+| `axiom_ops_heal_test` | 通过，98.84 s（低于既有 120 s 限制） | 扭转凸/凹与孔、绕向、空间旋转、方向缩放/反转、正负部分角/整周/零角；真实拓扑/反向索引/bbox/质量/Strict/网格、退化输入、活动事务失败原子性、拓扑编辑回滚与重试；第 60/61/62/65 包既有回归同次通过 |
+| `axiom_representation_io_test` | 通过，10.46 s | 表示转换与 IO 集成回归 |
+| `axiom_perf_baseline_test` | 通过，1.68 s | 保留现有性能门禁；该数值为 CTest 墙钟，不是新增扭转基准或跨环境性能保证 |
+| 完整 CTest（含其余测试） | 16/16 通过，0 失败，126.44 s | 本批及既有包无待验收项；日志未记录本批文档检查结果 |
+
+模块审计筛选 Error 及以上问题，使用 `issue_code_prefix="AXM-"`，避免漏掉复用的 CORE/VAL/TOPO 根因码；分别要求 `heal.` / `io.` 阶段、关联实体与有限数值证据。IO 预物化零令牌表示没有可关联的模型实体；审计通过仅证明证据结构完整，不代表模型、格式或算法工业完备。
+
+验收边界：HEAL trim 仍限 Plane/Cylinder/Sphere，验证/修复规则范围不扩大；HEAL 回滚不恢复 `next_id`，批量返回报告不合并子项全部根因 issue，子项原诊断仍保留。IO 标准 STEP/IGES 实体、普通文本/目录辅助接口与更广泛失败注入语料未因此闭合。后验验证/自动修复 issue 可随 `Ok` 导入返回，批量模型回滚由子项实际失败触发，批量导出不保证文件事务。扭转方向必须法向、中心共面、正距离、扭角最多一周，角站差不超过 7.5°；真实结果仍为保守采样多面体，不是解析螺旋面，未组合变比例/至平面拉伸。FR-OPS-001 继续进行中，FR-DIAG-001/NFR-DIA-001 继续受限可用。
+
 ## 2. 测试总体原则
 
 几何引擎测试必须遵循以下原则：

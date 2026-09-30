@@ -170,6 +170,10 @@ struct BodyRecord {
     /// （轴须在轮廓平面内，转角 `<= 2π`；带孔区域须与轴严格分离）。
     std::vector<Point3> revolve_profile_xyz;
     std::vector<std::vector<Point3>> revolve_holes_xyz;
+    /// Directed interval placement for explicit polygon revolution. `b` retains the
+    /// positive span magnitude for mass/query compatibility with older records.
+    Scalar revolve_start_angle {0.0};
+    Scalar revolve_signed_angle {0.0};
     /// 整周旋转必须走专用闭壳物化，失败时禁止回退到 bbox 占位拓扑。
     bool revolve_full_turn {false};
     /// 多边形 `extrude`：轮廓副本，供 **平面多边形 + 非退化拉伸方向** 的棱柱 BRep 物化（见 `try_materialize_sweep_extrude_prism_body`）。
@@ -181,9 +185,15 @@ struct BodyRecord {
     Point3 extrude_scale_center {};
     /// Optional terminating plane for a straight extrusion with vertex-dependent travel.
     std::optional<Plane> extrude_end_plane;
-    /// Fixed-orientation polyline sweep: station displacements relative to the rail start.
+    /// Straight sampled sweep station displacements relative to the profile/rail start.
     /// Empty for a single extrusion; otherwise starts at zero and is strictly monotone through the profile plane.
     std::vector<Vec3> sweep_station_offsets;
+    /// Optional positive uniform section scale at every fixed-orientation station. When present,
+    /// it matches sweep_station_offsets and scales about extrude_scale_center.
+    std::vector<Scalar> sweep_station_scales;
+    /// Optional signed rotation about `axis` at every straight-extrusion station. It matches
+    /// sweep_station_offsets, begins at zero and rotates about extrude_scale_center.
+    std::vector<Scalar> sweep_station_angles;
     /// Curve-following sweep stations. `u/v` are a rotation-minimizing section frame at each
     /// rail point; open rails include both endpoints, while a closed rail omits its repeated end.
     /// The materializer reconstructs every section from the original world-space profile in
@@ -191,6 +201,8 @@ struct BodyRecord {
     std::vector<Point3> sweep_frame_origins;
     std::vector<Vec3> sweep_frame_u;
     std::vector<Vec3> sweep_frame_v;
+    /// Optional positive uniform section scale at each curve-frame station.
+    std::vector<Scalar> sweep_frame_scales;
     bool sweep_frame_closed {false};
     /// Explicit compatible-section loft. Each station owns one outer polygon and
     /// the same-index collection of hole rings; corresponding rings have equal counts.
@@ -304,6 +316,12 @@ struct KernelState {
     std::uint64_t topology_cancellation_rollback_count{0};
     std::uint64_t topology_cancelled_write_operations_total{0};
     std::uint64_t topology_last_cancelled_write_operations{0};
+    std::uint64_t topology_savepoint_created_count{0};
+    std::uint64_t topology_savepoint_rollback_count{0};
+    std::uint64_t topology_savepoint_released_count{0};
+    std::uint64_t topology_savepoint_discarded_nested_count{0};
+    std::uint64_t topology_savepoint_rolled_back_write_operations_total{0};
+    std::uint64_t topology_savepoint_last_rolled_back_write_operations{0};
     /// 当前拓扑写事务的唯一所有权令牌；事务关闭后弱引用自动失效。
     std::weak_ptr<void> active_topology_transaction;
 

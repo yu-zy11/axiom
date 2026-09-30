@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <iterator>
 #include <limits>
 #include <string_view>
 #include <unordered_map>
@@ -26,11 +27,46 @@ struct TopologyCancellationState {
   std::atomic<bool> requested{false};
 };
 
-struct TopologyTransactionState {
+std::atomic<std::uint64_t> next_topology_transaction_cookie{1};
+
+struct TopologySavepointSnapshot {
+  TopologySavepoint handle;
+  std::unordered_map<std::uint64_t, VertexRecord> vertices;
+  std::unordered_map<std::uint64_t, EdgeRecord> edges;
+  std::unordered_map<std::uint64_t, CoedgeRecord> coedges;
+  std::unordered_map<std::uint64_t, LoopRecord> loops;
+  std::unordered_map<std::uint64_t, FaceRecord> faces;
+  std::unordered_map<std::uint64_t, ShellRecord> shells;
+  std::unordered_map<std::uint64_t, BodyRecord> bodies;
+  std::vector<std::uint64_t> created_vertices;
+  std::vector<std::uint64_t> created_edges;
+  std::vector<std::uint64_t> created_coedges;
+  std::vector<std::uint64_t> created_loops;
+  std::vector<std::uint64_t> created_faces;
+  std::vector<std::uint64_t> created_shells;
+  std::vector<std::uint64_t> created_bodies;
   std::unordered_map<std::uint64_t, PCurveId> original_coedge_pcurves;
   std::unordered_map<std::uint64_t, FaceRecord> original_faces;
   std::unordered_map<std::uint64_t, ShellRecord> original_shells;
   std::unordered_map<std::uint64_t, BodyRecord> original_bodies;
+  std::uint64_t deleted_faces{};
+  std::uint64_t deleted_shells{};
+  std::uint64_t deleted_bodies{};
+  std::uint64_t replaced_surfaces{};
+  std::uint64_t coedge_pcurve_binds{};
+  std::uint64_t coedge_pcurve_clears{};
+  std::uint64_t write_operations{};
+};
+
+struct TopologyTransactionState {
+  std::uint64_t transaction_cookie{
+      next_topology_transaction_cookie.fetch_add(1, std::memory_order_relaxed)};
+  std::uint64_t next_savepoint_sequence{1};
+  std::unordered_map<std::uint64_t, PCurveId> original_coedge_pcurves;
+  std::unordered_map<std::uint64_t, FaceRecord> original_faces;
+  std::unordered_map<std::uint64_t, ShellRecord> original_shells;
+  std::unordered_map<std::uint64_t, BodyRecord> original_bodies;
+  std::vector<TopologySavepointSnapshot> savepoints;
 
   void snapshot_face(const KernelState &state, FaceId face_id) {
     if (original_faces.find(face_id.value) != original_faces.end()) {
@@ -132,6 +168,21 @@ TopologyService::cancellation_metrics() const {
       state_->topology_last_cancelled_write_operations;
   return ok_result(metrics,
                    state_->create_diagnostic("已查询拓扑协作式取消审计"));
+}
+
+Result<TopologySavepointMetrics> TopologyService::savepoint_metrics() const {
+  TopologySavepointMetrics metrics;
+  metrics.created_count = state_->topology_savepoint_created_count;
+  metrics.rollback_count = state_->topology_savepoint_rollback_count;
+  metrics.released_count = state_->topology_savepoint_released_count;
+  metrics.discarded_nested_count =
+      state_->topology_savepoint_discarded_nested_count;
+  metrics.rolled_back_write_operations_total =
+      state_->topology_savepoint_rolled_back_write_operations_total;
+  metrics.last_rolled_back_write_operations =
+      state_->topology_savepoint_last_rolled_back_write_operations;
+  return ok_result(metrics,
+                   state_->create_diagnostic("已查询拓扑事务保存点累计审计"));
 }
 
 TopologyQueryService &TopologyService::query() { return query_service_; }

@@ -58,6 +58,21 @@ enum class ExactBrepRecordValidationFailure {
 };
 /// Validate imported record geometry before model-store/ID mutation.
 ExactBrepRecordValidationFailure validate_exact_brep_body_record(const detail::BodyRecord& record);
+/// Build a heavyweight IO failure diagnostic whose error issues always carry an
+/// `io.*` stage, at least one problem-entity token, and finite numeric evidence.
+DiagnosticId create_io_failure_diagnostic(
+    detail::KernelState& state, StatusCode status, std::string_view code,
+    std::string message, std::string summary,
+    std::vector<std::uint64_t> related_entities, std::string_view stage,
+    std::vector<NumericEvidence> evidence = {});
+/// Copy a child failure into a new IO workflow report without mutating the child
+/// report. Error/fatal issues are completed with the supplied workflow context.
+DiagnosticId wrap_io_failure_diagnostic(
+    detail::KernelState& state, StatusCode status, DiagnosticId child_diagnostic,
+    std::string_view fallback_code, std::string fallback_message,
+    std::string summary, std::vector<std::uint64_t> related_entities,
+    std::string_view stage, std::vector<NumericEvidence> evidence = {},
+    bool replace_child_stage = true);
 void write_axmjson_payload(std::ostream& out, const detail::BodyRecord& body, const ExportOptions& options,
                            std::string_view format_json_value);
 std::uint32_t crc32_ieee_update(std::uint32_t crc, const std::uint8_t* p, std::size_t n);
@@ -95,9 +110,12 @@ bool stl_binary_parse(const std::vector<std::uint8_t>& data, detail::MeshRecord&
 std::optional<std::string> parse_stl_bytes(const std::vector<std::uint8_t>& data, detail::MeshRecord& mesh);
 bool scan_json_uint_after(const std::string& s, std::size_t from, std::string_view key, std::uint64_t& out);
 std::optional<std::string> parse_gltf_embedded_minimal(std::string_view json, detail::MeshRecord& mesh);
-void append_issues_from_import_diag(detail::KernelState* state, std::vector<Issue>& issues, std::vector<Warning>& warnings,
-                                    DiagnosticId diagnostic_id,
-                                    std::initializer_list<std::uint64_t> fallback_related_entities);
+void append_issues_from_import_diag(
+    detail::KernelState* state, std::vector<Issue>& issues,
+    std::vector<Warning>& warnings, DiagnosticId diagnostic_id,
+    std::initializer_list<std::uint64_t> fallback_related_entities,
+    StatusCode status, std::string_view stage,
+    std::vector<NumericEvidence> evidence = {});
 DiagnosticId merge_batch_import_failure_diagnostic(detail::KernelState& state, std::string_view format_label_cn,
                                                    std::size_t index, std::string_view path, DiagnosticId child_diag_id);
 DiagnosticId merge_batch_export_failure_diagnostic(detail::KernelState& state, std::string_view format_label_cn,

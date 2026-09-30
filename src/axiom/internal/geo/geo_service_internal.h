@@ -5,6 +5,7 @@
 #include <limits>
 
 #include "axiom/core/types.h"
+#include "axiom/geo/geometry_services.h"
 #include "axiom/internal/core/kernel_state.h"
 
 namespace axiom {
@@ -24,6 +25,13 @@ bool evaluate_curve_point_no_cache(const detail::KernelState& state,
 bool curve_interval_bbox_no_cache(const detail::KernelState& state,
                                   CurveId curve_id, Scalar start_parameter,
                                   Scalar end_parameter, BoundingBox& bbox);
+
+/// 与公开曲线求交入口使用同一解析/分支限界/Gauss-Newton 实现，但不创建
+/// Diagnostic 或写任何运行时存储。供 Topo 等允许依赖 GeoCore 的上层模块在
+/// 自己的事务和诊断边界内执行有限 trim 区间求交。
+Result<CurveCurveIntersectionResult> intersect_curve_curve_no_diagnostics(
+    detail::KernelState& state, CurveId first_curve, CurveId second_curve,
+    const CurveCurveIntersectionOptions& options);
 
 template <typename F>
 Vec3 surface_partial_u_from_eval(const F &eval_fn, Scalar cu, Scalar cv,
