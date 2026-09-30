@@ -695,7 +695,10 @@ FaceBoundaryConflictSearchResult face_cross_loop_boundary_conflict(
       if (!std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(a.z) ||
           !std::isfinite(b.x) || !std::isfinite(b.y) || !std::isfinite(b.z))
         continue;
-      BoundaryEdge boundary{loop_id, edge_id, edge_it->second.curve_id};
+      BoundaryEdge boundary{};
+      boundary.loop = loop_id;
+      boundary.edge = edge_id;
+      boundary.curve = edge_it->second.curve_id;
       std::vector<LinearPiece> pieces;
       if (curve_it->second.kind == detail::CurveKind::Line ||
           curve_it->second.kind == detail::CurveKind::LineSegment) {

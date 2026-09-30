@@ -820,4 +820,19 @@ thicken 失败 issue 关联输入 FaceId；支持正反法向及与其独立的�
 
 编辑/删除使 Eval 绑定及下游 dirty；保存点/显式/析构/取消恢复会重新失效已在事务内重算的消费者。移除体在恢复或提交时清理其网格/缓存和体绑定；诊断不回滚，事务 ID 不承诺回收。旧网格是快照，仅当前边界键与正确 source_body 可命中；历史 metadata `bbox_proxy` 显示路径仍保留，不属于 owned 实体 fallback，也不授予质量/实体查询资格。
 
-`stage3_representation_consistency_regression`、`stage3_eval_rollback_consistency_regression`、`stage3_discarded_body_runtime_regression` 及五类 Ops 集成闭环均随调度器完整 CTest **16/16、164.60 s** 通过，详见 [验收 §1.5](../quality/AxiomKernel_测试与验收方案.md#15-cycle-0078--s3-consistency-门禁与逐项证据)。Strict warnings 独立门禁未记录；正式验收条件见当前进度 §5.2.1，Stage 3 保持进行中。
+`stage3_representation_consistency_regression`、`stage3_eval_rollback_consistency_regression`、`stage3_discarded_body_runtime_regression` 及五类 Ops 集成闭环均随调度器完整 CTest **16/16、164.60 s** 通过，详见 [验收 §1.5](../quality/AxiomKernel_测试与验收方案.md#15-cycle-0078--s3-consistency-门禁与逐项证据)。上述为 cycle-0078 历史门禁，当批未记录 Strict warnings 独立门禁；当前 cycle-0079 的配置及残余告警见下文，正式验收条件见当前进度 §5.2.1，Stage 3 保持进行中。
+
+### cycle-0079 / S3-EXIT 统一矩阵拒绝合同
+
+本批复用错误码常量和既有 Issue.stage，不新增/改义错误码；公开接口只补支持边界注释。`tests/eval/query_eval_test.cpp::stage3_exit_support_matrix_regression` 的 17 行已随调度器全量 **16/16、0 失败、163.78 s** 执行，其中四类原生解析体仅通用质量成功，代理体拓扑质量与实体截面/最近点/距离拒绝；占位 Sweep/Boolean 与 mesh 派生全部物理查询拒绝。真实平面 Face thicken 是支持行，不能误写为历史占位。
+
+| 入口族 | 不支持当前物理边界 | 无效 BodyId |
+|---|---|---|
+| Query section_detailed/section、Topo section | NotImplemented / `AXM-CORE-E-0004` / `query.section.support_gate` | InvalidInput / `AXM-CORE-E-0001` / `query.section.preflight` |
+| Query closest_point、Topo locate_point | 同码/状态 / `query.closest_point.support_gate` | 同码/状态 / `query.closest_point.preflight` |
+| Query/Topo closest_points、Query 正反 min_distance | 同码/状态 / `query.distance.support_gate` | 同码/状态 / `query.distance.preflight` |
+| Query mass_properties、Topo body_mass_properties | 同码/状态 / `query.mass_properties.support_gate`；原生未编辑解析体的 Query 入口例外成功 | 同码/状态 / `query.mass_properties.preflight` |
+
+拒绝必须无 value 且 diagnostic_id 可检索对应 Issue.code/stage；稳定阶段不以成功值或 bbox fallback 代替。查询矩阵核对对象/几何数量、next_object_id、网格/体面三角化/曲线曲面求值/交线缓存、Eval invalid/recompute 与事务写计数不变；诊断及 Topo 读审计可增长。成功兼容 section 显式发布网格的语义不变，矩阵仅检查该入口的拒绝路径。预算、数值、当前编辑 preflight 与 rep.tessellation 原子失败合同沿用前述 S3-QUERY/MASS/CONSISTENCY 条目；内部 empty_gate 无公共夹具，不宣称已验收。
+
+API 支持体类、精确/采样范围见 [统一矩阵 §6.1.4](../api/AxiomKernel_详细模块接口清单.md#614-stage-3-统一退出支持矩阵cycle-0079--s3-exit)，三条阶段证据及本批 strict warnings 残余见 [验收 §1.6](../quality/AxiomKernel_测试与验收方案.md#16-cycle-0079--s3-exit-门禁与逐项证据)。本批编译告警为 C++ 初始化告警，不是新 AXM 诊断码；实发 SDK 1 条，未重编译的 helpers 历史 17 条不宣称消除。stage_task_id=S3-EXIT、stage_outcome=ready_for_acceptance，最终文档门禁及调度器提交成功后才记录正式验收，Stage 3 保持进行中。

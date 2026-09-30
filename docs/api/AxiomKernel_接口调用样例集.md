@@ -1365,3 +1365,38 @@ if (spatial_box.value) {
 Inside/Outside 按闭壳包含奇偶判断，支持空腔和材料岛；非空实体总给最近面内/边/顶点边界，等距按稳定 ShellId、FaceId 选择，内部零壳实体合同为 Outside 和空最近边界；公共 `create_body({})` 拒绝，本批未构造/验证该零壳查询分支。Boundary 点定位是距离容差带；线段裁剪不按该容差膨胀材料或合并可分辨薄层，长度不大于容差的线段失败。裁剪区间按参数排序、内部不重叠，省略 Outside，孤立相切点不与已覆盖区间重复，Boundary 段不计材料长度。
 
 仅支持无自交的嵌入平面直边双边流形闭壳，曲面/显式裁剪曲边拒绝，面边界须在支撑平面上；壳间相交/重叠/建模容差接触失败。本批未新增壳自身全局自交证明或大规模空间加速。预算仅计前置检查之后的新三角形计算；耗尽或事件数值分辨率不足时无部分值。查询增加诊断和只读审计，不发布 MeshId，不写缓存、Eval 或事务；当前编辑即时可见，回滚后恢复。门禁和完整失败码见 [接口合同](AxiomKernel_详细模块接口清单.md#611-实体空间查询cycle-0074已通过完整门禁) 与 [错误码字典](../diagnostics/AxiomKernel_错误码与诊断码字典.md)。
+
+## 16. Stage 3 退出主链样例（cycle-0079 / S3-EXIT）
+
+以下沿用 `tests/sdk/smoke_test.cpp::main` 的公开门面夹具：三角形底面积 6、高 3、终端比例 0.5，中点比例 0.75，结果为当前真实多面体。文档片段未单独编译；实际 smoke 已随调度器完整 CTest **16/16、163.78 s** 通过（smoke 0.02 s）。
+
+```cpp
+axiom::Kernel kernel;
+axiom::ProfileRef profile{"exit_scaled_triangle", {{0,0,0},{4,0,0},{0,3,0}}};
+auto solid = kernel.sweeps().extrude_scaled(profile, {0,0,2}, 3.0, {0,0,0}, 0.5);
+if (!solid.value) return 1;  // 用 diagnostic_id 检索诊断
+
+auto mass = kernel.query().mass_properties(*solid.value);              // V=10.5
+// mass: 单位密度，面积 L²、体积 L³、质心 L、世界坐标质心惯性 L⁵。
+auto section = kernel.query().section_detailed(
+    *solid.value, {{0,0,1.5},{0,0,1}});                                // S=3.375
+// 材料内部的 closest_point 仍返回最近边界；本例为外点，距离=1。
+auto nearest = kernel.query().closest_point(*solid.value, {0,0,4});
+auto remote = kernel.primitives().box({0,0,4}, 1, 1, 1);
+if (!remote.value) return 1;
+auto distance = kernel.query().min_distance(*solid.value, *remote.value); // 1
+if (!mass.value || !section.value || !nearest.value || !distance.value)
+    return 1;  // 失败无部分值；读取 query.*.support_gate/preflight/budget/numeric
+
+auto mesh = kernel.convert().brep_to_mesh(*solid.value, {});
+if (!mesh.value) return 1;
+auto report = kernel.convert().inspect_mesh(*mesh.value);
+if (!report.value || report.value->triangle_count == 0 ||
+    report.value->tessellation_strategy != "owned_topo_welded") return 1;
+auto strict = kernel.validate().validate_all(*solid.value, axiom::ValidationMode::Strict);
+if (strict.status != axiom::StatusCode::Ok) return 1;
+```
+
+此链不使用 bbox 截面或来源/创建缓存质量。详细 section 不发布 MeshId，兼容 `query().section` 的有面积成功分支会发布结果网格；空集/纯线点相切成功返回零句柄，不能与无 value 失败混淆。表示转换成功会发布网格并填缓存；owned 失败原子拒绝，不回退 bbox/创建参数。来源及 Face/Shell 见证、缓存 BodyId/当前边界/source_body、primitive 编辑资格和事务/Eval 合同沿用 §12.2；保存点/显式/析构/取消回滚会恢复当前边界并传播 dirty，合法提交之后的失败恢复已提交状态。旧 MeshId 是快照，Eval recompute 不自动运行质量/表示算法；metadata bbox_proxy 仅显示，不取得物理查询资格。
+
+五类真实建模及 box/wedge/Generic/原生解析质量资格/占位和派生拒绝的完整范围、独立参考与 17 行自动化映射见 [API §6.1.4](AxiomKernel_详细模块接口清单.md#614-stage-3-统一退出支持矩阵cycle-0079--s3-exit)，本批三条证据及五项退出映射见 [验收 §1.6](../quality/AxiomKernel_测试与验收方案.md#16-cycle-0079--s3-exit-门禁与逐项证据)。平面多面体仅在浮点容差内精确，旋转/曲线扫掠/截面律查询实际采样多面体；四类未编辑原生解析体仅通用质量成功，实体截面/最近点/距离与代理壳积分拒绝。通用曲面/曲边积分及实体查询、曲面 thicken、任意 loft 匹配、相交多壳/全局嵌入证明、空间加速、完整 trim/标准交换、工业 Boolean 和 Eval 自动算法重算仍有限制，不作为 Stage 3 完成前提；最终文档门禁及调度器提交成功前保持 ready_for_acceptance，不提前宣布阶段退出。

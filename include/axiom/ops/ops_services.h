@@ -251,6 +251,11 @@ public:
 
     Result<IntersectionId> intersect(CurveId curve_id, SurfaceId surface_id) const;
     Result<IntersectionId> intersect(SurfaceId lhs, SurfaceId rhs) const;
+    /// Stage 3 spatial queries share one support boundary: current ExactBRep
+    /// box/wedge, materialized extrude/revolve/sweep/loft/planar Face thicken,
+    /// and Generic planar straight-edge embedded closed shells (including cavities/islands).
+    /// Sampled modeling results measure their polyhedron; native curved primitives
+    /// have only the analytic mass qualification described below, not spatial query support.
     /// 只读真实多面体查询；支持/空交集/失败合同与 TopologyQueryService::section 相同。
     Result<BodyPlaneSection> section_detailed(
         BodyId body_id, const Plane& plane, const BodySpatialQueryOptions& options = {}) const;

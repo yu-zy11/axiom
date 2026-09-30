@@ -631,6 +631,8 @@ PCurve 必须为至少两点的折线，按 coedge 方向连续闭合，各点�
 
 ### 6.1.2 Stage 3 截面、最近点与距离支持矩阵（cycle-0075 / S3-QUERY）
 
+当前退出统一矩阵及 cycle-0079 自动化证据见 [§6.1.4](#614-stage-3-统一退出支持矩阵cycle-0079--s3-exit)；本节保留专项合同与历史门禁。
+
 `TopologyQueryService::section` 与 `QueryService::section_detailed` 返回同一 `BodyPlaneSection`；通用 `closest_point` 复用 `locate_point`，通用/专用 `closest_points` 返回同一 `BodyDistanceQuery`，`min_distance` 取其 distance 并保留诊断。以下“支持”均要求当前拓扑通过闭壳、面支撑、壳间接触与包含前置检查，且输入为无自交的嵌入双边流形闭壳。
 
 | 当前体类 / 建模路径 | 截面、最近边界与实体距离 | 质量属性 / 表示合同 | 回归依据与限制 |
@@ -658,11 +660,13 @@ PCurve 必须为至少两点的折线，按 coedge 方向连续闭合，各点�
 
 详细查询每次消费当前拓扑，只增加诊断与 Topo 只读审计，不写模型/网格/交线存储、曲线/曲面求值缓存、体/面三角化缓存、Eval 失效/重算或事务写计数。编辑失败不得恢复旧拓扑质量或 bbox fallback；rollback 后截面与质量恢复。内部零壳分支约定截面成功空、距离 `DegenerateGeometry / AXM-QUERY-E-0001 / query.distance.empty_gate`，但公共 `create_body({})` 返回 `OperationFailed / AXM-TX-E-0001`，本批仅验证创建拒绝及写计数不变，未构造或验收零壳查询分支。
 
-调度器修复后完整构建及 CTest **16/16 通过、148.44 s**；Query/Eval **0.90 s**、Ops/Heal **121.81 s**、representation/IO **9.87 s**。逐项独立参考与四条验收证据见 [测试与验收方案 §1.2](../quality/AxiomKernel_测试与验收方案.md#12-cycle-0075--s3-query-门禁与逐项证据)，稳定失败码见 [错误码字典](../diagnostics/AxiomKernel_错误码与诊断码字典.md)。该节保留 S3-QUERY 历史代码门禁与支持范围；当前唯一任务为 cycle-0078 / S3-CONSISTENCY（§7.3.1），正式状态见当前进度 §5.2.1，不由历史日志推断文档检查/提交成功。Stage 3 / FR-QUERY-001 保持进行中。
+调度器修复后完整构建及 CTest **16/16 通过、148.44 s**；Query/Eval **0.90 s**、Ops/Heal **121.81 s**、representation/IO **9.87 s**。逐项独立参考与四条验收证据见 [测试与验收方案 §1.2](../quality/AxiomKernel_测试与验收方案.md#12-cycle-0075--s3-query-门禁与逐项证据)，稳定失败码见 [错误码字典](../diagnostics/AxiomKernel_错误码与诊断码字典.md)。该节保留 S3-QUERY 历史代码门禁与支持范围；当前唯一任务为 cycle-0079 / S3-EXIT（§6.1.4），正式状态见当前进度 §5.2.1，不由历史日志推断文档检查/提交成功。Stage 3 / FR-QUERY-001 保持进行中。
 
 本矩阵由 cycle-0078 / S3-CONSISTENCY 继续回归锁定：五类代表建模结果的截面/最近点/距离/质量、owned 表示、有效来源与 Eval 绑定闭环通过；成功提交、失败与回滚的一致性见 [§7.3.1](#731-stage-3-表示来源与-eval-一致性合同cycle-0078--s3-consistency) 和 [验收 §1.5](../quality/AxiomKernel_测试与验收方案.md#15-cycle-0078--s3-consistency-门禁与逐项证据)。全量 16/16、164.60 s；支持体类不扩大，详细查询只读，拓扑修改/恢复自身会传播 Eval dirty。
 
 ### 6.1.3 Stage 3 质量属性支持矩阵（cycle-0076 / S3-MASS）
+
+当前退出统一矩阵及 cycle-0079 自动化证据见 [§6.1.4](#614-stage-3-统一退出支持矩阵cycle-0079--s3-exit)；本节保留专项合同与历史门禁。
 
 `QueryService::mass_properties(BodyId)` 返回 `Result<MassProperties>`。密度固定为 1；`volume/area/centroid` 的单位为模型长度单位的三次方/平方/一次方，`inertia` 为关于质心的世界坐标系 3×3 行主序张量，单位为长度的五次方。张量非对角项为负积惯量，坐标旋转按 `R I Rᵀ` 变换。接口没有密度参数；均匀密度 ρ 的物理质量为 `ρ*volume`，物理惯性为 `ρ*inertia`，面积与重心不变。
 
@@ -682,9 +686,43 @@ PCurve 必须为至少两点的折线，按 coedge 方向连续闭合，各点�
 
 所有失败无 `value`，不返回部分体积/面积/重心/惯性。稳定阶段为 `query.mass_properties.support_gate/preflight/empty_gate/numeric`；原生解析溢出/惯性下溢、非有限结果或非正惯性对角项为 `NumericalInstability / AXM-QUERY-E-0003 / numeric`。无效/删除句柄为 `InvalidInput / AXM-CORE-E-0001 / preflight`；其余拓扑根因保留错误码。公共 API 无零壳体夹具，删除最后壳会删除 owner Body，回归核对的是 InvalidInput/preflight，内部 empty_gate 不声称已覆盖。
 
-独立参考、采样误差和三条 `stage_evidence` 见 [测试与验收 §1.3](../quality/AxiomKernel_测试与验收方案.md#13-cycle-0076--s3-mass-门禁与逐项证据)。调度器完整构建成功，全量 CTest **16/16、0 失败、147.97 s**；此为 S3-MASS 历史代码门禁；当前唯一任务 S3-CONSISTENCY 的证据见 §7.3.1 与测试与验收 §1.5，正式状态见当前进度 §5.2.1。Stage 3 / FR-QUERY-001 继续进行中。
+独立参考、采样误差和三条 `stage_evidence` 见 [测试与验收 §1.3](../quality/AxiomKernel_测试与验收方案.md#13-cycle-0076--s3-mass-门禁与逐项证据)。调度器完整构建成功，全量 CTest **16/16、0 失败、147.97 s**；此为 S3-MASS 历史代码门禁；当前唯一任务 S3-EXIT 的证据见 §6.1.4 与测试与验收 §1.6，正式状态见当前进度 §5.2.1。Stage 3 / FR-QUERY-001 继续进行中。
 
 本矩阵由 cycle-0078 / S3-CONSISTENCY 继续回归锁定：五类代表建模结果的截面/最近点/距离/质量、owned 表示、有效来源与 Eval 绑定闭环通过；成功提交、失败与回滚的一致性见 [§7.3.1](#731-stage-3-表示来源与-eval-一致性合同cycle-0078--s3-consistency) 和 [验收 §1.5](../quality/AxiomKernel_测试与验收方案.md#15-cycle-0078--s3-consistency-门禁与逐项证据)。全量 16/16、164.60 s；支持体类不扩大，详细查询只读，拓扑修改/恢复自身会传播 Eval dirty。
+
+### 6.1.4 Stage 3 统一退出支持矩阵（cycle-0079 / S3-EXIT）
+
+此表统一 §6.1.2 截面/最近点/距离、§6.1.3 质量、§8.1.1 五类建模与 §7.3.1 表示/来源/Eval 合同，复用既有接口及错误码，不扩展支持域。`stage_task_id=S3-EXIT`、`stage_outcome=ready_for_acceptance`；调度器独立完整构建成功，全量 CTest **16/16、0 失败、163.78 s**。三条验收证据与退出项映射见 [验收 §1.6](../quality/AxiomKernel_测试与验收方案.md#16-cycle-0079--s3-exit-门禁与逐项证据)，正式状态见 [当前进度 §5.2.1](../plan/AxiomKernel_当前开发进度.md#521-stage-3-当前退出任务)。
+
+以下 17 行逐一对应 `tests/eval/query_eval_test.cpp::stage3_exit_support_matrix_regression` 中的 Row.label（main 已调用）。V/A/C 分别为体积/面积/质心，S 为水平截面积；单位及世界坐标质心惯性沿用 §6.1.3。距离列同时涵盖 `closest_points`、正反 `min_distance`，最近点涵盖 `closest_point/locate_point`。支持行先通过 Strict；矩阵不以 ExactBRep 标签、bbox 或来源作为物理边界证明。
+
+| 体类 / 建模路径（自动化行） | 精度与范围 | 截面 S | 最近边界点 | 实体距离 | 通用质量 V / A / C | Topo 体质量 |
+|---|---|---|---|---|---|---|
+| box | 当前平面多面体，浮点容差内精确 | 6 | 支持 | 支持 | 24 / 52 / (1,1.5,2) | 同一当前边界 |
+| wedge | 当前三角棱柱，浮点容差内精确 | 3 | 支持 | 支持 | 12 / (26+4√13) / (2/3,1,2) | 同一当前边界 |
+| extrude/holed | 显式 polygon 凸/凹及分离非嵌套孔，代表夹具为贯通孔棱柱 | 12 | 支持 | 支持 | 36 / 96 / (2,2,1.5) | 同一当前边界 |
+| sweep/line | 有限直线显式 polygon 平移棱柱；其他开放/周期曲线按采样合同 | 6 | 支持 | 支持 | 24 / 52 / (1,1.5,2) | 同一当前边界 |
+| loft/compatible | 拓扑兼容对应顶点，代表夹具侧壁共面；非共面侧壁按实际三角剖分 | 6 | 支持 | 支持 | 24 / 52 / (1,1.5,2) | 同一当前边界 |
+| thicken/planar | 当前平面直边 Face，有限正厚度沿支撑法向单侧；代表夹具在 z∈[-2,0] | 6 | 支持 | 支持 | 12 / 32 / (1,1.5,-1) | 同一当前边界 |
+| revolve/chords | 有向 −π/2 弦面采样多面体；部分/整周沿用 §8.1 门禁 | a | 支持实际多面体 | 支持实际多面体 | 4a / (2a+4p) / (c,-c,2) | 同一采样边界 |
+| generic/closed | 用户 Generic 平面直边嵌入双边流形闭壳 | 6 | 支持 | 支持 | 24 / 52 / (1,1.5,2) | 同一当前边界 |
+| generic/cavity/island | 无序多壳严格包含，材料加/空腔减/岛加；面积计全部边界 | 68 | 支持 | 支持 | 792 / 840 / (5,5,5) | 同一当前边界 |
+| sphere/native | 未编辑原生解析质量资格，r=2；兼容壳为代理 | 不支持 | 不支持 | 不支持 | 32π/3 / 16π / (0,0,0) | 不支持代理积分 |
+| cylinder/native | 未编辑原生解析质量资格，r=2、h=6，夹具中心在原点 | 不支持 | 不支持 | 不支持 | 24π / 32π / (0,0,0) | 不支持代理积分 |
+| cone/native | 未编辑原生解析质量资格，r=2、h=6、apex 在原点 | 不支持 | 不支持 | 不支持 | 8π / (4π+2π√40) / (0,0,4.5) | 不支持代理积分 |
+| torus/native | 未编辑原生解析质量资格，R=5、r=2 | 不支持 | 不支持 | 不支持 | 40π² / 40π² / (0,0,0) | 不支持代理积分 |
+| sweep/label_only | 历史无显式轮廓占位，不计真实主路径 | 不支持 | 不支持 | 不支持 | 不支持 | 不支持 |
+| mesh/derived | mesh_to_brep 派生，不继承物理边界/解析质量资格 | 不支持 | 不支持 | 不支持 | 不支持 | 不支持 |
+| boolean/placeholder | 既有占位 Boolean 结果，不按来源组合恢复质量 | 不支持 | 不支持 | 不支持 | 不支持 | 不支持 |
+| invalid_handle | 无效句柄，所有入口 preflight 拒绝 | 拒绝 | 拒绝 | 拒绝 | 拒绝 | 拒绝 |
+
+矩阵独立参考：旋转区间数 `n=vertex_count/4−1`、`δ=π/(2n)`，`a=2.5n sinδ`、`p=10n sin(δ/2)+2`、`c=19/(15n tan(δ/2))`。空腔/岛 V=`1000−216+8=792`、A=`600+216+24=840`、S=`100−36+4=68`，不能用外 bbox 答案取代。远方盒为 (50,50,50) 起始的单位盒；本体最近角点按上表前九行依次为 (2,3,4)、(0,3,4)、(4,4,3)、(2,3,4)、(2,3,4)、(2,3,0)、(3,0,4)、(2,3,4)、(10,10,10)，双侧见证距离取与 (50,50,50) 的欧氏长度；点查询为 (60,60,z_section)，参考边界点取该角点的 x/y 与 z_section。质量/点/距离/截面比较容差为 `2e-8*max(1,abs(reference))`。全九项惯性的独立参考由 `stage3_mass_authority_regression/topology_mass_properties_regression` 及 Ops `test_stage3_model_mass_references/test_planar_face_thicken` 保留，不将入口间一致代替独立参考。
+
+所有不支持格要求无 value、可检索 diagnostic_id、`NotImplemented / AXM-CORE-E-0004` 与 `query.{section,closest_point,distance,mass_properties}.support_gate`；无效句柄为 `InvalidInput / AXM-CORE-E-0001` 与对应 `.preflight`。成功详细查询与矩阵拒绝不改变对象/几何数量、next_object_id、Mesh/体面三角化/曲线曲面求值/交线存储、Eval invalid/recompute 或事务写计数；诊断与 Topo 读审计可增长。Strict 可能先创建网格，因此只读快照在 Strict 完成后取得。兼容 section 的成功有面积分支仍会发布 MeshId（§6.1.2）；本矩阵仅在拒绝行检查该入口，不能据此声称所有兼容 section 都无写入。
+
+原生解析资格的成功编辑撤销、失败编辑保留、保存点/回滚恢复、提交后持续拒绝，以及 metadata/mesh/implicit 不继承资格，沿用 §6.1.3。owned 表示缓存必须命中当前边界与正确 source_body，失败原子拒绝且无 bbox/创建参数 fallback；合法提交、保存点/显式/析构/取消回滚及删除清理沿用 §7.3.1。旧网格为快照，metadata 的 bbox_proxy 仅显示，Eval recompute 仅管理图，不承诺 ID 回收或算法自动重算。
+
+“精确”仅指平面多面体浮点容差内的计算；曲线 sweep、旋转及比例/扭转律均测实际采样多面体，无通用连续曲面误差保证。通用曲面/曲边闭壳积分与实体空间查询、曲面/曲边 thicken、任意 loft 环匹配、相交/接触多壳、壳自身全局嵌入证明、空间加速、完整 trim/标准交换和工业 Boolean 均不作为 Stage 3 完成前提；内部 empty_gate 无公共夹具，不宣称已验收。工业需求 FR-OPS-001 / FR-QUERY-001 仍进行中，Stage 3 正式退出须调度器完成文档门禁及提交。
 
 ### 6.2 拓扑事务接口
 
@@ -899,6 +937,8 @@ public:
 
 ### 7.3.1 Stage 3 表示、来源与 Eval 一致性合同（cycle-0078 / S3-CONSISTENCY）
 
+当前退出统一矩阵及 cycle-0079 自动化证据见 [§6.1.4](#614-stage-3-统一退出支持矩阵cycle-0079--s3-exit)；本节保留专项合同与历史门禁。
+
 无公开签名或错误码常量新增；`brep_to_mesh` 和事务 `rollback` 的公开合同注释已补齐。本批统一的是 Stage 3 已声明支持主链的当前实体语义，质量/查询范围沿用 §6.1.2～6.1.3，五类建模边界沿用 §8.1.1。
 
 | 路径 / 状态 | 当前合同 | 回归依据 |
@@ -917,7 +957,7 @@ public:
 
 旧 metadata-only 体仍可输出显式 `bbox_proxy` 显示网格，此兼容显示路径不证明 owned BRep、物理质量或实体空间查询。`RepresentationService::classify_point/distance_to_body` 仍为 bbox 辅助语义，实体查询使用 QueryService / TopologyQueryService；本批一致性不能扩大到这些旧辅助入口、通用解析体曲面壳或 metadata 派生体。
 
-完整构建及全量 CTest **16/16、0 失败、164.60 s**，四个必需回归通过。按三条要求排列的独立参考与限制见 [验收 §1.5](../quality/AxiomKernel_测试与验收方案.md#15-cycle-0078--s3-consistency-门禁与逐项证据)；`stage_outcome=ready_for_acceptance`，正式验收条件及 Strict warnings 未记录边界见 [当前进度 §5.2.1](../plan/AxiomKernel_当前开发进度.md#521-stage-3-当前退出任务)。
+完整构建及全量 CTest **16/16、0 失败、164.60 s**，四个必需回归通过。按三条要求排列的独立参考与限制见 [验收 §1.5](../quality/AxiomKernel_测试与验收方案.md#15-cycle-0078--s3-consistency-门禁与逐项证据)；`stage_outcome=ready_for_acceptance`，本节为 cycle-0078 历史证据，当前 S3-EXIT 门禁及残余告警见验收 §1.6，正式验收条件见 [当前进度 §5.2.1](../plan/AxiomKernel_当前开发进度.md#521-stage-3-当前退出任务)。
 
 ## 8. `OpsCore` 接口清单
 
@@ -1030,7 +1070,9 @@ public:
 
 ### 8.1.1 Stage 3 五类建模主路径（cycle-0077 / S3-MODELING）
 
-此节保留 cycle-0077 历史五类路径证据；当前唯一任务为 cycle-0078 / S3-CONSISTENCY（§7.3.1）。公开签名不变，未新增错误码。cycle-0077 核验既有四类路径，并以真实平面直边 Face 加厚补齐第五类；下表只声明可证明子集。
+当前退出统一矩阵及 cycle-0079 自动化证据见 [§6.1.4](#614-stage-3-统一退出支持矩阵cycle-0079--s3-exit)；本节保留专项合同与历史门禁。
+
+此节保留 cycle-0077 历史五类路径证据；当前唯一任务为 cycle-0079 / S3-EXIT（§6.1.4）。公开签名不变，未新增错误码。cycle-0077 核验既有四类路径，并以真实平面直边 Face 加厚补齐第五类；下表只声明可证明子集。
 
 | 入口 / 主路径 | 实际拓扑与质量语义 | 本批回归及支持边界 |
 |---|---|---|

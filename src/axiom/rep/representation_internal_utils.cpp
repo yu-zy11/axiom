@@ -323,7 +323,7 @@ MeshRecord tessellate_box(const BodyRecord& body, const TessellationOptions& opt
 
     // Emit a face grid by selecting which axis corresponds to (u,v) and holding the third axis constant.
     enum class Axis { X, Y, Z };
-    auto emit_face_grid = [&](Axis u_axis, Axis v_axis, Axis w_axis, Scalar w_value,
+    auto emit_face_grid = [&](Axis u_axis, Axis v_axis, Scalar w_value,
                               const Vec3& n, std::size_t nu, std::size_t nv) {
         const auto base = static_cast<Index>(mesh.vertices.size());
         auto coord = [&](Axis a, std::size_t idx_u, std::size_t idx_v) -> Scalar {
@@ -362,14 +362,14 @@ MeshRecord tessellate_box(const BodyRecord& body, const TessellationOptions& opt
     };
 
     // +Z, -Z
-    emit_face_grid(Axis::X, Axis::Y, Axis::Z, zs.back(), Vec3{0,0,1}, nx, ny);
-    emit_face_grid(Axis::X, Axis::Y, Axis::Z, zs.front(), Vec3{0,0,-1}, nx, ny);
+    emit_face_grid(Axis::X, Axis::Y, zs.back(), Vec3{0,0,1}, nx, ny);
+    emit_face_grid(Axis::X, Axis::Y, zs.front(), Vec3{0,0,-1}, nx, ny);
     // +Y, -Y
-    emit_face_grid(Axis::X, Axis::Z, Axis::Y, ys.back(), Vec3{0,1,0}, nx, nz);
-    emit_face_grid(Axis::X, Axis::Z, Axis::Y, ys.front(), Vec3{0,-1,0}, nx, nz);
+    emit_face_grid(Axis::X, Axis::Z, ys.back(), Vec3{0,1,0}, nx, nz);
+    emit_face_grid(Axis::X, Axis::Z, ys.front(), Vec3{0,-1,0}, nx, nz);
     // +X, -X
-    emit_face_grid(Axis::Y, Axis::Z, Axis::X, xs.back(), Vec3{1,0,0}, ny, nz);
-    emit_face_grid(Axis::Y, Axis::Z, Axis::X, xs.front(), Vec3{-1,0,0}, ny, nz);
+    emit_face_grid(Axis::Y, Axis::Z, xs.back(), Vec3{1,0,0}, ny, nz);
+    emit_face_grid(Axis::Y, Axis::Z, xs.front(), Vec3{-1,0,0}, ny, nz);
 
     weld_mesh_vertices(mesh, options);
     if (!options.generate_texcoords) {

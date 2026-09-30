@@ -35,7 +35,7 @@
 
 ### 1.2 cycle-0075 / S3-QUERY 门禁与逐项证据
 
-历史 develop/repair 报告记录 `stage_task_id: S3-QUERY`、`stage_outcome: ready_for_acceptance`；当前唯一任务已切换为 cycle-0078 / S3-CONSISTENCY（§1.5），本节保留历史证据。该批关闭已声明真实多面体的截面、最近边界和实体距离主链，未扩展后续阶段。依据 [cycle-0075-gates.log](../../.axiom-agent/logs/cycle-0075-gates.log) 与实际 diff：调度器两轮独立配置/完整构建（测试与示例开启、并发 4）；首次 CTest **14/16 通过、2 失败、141.18 s**，Ops 在有向区间旋转验证失败，Query 在实际截面/距离回归失败。repair 翻转负向旋转侧壁并在分配前验证共享边双边反向，修正非等边楔体斜面法向 `(dy,dx,0)`，修正把拒绝创建空体当有效空体的夹具。
+历史 develop/repair 报告记录 `stage_task_id: S3-QUERY`、`stage_outcome: ready_for_acceptance`；当前唯一任务已切换为 cycle-0079 / S3-EXIT（§1.6），本节保留历史证据。该批关闭已声明真实多面体的截面、最近边界和实体距离主链，未扩展后续阶段。依据 [cycle-0075-gates.log](../../.axiom-agent/logs/cycle-0075-gates.log) 与实际 diff：调度器两轮独立配置/完整构建（测试与示例开启、并发 4）；首次 CTest **14/16 通过、2 失败、141.18 s**，Ops 在有向区间旋转验证失败，Query 在实际截面/距离回归失败。repair 翻转负向旋转侧壁并在分配前验证共享边双边反向，修正非等边楔体斜面法向 `(dy,dx,0)`，修正把拒绝创建空体当有效空体的夹具。
 
 repair 报告另记录三项目标定向构建/并发 CTest **3/3 通过、130.72 s**（Query 2.41 s、Ops 130.71 s、representation/IO 17.52 s）；最终结论采用调度器日志的修复后全量结果，不以定向测试替代完整门禁。
 
@@ -61,7 +61,7 @@ repair 报告另记录三项目标定向构建/并发 CTest **3/3 通过、130.7
 
 ### 1.3 cycle-0076 / S3-MASS 门禁与逐项证据
 
-历史报告记录 `stage_task_id: S3-MASS`、`stage_outcome: ready_for_acceptance`；当前任务为 §1.5 的 S3-CONSISTENCY。依据实际代码/回归 diff 和调度器 [cycle-0076-gates.log](../../.axiom-agent/logs/cycle-0076-gates.log)，本批完成已支持模型的质量来源统一、独立参考和拒绝合同。develop 仅静态检查、未执行测试是开发阶段事实；现已由调度器实际完整门禁覆盖，不再写作等待编译/测试。无 repair 报告；本次文档同步没有重建或运行测试。
+历史报告记录 `stage_task_id: S3-MASS`、`stage_outcome: ready_for_acceptance`；当前任务为 §1.6 的 S3-EXIT。依据实际代码/回归 diff 和调度器 [cycle-0076-gates.log](../../.axiom-agent/logs/cycle-0076-gates.log)，本批完成已支持模型的质量来源统一、独立参考和拒绝合同。develop 仅静态检查、未执行测试是开发阶段事实；现已由调度器实际完整门禁覆盖，不再写作等待编译/测试。无 repair 报告；本次文档同步没有重建或运行测试。
 
 | 调度器门禁 | 实际结果 |
 |---|---|
@@ -91,7 +91,7 @@ cycle-0076 文档阶段曾完成静态检查：当时 9 个已修改 Markdown �
 
 ### 1.4 cycle-0077 / S3-MODELING 门禁与逐项证据
 
-历史报告记录 `stage_task_id: S3-MODELING`、`stage_outcome: ready_for_acceptance`；当前唯一任务为 cycle-0078 / S3-CONSISTENCY（§1.5）。依据实际 diff 与调度器 [cycle-0077-gates.log](../../.axiom-agent/logs/cycle-0077-gates.log)，既有 extrude/revolve/sweep/loft 主路径验收断言补齐，新增真实平面直边 Face thicken。develop 的“尚未执行”只描述开发阶段；以下采用调度器实际结果，无 repair 报告，本轮仅同步文档，没有重建或运行测试。
+历史报告记录 `stage_task_id: S3-MODELING`、`stage_outcome: ready_for_acceptance`；当前唯一任务为 cycle-0079 / S3-EXIT（§1.6）。依据实际 diff 与调度器 [cycle-0077-gates.log](../../.axiom-agent/logs/cycle-0077-gates.log)，既有 extrude/revolve/sweep/loft 主路径验收断言补齐，新增真实平面直边 Face thicken。develop 的“尚未执行”只描述开发阶段；以下采用调度器实际结果，无 repair 报告，本轮仅同步文档，没有重建或运行测试。
 
 | 调度器门禁 | 实际结果 |
 |---|---|
@@ -142,7 +142,43 @@ cycle-0077 文档阶段曾完成静态检查：9 个当时已修改 Markdown 的
 | 2. topology/rep/provenance/eval 对同一主链结果一致，关联实体有效 | Ops 同函数：owned 壳/面、ExactBRep、面唯一 owner、有效支撑句柄，source_bodies/source_shells/source_faces 及逐面来源存在且区别于新 owned 实体；thicken 来源精确为输入 Face 和原 owner Body；最近点/距离 FaceId/ShellId 属于对应体，`nodes_of_body` 精确绑定，只读查询/转换不改变 dirty/recompute_count。Rep 同函数：相同 bbox/面积/高度的不同三角棱柱及重复几何不同 BodyId 不混用 MeshId；mesh_to_brep 重绑定后原体缓存不能返回重绑定网格。`tests/sdk/kernel_runtime_invariant_test.cpp::stage3_discarded_body_runtime_regression` 核对共享源壳派生体来源与源 owned 面/Strict/网格保留 | 两同 bbox 棱柱 OBJ 质心为 (4/3,1,1) 与 (8/3,2,1)，V=12/A=36；重复体仍有独立 MeshId。五类来源/面归属及 Eval 绑定均通过断言；查询与表示不会主动重算 Eval | Eval recompute 仅为图管理动作，不执行质量/表示算法；metadata/mesh 派生不取得物理查询或解析质量资格。旧 metadata 显示 bbox 代理保留，不属于本批 owned 主链；Rep 的 bbox 分类/距离辅助入口不等同实体精确查询 |
 | 3. 修改/失败/回滚后的拓扑、表示、来源与 Eval 状态一致并有回归 | `tests/eval/query_eval_test.cpp::stage3_eval_rollback_consistency_regression`：非法修改零写入/不脏化，换面/PCurve 绑定传播 bound/downstream 而 unrelated clean；事务内 recompute 后保存点/显式/析构/取消恢复再次 dirty，面/壳/体删除恢复面集/来源/Strict/原网格和查询；成功提交等价 Plane 生成新当前网格，随后失败回滚恢复已提交支撑/网格并再次 dirty。Rep 同函数：warm/cold/full/local/shell 位移支撑拒绝且对象数/next_id/写数/mesh/两级缓存计数不增长，曲面支持拒绝、保存点/整回滚、非法 options、编辑 native box/sphere 无创建参数 fallback。SDK 同函数：保存点/整事务/取消回滚及删除提交移除派生体网格与 Eval 绑定、消费者 dirty、源体保留、mesh/cache 回基线且运行时/Eval 映射不变量成立；Ops 既有 `test_stage3_modeling_failures/test_planar_face_thicken` 保留活动事务原子性与重试 | 恢复棱柱 V=24/A=52、九项惯性等于原值，截面=6、外点最近边界=1、重叠体距离=0。位移支撑 OperationFailed/AXM-TES-E-0001/rep.tessellation.face 且关联目标 FaceId；曲面 NotImplemented/同码/rep.tessellation.support；非法 options InvalidInput/AXM-CORE-E-0002。移除体网格不可查询、绑定不再存在，源网格仍命中 | 旧网格是不可变快照，存活体可保留历史边界缓存，仅当前边界键且 source_body 正确可命中；不承诺事务 ID 回收或 Eval 自动重算。重复保存点无新增写入时不要求再次 dirty；诊断轨迹可增长。topology/assembly 防御阶段已在实现提供，本批不宣称逐分支失败注入穷举 |
 
-公开签名与错误码常量均未新增，仅补合同注释。缓存身份、发布原子性、primitive 编辑资格与事务/Eval 语义见 [API §7.3.1](../api/AxiomKernel_详细模块接口清单.md#731-stage-3-表示来源与-eval-一致性合同cycle-0078--s3-consistency)；质量/查询矩阵及五类主路径边界保持有效。当前唯一任务正式状态见 [当前进度 §5.2.1](../plan/AxiomKernel_当前开发进度.md#521-stage-3-当前退出任务)。通用曲面/曲边闭壳、相交多壳、全局嵌入证明、大规模加速和后续阶段均不扩展。
+公开签名与错误码常量均未新增，仅补合同注释。缓存身份、发布原子性、primitive 编辑资格与事务/Eval 语义见 [API §7.3.1](../api/AxiomKernel_详细模块接口清单.md#731-stage-3-表示来源与-eval-一致性合同cycle-0078--s3-consistency)；质量/查询矩阵及五类主路径边界保持有效。当前 S3-EXIT 任务正式状态见 [当前进度 §5.2.1](../plan/AxiomKernel_当前开发进度.md#521-stage-3-当前退出任务)。通用曲面/曲边闭壳、相交多壳、全局嵌入证明、大规模加速和后续阶段均不扩展。
+
+### 1.6 cycle-0079 / S3-EXIT 门禁与逐项证据
+
+`stage_task_id: S3-EXIT`；`stage_outcome: ready_for_acceptance`。依据 [cycle-0079-gates.log](../../.axiom-agent/logs/cycle-0079-gates.log) 与实际 diff：本批增加 17 行统一可执行支持矩阵、门面 smoke 闭环和公开支持边界注释，补强成功/拒绝查询的对象/几何/下一 ID 只读断言，并清理所涉 Topo/Rep 告警。没有新增公开签名、错误码或工业能力；无 repair。develop 报告 tests=[] 是开发阶段未执行，以下为调度器独立执行的实际结果；本次 docs 阶段未重新构建或运行 CTest。
+
+| 调度器门禁 | 实际结果 |
+|---|---|
+| 配置 `cmake -S . -B /workspaces/axiom/build-agent -DAXM_ENABLE_TESTS=ON -DAXM_ENABLE_EXAMPLES=ON`，完整构建 `cmake --build /workspaces/axiom/build-agent --parallel 4` | 成功，全部库/示例/测试目标完成；复用 build-agent，非清理重建。日志未记录构建总耗时，不填估计值 |
+| `axiom_ops_heal_test`（必需） | 通过，137.10 s |
+| `axiom_query_eval_test`（必需，含 17 行矩阵） | 通过，1.41 s |
+| `axiom_representation_io_test`（必需） | 通过，9.01 s |
+| `axiom_kernel_runtime_invariant_test`（必需） | 通过，0.02 s |
+| `axiom_smoke_test`（必需，新增门面闭环） | 通过，0.02 s |
+| 保留 `axiom_topology_test` / `axiom_boolean_workflow_test` / `axiom_boolean_prep_test` | 通过，0.17 / 0.03 / 0.04 s |
+| 保留 `axiom_perf_baseline_test` | 通过，1.71 s；未改原阈值/迭代，该耗时为 CTest 墙钟，不是新性能保证 |
+| 串行 `ctest --test-dir /workspaces/axiom/build-agent --output-on-failure --no-tests=error` | **16/16 通过、0 失败、163.78 s** |
+
+`build-agent/CMakeCache.txt` 实际为 `AXM_ENABLE_STRICT_WARNINGS:BOOL=ON`，本批完整构建已在该配置下通过。Topo `BoundaryEdge` 值初始化后逐项赋 loop/edge/curve，Rep `emit_face_grid` 删除未用 w_axis 并同步六个调用；cycle-0078 日志的 2 条 interval/segments 遗漏初始化及 1 条 w_axis 告警在本批重编译对应文件时不再出现。cycle-0079 日志实际剩余 **1 条**：`src/axiom/sdk/kernel_plugin.cpp:122` 的 `Issue::numeric_evidence` 遗漏初始化（`-Wmissing-field-initializers`）。历史 `src/axiom/internal/sdk/kernel_plugin_helpers.cpp` 的 17 条同类告警所属编译单元未在本批日志重编译，不能宣称已消除；不把历史 18 条直接计成本次实发数量，也不宣称干净重建无告警。没有单独无告警/警告即错误门禁记录。
+
+下列 `stage_evidence` 严格按本批三条验收要求排列，代码断言已随上述全量 CTest 执行；参考值来自测试期望，日志不逐项打印测量值。
+
+| 验收条目 | 测试文件 / 断言 | 独立参考结果 | 限制说明 |
+|---|---|---|---|
+| 1. 统一矩阵映射体类、五类建模、截面/最近点/距离/质量与精确/采样/拒绝 | `tests/eval/query_eval_test.cpp::stage3_exit_support_matrix_regression`（main 已调用）17 行，逐行核对 Query/Topo 质量、section_detailed/section、closest_point/locate_point、closest_points 与正反 min_distance；支持行 Strict；拒绝无 value 且诊断含既有码及 support_gate/preflight；整体对象/几何/next_id/网格/求值/交线缓存/Eval/事务只读。`stage3_mass_authority_regression/topology_mass_properties_regression` 保留原生编辑资格、全九项质心惯性、材料空腔独立积分；Rep main 保留 metadata/mesh/implicit 拒绝 | box V=24/A=52/C=(1,1.5,2)/S=6；wedge V=12/A=26+4√13/C=(2/3,1,2)/S=3；孔 extrude 36/96/12，直线 sweep 与 loft 24/52/6，thicken 12/32/C=(1,1.5,-1)/S=6；空腔/岛 V=1000−216+8=792、A=600+216+24=840、S=100−36+4=68。revolve δ=π/(2n)，a=2.5n sinδ、p=10n sin(δ/2)+2、V=4a、A=2a+4p、C=(c,-c,2)、c=19/(15n tan(δ/2))；最近点与远盒距离来自已知角点和欧氏长度。四类原生解析体仅通用质量成功 | [统一矩阵 §6.1.4](../api/AxiomKernel_详细模块接口清单.md#614-stage-3-统一退出支持矩阵cycle-0079--s3-exit) 明列 17 行。精确限平面多面体浮点容差，采样只测实际多面体，不保证连续曲面误差；占位 Sweep/Boolean、mesh 派生均拒绝。内部 empty_gate 无公共夹具未验收；成功兼容 section 会发布 MeshId，矩阵只测其拒绝路径的只读性 |
+| 2. Stage 3 五项退出标准逐项对应集成回归，保留工业限制 | SDK `tests/sdk/smoke_test.cpp::main` 缩放三角拉伸→质量→截面→最近点→距离→owned 网格→Strict；Ops `test_stage3_model_mass_references/test_planar_face_thicken/test_stage3_consistency_chain/test_stage3_modeling_failures`；Query 上述矩阵及 `stage3_section_distance_regression/stage3_eval_rollback_consistency_regression`；Rep `stage3_representation_consistency_regression`；SDK `stage3_discarded_body_runtime_regression`；详见下表五项映射 | smoke V=10.5、S=6×0.75²=3.375、最近边界/远盒距离=1、triangle_count>0、owned_topo_welded、Strict=Ok；编辑/恢复参考 V=24/A=52/S=6/最近边界=1/重叠距离=0；OBJ 三角独立积分、双侧实体见证、来源/缓存身份和运行时清理沿用 §1.5 | 不以工业需求全部满足作为 Stage 3 完成前提；通用曲面/曲边积分与实体查询、曲面 thicken、任意 loft 匹配、相交多壳/全局嵌入证明、空间加速、完整 trim/标准交换、工业 Boolean 保留。Eval 只管理图、旧网格快照、metadata 显示代理无物理资格、不承诺 ID 回收 |
+| 3. 完整构建/CTest 与文档检查后同步进度/需求/Backlog，压缩所涉 strict warnings 并记录残余 | 本节记录上述完整门禁，API §6.1.2/§6.1.3/§6.1.4/§7.3.1/§8.1.1、诊断字典、调用样例、主路线图 §4.4、当前进度 §5.2.1、需求矩阵 FR-QUERY-001/FR-OPS-001 与近期 Backlog 同步。所涉告警修改由 Query/Ops 孔边界及 Rep/smoke 网格回归覆盖，保留 Topology；文档链接/标题检查使用 scripts/check_docs.py，结果见本节下方 | 完整构建成功、全量 16/16、163.78 s，strict warnings 配置 ON；所涉 Topo 2 条与 Rep 1 条未再出现，本批实发残余 SDK 1 条；历史 helpers 17 条未重编译，保留潜在残余 | 构建时长未记录；不宣称无告警干净重建。文档检查与调度器提交是独立条件，提交尚未执行，不预记 S3-EXIT 已验收或 Stage 3 已退出；FR-QUERY-001/FR-OPS-001 仍进行中，不自动启动后续阶段 |
+
+| 主路线图 §4.4 退出项 | 集成回归及断言 | 支持边界 |
+|---|---|---|
+| 基础零件建模闭环跑通 | smoke main 上述门面闭环；Ops test_stage3_consistency_chain 五类 Strict→查询→full/local/shell 网格 | 真实 owned 平面边界及已声明采样体 |
+| 质量属性结果正确 | Ops test_stage3_model_mass_references/test_planar_face_thicken；Query stage3_mass_authority_regression/topology_mass_properties_regression 与统一矩阵；Rep OBJ 三角独立积分 | 独立 V/A/C/全惯性参考，当前拓扑与未编辑原生解析资格分别核验，禁止来源/bbox/创建缓存恢复 |
+| extrude/revolve/sweep/loft/thicken 各一条非占位主路径 | Ops test_stage3_consistency_chain/test_stage3_modeling_failures/test_planar_face_thicken，Query 矩阵五类行；Strict、owned 壳面、真实质量/截面/距离、稳定失败阶段与重试 | 显式 polygon/直线 sweep/兼容 loft/平面 Face 单侧 thicken，旋转为弦面采样；各入口变体范围沿用 API |
+| 截面/最近点/距离/质量语义一致且稳定 Issue.stage | Query stage3_exit_support_matrix_regression/stage3_section_distance_regression；空截面/线点相切、凹孔/多壳、包含零距离、bbox 重叠正实体距离、可表示小间隙、预算/数值拒绝、编辑/恢复 | 共用当前物理边界；NotImplemented/support_gate 与 InvalidInput/preflight 等既有阶段，无部分结果 |
+| topology/rep/provenance/eval 一致，无失败回滚/fallback 漂移 | Ops 五类有效来源/见证；Rep 缓存身份/source_body/owned 原子拒绝；Query stage3_eval_rollback_consistency_regression 保存点/析构/取消/提交后失败恢复；SDK stage3_discarded_body_runtime_regression 丢弃/永久删除清理与源体保留 | 当前边界与 owner 命中；旧网格快照、Eval 图管理、ID 回收限制保留 |
+
+文档检查结果（本次 docs 阶段实际执行）：`python3 scripts/check_docs.py` 检查 **35 个 Markdown，0 错误、0 警告**；`git diff --check` 通过。补充静态检查覆盖本批 **8 个已修改 Markdown 的 69 个新增/更新本地链接、54 个标题锚点和代码围栏**，0 错误；统一矩阵的 **17 个行名及顺序**与 `stage3_exit_support_matrix_regression` 一致。上次文档阶段的 900 s 超时不作为验收成功证据，本次重新完成上述文档检查。未重新构建或运行 CTest，不复用历史检查值。调度器日志尚未包含文档门禁或提交成功，正式验收须调度器核验最终文档检查及提交；Stage 3 保持进行中，唯一退出任务为 S3-EXIT，不再将 S3-CONSISTENCY 列为当前待执行任务。
 
 ## 2. 测试总体原则
 
