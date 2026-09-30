@@ -885,8 +885,8 @@ int main() {
         std::cerr << "expected valid section result\n";
         return 1;
     }
-    if (section_fail.status == axiom::StatusCode::Ok) {
-        std::cerr << "expected section failure for non-intersecting plane\n";
+    if (section_fail.status != axiom::StatusCode::Ok || !section_fail.value || section_fail.value->value != 0) {
+        std::cerr << "expected successful empty section for non-intersecting plane\n";
         return 1;
     }
 

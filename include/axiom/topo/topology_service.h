@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -170,6 +171,7 @@ struct BodySpatialQueryOptions {
     /// 模型长度单位；0 使用当前内核线性容差，负数/非有限值失败。
     Scalar position_tolerance {};
     /// 完成拓扑/壳层级前置检查之后的三角形距离、求交和绕数计算总预算。
+    /// 截面还计交段扫描，体间距离按三角形对计；triangle_tests 返回相同口径的实际工作量。
     /// 前置检查与已有质量属性查询相同，不计入此预算；0 非法，耗尽失败且无部分结果。
     std::uint64_t max_triangle_tests {1000000};
 };
@@ -205,6 +207,29 @@ struct BodySegmentQuery {
     /// 区间内部为材料的总长度；共面边界段和孤立接触点不计入。
     Scalar material_length {};
     Scalar position_tolerance {};
+    std::uint64_t triangle_tests {};
+};
+
+/// 平面与实体材料闭集的交集；坐标为世界坐标，面积为模型长度单位的平方。
+/// triangles 覆盖真实截面区域（含空腔/孔），接触线/点单独保留，不赋予虚构面积。
+struct BodyPlaneSection {
+    std::vector<Point3> vertices;
+    std::vector<std::array<int, 3>> triangles;
+    /// 真实边界面片与平面的交段；可重合，共面面片包含三角化内部边。
+    std::vector<std::array<Point3, 2>> boundary_segments;
+    std::vector<Point3> contact_points;
+    BoundingBox bbox {};
+    Scalar area {};
+    std::uint64_t triangle_tests {};
+};
+
+/// 两个非空实体材料闭集的最近位置；相交/包含/相切时 distance=0。
+/// FaceId/ShellId 为零表示见证点在该实体材料内部；正距离时两侧均属真实边界。
+struct BodyDistanceQuery {
+    Scalar distance {};
+    Point3 first_point {}, second_point {};
+    FaceId first_face {}, second_face {};
+    ShellId first_shell {}, second_shell {};
     std::uint64_t triangle_tests {};
 };
 
@@ -280,6 +305,8 @@ public:
     /// `area` 为所有材料/空腔边界面积之和；其余单位及失败/只读语义同 `shell_mass_properties`。
     Result<MassProperties> body_mass_properties(BodyId body_id) const;
     /// 平面直边、多面体实体的真实材料定位与最近边界；支持凹面、孔、多壳、空腔、材料岛。
+    /// 仅 ExactBRep 的 box/wedge、已物化真实多面体 Sweep 和用户建立的 Generic 闭壳；
+    /// 解析曲面体及旧占位建模体返回 NotImplemented/query.closest_point.support_gate，不能使用 bbox 壳代替。
     /// 与 shell_mass_properties/body_shell_regions 共用闭壳/面/壳间接触前置检查；输入须为无自交的嵌入闭壳。
     /// 最近边界距离 <= position_tolerance 时为 Boundary，否则按闭壳包含奇偶判断 Inside/Outside。
     /// 非有限坐标、无效预算/容差、数值溢出失败；空实体成功返回 Outside 和空 nearest_boundary。
@@ -295,6 +322,21 @@ public:
     Result<BodySegmentQuery> clip_segment(
         BodyId body_id, const Point3& start, const Point3& end,
         const BodySpatialQueryOptions& options = {}) const;
+    /// 当前平面直边嵌入闭壳的实际平面截面；支持凹面、孔、多壳、空腔和材料岛。
+    /// 体类支持范围与 locate_point 相同；包含可验证的 box/wedge、真实 Sweep 及 Generic 闭壳。
+    /// 对采样 revolve/sweep/loft 查询已物化的多面体，不宣称连续曲面的解析截面。
+    /// 共面面包含在截面中；线/点相切成功返回零面积，空交集成功返回空结果。
+    /// 位置容差不把近邻平面吸附到边界；距离符号或不同事件无法可靠分辨时 query.section.numeric 失败。
+    /// 不用 bbox 替代解析曲面或占位建模体；不支持输入 NotImplemented，稳定 Issue.stage。
+    /// 每次重算、无 MeshId/缓存/Eval/事务写入；预算耗尽或不可分辨事件失败，无部分结果。
+    Result<BodyPlaneSection> section(
+        BodyId body_id, const Plane& plane, const BodySpatialQueryOptions& options = {}) const;
+    /// 对同一支持范围计算实际材料距离；包含需按壳奇偶判定，bbox 重叠不代表相交。
+    /// 空实体无有限最近位置，DegenerateGeometry/query.distance.empty_gate；不按位置容差膨胀实体。
+    /// 等距按壳/面 ID 稳定选择；只读和预算语义同 section，正距离单位为模型长度单位。
+    /// 接触求交不使用线段裁剪的舍入带或调用者位置容差膨胀实体；可表示的正间隙保持正距离。
+    Result<BodyDistanceQuery> closest_points(
+        BodyId lhs, BodyId rhs, const BodySpatialQueryOptions& options = {}) const;
     /// 显式裁剪边按支撑曲线区间计算真实弧长；兼容旧 Line/LineSegment 边的端点距离。
     /// 曲边缺少裁剪区间返回 NotImplemented；区间、端点或曲线不一致返回 InvalidTopology。
     Result<Scalar> edge_length(EdgeId edge_id) const;

@@ -628,19 +628,76 @@ if (mp.status == StatusCode::Ok) {
 ## 10.2 最短距离
 
 ```cpp
-auto dist = kernel.query().min_distance(body_a, body_b);
+// body_a/body_b 必须为支持的真实 ExactBRep 多面体。
+auto nearest = kernel.query().closest_points(body_a, body_b);
+if (!nearest.value) {
+  handle_error(nearest);  // 诊断含 query.distance.support_gate/preflight/budget/numeric
+  return;
+}
+print(nearest.value->distance, nearest.value->first_point, nearest.value->second_point);
+// distance 为模型长度单位，等于见证点欧氏距离；相交/包含/相切为 0。
+// 正距离时两侧均有真实 FaceId/ShellId；内部见证归属句柄可为零。
+auto dist = kernel.query().min_distance(body_a, body_b);  // 同一主链，使用默认预算
+```
+
+点到体的最近位置采用最近边界语义，返回 `BodyPointQuery`：
+
+```cpp
+auto wedge = kernel.primitives().wedge({0,0,0}, 1,1,1);
+if (!wedge.value) {
+  handle_error(wedge);
+  return;
+}
+auto point_result = kernel.query().closest_point(*wedge.value, {1,1,0.5});
+if (!point_result.value) {
+  handle_error(point_result);
+  return;
+}
+if (point_result.value->nearest_boundary) {
+  const auto& boundary = *point_result.value->nearest_boundary;
+  print(boundary.point, boundary.distance, boundary.face, boundary.shell);
+  // 实际边界见证 (0.5,0.5,0.5)，距离 1/sqrt(2)，单位为模型长度单位。
+}
 ```
 
 ## 10.3 截面
 
 ```cpp
-Plane section_plane{
-  .origin = {0,0,10},
-  .normal = {0,0,1}
-};
+auto unit_box = kernel.primitives().box({0,0,0}, 1,1,1);
+if (!unit_box.value) {
+  handle_error(unit_box);
+  return;
+}
+Plane section_plane{.origin = {1,0,0}, .normal = {1,1,1}};  // x+y+z=1
+BodySpatialQueryOptions options;
+options.max_triangle_tests = 1000000;  // 前置检查之后工作；0 非法
+// 详细查询只读，不发布 MeshId，不写缓存/Eval/事务。
+auto detailed = kernel.query().section_detailed(*unit_box.value, section_plane, options);
+if (!detailed.value) {
+  handle_error(detailed);
+  return;
+}
+print(detailed.value->area);  // sqrt(3)/2，模型长度单位平方
+// vertices 世界坐标；triangles 为索引；boundary_segments/contact_points 保留接触。
+auto dedicated = kernel.topology().query().section(*unit_box.value, section_plane, options);
 
-auto sec = kernel.query().section(body_id, section_plane);
+// 兼容入口：成功有面积时显式发布一个真实结果网格，不填三角化缓存。
+auto sec = kernel.query().section(*unit_box.value, section_plane);
+if (!sec.value) {
+  handle_error(sec);
+} else if (sec.value->value != 0) {
+  auto count = kernel.convert().mesh_triangle_count(*sec.value);
+}
+auto empty = kernel.query().section(*unit_box.value, {{0,0,2}, {0,0,1}});
+// empty 成功且有 value，但 *empty.value == MeshId{}；不创建/消费网格。
+auto edge_contact = kernel.query().section_detailed(*unit_box.value, {{0,0,0}, {1,1,0}});
+// 成功时 area=0、无面积三角形，boundary_segments 保留真实线接触。
+// 此时 bbox 可有效；area=0 或兼容 MeshId{} 不能区分无交集与接触。
 ```
+
+通用 `closest_point(body, point, options)` 返回与 `TopologyQueryService::locate_point` 相同的 `BodyPointQuery`，即使点在材料内部也返回最近边界距离。只支持 ExactBRep box/wedge、已物化真实 Sweep 与用户 Generic 平面直边嵌入闭壳（凹/孔/空腔/材料岛）；旋转/曲线扫掠返回采样多面体结果。解析曲面体和旧占位 thicken 为 `NotImplemented / AXM-CORE-E-0004 / query.*.support_gate`，不生成 bbox 伪截面/距离。无交集、纯线/点相切是成功，兼容入口返回零网格句柄；接触细节使用详细入口。
+
+真实多面体 `mass_properties` 与专用体质量共用当前拓扑；编辑支撑面或删面失败不会恢复旧 Sweep 质量。预算耗尽及数值不可分辨失败无部分值，位置容差不吸附近邻平面、不抹去可表示正间隙。完整合同、限制与本批门禁见 [Stage 3 支持矩阵](AxiomKernel_详细模块接口清单.md#612-stage-3-截面最近点与距离支持矩阵cycle-0075--s3-query)。
 
 ## 11. 导入导出样例
 
@@ -1147,6 +1204,6 @@ if (spatial_box.value) {
 }
 ```
 
-Inside/Outside 按闭壳包含奇偶判断，支持空腔和材料岛；非空实体总给最近面内/边/顶点边界，等距按稳定 ShellId、FaceId 选择，空实体返回 Outside 和空最近边界。Boundary 点定位是距离容差带；线段裁剪不按该容差膨胀材料或合并可分辨薄层，长度不大于容差的线段失败。裁剪区间按参数排序、内部不重叠，省略 Outside，孤立相切点不与已覆盖区间重复，Boundary 段不计材料长度。
+Inside/Outside 按闭壳包含奇偶判断，支持空腔和材料岛；非空实体总给最近面内/边/顶点边界，等距按稳定 ShellId、FaceId 选择，内部零壳实体合同为 Outside 和空最近边界；公共 `create_body({})` 拒绝，本批未构造/验证该零壳查询分支。Boundary 点定位是距离容差带；线段裁剪不按该容差膨胀材料或合并可分辨薄层，长度不大于容差的线段失败。裁剪区间按参数排序、内部不重叠，省略 Outside，孤立相切点不与已覆盖区间重复，Boundary 段不计材料长度。
 
 仅支持无自交的嵌入平面直边双边流形闭壳，曲面/显式裁剪曲边拒绝，面边界须在支撑平面上；壳间相交/重叠/建模容差接触失败。本批未新增壳自身全局自交证明或大规模空间加速。预算仅计前置检查之后的新三角形计算；耗尽或事件数值分辨率不足时无部分值。查询增加诊断和只读审计，不发布 MeshId，不写缓存、Eval 或事务；当前编辑即时可见，回滚后恢复。门禁和完整失败码见 [接口合同](AxiomKernel_详细模块接口清单.md#611-实体空间查询cycle-0074已通过完整门禁) 与 [错误码字典](../diagnostics/AxiomKernel_错误码与诊断码字典.md)。

@@ -544,6 +544,25 @@ struct BodySegmentQuery {
   std::uint64_t triangle_tests {};
 };
 
+// cycle-0075：实际平面截面；世界坐标，area 为模型长度单位平方。
+struct BodyPlaneSection {
+  std::vector<Point3> vertices;
+  std::vector<std::array<int, 3>> triangles;
+  std::vector<std::array<Point3, 2>> boundary_segments;
+  std::vector<Point3> contact_points;
+  BoundingBox bbox {};
+  Scalar area {};
+  std::uint64_t triangle_tests {};
+};
+// 实体材料闭集距离；内部见证的 FaceId/ShellId 为零。
+struct BodyDistanceQuery {
+  Scalar distance {};  // 模型长度单位，等于两见证点的欧氏距离
+  Point3 first_point {}, second_point {};
+  FaceId first_face {}, second_face {};
+  ShellId first_shell {}, second_shell {};
+  std::uint64_t triangle_tests {};
+};
+
 struct EdgeCurveInterval {
   Scalar start_parameter;  // 对应 v0
   Scalar end_parameter;    // 对应 v1，可小于 start_parameter
@@ -569,6 +588,10 @@ public:
                                     const BodySpatialQueryOptions& options = {}) const;
   Result<BodySegmentQuery> clip_segment(BodyId, const Point3& start, const Point3& end,
                                        const BodySpatialQueryOptions& options = {}) const;
+  Result<BodyPlaneSection> section(BodyId, const Plane&,
+                                   const BodySpatialQueryOptions& options = {}) const;
+  Result<BodyDistanceQuery> closest_points(BodyId, BodyId,
+                                         const BodySpatialQueryOptions& options = {}) const;
   Result<std::optional<EdgeCurveInterval>> edge_curve_interval(EdgeId) const;
   Result<Scalar> edge_length(EdgeId) const;
   Result<Scalar> loop_length(LoopId) const;
@@ -594,17 +617,47 @@ PCurve 必须为至少两点的折线，按 coedge 方向连续闭合，各点�
 
 ### 6.1.1 实体空间查询（cycle-0074，已通过完整门禁）
 
-`locate_point` 对真实平面直边多面体材料返回 `Inside/Outside/Boundary`，空腔为 Outside，偶数包含深度的材料岛为 Inside。非空实体总是返回最近真实边界位置（可在面内、边或顶点）、非负距离及所属 `ShellId/FaceId`；等距时按 ShellId、FaceId 的稳定句柄顺序选择，与壳插入顺序无关。最近距离不大于有效 `position_tolerance` 时归为 Boundary；空实体成功返回 Outside 和空 `nearest_boundary`。
+`locate_point` 对真实平面直边多面体材料返回 `Inside/Outside/Boundary`，空腔为 Outside，偶数包含深度的材料岛为 Inside。非空实体总是返回最近真实边界位置（可在面内、边或顶点）、非负距离及所属 `ShellId/FaceId`；等距时按 ShellId、FaceId 的稳定句柄顺序选择，与壳插入顺序无关。最近距离不大于有效 `position_tolerance` 时归为 Boundary。内部零壳分支约定 Outside 和空 `nearest_boundary`；公共 `create_body({})` 拒绝，cycle-0075 未构造或验收零壳查询分支。
 
-`clip_segment` 返回按无量纲 `t` 递增、内部不重叠的材料/边界区间，省略 Outside 区间。Inside 指开区间内部为材料，端点包含且可位于边界；Boundary 指共面边界段或孤立相切点 `[t,t]`。相邻同类区间合并，已被区间包含的接触点不重复返回。`material_length` 仅累加 Inside 区间的实际长度，共面段/相切点不计入；完全无交集及空实体成功返回空集合和零长度。反向线段仍按自身从 start 到 end 的参数返回。
+`clip_segment` 返回按无量纲 `t` 递增、内部不重叠的材料/边界区间，省略 Outside 区间。Inside 指开区间内部为材料，端点包含且可位于边界；Boundary 指共面边界段或孤立相切点 `[t,t]`。相邻同类区间合并，已被区间包含的接触点不重复返回。`material_length` 仅累加 Inside 区间的实际长度，共面段/相切点不计入；完全无交集成功返回空集合和零长度。内部零壳分支也约定空集合和零长度，但不属于本批已验证范围。反向线段仍按自身从 start 到 end 的参数返回。
 
 位置容差为模型长度单位，0 使用内核有效线性容差（至少 `1e-12`），负数或非有限值失败。线段长度不大于该容差时为退化失败；该容差不膨胀材料，不合并可分辨的薄层或窄空腔。求交/共面采用局部浮点舍入尺度；边界事件在归一化参数舍入尺度内无法可靠分离时返回 `NumericalInstability`，无部分区间。
 
-两入口共用 `shell_mass_properties/body_shell_regions` 的闭壳质量、壳间接触和严格包含前置检查，支持凹面、孔、无序多壳、空腔与材料岛。仅支持无自交的嵌入平面直边双边流形闭壳；本批未新增壳自身全局自交证明。共享前置检查明确拒绝曲面/曲边（含显式 trim 曲边），不以端点弦替代曲边，并检查面边界位于支撑平面。壳相交/重叠/建模容差接触仍失败；调用方的位置容差不改变壳间建模容差。
+两入口共用 `shell_mass_properties/body_shell_regions` 的闭壳质量、壳间接触和严格包含前置检查，支持凹面、孔、无序多壳、空腔与材料岛。cycle-0075 加严体类门禁：仅接受 `ExactBRep` 的 box/wedge、已物化真实多面体 Sweep 和用户 Generic 闭壳；解析曲面体与旧 bbox 占位建模体即使拥有平面壳也拒绝，完整支持矩阵见 §6.1.2。仅支持无自交的嵌入平面直边双边流形闭壳；本批未新增壳自身全局自交证明。共享前置检查明确拒绝曲面/曲边（含显式 trim 曲边），不以端点弦替代曲边，并检查面边界位于支撑平面。壳相交/重叠/建模容差接触仍失败；调用方的位置容差不改变壳间建模容差。
 
 `max_triangle_tests` 默认 1000000，须非零，仅限制前置检查之后的新三角形距离、求交和绕数计算；成功的 `triangle_tests` 是实际工作量，可用作精确预算重放，预算耗尽不返回部分结果。既有质量/壳关系前置检查不计入预算，尚无大规模空间加速。局部 `long double` 距离/平面裁剪和补偿立体角绕数用于计算，非有限坐标及溢出结构化失败；错误码见字典的 cycle-0074 空间查询条目。
 
 查询从当前拓扑重算，事务替换/删除即时可见，回滚后恢复；仅增加诊断和一次顶层 Topo 查询审计，不创建几何或 MeshId，不写缓存、Eval 状态或事务写计数。`axiom_query_eval_test` 的最近面/边/角、容差带、穿透/反向/内部/端点/相切/共面/空集、薄层、多壳奇偶、姿态尺度、预算/数值失败、支撑面编辑回滚和不污染回归随 cycle-0074 完整 CTest 16/16 通过。
+
+### 6.1.2 Stage 3 截面、最近点与距离支持矩阵（cycle-0075 / S3-QUERY）
+
+`TopologyQueryService::section` 与 `QueryService::section_detailed` 返回同一 `BodyPlaneSection`；通用 `closest_point` 复用 `locate_point`，通用/专用 `closest_points` 返回同一 `BodyDistanceQuery`，`min_distance` 取其 distance 并保留诊断。以下“支持”均要求当前拓扑通过闭壳、面支撑、壳间接触与包含前置检查，且输入为无自交的嵌入双边流形闭壳。
+
+| 当前体类 / 建模路径 | 截面、最近边界与实体距离 | 质量属性 / 表示合同 | 回归依据与限制 |
+|---|---|---|---|
+| ExactBRep box / wedge | 实际平面直边边界的浮点计算 | 通用质量与 `body_mass_properties` 共用当前拓扑 | `tests/eval/query_eval_test.cpp::stage3_section_distance_regression`；单位盒斜截面、凹孔、多壳、非等边平移楔体参考 |
+| 真实物化的显式 polygon `extrude`、折线 `sweep`、拓扑兼容 `loft` | 支持真实多面体，凹/孔按材料奇偶填充 | ExactBRep 标签；真实拓扑 bbox、质量、面/壳归属及 provenance 一致 | `tests/ops/ops_heal_test.cpp::test_stage3_model_query_chain`；只覆盖各入口已声明可物化子域，不扩大自动环匹配或任意放样 |
+| 真实物化的 `extrude_scaled/extrude_twisted/extrude_with_law`、`sweep_scaled/sweep_with_scale_law/sweep_with_law`、采样曲线 sweep、有向部分/整周 revolve | 查询实际采样与剖分多面体，非连续曲面的解析解 | 通用质量每次消费当前拓扑，不恢复旧 Sweep 质量缓存 | 同上及 `test_directed_interval_revolutions`、既有建模回归；新增跨模块截面断言覆盖其中选定夹具，不能视为所有采样变体穷举 |
+| ExactBRep 用户 Generic 平面直边闭壳；独立壳、嵌套空腔与材料岛 | 支持；按严格包含深度奇偶计算材料 | 体积材料加/空腔减/岛加，面积计全部边界 | Query 多壳截面面积 `100−36+4=68`、空腔悬浮体距离 `0.5`；壳相交/重叠/建模容差接触拒绝，未证明壳自身全局嵌入 |
+| sphere / cylinder / cone / torus 等解析曲面体、曲面/曲边闭壳 | `NotImplemented / AXM-CORE-E-0004`，`query.*.support_gate` | 通用基本解析体质量仍保留解析路径；专用体闭壳质量拒绝 bbox 壳 | sphere 拒绝回归与共享体类门禁；Geo 曲面最近点/单面面积的既有支持不等于实体查询支持 |
+| 旧占位 thicken、未真实物化 Sweep、其他占位或非 ExactBRep 体 | 同上，不能用 bbox 壳代替实体 | 不将旧质量恢复路径升级为真实拓扑质量 | 旧 thicken 拒绝已回归；真实 thicken 主路径仍是 Stage 3 剩余限制 |
+| 已删除体/面、支撑面错配、活动事务内改成曲面 | `preflight` 或 `support_gate` 失败，无部分结果 | 支持体类质量同步失败，回滚后恢复 | Query/Ops 编辑失败、缓存与 Eval 不污染、rollback/Strict 回归 |
+
+截面三角形覆盖实际材料区域，扣除孔/空腔并保留材料岛。`vertices` 为世界坐标，`triangles` 是有效顶点索引，`area` 是实际三角面积之和；`boundary_segments` 是真实边界三角片与平面的交段，可重复，共面片含三角化内部边，因此不是已去重的闭合轮廓环。`contact_points` 保留点接触。完全无交集成功返回空容器、area=0、无效 bbox；共面面保留真实面积，纯线/点相切成功零面积并保留接触信息。
+
+`vertices/triangles` 仅描述填充的面积区域，接触线/点由独立容器描述；顶点不保证焊接，接触记录不保证去重。`bbox` 包含交段与接触点，纯线/点接触也可有有效 bbox。因此 `area == 0` 或 `triangles.empty()` 只表示无面积，不能单独用来判定完全无交集；应同时检查接触容器。
+
+兼容 `QueryService::section` 只在成功且有面积三角形时显式发布一个真实结果 MeshId，不填体/面三角化缓存；空交集与纯线/点接触成功返回有 value 的 `MeshId{}`，不发布网格。失败没有 value 且沿用详细入口诊断。调用方应分别检查 Result.value 与句柄是否为零，不能把零句柄当失败或传入网格消费入口。
+
+点查询在材料内部也返回最近**边界**距离。体间查询则求两个材料闭集距离：相交、包含和相切为 0，bbox 重叠不能判作相交。正距离时双侧见证属于真实边界并有 FaceId/ShellId；零距离时内部见证的归属句柄可为零，等距按稳定壳/面 ID 选择。距离等于实际见证点欧氏距离，单位为模型长度单位。
+
+位置容差不吸附近邻截面平面，不膨胀距离实体，也不借用线段裁剪舍入带抵消可表示正间隙。回归保留 `nextafter(1,2)` 外部平面空集与 `1e-18` 正间隙；这不表示任意尺度均有相同分辨率。平面符号、平面坐标事件或远隔小分量无法可靠分辨时 `AXM-QUERY-E-0002 / query.section.numeric` 失败，无部分面积。截面法向须有限且非零（不必单位长度）；坐标有限，容差须有限且非负，0 使用内核有效容差。
+
+默认工作预算 1000000、须非零；仅计质量/壳层级前置检查之后工作。截面还计交段扫描、区域分类，体间距离按三角形对及包含绕数计数；`triangle_tests` 可用于同输入精确重放。预算耗尽为 `InvalidInput / AXM-CORE-E-0002 / query.*.budget`，不是部分成功。前置检查仍不纳入预算，无大规模加速结构。
+
+详细查询每次消费当前拓扑，只增加诊断与 Topo 只读审计，不写模型/网格/交线存储、曲线/曲面求值缓存、体/面三角化缓存、Eval 失效/重算或事务写计数。编辑失败不得恢复旧拓扑质量或 bbox fallback；rollback 后截面与质量恢复。内部零壳分支约定截面成功空、距离 `DegenerateGeometry / AXM-QUERY-E-0001 / query.distance.empty_gate`，但公共 `create_body({})` 返回 `OperationFailed / AXM-TX-E-0001`，本批仅验证创建拒绝及写计数不变，未构造或验收零壳查询分支。
+
+调度器修复后完整构建及 CTest **16/16 通过、148.44 s**；Query/Eval **0.90 s**、Ops/Heal **121.81 s**、representation/IO **9.87 s**。逐项独立参考与四条验收证据见 [测试与验收方案 §1.2](../quality/AxiomKernel_测试与验收方案.md#12-cycle-0075--s3-query-门禁与逐项证据)，稳定失败码见 [错误码字典](../diagnostics/AxiomKernel_错误码与诊断码字典.md)。S3-QUERY 为 `ready_for_acceptance`；正式验收需调度器文档检查与提交成功，Stage 3 / FR-QUERY-001 保持进行中。
 
 ### 6.2 拓扑事务接口
 
@@ -993,11 +1046,19 @@ class QueryService {
 public:
   Result<IntersectionId> intersect(CurveId, SurfaceId) const;
   Result<IntersectionId> intersect(SurfaceId, SurfaceId) const;
+  Result<BodyPlaneSection> section_detailed(
+      BodyId, const Plane&, const BodySpatialQueryOptions& options = {}) const;
   Result<MeshId> section(BodyId, const Plane&) const;
+  Result<BodyPointQuery> closest_point(
+      BodyId, const Point3&, const BodySpatialQueryOptions& options = {}) const;
+  Result<BodyDistanceQuery> closest_points(
+      BodyId, BodyId, const BodySpatialQueryOptions& options = {}) const;
   Result<MassProperties> mass_properties(BodyId) const;
   Result<Scalar> min_distance(BodyId, BodyId) const;
 };
 ```
+
+cycle-0075 起，上述实体截面与距离入口遵循 §6.1.2 的真实拓扑支持矩阵及空结果合同。`mass_properties` 对 box/wedge/Generic/真实物化 Sweep 复用 `body_mass_properties`，当前拓扑错误直接失败，不恢复旧质量缓存；球/柱/锥/环基本体的通用解析质量路径保留，其他历史布尔/Modified 等质量恢复路径未在 S3-QUERY 中升级，不属于真实多面体查询支持范围。
 
 ## 9. `HealCore` 接口清单
 

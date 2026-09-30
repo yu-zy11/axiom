@@ -2467,41 +2467,52 @@ Result<IntersectionId> QueryService::intersect(SurfaceId lhs, SurfaceId rhs) con
     return ok_result(id, state_->create_diagnostic("已完成曲面曲面求交"));
 }
 
+Result<BodyPlaneSection> QueryService::section_detailed(
+    BodyId body_id, const Plane& plane, const BodySpatialQueryOptions& options) const {
+    return TopologyQueryService(state_).section(body_id, plane, options);
+}
+
 Result<MeshId> QueryService::section(BodyId body_id, const Plane& plane) const {
-    if (!detail::has_body(*state_, body_id)) {
-        return detail::failed_result<MeshId>(
-            *state_, StatusCode::InvalidInput, diag_codes::kQuerySectionFailure,
-            "截面计算失败：目标实体不存在", "截面计算失败");
-    }
-
-    const auto& body = state_->bodies[body_id.value];
-    if (!intersects_plane(body.bbox, plane)) {
-        return detail::failed_result<MeshId>(
-            *state_, StatusCode::OperationFailed, diag_codes::kQuerySectionFailure,
-            "截面计算失败：截面平面与目标体包围盒不相交", "截面计算失败");
-    }
-
-    const auto mesh_id = MeshId {state_->allocate_id()};
+    const auto section = section_detailed(body_id, plane);
+    if (!section.value) return error_result<MeshId>(section.status, section.diagnostic_id);
+    if (section.value->triangles.empty()) return ok_result(MeshId {}, section.diagnostic_id);
     detail::MeshRecord mesh;
     mesh.source_body = body_id;
-    mesh.label = "section";
-    mesh.bbox = body.bbox;
-    mesh.vertices = bbox_corners(body.bbox);
-    mesh.indices = {0, 1, 2, 0, 2, 3};
+    mesh.label = "section_polyhedron";
+    mesh.bbox = section.value->bbox;
+    mesh.vertices = section.value->vertices;
+    for (const auto& triangle : section.value->triangles)
+        for (const auto index : triangle) mesh.indices.push_back(static_cast<Index>(index));
+    const auto mesh_id = MeshId {state_->allocate_id()};
     state_->meshes.emplace(mesh_id.value, std::move(mesh));
-    return ok_result(mesh_id, state_->create_diagnostic("已完成截面计算"));
+    return ok_result(mesh_id, section.diagnostic_id);
+}
+
+Result<BodyPointQuery> QueryService::closest_point(
+    BodyId body_id, const Point3& point, const BodySpatialQueryOptions& options) const {
+    return TopologyQueryService(state_).locate_point(body_id, point, options);
+}
+
+Result<BodyDistanceQuery> QueryService::closest_points(
+    BodyId lhs, BodyId rhs, const BodySpatialQueryOptions& options) const {
+    return TopologyQueryService(state_).closest_points(lhs, rhs, options);
 }
 
 Result<MassProperties> QueryService::mass_properties(BodyId body_id) const {
     const auto it = state_->bodies.find(body_id.value);
     if (it == state_->bodies.end()) {
-        return detail::failed_result<MassProperties>(
-            *state_, StatusCode::InvalidInput, diag_codes::kQueryMassPropertiesFailure,
-            "质量属性计算失败：目标实体不存在", "质量属性计算失败");
+        return TopologyQueryService(state_).body_mass_properties(body_id);
     }
 
     MassProperties props {};
     const auto& body = it->second;
+    // Stage 3 real polyhedra are measured from current topology, never cached
+    // sweep metadata or a bbox recovery after a failed topology edit.
+    if (body.kind == detail::BodyKind::Box || body.kind == detail::BodyKind::Wedge ||
+        body.kind == detail::BodyKind::Generic ||
+        (body.kind == detail::BodyKind::Sweep && body.sweep_polyhedral_mass_valid)) {
+        return TopologyQueryService(state_).body_mass_properties(body_id);
+    }
     switch (body.kind) {
         case detail::BodyKind::Box:
         case detail::BodyKind::Wedge:
@@ -2543,17 +2554,9 @@ Result<MassProperties> QueryService::mass_properties(BodyId body_id) const {
 }
 
 Result<Scalar> QueryService::min_distance(BodyId lhs, BodyId rhs) const {
-    if (!detail::has_body(*state_, lhs) || !detail::has_body(*state_, rhs)) {
-        return detail::failed_result<Scalar>(
-            *state_, StatusCode::InvalidInput, diag_codes::kQueryClosestPointFailure,
-            "最短距离计算失败：输入实体不存在", "最短距离计算失败");
-    }
-    const auto& lb = state_->bodies[lhs.value].bbox;
-    const auto& rb = state_->bodies[rhs.value].bbox;
-    const auto dx = interval_gap(lb.min.x, lb.max.x, rb.min.x, rb.max.x);
-    const auto dy = interval_gap(lb.min.y, lb.max.y, rb.min.y, rb.max.y);
-    const auto dz = interval_gap(lb.min.z, lb.max.z, rb.min.z, rb.max.z);
-    return ok_result<Scalar>(std::sqrt(dx * dx + dy * dy + dz * dz), state_->create_diagnostic("已完成最短距离计算"));
+    const auto closest = closest_points(lhs, rhs);
+    if (!closest.value) return error_result<Scalar>(closest.status, closest.diagnostic_id);
+    return ok_result(closest.value->distance, closest.diagnostic_id);
 }
 
 }  // namespace axiom

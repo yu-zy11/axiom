@@ -33,6 +33,32 @@
 
 验收边界：HEAL trim 仍限 Plane/Cylinder/Sphere，验证/修复规则范围不扩大；HEAL 回滚不恢复 `next_id`，批量返回报告不合并子项全部根因 issue，子项原诊断仍保留。IO 标准 STEP/IGES 实体、普通文本/目录辅助接口与更广泛失败注入语料未因此闭合。后验验证/自动修复 issue 可随 `Ok` 导入返回，批量模型回滚由子项实际失败触发，批量导出不保证文件事务。扭转方向必须法向、中心共面、正距离、扭角最多一周，角站差不超过 7.5°；真实结果仍为保守采样多面体，不是解析螺旋面，未组合变比例/至平面拉伸。FR-OPS-001 继续进行中，FR-DIAG-001/NFR-DIA-001 继续受限可用。
 
+### 1.2 cycle-0075 / S3-QUERY 门禁与逐项证据
+
+`stage_task_id: S3-QUERY`；`stage_outcome: ready_for_acceptance`。本批关闭已声明真实多面体的截面、最近边界和实体距离主链，未扩展后续阶段。依据 [cycle-0075-gates.log](../../.axiom-agent/logs/cycle-0075-gates.log) 与实际 diff：调度器两轮独立配置/完整构建（测试与示例开启、并发 4）；首次 CTest **14/16 通过、2 失败、141.18 s**，Ops 在有向区间旋转验证失败，Query 在实际截面/距离回归失败。repair 翻转负向旋转侧壁并在分配前验证共享边双边反向，修正非等边楔体斜面法向 `(dy,dx,0)`，修正把拒绝创建空体当有效空体的夹具。
+
+repair 报告另记录三项目标定向构建/并发 CTest **3/3 通过、130.72 s**（Query 2.41 s、Ops 130.71 s、representation/IO 17.52 s）；最终结论采用调度器日志的修复后全量结果，不以定向测试替代完整门禁。
+
+| 最终调度器门禁 | 实际结果 |
+|---|---|
+| `cmake -S . -B /workspaces/axiom/build-agent -DAXM_ENABLE_TESTS=ON -DAXM_ENABLE_EXAMPLES=ON`；完整构建 `--parallel 4` | 成功 |
+| `axiom_query_eval_test`（必需） | 通过，0.90 s |
+| `axiom_ops_heal_test`（必需） | 通过，121.81 s；以本次日志为准，历史 120 s 描述不作为本批门禁结论 |
+| `axiom_representation_io_test`（空截面兼容回归） | 通过，9.87 s |
+| `axiom_geometry_test` / `axiom_topology_test` / `axiom_perf_baseline_test` | 通过，0.53 / 0.11 / 1.45 s |
+| `ctest --test-dir /workspaces/axiom/build-agent --output-on-failure --no-tests=error` | **16/16 通过、0 失败、148.44 s** |
+
+日志仍记录 BoundaryEdge/Issue 缺失成员初始化告警，未记录单独严格告警门禁或文档检查。本文档同步没有重新构建或运行测试；正式验收须调度器完成文档检查和提交，不预记任务已验收，Stage 3 与 FR-OPS-001 / FR-QUERY-001 均保持进行中。
+
+下表按四条验收要求排列 `stage_evidence`；支持矩阵与接口细节见 [接口清单 §6.1.2](../api/AxiomKernel_详细模块接口清单.md#612-stage-3-截面最近点与距离支持矩阵cycle-0075--s3-query)。
+
+| 验收条目 | 测试文件 / 断言 | 独立参考结果 | 限制说明 |
+|---|---|---|---|
+| 1. 真实平面截面，非轴对齐与凹/带孔，排除 bbox 伪截面 | `tests/eval/query_eval_test.cpp::stage3_section_distance_regression/check_section`：通用/专用面积一致、三角索引有效、实际面积求和、顶点平面残差；同函数凹带孔 cap 夹具逐三角核对重心处于材料；`tests/ops/ops_heal_test.cpp::test_stage3_model_query_chain` 与 `test_directed_interval_revolutions`：建模后真实截面 | 单位盒 `x+y+z=1` 为 `sqrt(3)/2`，单位楔体水平 `0.5`；凹 L 减孔 `19`，`x+y=5` 两真实矩形 `20*sqrt(2)`，旋转平移后 `19`；空腔+岛 `100−36+4=68`；平移非等边楔体 z=5 面积 `3`。建模截面 `4` 或 `4*1.5²=9`；旋转采样环 `n*(R²−r²)*sin(span/n)/2`，带孔有向轮廓 `7*n*sin(span/n)` | 浮点计算当前平面直边多面体。扫掠/旋转/扭转是采样剖分结果，不能以连续解析截面公式取代；bbox 内缺角的真实空集已验证 |
+| 2. 真实边界最近点/距离，bbox 重叠但实体分离及相切 | Query 同函数 `check_distance`：通用/专用/标量/反向一致，距离等于见证点欧氏距离，FaceId/ShellId 一致，locate_point 核对材料闭集及正距离边界；既有 `body_spatial_query_regression` 面/边/角独立参考；Ops 有向区间四方向×四绕序/起点变体 | L 缺角小盒 `1`、孔内盒 `0.25`、分离三角棱柱 `1.5/sqrt(2)`、斜交棱线内部 `1`、空腔悬浮体 `0.5`，自身/包含/面与点相切 `0`。单位楔体点 `(1,1,0.5)` 最近 `(0.5,0.5,0.5)` 距离 `1/sqrt(2)`，孔心 `0.5`；非等边楔体点 `(3,5,5)` 最近 `(1+8/13,2+27/13,5)` 距离 `6/sqrt(13)`。`1e-18` 正间隙相对误差 ≤`1e-10` 且见证 z 为 `0/1e-18`；旋转轴最近边界 `2*cos(span/(2*n))`，独立采样体积 `35*n*sin(span/n)` | 实际三角边界浮点距离，没有大规模加速；不支持解析曲面/曲边或占位体。内部点查最近边界与两个实体材料闭集距离语义不同 |
+| 3. 精确/采样与不支持边界、稳定错误码/阶段、空交集一致 | Query sphere/旧 thicken、非法输入、换曲面/支撑面错配/删面/删体、预算重放和少一预算、远隔小分量数值失败；`tests/rep/representation_io_test.cpp::main` 旧 section 无交集成功且句柄为零 | 不支持 `NotImplemented / AXM-CORE-E-0004 / query.section.support_gate/query.closest_point.support_gate/query.distance.support_gate`；无交集空容器/无效 bbox/`MeshId{}`，共面有面积，边/点接触零面积；`nextafter(1,2)` 外部近邻平面保持空集；非法输入 `AXM-CORE-E-0002 / input_gate`，预算耗尽同码 `/budget`，不可分辨截面 `AXM-QUERY-E-0002 / query.section.numeric` | ExactBRep 为表示标签，查询仍是浮点计算；默认 1000000 工作预算不计前置检查；壳间建模容差接触拒绝，未证明壳自身全局嵌入。公共 `create_body({})` 是 `OperationFailed / AXM-TX-E-0001`，只验证拒绝及写计数不变，零壳截面/距离内部合同未构造或验收 |
+| 4. 成功/退化/失败/回滚、模型/缓存/Eval/事务只读与跨模块一致性 | Query 同函数比较对象总数、mesh/intersection、体/面三角化和曲线/曲面求值缓存、Eval invalid/recompute、事务 writes；Ops 主链比较 rep ExactBRep/真实 topo bbox、面/壳归属、source_faces/provenance、通用/专用质量/截面及缓存/Eval，换面失败禁止旧质量恢复，rollback 后 Strict/截面恢复；有向旋转失败原子性与重试 | 所有详细查询不写模型/缓存/Eval/事务；删体/面及曲面/错配支撑面失败无 value，回滚恢复真实查询；兼容 section 仅有面积时 mesh_records 精确增加 `1`，不填三角化缓存，空集/失败不发布；正负旋转共享边反向与楔体支撑修复已由完整门禁验证 | 诊断记录和 Topo 只读审计可增长；兼容网格发布是约定副作用。跨模块新增断言是受支持路径的选定夹具，不宣称后续阶段、全体类或零壳分支完备 |
+
 ## 2. 测试总体原则
 
 几何引擎测试必须遵循以下原则：

@@ -313,10 +313,10 @@
 
 | 错误码 | 严重级别 | 含义 |
 |---|---|---|
-| `AXM-QUERY-E-0001` | Error | 最近点查询失败（含实体点定位距离/绕数数值失败） |
+| `AXM-QUERY-E-0001` | Error | 最近点/实体距离查询失败（含距离/绕数数值失败及空实体无有限见证） |
 | `AXM-QUERY-E-0002` | Error | 截面计算失败（含实体线段裁剪/事件分辨率/绕数数值失败） |
 | `AXM-QUERY-E-0003` | Error | 质量属性或解析修剪面积的数值积分失败 |
-| `AXM-QUERY-E-0004` | Error | 距离计算失败 |
+| `AXM-QUERY-E-0004` | Error | 距离计算失败（既有保留码；S3-QUERY 体间距离数值失败复用 E-0001） |
 | `AXM-QUERY-E-0005` | Warning | 质量属性基于近似网格计算 |
 | `AXM-QUERY-E-0006` | Error | 多闭壳相交、重叠或容差接触，无法建立材料/空腔包含层级 |
 
@@ -741,6 +741,32 @@ Plane/Cylinder/Cone/规则 Sphere/Torus 及其嵌套 Offset 的成功解析路�
 | `AXM-TOPO-E-0008 / InvalidTopology` | 面边界不位于支撑平面；共享质量属性前置检查同样加严 |
 | `AXM-QUERY-E-0006 / InvalidTopology` | 壳间相交、重叠、建模容差接触或矛盾包含关系 |
 
-其余闭壳/面/环/边/质量失败沿用上文质量属性与包含层级诊断并原样传播，不返回部分最近点、区间或材料长度。无交集、空实体为成功空结果。位置容差不膨胀材料，事件分辨率不足闭合失败；新三角形预算仅覆盖质量/壳关系前置检查之后的距离、求交与绕数，成功公开实际 `triangle_tests`。诊断与一次顶层 Topo 查询审计允许增加；模型、MeshId、缓存、Eval 和活动事务写计数不变。要求无自交的嵌入平面直边双边流形闭壳，本批未新增壳自身全局自交证明。
+其余闭壳/面/环/边/质量失败沿用上文质量属性与包含层级诊断并原样传播，不返回部分最近点、区间或材料长度。线段无交集为成功空结果；内部零壳分支的空结果合同不代表公共 API 可创建空体，cycle-0075 未构造或验收该分支。位置容差不膨胀材料，事件分辨率不足闭合失败；新三角形预算仅覆盖质量/壳关系前置检查之后的距离、求交与绕数，成功公开实际 `triangle_tests`。诊断与一次顶层 Topo 查询审计允许增加；模型、MeshId、缓存、Eval 和活动事务写计数不变。要求无自交的嵌入平面直边双边流形闭壳，本批未新增壳自身全局自交证明。
 
 上述 Ops/Query 失败码、阶段、数值证据、预算及事务/只读回归分别纳入 `axiom_ops_heal_test` 与 `axiom_query_eval_test`；[cycle-0074 门禁日志](../../.axiom-agent/logs/cycle-0074-gates.log) 记录完整 CTest 16/16、0 失败、134.05 s。本轮未重新构建或运行测试。
+
+
+### S3-QUERY 截面与距离诊断（cycle-0075，复用既有错误码）
+
+通用/专用入口共用失败状态、稳定错误码和 Issue.stage；兼容 `section` 与 `min_distance` 沿用详细结果 diagnostic_id。前置检查不能因为平面远离 bbox 而跳过，所有失败无部分结果。
+
+共享体类门禁也用于 `body_shell_regions`，该入口不支持体类返回 `NotImplemented / AXM-CORE-E-0004 / query.body.support_gate`。`body_mass_properties` 将前置失败映射为 `query.mass_properties.support_gate/preflight`；通用基本解析体质量仍有独立解析路径，不因实体截面/距离拒绝而一并宣称不支持。
+
+| 错误码 / StatusCode | 稳定 `Issue.stage` | 根因与约定 |
+|---|---|---|
+| `AXM-CORE-E-0002 / InvalidInput` | `query.section.input_gate`、`query.closest_point.input_gate`、`query.distance.input_gate` | 平面法向非有限/零、坐标非有限、负或非有限位置容差、零工作预算（各入口适用的输入） |
+| `AXM-CORE-E-0002 / InvalidInput` | `query.section.budget`、`query.closest_point.budget`、`query.distance.budget` | 前置检查之后实际工作预算耗尽；无部分值，不继续发布网格 |
+| `AXM-CORE-E-0004 / NotImplemented` | `query.section.support_gate`、`query.closest_point.support_gate`、`query.distance.support_gate`、`query.mass_properties.support_gate` | 解析曲面、曲边、旧占位或非 ExactBRep 等不支持真实多面体体类/边界；不允许 bbox 壳代替 |
+| `AXM-CORE-E-0001 / InvalidInput` | `query.section.preflight`、`query.closest_point.preflight`、`query.distance.preflight`、`query.mass_properties.preflight` | 无效、删除或已回滚 BodyId |
+| `AXM-TOPO-E-0005 / InvalidTopology` | 相应 `query.*.preflight` | 删除面后壳不闭合等闭壳前置失败；其他环/边/面根因沿用已有 TOPO/GEO 码 |
+| `AXM-TOPO-E-0008 / InvalidTopology` | 相应 `query.*.preflight` | 当前面边界与支撑平面错配 |
+| `AXM-QUERY-E-0006 / InvalidTopology` | 相应 `query.*.preflight` | 多壳相交、重叠、建模容差接触或包含关系冲突 |
+| `AXM-QUERY-E-0002 / NumericalInstability` | `query.section.numeric` | 平面有向距离符号、不同交段/事件或世界坐标不可分辨，面积溢出；远隔小分量不可静默丢失 |
+| `AXM-QUERY-E-0001 / NumericalInstability` | `query.closest_point.numeric`、`query.distance.numeric` | 三角形/面边距离退化、溢出或材料绕数无法可靠判定 |
+| `AXM-QUERY-E-0003 / NumericalInstability` | `query.mass_properties.numeric` | 当前拓扑质量汇总、质心或惯性不可表示；不恢复编辑前缓存值 |
+| `AXM-QUERY-E-0001 / DegenerateGeometry` | `query.distance.empty_gate` | 内部零壳体分支无有限最近见证；合同保留，但本批未构造/验证该查询分支 |
+| `AXM-TOPO-E-0005 / InvalidTopology` | `query.mass_properties.empty_gate` | 内部零壳体无可积分边界；不是本批零壳查询验收证据 |
+
+公共 `create_body({})` 已回归为 `OperationFailed / AXM-TX-E-0001`、无 value、事务写计数不变；这不能用来声称测试了零壳体查询。真正无交集截面是成功空结果，bbox 无效，兼容入口有 value 的 `MeshId{}`；共面面有面积，线/点相切成功零面积，均无失败 issue。最近体间距离的相交、包含、相切为成功 0；可表示正间隙不被位置容差或裁剪舍入带抹为零。预算默认 1000000，仅计前置之后工作，精确重放与少一预算失败均已回归。
+
+依据 [cycle-0075 最终全量门禁](../../.axiom-agent/logs/cycle-0075-gates.log)，Query/Eval、Ops/Heal、representation/IO 及全量 CTest 已通过；逐项证据见 [测试与验收方案](../quality/AxiomKernel_测试与验收方案.md)。未新增错误码，S3-QUERY 正式验收以调度器文档检查及提交成功为准，FR-QUERY-001 保持进行中。

@@ -117,7 +117,7 @@
 
 **状态：进行中，当前主线。** 已验收子路径包括显式凸/凹及带孔 polygon 拉伸、轴分离有向区间旋转、开放/周期采样曲线扫掠、拓扑兼容 polygon 放样、受限 `thicken/draft/section`、解析体与平面直边闭壳质量属性。cycle-0074 补齐 `extrude_with_law`、`sweep_with_scale_law`、`sweep_with_law` 的分段正比例/有向扭转采样多面体，以及 `locate_point/clip_segment` 的平面直边实体空间查询；调度器完整构建后 CTest 16/16 通过（134.05 s），详见[当前进度](AxiomKernel_当前开发进度.md)。这些仍以“可证明子集 + 前置拒绝 + 回滚不污染”为主，Stage 3 完整退出标准尚未收口。
 
-cycle-0074 是升级前检查点，按原范围验收并同步文档；下一批开始围绕本阶段目标调度任务。FR-OPS-001 / FR-QUERY-001 继续进行中，不因本批通过而标记需求或阶段完成。
+cycle-0074 是升级前检查点。cycle-0075 唯一退出任务 S3-QUERY 已将通用/专用截面与最近位置/距离收敛到真实多面体拓扑，支持矩阵及建模后跨模块回归已整理；repair 后调度器完整构建成功，最终 CTest 16/16 通过（148.44 s）。任务为 ready_for_acceptance，正式验收需文档检查与调度器提交成功，状态见 [当前进度 §5.2.1](AxiomKernel_当前开发进度.md#521-stage-3-当前退出任务)。FR-OPS-001 / FR-QUERY-001 和 Stage 3 继续进行中；旧占位 thicken 明确被查询拒绝，未因本批通过获得真实主路径。
 
 目标：
 
@@ -135,9 +135,9 @@ cycle-0074 是升级前检查点，按原范围验收并同步文档；下一批
 
 **本阶段退出前仍需收口的事项**：
 
-- 把当前分散在 `ops_heal`、`query_eval`、`representation_io`、`geometry` 中的 Stage 3 frontier 证据整理为统一支持矩阵
-- 收敛查询分析的 fallback 语义，避免 `section_bbox_plane`、局部解析截面与质量属性恢复在不同体类上口径不一
-- 对已声明支持的建模路径补齐跨模块一致性断言，而不只验证单点成功
+- cycle-0075 已整理 [S3-QUERY 统一支持矩阵](../api/AxiomKernel_详细模块接口清单.md#612-stage-3-截面最近点与距离支持矩阵cycle-0075--s3-query) 和 [四条验收证据](../quality/AxiomKernel_测试与验收方案.md#12-cycle-0075--s3-query-门禁与逐项证据)；后续声明新支持路径时须继续维护
+- S3-QUERY 已移除受支持体类通用截面/距离的 bbox 占位与质量编辑失败旧缓存恢复；解析/曲边实体及历史占位明确拒绝，旧布尔/Modified 等质量恢复不升级为真实查询能力
+- 已支持建模子路径新增 topology/rep/provenance/质量/查询/缓存/Eval/回滚一致性断言；真实 thicken 主路径与整个 Stage 3 完整退出标准仍未收口，不自行扩展后续阶段
 - 维持全量 `ctest` 绿并继续压缩 `AXM_ENABLE_STRICT_WARNINGS=ON` 下的历史告警
 
 ## 4.5 `Stage 4` 布尔与验证器第一代
@@ -286,7 +286,7 @@ cycle-0074 是升级前检查点，按原范围验收并同步文档；下一批
 
 ## 7. 当前立即执行顺序
 
-以[近期迭代与 Backlog](AxiomKernel_近期迭代与Backlog.md)为选取顺序真源：实际回归阻断优先；其次 S3-01 支持矩阵、S3-02 建模跨模块闭环、S3-03 查询语义、S3-04 阶段验收。任务状态只在进度 §5.2.1 维护。
+以[近期迭代与 Backlog](AxiomKernel_近期迭代与Backlog.md)为选取顺序真源：实际回归阻断优先；本批唯一退出任务为 S3-QUERY，统一支持矩阵、建模跨模块闭环与查询语义证据已随 cycle-0075 全量门禁通过，正式任务状态只在进度 §5.2.1 维护。不得依据历史 remaining 或需求权重自行追加与退出任务无关的功能。
 
 不重复立项已经完成的骨架、公共存储和基础诊断建设。Geo/Topo/Math/Heal 本轮优先服务上述链路的明确缺口；工业布尔仍是 Stage 4，标准交换是 Stage 5。专题计划中的优先级是专题内部顺序。
 

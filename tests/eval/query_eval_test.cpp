@@ -813,6 +813,356 @@ bool analytic_face_area_regression() {
     return true;
 }
 
+bool stage3_section_distance_regression() {
+    axiom::Kernel kernel;
+    auto& topo = kernel.topology().query();
+    auto& query = kernel.query();
+    const auto close = [](double a, double b) {
+        return std::abs(a-b) <= 2e-8*std::max({1.0,std::abs(a),std::abs(b)});
+    };
+    const auto failed = [&](const auto& result, axiom::StatusCode status,
+                            std::string_view code, std::string_view stage) {
+        const auto diagnostic = kernel.diagnostics().get(result.diagnostic_id);
+        const bool matches = !result.value && result.status == status && diagnostic.value &&
+            std::any_of(diagnostic.value->issues.begin(),diagnostic.value->issues.end(),
+                [&](const axiom::Issue& issue) { return issue.code == code && issue.stage == stage; });
+        if (!matches) {
+            std::cerr << "Expected failure " << code << " at " << stage << " actual status=" << static_cast<int>(result.status) << "\n";
+            if (diagnostic.value) for (const auto& issue : diagnostic.value->issues)
+                std::cerr << issue.code << " " << issue.stage << " " << issue.message << "\n";
+        }
+        return matches;
+    };
+    const auto check_section = [&](axiom::BodyId body, const axiom::Plane& plane, double area) {
+        const auto actual = query.section_detailed(body,plane);
+        const auto dedicated = topo.section(body,plane);
+        if (!actual.value || !dedicated.value || !close(actual.value->area,area) ||
+            !close(dedicated.value->area,area) || actual.value->triangles.size() != dedicated.value->triangles.size())
+            return false;
+        double triangle_area = 0;
+        for (const auto& triangle : actual.value->triangles) {
+            for (const auto index : triangle)
+                if (index < 0 || static_cast<std::size_t>(index) >= actual.value->vertices.size()) return false;
+            const auto a = actual.value->vertices[static_cast<std::size_t>(triangle[0])];
+            const auto b = actual.value->vertices[static_cast<std::size_t>(triangle[1])];
+            const auto c = actual.value->vertices[static_cast<std::size_t>(triangle[2])];
+            const axiom::Vec3 ab{b.x-a.x,b.y-a.y,b.z-a.z}, ac{c.x-a.x,c.y-a.y,c.z-a.z};
+            triangle_area += .5*std::hypot(ab.y*ac.z-ab.z*ac.y,ab.z*ac.x-ab.x*ac.z,ab.x*ac.y-ab.y*ac.x);
+        }
+        for (const auto& point : actual.value->vertices) {
+            const double residual = (point.x-plane.origin.x)*plane.normal.x+
+                (point.y-plane.origin.y)*plane.normal.y+(point.z-plane.origin.z)*plane.normal.z;
+            if (!close(residual,0)) return false;
+        }
+        return close(triangle_area,area);
+    };
+    const auto check_distance = [&](axiom::BodyId first, axiom::BodyId second, double distance) {
+        const auto result = query.closest_points(first,second);
+        const auto dedicated = topo.closest_points(first,second);
+        const auto scalar = query.min_distance(first,second);
+        const auto reversed = query.min_distance(second,first);
+        if (!result.value || !dedicated.value || !scalar.value || !reversed.value ||
+            !close(result.value->distance,distance) || !close(dedicated.value->distance,distance) ||
+            !close(*scalar.value,distance) || !close(*reversed.value,distance) ||
+            result.value->first_face.value != dedicated.value->first_face.value ||
+            result.value->second_face.value != dedicated.value->second_face.value ||
+            result.value->first_shell.value != dedicated.value->first_shell.value ||
+            result.value->second_shell.value != dedicated.value->second_shell.value) return false;
+        const auto a = result.value->first_point, b = result.value->second_point;
+        if (!close(std::hypot(a.x-b.x,a.y-b.y,a.z-b.z),distance)) return false;
+        if (distance > 0 && (result.value->first_face.value == 0 || result.value->second_face.value == 0)) return false;
+        const auto first_location = topo.locate_point(first,a);
+        const auto second_location = topo.locate_point(second,b);
+        if (!first_location.value || !second_location.value ||
+            first_location.value->location == axiom::BodyPointLocation::Outside ||
+            second_location.value->location == axiom::BodyPointLocation::Outside) return false;
+        if (distance > 0 && (first_location.value->location != axiom::BodyPointLocation::Boundary ||
+                            second_location.value->location != axiom::BodyPointLocation::Boundary)) return false;
+        return true;
+    };
+    const auto box = kernel.primitives().box({0,0,0},1,1,1);
+    const auto wedge = kernel.primitives().wedge({0,0,0},1,1,1);
+    axiom::ProfileRef profile;
+    profile.label = "stage3_section_concave_hole";
+    profile.polygon_xyz = {{0,0,0},{6,0,0},{6,2,0},{2,2,0},{2,6,0},{0,6,0}};
+    profile.holes_xyz = {{{.5,.5,0},{1.5,.5,0},{1.5,1.5,0},{.5,1.5,0}}};
+    const auto prism = kernel.sweeps().extrude(profile,{0,0,1},5);
+    if (!box.value || !wedge.value || !prism.value) return false;
+    // Independent references: unit intercept triangle, L-polygon minus a unit
+    // hole, and two disjoint diagonal rectangles of width 2*sqrt(2), height 5.
+    if (!check_section(*box.value,{{1,0,0},{1,1,1}},std::sqrt(3.0)/2) ||
+        !check_section(*wedge.value,{{0,0,.5},{0,0,1}},.5) ||
+        !check_section(*prism.value,{{0,0,2},{0,0,1}},19) ||
+        !check_section(*prism.value,{{5,0,0},{1,1,0}},20*std::sqrt(2.0)) ||
+        !check_section(*prism.value,{{0,0,0},{0,0,-7}},19)) return false;
+    const auto wedge_point = query.closest_point(*wedge.value,{1,1,.5});
+    if (!wedge_point.value || !wedge_point.value->nearest_boundary ||
+        wedge_point.value->location != axiom::BodyPointLocation::Outside ||
+        !close(wedge_point.value->nearest_boundary->point.x,.5) ||
+        !close(wedge_point.value->nearest_boundary->point.y,.5) ||
+        !close(wedge_point.value->nearest_boundary->point.z,.5) ||
+        !close(wedge_point.value->nearest_boundary->distance,1/std::sqrt(2.0))) return false;
+    // Unequal wedge legs require the sloped support plane normal (dy,dx,0).
+    // A square wedge would hide a stale (1,1,0) placeholder normal.
+    const auto unequal_wedge = kernel.primitives().wedge({1,2,3},2,3,4);
+    if (!unequal_wedge.value || !check_section(*unequal_wedge.value,{{0,0,5},{0,0,1}},3)) return false;
+    const auto unequal_point = query.closest_point(*unequal_wedge.value,{3,5,5});
+    if (!unequal_point.value || !unequal_point.value->nearest_boundary ||
+        unequal_point.value->location != axiom::BodyPointLocation::Outside ||
+        !close(unequal_point.value->nearest_boundary->point.x,1+8.0/13) ||
+        !close(unequal_point.value->nearest_boundary->point.y,2+27.0/13) ||
+        !close(unequal_point.value->nearest_boundary->point.z,5) ||
+        !close(unequal_point.value->nearest_boundary->distance,6/std::sqrt(13.0))) return false;
+    const auto cap = query.section_detailed(*prism.value,{{0,0,2},{0,0,1}});
+    if (!cap.value) return false;
+    // Every filled triangle centroid must be in material: no bridging the hole
+    // or filling the concave missing corner, even though both are inside bbox.
+    for (const auto& triangle : cap.value->triangles) {
+        axiom::Point3 center{};
+        for (const auto index : triangle) {
+            const auto p = cap.value->vertices[static_cast<std::size_t>(index)];
+            center.x += p.x/3; center.y += p.y/3; center.z += p.z/3;
+        }
+        const auto location = topo.locate_point(*prism.value,center);
+        if (!location.value || location.value->location != axiom::BodyPointLocation::Inside) return false;
+    }
+    const auto world = [](const axiom::Point3& p) {
+        return axiom::Point3{100+(p.x-p.z)/std::sqrt(2.0),-200+p.y,300+(p.x+p.z)/std::sqrt(2.0)};
+    };
+    auto rotated = profile;
+    for (auto& p : rotated.polygon_xyz) p = world(p);
+    for (auto& ring : rotated.holes_xyz) for (auto& p : ring) p = world(p);
+    const auto rotated_body = kernel.sweeps().extrude(rotated,{-1,0,1},5);
+    if (!rotated_body.value || !check_section(*rotated_body.value,{world({0,0,2}),{-1,0,1}},19)) return false;
+
+    // Missing-corner plane intersects bbox but not the actual concave solid.
+    for (const auto plane : std::array<axiom::Plane,2>{{{{9,0,0},{1,1,0}},{{0,0,20},{0,0,1}}}}) {
+        const auto empty = query.section_detailed(*prism.value,plane);
+        const auto mesh = query.section(*prism.value,plane);
+        if (!empty.value || empty.value->area != 0 || !empty.value->vertices.empty() ||
+            !empty.value->boundary_segments.empty() || !empty.value->contact_points.empty() ||
+            empty.value->bbox.is_valid || !mesh.value || mesh.value->value != 0) return false;
+    }
+    // Face/edge/vertex tangencies use the same success semantics; no invented area.
+    if (!check_section(*box.value,{{0,0,0},{0,0,1}},1) ||
+        !check_section(*box.value,{{0,0,0},{1,1,0}},0) ||
+        !check_section(*box.value,{{0,0,0},{1,1,1}},0)) return false;
+    const auto edge = query.section_detailed(*box.value,{{0,0,0},{1,1,0}});
+    const auto vertex = query.section_detailed(*box.value,{{0,0,0},{1,1,1}});
+    if (!edge.value || edge.value->boundary_segments.empty() || !vertex.value || vertex.value->contact_points.empty())
+        return false;
+    // One representable step beyond a cap is still empty, even with a large
+    // caller tolerance. It must not be snapped into a coplanar unit-area cap.
+    axiom::BodySpatialQueryOptions broad_tolerance;
+    broad_tolerance.position_tolerance = .1;
+    const axiom::Plane near_miss{{0,0,std::nextafter(1.0,2.0)},{0,0,1}};
+    const auto near_section = query.section_detailed(*box.value,near_miss,broad_tolerance);
+    const auto near_dedicated = topo.section(*box.value,near_miss,broad_tolerance);
+    const auto near_mesh = query.section(*box.value,near_miss);
+    if (!near_section.value || !near_dedicated.value || !near_mesh.value || near_mesh.value->value != 0 ||
+        near_section.value->area != 0 || !near_section.value->triangles.empty() ||
+        !near_section.value->boundary_segments.empty() || !near_section.value->contact_points.empty() ||
+        near_section.value->bbox.is_valid || near_dedicated.value->bbox.is_valid) return false;
+
+    // A positive gap below the triangle clipping roundoff band is independently
+    // representable near z=0. Distance queries must retain it rather than borrow
+    // clipping's coplanarity band or the much larger modelling tolerance.
+    constexpr double gap = 1e-18;
+    const auto below = kernel.primitives().box({0,0,-1},1,1,1);
+    const auto above = kernel.primitives().box({0,0,gap},1,1,1);
+    if (!below.value || !above.value) return false;
+    const auto tiny_distance = query.closest_points(*below.value,*above.value,broad_tolerance);
+    const auto tiny_dedicated = topo.closest_points(*below.value,*above.value,broad_tolerance);
+    const auto tiny_scalar = query.min_distance(*below.value,*above.value);
+    const auto tiny_reversed = query.min_distance(*above.value,*below.value);
+    if (!tiny_distance.value || !tiny_dedicated.value || !tiny_scalar.value || !tiny_reversed.value ||
+        std::abs(tiny_distance.value->distance/gap-1) > 1e-10 ||
+        std::abs(tiny_dedicated.value->distance/gap-1) > 1e-10 ||
+        std::abs(*tiny_scalar.value/gap-1) > 1e-10 || std::abs(*tiny_reversed.value/gap-1) > 1e-10 ||
+        tiny_distance.value->first_point.z != 0 || tiny_distance.value->second_point.z != gap ||
+        tiny_distance.value->first_face.value == 0 || tiny_distance.value->second_face.value == 0) return false;
+
+    const auto missing_corner = kernel.primitives().box({3,3,2},1,1,1);
+    const auto in_hole = kernel.primitives().box({.75,.75,2},.5,.5,1);
+    const auto tangent = kernel.primitives().box({2,3,2},1,1,1);
+    if (!missing_corner.value || !in_hole.value || !tangent.value ||
+        !check_distance(*prism.value,*missing_corner.value,1) ||
+        !check_distance(*prism.value,*in_hole.value,.25) ||
+        !check_distance(*prism.value,*tangent.value,0) || !check_distance(*box.value,*box.value,0)) return false;
+    axiom::ProfileRef triangle_a{"diagonal_distance_a",{{0,0,0},{2,0,0},{0,2,0}}};
+    axiom::ProfileRef triangle_b{"diagonal_distance_b",{{2,2,0},{1.5,2,0},{2,1.5,0}}};
+    const auto a = kernel.sweeps().extrude(triangle_a,{0,0,1},1);
+    const auto b = kernel.sweeps().extrude(triangle_b,{0,0,1},1);
+    if (!a.value || !b.value || !check_distance(*a.value,*b.value,1.5/std::sqrt(2.0))) return false;
+    // Skew ridge/ridge minimum occurs in the interiors of both edges. A has
+    // z<=0, B has z>=1; their orthogonal ridge lines meet at (0,0) in XY.
+    const axiom::ProfileRef ridge_a{"skew_ridge_a",{{-2,-1,-1},{-2,1,-1},{-2,0,0}}};
+    const axiom::ProfileRef ridge_b{"skew_ridge_b",{{-1,-2,2},{0,-2,1},{1,-2,2}}};
+    const auto ridge_first = kernel.sweeps().extrude(ridge_a,{1,0,0},4);
+    const auto ridge_second = kernel.sweeps().extrude(ridge_b,{0,1,0},4);
+    const auto point_touch = kernel.primitives().box({1,1,1},1,1,1);
+    if (!ridge_first.value || !ridge_second.value || !point_touch.value ||
+        !check_distance(*ridge_first.value,*ridge_second.value,1) ||
+        !check_distance(*box.value,*point_touch.value,0)) return false;
+    const auto point = query.closest_point(*prism.value,{1,1,2});
+    const auto dedicated_point = topo.locate_point(*prism.value,{1,1,2});
+    if (!point.value || !point.value->nearest_boundary || !dedicated_point.value ||
+        !dedicated_point.value->nearest_boundary || point.value->location != axiom::BodyPointLocation::Outside ||
+        !close(point.value->nearest_boundary->distance,.5) ||
+        point.value->nearest_boundary->face.value != dedicated_point.value->nearest_boundary->face.value) return false;
+
+    const auto outer = kernel.primitives().box({0,0,0},10,10,10);
+    const auto cavity = kernel.primitives().box({2,2,2},6,6,6);
+    const auto island = kernel.primitives().box({4,4,4},2,2,2);
+    const auto floating = kernel.primitives().box({2.5,2.5,3},1,1,1);
+    const auto contained = kernel.primitives().box({.2,.2,.2},.2,.2,.2);
+    if (!outer.value || !cavity.value || !island.value || !floating.value || !contained.value) return false;
+    const auto outer_shells = topo.shells_of_body(*outer.value);
+    const auto cavity_shells = topo.shells_of_body(*cavity.value);
+    const auto island_shells = topo.shells_of_body(*island.value);
+    if (!outer_shells.value || !cavity_shells.value || !island_shells.value) return false;
+    {
+        auto txn = kernel.topology().begin_transaction();
+        const auto hollow = txn.create_body(std::array{island_shells.value->front(),outer_shells.value->front(),
+                                                       cavity_shells.value->front()});
+        const auto writes = txn.write_operation_count();
+        // Empty shell lists cannot create a body through the public transaction
+        // API. Check that rejection without treating its absent value as a body.
+        const auto empty = txn.create_body({});
+        const auto empty_report = kernel.diagnostics().get(empty.diagnostic_id);
+        if (empty.value || empty.status != axiom::StatusCode::OperationFailed || !empty_report.value ||
+            !has_issue_code(*empty_report.value,axiom::diag_codes::kTxCommitFailure) ||
+            !hollow.value || !check_section(*hollow.value,{{0,0,5},{0,0,1}},68) ||
+            !check_distance(*hollow.value,*floating.value,.5) || !check_distance(*outer.value,*contained.value,0) ||
+            txn.write_operation_count().value != writes.value || txn.rollback().status != axiom::StatusCode::Ok) return false;
+        if (!failed(query.section_detailed(*hollow.value,{{0,0,5},{0,0,1}}),axiom::StatusCode::InvalidInput,
+                    axiom::diag_codes::kCoreInvalidHandle,"query.section.preflight")) return false;
+    }
+
+    const auto sphere = kernel.primitives().sphere({0,0,0},1);
+    const auto curved_surface = kernel.surfaces().make_sphere({0,0,0},1);
+    const auto displaced_plane = kernel.surfaces().make_plane({0,0,100},{0,0,1});
+    const auto faces = topo.faces_of_body(*box.value);
+    const auto node = kernel.eval_graph().register_node(axiom::NodeKind::Analysis,"stage3:queries");
+    if (!sphere.value || !curved_surface.value || !displaced_plane.value || !faces.value || !node.value) return false;
+    // The legacy thicken path currently owns a placeholder shell. It must
+    // receive the same explicit rejection as curved primitives, even though
+    // its bbox has a perfectly valid planar section.
+    const auto placeholder_thicken = kernel.sweeps().thicken(faces.value->front(),1);
+    if (!placeholder_thicken.value) return false;
+    // Individually resolvable components can exceed the combined plane-frame
+    // resolution when very far apart. Do not silently erase the small component.
+    const auto tiny = kernel.primitives().box({1e12,0,0},.001,.001,.001);
+    const auto box_shells = topo.shells_of_body(*box.value);
+    const auto tiny_shells = tiny.value ? topo.shells_of_body(*tiny.value)
+                                       : axiom::Result<std::vector<axiom::ShellId>>{};
+    if (!box_shells.value || !tiny_shells.value) return false;
+    {
+        auto txn = kernel.topology().begin_transaction();
+        const auto wide = txn.create_body(std::array{box_shells.value->front(),tiny_shells.value->front()});
+        if (!wide.value || !failed(query.section_detailed(*wide.value,{{0,0,.0005},{0,0,1}}),
+            axiom::StatusCode::NumericalInstability,axiom::diag_codes::kQuerySectionFailure,"query.section.numeric") ||
+            txn.rollback().status != axiom::StatusCode::Ok) return false;
+    }
+    const auto objects = kernel.object_count_total();
+    const auto stores = kernel.runtime_store_counts();
+    const auto invalid = kernel.eval_graph().is_invalid(*node.value);
+    const auto recompute = kernel.eval_graph().recompute_count(*node.value);
+    if (!objects.value || !stores.value) return false;
+    for (const auto unsupported : {*sphere.value,*placeholder_thicken.value}) {
+        if (!failed(query.section_detailed(unsupported,{{0,0,0},{0,0,1}}),axiom::StatusCode::NotImplemented,
+                axiom::diag_codes::kCoreOperationUnsupported,"query.section.support_gate") ||
+        !failed(query.section(unsupported,{{0,0,0},{0,0,1}}),axiom::StatusCode::NotImplemented,
+                axiom::diag_codes::kCoreOperationUnsupported,"query.section.support_gate") ||
+        !failed(query.min_distance(unsupported,*box.value),axiom::StatusCode::NotImplemented,
+                axiom::diag_codes::kCoreOperationUnsupported,"query.distance.support_gate") ||
+        !failed(query.closest_point(unsupported,{0,0,0}),axiom::StatusCode::NotImplemented,
+                axiom::diag_codes::kCoreOperationUnsupported,"query.closest_point.support_gate")) return false;
+    }
+    if (!failed(query.section_detailed(*box.value,{{0,0,0},{0,0,0}}),axiom::StatusCode::InvalidInput,
+                axiom::diag_codes::kCoreParameterOutOfRange,"query.section.input_gate")) return false;
+    for (const double bad : {-1.0,std::numeric_limits<double>::infinity(),
+                             std::numeric_limits<double>::quiet_NaN()}) {
+        axiom::BodySpatialQueryOptions options;
+        options.position_tolerance = bad;
+        if (!failed(query.section_detailed(*box.value,{{0,0,0},{0,0,1}},options),axiom::StatusCode::InvalidInput,
+                    axiom::diag_codes::kCoreParameterOutOfRange,"query.section.input_gate") ||
+            !failed(query.closest_points(*box.value,*prism.value,options),axiom::StatusCode::InvalidInput,
+                    axiom::diag_codes::kCoreParameterOutOfRange,"query.distance.input_gate") ||
+            !failed(query.closest_point(*box.value,{0,0,0},options),axiom::StatusCode::InvalidInput,
+                    axiom::diag_codes::kCoreParameterOutOfRange,"query.closest_point.input_gate")) return false;
+    }
+    axiom::BodySpatialQueryOptions zero_budget;
+    zero_budget.max_triangle_tests = 0;
+    if (!failed(query.section_detailed(*box.value,{{0,0,0},{0,0,1}},zero_budget),axiom::StatusCode::InvalidInput,
+                axiom::diag_codes::kCoreParameterOutOfRange,"query.section.input_gate") ||
+        !failed(query.closest_points(*box.value,*prism.value,zero_budget),axiom::StatusCode::InvalidInput,
+                axiom::diag_codes::kCoreParameterOutOfRange,"query.distance.input_gate")) return false;
+    for (const double bad : {std::numeric_limits<double>::infinity(),std::numeric_limits<double>::quiet_NaN()}) {
+        if (!failed(query.section_detailed(*box.value,{{bad,0,0},{0,0,1}}),axiom::StatusCode::InvalidInput,
+                    axiom::diag_codes::kCoreParameterOutOfRange,"query.section.input_gate") ||
+            !failed(query.section_detailed(*box.value,{{0,0,0},{0,bad,1}}),axiom::StatusCode::InvalidInput,
+                    axiom::diag_codes::kCoreParameterOutOfRange,"query.section.input_gate") ||
+            !failed(query.closest_point(*box.value,{bad,0,0}),axiom::StatusCode::InvalidInput,
+                    axiom::diag_codes::kCoreParameterOutOfRange,"query.closest_point.input_gate")) return false;
+    }
+    const auto section_work = query.section_detailed(*prism.value,{{0,0,2},{0,0,1}});
+    const auto distance_work = query.closest_points(*prism.value,*in_hole.value);
+    if (!section_work.value || !distance_work.value) return false;
+    axiom::BodySpatialQueryOptions budget;
+    budget.max_triangle_tests = section_work.value->triangle_tests;
+    if (!query.section_detailed(*prism.value,{{0,0,2},{0,0,1}},budget).value) return false;
+    --budget.max_triangle_tests;
+    if (!failed(query.section_detailed(*prism.value,{{0,0,2},{0,0,1}},budget),axiom::StatusCode::InvalidInput,
+                axiom::diag_codes::kCoreParameterOutOfRange,"query.section.budget")) return false;
+    budget.max_triangle_tests = distance_work.value->triangle_tests;
+    if (!query.closest_points(*prism.value,*in_hole.value,budget).value) return false;
+    --budget.max_triangle_tests;
+    if (!failed(query.closest_points(*prism.value,*in_hole.value,budget),axiom::StatusCode::InvalidInput,
+                axiom::diag_codes::kCoreParameterOutOfRange,"query.distance.budget")) return false;
+    for (int edit = 0; edit < 4; ++edit) {
+        auto txn = kernel.topology().begin_transaction();
+        const auto change = edit == 0 ? txn.delete_face(faces.value->front())
+                          : edit == 1 ? txn.replace_surface(faces.value->front(),*curved_surface.value)
+                          : edit == 2 ? txn.replace_surface(faces.value->front(),*displaced_plane.value)
+                                      : txn.delete_body(*box.value);
+        if (change.status != axiom::StatusCode::Ok) return false;
+        const auto writes = txn.write_operation_count();
+        const auto status = edit == 1 ? axiom::StatusCode::NotImplemented
+                          : edit == 3 ? axiom::StatusCode::InvalidInput : axiom::StatusCode::InvalidTopology;
+        const auto code = edit == 0 ? axiom::diag_codes::kTopoShellNotClosed
+                        : edit == 1 ? axiom::diag_codes::kCoreOperationUnsupported
+                        : edit == 2 ? axiom::diag_codes::kTopoCurveTopologyMismatch : axiom::diag_codes::kCoreInvalidHandle;
+        if (!failed(query.section_detailed(*box.value,{{0,0,20},{0,0,1}}),status,code,
+                    edit == 1 ? "query.section.support_gate" : "query.section.preflight") ||
+            !failed(query.min_distance(*box.value,*prism.value),status,code,
+                    edit == 1 ? "query.distance.support_gate" : "query.distance.preflight") ||
+            !failed(query.closest_point(*box.value,{1,1,1}),status,code,
+                    edit == 1 ? "query.closest_point.support_gate" : "query.closest_point.preflight") ||
+            query.mass_properties(*box.value).value || txn.write_operation_count().value != writes.value ||
+            txn.rollback().status != axiom::StatusCode::Ok ||
+            !check_section(*box.value,{{1,0,0},{1,1,1}},std::sqrt(3.0)/2)) return false;
+    }
+    const auto after = kernel.runtime_store_counts();
+    if (!after.value || kernel.object_count_total().value != objects.value ||
+        after.value->mesh_records != stores.value->mesh_records ||
+        after.value->intersection_records != stores.value->intersection_records ||
+        after.value->tessellation_cache_entries != stores.value->tessellation_cache_entries ||
+        after.value->face_tessellation_cache_entries != stores.value->face_tessellation_cache_entries ||
+        after.value->curve_eval_cache_entries != stores.value->curve_eval_cache_entries ||
+        after.value->surface_eval_cache_entries != stores.value->surface_eval_cache_entries ||
+        kernel.eval_graph().is_invalid(*node.value).value != invalid.value ||
+        kernel.eval_graph().recompute_count(*node.value).value != recompute.value) return false;
+    // The legacy MeshId entry explicitly publishes only its successful filled
+    // result; failure/empty queries above published nothing and filled no cache.
+    const auto mesh = query.section(*prism.value,{{0,0,2},{0,0,1}});
+    const auto count = kernel.convert().mesh_triangle_count(mesh.value ? *mesh.value : axiom::MeshId{});
+    const auto published = kernel.runtime_store_counts();
+    return mesh.value && mesh.value->value != 0 && count.value && *count.value == cap.value->triangles.size() &&
+        published.value && published.value->mesh_records == stores.value->mesh_records+1 &&
+        published.value->tessellation_cache_entries == stores.value->tessellation_cache_entries;
+}
+
 bool body_spatial_query_regression() {
     axiom::Kernel kernel;
     auto& topo = kernel.topology().query();
@@ -1537,6 +1887,9 @@ bool topology_mass_properties_regression() {
             !failed(topo.body_mass_properties(*body.value), expected_status, expected_code) ||
             !failed(topo.locate_point(*body.value, {0,0,7}), expected_status, expected_code) ||
             !failed(topo.clip_segment(*body.value, {-1,0,7}, {3,0,7}), expected_status, expected_code) ||
+            !failed(kernel.query().section_detailed(*body.value, {{0,0,7},{0,0,1}}), expected_status, expected_code) ||
+            !failed(kernel.query().closest_point(*body.value, {0,0,7}), expected_status, expected_code) ||
+            !failed(kernel.query().closest_points(*body.value, *reference_box.value), expected_status, expected_code) ||
             txn.rollback().status != axiom::StatusCode::Ok) return false;
     }
     return true;
@@ -1781,6 +2134,10 @@ bool curve_curve_intersection_regression() {
 }  // namespace
 
 int main() {
+    if (!stage3_section_distance_regression()) {
+        std::cerr << "Stage 3 actual section/distance regression failed\n";
+        return 1;
+    }
     if (!body_spatial_query_regression()) {
         std::cerr << "body spatial query regression failed\n";
         return 1;

@@ -5,6 +5,7 @@
 #include <string_view>
 
 #include "axiom/core/result.h"
+#include "axiom/topo/topology_service.h"
 
 namespace axiom {
 namespace detail {
@@ -233,8 +234,19 @@ public:
 
     Result<IntersectionId> intersect(CurveId curve_id, SurfaceId surface_id) const;
     Result<IntersectionId> intersect(SurfaceId lhs, SurfaceId rhs) const;
+    /// 只读真实多面体查询；支持/空交集/失败合同与 TopologyQueryService::section 相同。
+    Result<BodyPlaneSection> section_detailed(
+        BodyId body_id, const Plane& plane, const BodySpatialQueryOptions& options = {}) const;
+    /// 兼容 MeshId 入口：仅成功非空面积时发布一个结果网格，不写三角化缓存。
+    /// 空交集和纯线/点相切成功返回 MeshId{}，不创建网格；接触信息通过 section_detailed 查询。
     Result<MeshId> section(BodyId body_id, const Plane& plane) const;
+    /// 返回真实最近边界及材料定位；点在材料内部仍返回最近边界距离，同 locate_point。
+    Result<BodyPointQuery> closest_point(
+        BodyId body_id, const Point3& point, const BodySpatialQueryOptions& options = {}) const;
+    Result<BodyDistanceQuery> closest_points(
+        BodyId lhs, BodyId rhs, const BodySpatialQueryOptions& options = {}) const;
     Result<MassProperties> mass_properties(BodyId body_id) const;
+    /// 实体材料距离，同 closest_points；空实体失败，不返回 bbox 间隔。
     Result<Scalar> min_distance(BodyId lhs, BodyId rhs) const;
 
 private:

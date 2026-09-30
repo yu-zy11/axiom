@@ -1018,7 +1018,7 @@ inline void materialize_body_wedge_shell(KernelState& state, BodyRecord& record)
     {
         const std::array<std::pair<int, bool>, 4> refs {{{1, false}, {8, false}, {4, true}, {7, true}}};
         faces.push_back(create_materialized_polygon_face(state, edges, std::span<const std::pair<int, bool>>(refs),
-                                                         Vec3 {1.0, 1.0, 0.0}, source_faces));
+                                                         Vec3 {dy, dx, 0.0}, source_faces));
     }
 
     const auto shell_id = ShellId {state.allocate_id()};
@@ -3195,7 +3195,13 @@ inline bool try_materialize_sweep_revolve_meridian_body(KernelState& state, Body
             const int b = vertex_at[static_cast<std::size_t>(station * n + next_i)];
             const int c = vertex_at[static_cast<std::size_t>((station + 1) * n + next_i)];
             const int d = vertex_at[static_cast<std::size_t>((station + 1) * n + i)];
-            if (!append_triangle(a, b, c) || !append_triangle(a, c, d)) return false;
+            // Reversing angular travel reverses the side-wall orientation as
+            // well as the caps. Keep every shared edge oppositely directed.
+            if (signed_angle > 0.0) {
+                if (!append_triangle(a, b, c) || !append_triangle(a, c, d)) return false;
+            } else {
+                if (!append_triangle(a, c, b) || !append_triangle(a, d, c)) return false;
+            }
         }
     }
     for (const auto& triangle : cap_triangles) {
@@ -3214,16 +3220,18 @@ inline bool try_materialize_sweep_revolve_meridian_body(KernelState& state, Body
     }
     if (tris.empty()) return false;
 
-    std::map<std::pair<int, int>, int> edge_use_count;
+    std::map<std::pair<int, int>, std::array<int, 2>> edge_use_count;
     for (const auto& triangle : tris) {
         for (int i = 0; i < 3; ++i) {
             const int a = triangle[static_cast<std::size_t>(i)];
             const int b = triangle[static_cast<std::size_t>((i + 1) % 3)];
-            ++edge_use_count[{std::min(a, b), std::max(a, b)}];
+            auto& uses = edge_use_count[{std::min(a, b), std::max(a, b)}];
+            ++uses[0];
+            uses[1] += a < b ? 1 : -1;
         }
     }
     if (edge_use_count.empty() || std::any_of(edge_use_count.begin(), edge_use_count.end(),
-        [](const auto& item) { return item.second != 2; })) return false;
+        [](const auto& item) { return item.second[0] != 2 || item.second[1] != 0; })) return false;
 
     Scalar vol_chk = 0.0;
     Point3 cm_tmp {};
