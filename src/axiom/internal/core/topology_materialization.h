@@ -1712,7 +1712,7 @@ inline bool validate_materialization_triangle_contacts(const std::vector<Point3>
     return true;
 }
 
-/// 简单平面多边形（可凹、可带孔）直线/至平面/扭转拉伸、等比变截面拉伸或折线平移扫掠：三角端盖 + 平面侧壁。
+/// 简单平面多边形（可凹、可带孔）直线/至平面/扭转拉伸、平面面片加厚、等比变截面拉伸或折线平移扫掠：三角端盖 + 平面侧壁。
 /// 所有可失败检查在对象分配前完成，禁止失败时留下部分拓扑。
 inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRecord& record) {
     if (record.kind != BodyKind::Sweep || record.rep_kind != RepKind::ExactBRep || !record.bbox.is_valid ||
@@ -1720,7 +1720,7 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
         return false;
     }
     if (record.sweep_station_offsets.empty() &&
-        (record.label.size() < 8 || record.label.compare(0, 8, "extrude:") != 0)) {
+        (record.label.compare(0, 8, "extrude:") != 0 && record.label != "thicken:planar")) {
         return false;
     }
     const auto& poly_in = record.extrude_profile_xyz;

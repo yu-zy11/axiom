@@ -777,7 +777,7 @@ Plane/Cylinder/Cone/规则 Sphere/Torus 及其嵌套 Offset 的成功解析路�
 
 | 状态 / 根因码 | Issue.stage | 根因与限制 |
 |---|---|---|
-| NotImplemented / `AXM-CORE-E-0004` (`kCoreOperationUnsupported`) | `query.mass_properties.support_gate` | 未知/不支持体类或表示、旧 label-only Sweep/thicken、Boolean/Modified、metadata/mesh/implicit 派生记录、曲面/曲边/兼容代理壳；原生解析体成功编辑后资格撤销 |
+| NotImplemented / `AXM-CORE-E-0004` (`kCoreOperationUnsupported`) | `query.mass_properties.support_gate` | 未知/不支持体类或表示、旧 label-only Sweep、历史占位 thicken 记录、Boolean/Modified、metadata/mesh/implicit 派生记录、曲面/曲边/兼容代理壳；原生解析体成功编辑后资格撤销 |
 | InvalidInput / `AXM-CORE-E-0001` (`kCoreInvalidHandle`) | `query.mass_properties.preflight` | 目标不存在、已删除或已回滚；删除最后壳同时删除 owner Body，不留零壳体 |
 | InvalidTopology / `AXM-TOPO-E-0008` 或 `AXM-TOPO-E-0005` 等既有拓扑根因 | `query.mass_properties.preflight` | 支撑面错配、开壳、损坏引用等；保留既有错误码，不允许热缓存恢复旧值 |
 | InvalidTopology / `AXM-QUERY-E-0006` | `query.mass_properties.preflight` | 多壳相交、重叠、重合、建模容差接触或无法建立一致包含层级 |
@@ -786,3 +786,22 @@ Plane/Cylinder/Cone/规则 Sphere/Torus 及其嵌套 Offset 的成功解析路�
 | InvalidTopology / `AXM-TOPO-E-0005` | `query.mass_properties.empty_gate` | 内部零壳支持体防御；公共 API 无该夹具，本批不声称已执行/验收 |
 
 原生解析体失败编辑保持资格，成功替换面/改变 PCurve 绑定/删除撤销资格；保存点和整事务回滚恢复，提交后持续拒绝。代理面标记随克隆/imprint 切分继承，重新组壳/删除原 owner 不允许绕过拒绝。所有质量查询无 bbox、来源 Boolean/Modified 或 Sweep 创建缓存 fallback；查询只增加诊断/Topo 读审计，不发布网格、不改缓存/Eval/事务写计数。实际门禁与三条证据见 [测试与验收 §1.3](../quality/AxiomKernel_测试与验收方案.md#13-cycle-0076--s3-mass-门禁与逐项证据)，体类与单位见 [API §6.1.3](../api/AxiomKernel_详细模块接口清单.md#613-stage-3-质量属性支持矩阵cycle-0076--s3-mass)。
+
+### cycle-0077 / S3-MODELING 建模失败合同
+
+不新增错误码、不改公开签名；以下为本批五条真实主路径的 `Issue.stage` 合同。失败均无 `value`，前置验证/区域物化失败不分配模型或几何对象，不改变活动事务写数、next_id、索引、mesh/求值/三角化缓存及 Eval 状态，诊断可增加；回滚后可重试。
+
+| 状态 / 根因码 | Issue.stage | 根因与支持限制 |
+|---|---|---|
+| InvalidInput / `AXM-CORE-E-0002` (`kCoreParameterOutOfRange`) | `extrude.input_gate` / `extrude.materialization` | 空标签、共线/退化显式轮廓或非法方向/距离；区域物化拒绝外置孔等无效边界 |
+| InvalidInput / `AXM-CORE-E-0002` | `revolve.input_gate` / `revolve.materialization` | 非有限/零/越界角或非法轴；跨轴、无效轮廓或不可物化采样闭壳 |
+| InvalidInput / `AXM-CORE-E-0001` 或 `AXM-CORE-E-0002` | `sweep.input_gate` / `sweep.materialization` | 空轮廓标签或无效 rail 句柄用 0001；无限/切向/退化 rail、其余无效显式轮廓与物化失败用 0002。直线委托 extrude 仍映射为 sweep.* |
+| InvalidInput / `AXM-CORE-E-0002` | `loft.input_gate` / `loft.materialization` | 截面不足或缺显式轮廓；重合、拓扑不兼容、退化/折叠插值拒绝 |
+| InvalidInput / `AXM-CORE-E-0001` (`kCoreInvalidHandle`) | `thicken.input_gate` | FaceId 不存在、删除或无效 |
+| InvalidInput / `AXM-MOD-E-0003` (`kModShellFailure`) | `thicken.input_gate` | 厚度为零、负值、Inf 或 NaN；要求有限正厚度 |
+| InvalidTopology / `AXM-MOD-E-0003` | `thicken.topology_gate` | 无效支撑/环/共边/边/曲线/顶点引用，链断开或未闭合，端点不在支撑直线/平面上，裁剪区间与端点错配 |
+| DegenerateGeometry / `AXM-MOD-E-0003` | `thicken.topology_gate` | 支撑 Plane 法向非有限或退化 |
+| NotImplemented / `AXM-CORE-E-0004` (`kCoreOperationUnsupported`) | `thicken.support_gate` | 曲面、曲边或兼容代理 Face；不以边端点弦或 bbox 替代真实边界 |
+| InvalidInput / `AXM-MOD-E-0003` | `thicken.materialization` | 面区域自交/退化/孔冲突，或正厚度在当前尺度不可分辨，无法形成真实闭壳 |
+
+thicken 失败 issue 关联输入 FaceId；支持正反法向及与其独立的环绕向，读取真实裁剪边。结果曲面编辑后质量查询仍用 `AXM-CORE-E-0004 / query.mass_properties.support_gate` 拒绝且无部分属性，不恢复旧创建质量；回滚恢复当前质量与空间查询。cycle-0077 的真实平面 thicken 不再属于历史占位拒绝夹具；历史代理记录继续拒绝。逐项成功/拒绝/事务证据及真实门禁见 [测试与验收 §1.4](../quality/AxiomKernel_测试与验收方案.md#14-cycle-0077--s3-modeling-门禁与逐项证据)，支持矩阵见 [API §8.1.1](../api/AxiomKernel_详细模块接口清单.md#811-stage-3-五类建模主路径cycle-0077--s3-modeling)。截面律等已有专用阶段名保持原合同。

@@ -1045,11 +1045,11 @@ bool stage3_section_distance_regression() {
     const auto faces = topo.faces_of_body(*box.value);
     const auto node = kernel.eval_graph().register_node(axiom::NodeKind::Analysis,"stage3:queries");
     if (!sphere.value || !curved_surface.value || !displaced_plane.value || !faces.value || !node.value) return false;
-    // The legacy thicken path currently owns a placeholder shell. It must
-    // receive the same explicit rejection as curved primitives, even though
-    // its bbox has a perfectly valid planar section.
-    const auto placeholder_thicken = kernel.sweeps().thicken(faces.value->front(),1);
-    if (!placeholder_thicken.value) return false;
+    // Planar face thicken now materializes a physical prism. Curved native
+    // primitives retain explicit spatial support rejection below.
+    const auto planar_thicken = kernel.sweeps().thicken(faces.value->front(),1);
+    if (!planar_thicken.value || !query.mass_properties(*planar_thicken.value).value ||
+        !query.closest_point(*planar_thicken.value,{0,0,0}).value) return false;
     // Individually resolvable components can exceed the combined plane-frame
     // resolution when very far apart. Do not silently erase the small component.
     const auto tiny = kernel.primitives().box({1e12,0,0},.001,.001,.001);
@@ -1069,7 +1069,7 @@ bool stage3_section_distance_regression() {
     const auto invalid = kernel.eval_graph().is_invalid(*node.value);
     const auto recompute = kernel.eval_graph().recompute_count(*node.value);
     if (!objects.value || !stores.value) return false;
-    for (const auto unsupported : {*sphere.value,*placeholder_thicken.value}) {
+    for (const auto unsupported : {*sphere.value}) {
         if (!failed(query.section_detailed(unsupported,{{0,0,0},{0,0,1}}),axiom::StatusCode::NotImplemented,
                 axiom::diag_codes::kCoreOperationUnsupported,"query.section.support_gate") ||
         !failed(query.section(unsupported,{{0,0,0},{0,0,1}}),axiom::StatusCode::NotImplemented,

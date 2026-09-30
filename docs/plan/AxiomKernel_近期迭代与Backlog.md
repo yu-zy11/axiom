@@ -8,13 +8,17 @@
 
 `Stage 1 已达成；Stage 2 可测基线已达成；当前主线为 Stage 3：基础建模与查询分析（进行中）`
 
-cycle-0074 为升级前检查点，cycle-0075 S3-QUERY 保留历史门禁与查询支持矩阵。当前唯一退出任务 cycle-0076 S3-MASS 已通过调度器独立完整构建与全量 CTest，stage_outcome 为 ready_for_acceptance；质量矩阵、三条证据和文档已同步。正式状态只在 [当前进度 §5.2.1](AxiomKernel_当前开发进度.md#521-stage-3-当前退出任务) 维护，需完整门禁、文档检查及调度器提交成功后记已验收。Stage 3 / FR-OPS-001 / FR-QUERY-001 仍进行中；历史 remaining、权重或长期候选不构成自行扩展授权。
+cycle-0074 为升级前检查点，cycle-0075 S3-QUERY 保留历史门禁与查询支持矩阵。当前唯一退出任务 cycle-0077 S3-MODELING 已通过调度器独立完整构建与全量 CTest（16/16、153.89 s），stage_outcome 为 ready_for_acceptance；五类真实主路径/质量/查询矩阵、三条证据和文档已同步。正式状态只在 [当前进度 §5.2.1](AxiomKernel_当前开发进度.md#521-stage-3-当前退出任务) 维护，需完整门禁、文档检查及调度器提交成功后记已验收。Stage 3 / FR-OPS-001 / FR-QUERY-001 仍进行中；历史 remaining、权重或长期候选不构成自行扩展授权。
 
 ## 2. 当前迭代焦点
 
 ### 2.1 `diag + ops`
 
-- **cycle-0076 / S3-MASS（当前唯一任务，代码门禁通过）**：真实多面体从当前拓扑积分全部质量，未编辑原生球/柱/锥/环保留解析资格，成功拓扑/PCurve 编辑撤销，保存点/回滚恢复。删除 bbox、Boolean/Modified 来源与 Sweep 创建缓存 fallback；代理面重组/克隆/imprint/删除 owner 不改变拒绝，metadata/mesh/implicit 派生不继承资格。独立 primitive/建模全量质量参考、矩形子午面旋转采样误差、材料/空腔/岛与偏心积惯量、热缓存编辑拒绝/回滚/只读及稳定阶段/无部分值均随完整门禁通过，见 [质量矩阵](../api/AxiomKernel_详细模块接口清单.md#613-stage-3-质量属性支持矩阵cycle-0076--s3-mass) 与 [三条证据](../quality/AxiomKernel_测试与验收方案.md#13-cycle-0076--s3-mass-门禁与逐项证据)。历史 thicken 明确拒绝质量，真实主路径仍缺，不因本批通过退出 Stage 3。
+- **cycle-0077 / S3-MODELING（当前唯一任务，代码门禁通过）**：核验 extrude/revolve/sweep/loft 并补齐真实平面直边 Face thicken；当前定向外/内环与裁剪边沿支撑法向生成独立 owned 闭壳，支持凹形/分离非嵌套孔/有限正厚度，拒绝曲面/曲边/代理面，无 bbox fallback。五类公开面/边/壳查询、ExactBRep/owned_topo_welded、独立全质量/Strict、阶段诊断、活动事务不污染与回滚重试已执行通过。平面棱柱及共面侧壁 loft 夹具在浮点容差内精确，revolve 仍为采样多面体。见 [五类主路径矩阵](../api/AxiomKernel_详细模块接口清单.md#811-stage-3-五类建模主路径cycle-0077--s3-modeling) 与 [三条证据](../quality/AxiomKernel_测试与验收方案.md#14-cycle-0077--s3-modeling-门禁与逐项证据)。
+- **cycle-0077 门禁事实**：[日志](../../.axiom-agent/logs/cycle-0077-gates.log) 一轮测试/示例开启配置、并发 4 完整构建成功，CTest **16/16、0 失败、153.89 s**；必需 Ops **126.52 s**、Topology **0.13 s**，关联 Query **0.95 s**、Rep **9.79 s**、性能 **1.60 s**。无 repair，仍有初始化/未使用参数告警，未记录独立 Strict warnings、文档检查或提交成功；回归的 Strict 拓扑验证通过。当前为 ready_for_acceptance，正式验收由调度器确认，本轮不重建测试、不提交。
+
+
+- **cycle-0076 / S3-MASS（历史代码门禁）**：真实多面体从当前拓扑积分全部质量，未编辑原生球/柱/锥/环保留解析资格，成功拓扑/PCurve 编辑撤销，保存点/回滚恢复。删除 bbox、Boolean/Modified 来源与 Sweep 创建缓存 fallback；代理面重组/克隆/imprint/删除 owner 不改变拒绝，metadata/mesh/implicit 派生不继承资格。独立 primitive/建模全量质量参考、矩形子午面旋转采样误差、材料/空腔/岛与偏心积惯量、热缓存编辑拒绝/回滚/只读及稳定阶段/无部分值均随完整门禁通过，见 [质量矩阵](../api/AxiomKernel_详细模块接口清单.md#613-stage-3-质量属性支持矩阵cycle-0076--s3-mass) 与 [三条证据](../quality/AxiomKernel_测试与验收方案.md#13-cycle-0076--s3-mass-门禁与逐项证据)。该批当时的 thicken 质量拒绝已在 cycle-0077 更新为真实平面 Face 主路径；不因代码门禁通过自动退出 Stage 3。
 - **cycle-0076 门禁事实**：[日志](../../.axiom-agent/logs/cycle-0076-gates.log) 一轮完整构建（并发 4，测试/示例开启）成功，CTest **16/16、0 失败、147.97 s**；必需 Query **0.95 s**、Ops **120.75 s**、Rep **9.68 s**；Boolean **0.03 s**、性能 **1.58 s**，阈值/迭代数未变。无 repair，仍有初始化/未使用参数告警，未记录独立严格告警、文档检查/提交成功；本次只同步文档，未重建测试或提交。
 
 - **cycle-0075 / S3-QUERY（历史代码门禁）**：通用与专用实际截面、最近边界和体间材料距离共用真实拓扑；凹/孔/多壳奇偶、空集/共面/线点接触、bbox 重叠实体分离、相切、`1e-18` 正间隙及近邻平面不吸附参考已回归。支持 ExactBRep box/wedge、真实 Sweep、用户 Generic 平面直边嵌入闭壳；采样建模计算物化多面体，解析/曲边/旧 thicken 占位明确拒绝。真实多面体质量消费当前拓扑，编辑失败不得恢复旧缓存；topology/rep/provenance/缓存/Eval/事务与回滚一致性通过。repair 修正负向旋转侧壁反向与非等边楔体支撑，公共空列表建体夹具改验创建拒绝，零壳查询分支未验收。支持矩阵见 [API §6.1.2](../api/AxiomKernel_详细模块接口清单.md#612-stage-3-截面最近点与距离支持矩阵cycle-0075--s3-query)，四条证据见 [验收 §1.2](../quality/AxiomKernel_测试与验收方案.md#12-cycle-0075--s3-query-门禁与逐项证据)。
@@ -187,7 +191,7 @@ cycle-0074 为升级前检查点，cycle-0075 S3-QUERY 保留历史门禁与查�
 
 | 优先级 | 状态 | 模块 | 交付物（摘要） | 建议 `ctest` | 依赖 |
 |--------|------|------|----------------|--------------|------|
-| P0 | 代码全量门禁通过（cycle-0076，正式状态见当前进度 §5.2.1） | topo/ops/query/rep | S3-MASS：独立参考/采样误差、当前拓扑/原生解析资格、编辑保存点回滚、多壳材料空腔、无 bbox/来源/创建缓存 fallback | `axiom_query_eval_test`、`axiom_ops_heal_test`、`axiom_representation_io_test` | geo/topo |
+| P0 | 代码全量门禁通过（cycle-0077，正式状态见当前进度 §5.2.1） | topo/ops/query/rep | S3-MODELING：五类真实主路径/Strict，平面 Face thicken、公开拓扑/owned 表示/全质量、结构化诊断及事务/回滚重试 | `axiom_ops_heal_test`、`axiom_topology_test`、`axiom_query_eval_test` | geo/topo |
 | P0 | 已闭合（门禁） | core/io | 门面 IO 能力与 `IOService` 一致 | `axiom_smoke_test` | — |
 | P0～P1 | 已闭合（首批） | diag/ops/io/heal | 工作流 `Issue.stage` + JSON 导出可聚合 | `axiom_diagnostics_test`、`axiom_boolean_workflow_test`、`axiom_heal_test`、`axiom_ops_heal_test` | core |
 | P0～P1 | 已闭合（第 69 批） | diag/ops | 结构化数值证据、覆盖审计与 BOOL 受覆盖失败门禁 | `axiom_diagnostics_test`、`axiom_boolean_prep_test` | core |
@@ -213,7 +217,7 @@ cycle-0074 为升级前检查点，cycle-0075 S3-QUERY 保留历史门禁与查�
 
 ## 4. 下一未闭合批次
 
-当前唯一退出任务 S3-MASS 已完成代码全量门禁，质量支持矩阵、三条验收证据、稳定阶段与拒绝合同已同步；本批剩余交付为调度器文档检查和提交后的正式验收记录，不再安排重复代码验收或无关新增变体。Stage 3 仍缺真实 thicken 主路径等退出条件，须由调度器按主路线图 §4.4 另行定界。以下仅保留长期剩余能力候选，不优先于阶段任务；解析曲面/曲边实体查询、全局嵌入证明、加速结构及工业布尔不属于本批范围。
+当前唯一退出任务 S3-MODELING 已完成代码全量门禁，五类主路径/质量/查询矩阵、三条验收证据、稳定阶段及回滚合同已同步；本批剩余交付为调度器文档检查和提交后的正式验收记录，不再安排重复代码验收或无关新增变体。真实平面 Face thicken 缺口已补齐，Stage 3 整体退出须由调度器按主路线图 §4.4 确认，不自动进入后续阶段。以下仅保留长期剩余能力候选，不优先于阶段任务；解析曲面/曲边实体查询、全局嵌入证明、加速结构及工业布尔不属于本批范围。
 
 1. FR-GEO-001 / FR-QUERY-001：继续极端尺度、通用退化曲面、通用无限派生面自动有限化、旋转/扫掠专用局部界与大模型共享空间证书；无限曲线仍须显式有限窗口，一般高阶异参连续重合证明仍待闭合。
 2. FR-TOPO-001：在已交付的显式 trim 真曲线跨环门禁之上，推进 3D edge trim 与 PCurve/曲面参数域双向一致性、周期缝、奇点和持久命名。

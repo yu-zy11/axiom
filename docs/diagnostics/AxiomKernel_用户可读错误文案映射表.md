@@ -293,4 +293,18 @@ cycle-0075 的真实多面体截面完全无交集、纯线/点相切均为成�
 
 ### S3-MASS 质量查询文案（cycle-0076）
 
-按 `Issue.stage` 区分同一稳定错误码的使用场景，不新增错误码。`query.mass_properties.support_gate` 搭配 `AXM-CORE-E-0004` 时可显示“当前模型不支持质量分析”，说明“该模型没有受支持的真实边界，或原生解析模型已被编辑”，建议使用支持的真实建模路径；metadata 恢复、历史 thicken/布尔代理体不提示为“质量为零”。`preflight` 提示目标已删除或边界不完整；`numeric` 提示尺度或惯性数值不稳定。失败均没有可显示的部分质量，不能填入 bbox 估算值。回滚可恢复编辑前支持状态，提交后的原生解析编辑仍不支持。
+按 `Issue.stage` 区分同一稳定错误码的使用场景，不新增错误码。`query.mass_properties.support_gate` 搭配 `AXM-CORE-E-0004` 时可显示“当前模型不支持质量分析”，说明“该模型没有受支持的真实边界，或原生解析模型已被编辑”，建议使用支持的真实建模路径；metadata 恢复、历史占位 thicken 记录/布尔代理体不提示为“质量为零”。cycle-0077 真实平面 Face thicken 支持当前拓扑质量，见下节。`preflight` 提示目标已删除或边界不完整；`numeric` 提示尺度或惯性数值不稳定。失败均没有可显示的部分质量，不能填入 bbox 估算值。回滚可恢复编辑前支持状态，提交后的原生解析编辑仍不支持。
+
+### S3-MODELING 建模文案（cycle-0077）
+
+复用既有码，按 `Issue.stage` 显示失败位置。extrude/revolve/sweep/loft 的 `input_gate` 提示检查显式轮廓、轴/角度、有限导轨或截面数，`materialization` 提示输入不能形成受支持的闭壳；直线 sweep 的错误仍显示扫描阶段。
+
+| thicken 阶段 / 码 | 建议文案 / 处理 |
+|---|---|
+| input_gate / AXM-CORE-E-0001 | “目标面不存在”，重新获取有效 FaceId |
+| input_gate / AXM-MOD-E-0003 | “厚度必须有限且为正”，输入正厚度 |
+| topology_gate / AXM-MOD-E-0003 | “面边界或支撑平面无效”，检查定向边链、直线支撑/裁剪区间、平面归属与法向 |
+| support_gate / AXM-CORE-E-0004 | “加厚仅支持真实平面直边面”，曲面/曲边/代理面不提示为成功或零质量 |
+| materialization / AXM-MOD-E-0003 | “面区域或厚度无法形成有效闭壳”，检查自交、孔冲突或当前尺度无法分辨的厚度 |
+
+沿支撑法向单侧加厚，不按环绕向猜测方向；失败没有结果体，保留原模型和活动事务，可回滚后重试。真实平面 thicken 已支持当前拓扑质量与空间查询；编辑为曲面时 query.mass_properties.support_gate 仍提示不支持，不显示旧缓存属性。支持范围与实际回归见 [API §8.1.1](../api/AxiomKernel_详细模块接口清单.md#811-stage-3-五类建模主路径cycle-0077--s3-modeling)。

@@ -54,6 +54,8 @@ public:
 
     /// Simple planar polygons (including concave profiles and disjoint holes) produce a triangulated closed prism.
     /// Requires positive finite distance and a direction transverse to the profile plane.
+    /// Explicit-path failures report extrude.input_gate or extrude.materialization;
+    /// both reject before model allocation and preserve active transactions.
     Result<BodyId> extrude(const ProfileRef& profile, const Vec3& direction, Scalar distance);
     /// Explicit planar polygon, optionally with holes: straight extrusion with uniform section scaling.
     /// At t in [0,1], p becomes center + (1+t*(end_scale-1))*(p-center) + t*unit(direction)*distance.
@@ -100,6 +102,7 @@ public:
     /// meet the axis along one boundary edge. Profiles that cross the axis, touch it
     /// at an isolated point, have a holed region touching the axis, or are numerically
     /// near-degenerate are rejected before allocation.
+    /// Failures report revolve.input_gate or revolve.materialization.
     Result<BodyId> revolve(const ProfileRef& profile, const Axis3& axis, Scalar angle);
     /// Revolve an explicit profile over the directed angular interval [start_angle, end_angle].
     /// Angles are radians about axis.direction. The finite, nonzero signed span must have magnitude
@@ -119,6 +122,8 @@ public:
     /// must start on the rail in a plane normal to its tangent. Concavities and holes are supported;
     /// gaps, tangent-discontinuous joints, cusps, nested chains, excessive curvature and
     /// self-approaching rails are rejected without allocating a body or owned topology.
+    /// Failures report sweep.input_gate or sweep.materialization, including
+    /// the straight-rail path delegated to extrusion.
     Result<BodyId> sweep(const ProfileRef& profile, CurveId rail);
     /// Sweep an explicit polygon along a supported rail while uniformly scaling each transported
     /// section from 1 at the rail start to end_scale at the rail end. Non-unit scaling requires
@@ -182,7 +187,19 @@ public:
     /// correspondence; winding is independent. Sections must be strictly ordered along a common
     /// transverse direction and retain a valid interpolated region. Unlike ring topology,
     /// automatic vertex matching, branching and collapsed/apex sections are rejected before allocation.
+    /// Failures report loft.input_gate or loft.materialization.
     Result<BodyId> loft(std::span<const ProfileRef> profiles);
+    /// Thicken a real planar straight-edge Face by a finite positive distance along
+    /// its support surface normal (independent of loop winding). Uses the current
+    /// oriented outer/inner loops, supports simple concave outlines and disjoint
+    /// non-nested holes, and creates a separate owned closed polyhedral BRep.
+    /// Planar geometry and prism mass are exact up to floating-point tolerance;
+    /// caps/walls are triangulated, with no bbox or analytic-surface approximation.
+    /// Source face/shell/body provenance is retained without sharing result topology.
+    /// Curved supports/edges and proxy faces are unsupported. Invalid references,
+    /// nonplanar or discontinuous boundaries, invalid regions and unresolved thickness
+    /// fail with thicken.input_gate/topology_gate/support_gate/materialization issues.
+    /// Failure allocates no model objects and leaves active transactions intact.
     Result<BodyId> thicken(FaceId face_id, Scalar distance);
 
 private:

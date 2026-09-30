@@ -164,7 +164,7 @@ struct BodyRecord {
     Scalar a {0.0};
     Scalar b {0.0};
     Scalar c {0.0};
-    /// 建模创建时的历史缓存，不是公开质量查询的依据；`extrude_poly_cap_area<=0` 表示未缓存（`thicken` 为面面积估计；`revolve` 可为轮廓面积）。
+    /// 建模创建时的历史缓存，不是公开质量查询的依据；`extrude_poly_cap_area<=0` 表示未缓存（`revolve` 可为轮廓面积）。
     Scalar extrude_poly_cap_area {0.0};
     Scalar extrude_lateral_area {0.0};
     Point3 extrude_mass_centroid {};
@@ -178,7 +178,7 @@ struct BodyRecord {
     Scalar revolve_signed_angle {0.0};
     /// 整周旋转必须走专用闭壳物化，失败时禁止回退到 bbox 占位拓扑。
     bool revolve_full_turn {false};
-    /// 多边形 `extrude`：轮廓副本，供 **平面多边形 + 非退化拉伸方向** 的棱柱 BRep 物化（见 `try_materialize_sweep_extrude_prism_body`）。
+    /// 多边形 `extrude` / 平面 Face `thicken`：当前边界副本，供 **平面多边形 + 非退化拉伸方向** 的棱柱 BRep 物化（见 `try_materialize_sweep_extrude_prism_body`）。
     std::vector<Point3> extrude_profile_xyz;
     std::vector<std::vector<Point3>> extrude_holes_xyz;
     /// Single straight extrusion: homothetic end section, about a center in the profile plane.

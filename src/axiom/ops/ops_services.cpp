@@ -26,6 +26,14 @@ namespace {
 
 constexpr Scalar kSweepPi = 3.1415926535897932384626433832795;
 
+Result<BodyId> modeling_input_failure(detail::KernelState& state, std::string_view code,
+                                      std::string message, std::string summary, std::string_view stage) {
+    auto issue = detail::make_error_issue(code, std::move(message));
+    issue.stage = std::string(stage);
+    return error_result<BodyId>(StatusCode::InvalidInput,
+        state.create_diagnostic(std::move(summary), {std::move(issue)}));
+}
+
 // Refine the already sampled rail for scale and optional roll, keeping its
 // original corners and every law key. Arc-length keys are not curve parameters.
 // Work stays in temporary vectors until the complete schedule has been checked.
@@ -508,9 +516,9 @@ Result<BodyId> SweepService::extrude(const ProfileRef& profile, const Vec3& dire
         !std::isfinite(distance) || distance <= 0.0 ||
         !std::isfinite(direction.x) || !std::isfinite(direction.y) || !std::isfinite(direction.z) ||
         !valid_axis(direction)) {
-        return detail::invalid_input_result<BodyId>(
+        return modeling_input_failure(
             *state_, diag_codes::kCoreParameterOutOfRange,
-            "拉伸失败：轮廓不能为空，方向必须有效且距离必须大于 0", "拉伸失败");
+            "拉伸失败：轮廓不能为空，方向必须有效且距离必须大于 0", "拉伸失败", "extrude.input_gate");
     }
     detail::BodyRecord record;
     record.kind = detail::BodyKind::Sweep;
@@ -521,13 +529,13 @@ Result<BodyId> SweepService::extrude(const ProfileRef& profile, const Vec3& dire
     record.b = distance;
     if (!profile.polygon_xyz.empty()) {
         if (profile.polygon_xyz.size() < 3) {
-            return detail::invalid_input_result<BodyId>(
+            return modeling_input_failure(
                 *state_, diag_codes::kCoreParameterOutOfRange,
-                "拉伸失败：polygon 轮廓点数不足（至少 3 个点）", "拉伸失败");
+                "拉伸失败：polygon 轮廓点数不足（至少 3 个点）", "拉伸失败", "extrude.input_gate");
         }
         const auto reject_profile = [&](const char* message) {
-            return detail::invalid_input_result<BodyId>(
-                *state_, diag_codes::kCoreParameterOutOfRange, message, "拉伸失败");
+            return modeling_input_failure(
+                *state_, diag_codes::kCoreParameterOutOfRange, message, "拉伸失败", "extrude.input_gate");
         };
         const auto& poly = profile.polygon_xyz;
         for (const auto& p : poly) {
@@ -580,9 +588,9 @@ Result<BodyId> SweepService::extrude(const ProfileRef& profile, const Vec3& dire
             extend(top);
         }
         if (!bbox.is_valid) {
-            return detail::invalid_input_result<BodyId>(
+            return modeling_input_failure(
                 *state_, diag_codes::kCoreParameterOutOfRange,
-                "拉伸失败：polygon 轮廓点非法，无法形成有效包围盒", "拉伸失败");
+                "拉伸失败：polygon 轮廓点非法，无法形成有效包围盒", "拉伸失败", "extrude.input_gate");
         }
         record.bbox = bbox;
         // `BodyKind::Sweep` 的 `record.a`：多边形拉伸棱柱体积缓存（供 `mass_properties` 非纯 bbox 口径）。
@@ -656,9 +664,9 @@ Result<BodyId> SweepService::extrude(const ProfileRef& profile, const Vec3& dire
     }
     const auto body = make_body(state_, record, "已完成拉伸");
     if (body.value == 0) {
-        return detail::invalid_input_result<BodyId>(
+        return modeling_input_failure(
             *state_, diag_codes::kCoreParameterOutOfRange,
-            "拉伸失败：polygon 轮廓无法物化为有效棱柱", "拉伸失败");
+            "拉伸失败：polygon 轮廓无法物化为有效棱柱", "拉伸失败", "extrude.materialization");
     }
     return ok_result(body, state_->create_diagnostic("已完成拉伸"));
 }
@@ -929,9 +937,9 @@ Result<BodyId> SweepService::extrude_to_plane(const ProfileRef& profile, const V
 Result<BodyId> SweepService::revolve(const ProfileRef& profile, const Axis3& axis, Scalar angle) {
     constexpr Scalar kTwoPi = 6.283185307179586476925286766559;
     if (!std::isfinite(angle) || angle <= 0.0 || angle > kTwoPi + 1e-10) {
-        return detail::invalid_input_result<BodyId>(
+        return modeling_input_failure(
             *state_, diag_codes::kCoreParameterOutOfRange,
-            "旋转失败：旋转角须位于 (0, 2π]", "旋转失败");
+            "旋转失败：旋转角须位于 (0, 2π]", "旋转失败", "revolve.input_gate");
     }
     return revolve_between(profile, axis, 0.0, angle);
 }
@@ -947,10 +955,10 @@ Result<BodyId> SweepService::revolve_between(const ProfileRef& profile, const Ax
         angle > kTwoPi + 1e-10 || !std::isfinite(axis.origin.x) ||
         !std::isfinite(axis.origin.y) || !std::isfinite(axis.origin.z) ||
         !std::isfinite(axis_length) || axis_length <= 1e-14) {
-        return detail::invalid_input_result<BodyId>(
+        return modeling_input_failure(
             *state_, diag_codes::kCoreParameterOutOfRange,
             "区间旋转失败：轮廓与旋转轴必须有限有效，起止角须定义绝对值位于 (0, 2π] 的有向区间",
-            "区间旋转失败");
+            "区间旋转失败", "revolve.input_gate");
     }
     detail::BodyRecord record;
     record.kind = detail::BodyKind::Sweep;
@@ -963,9 +971,9 @@ Result<BodyId> SweepService::revolve_between(const ProfileRef& profile, const Ax
 
     if (!profile.polygon_xyz.empty()) {
         if (profile.polygon_xyz.size() < 3) {
-            return detail::invalid_input_result<BodyId>(
+            return modeling_input_failure(
                 *state_, diag_codes::kCoreParameterOutOfRange,
-                "旋转失败：polygon 轮廓点数不足（至少 3 个点）", "旋转失败");
+                "旋转失败：polygon 轮廓点数不足（至少 3 个点）", "旋转失败", "revolve.input_gate");
         }
         record.revolve_profile_xyz = profile.polygon_xyz;
         record.revolve_holes_xyz = profile.holes_xyz;
@@ -997,9 +1005,9 @@ Result<BodyId> SweepService::revolve_between(const ProfileRef& profile, const Ax
             extend_point(rotate_point_around_unit_axis(p, O, u, end_cos, end_sin));
         }
         if (!bbox.is_valid) {
-            return detail::invalid_input_result<BodyId>(
+            return modeling_input_failure(
                 *state_, diag_codes::kCoreParameterOutOfRange,
-                "旋转失败：polygon 轮廓无法形成有效包围盒", "旋转失败");
+                "旋转失败：polygon 轮廓无法形成有效包围盒", "旋转失败", "revolve.input_gate");
         }
         record.bbox = bbox;
         record.b = record.revolve_full_turn ? kTwoPi : angle;
@@ -1016,10 +1024,10 @@ Result<BodyId> SweepService::revolve_between(const ProfileRef& profile, const Ax
     }
     const auto body = make_body(state_, std::move(record), "已完成旋转");
     if (body.value == 0) {
-        return detail::invalid_input_result<BodyId>(
+        return modeling_input_failure(
             *state_, diag_codes::kCoreParameterOutOfRange,
             "区间旋转失败：轮廓须为有效共面多边形区域、轴须位于轮廓平面且区域位于轴的一侧；带孔区域须与轴保持间隙，无孔轮廓也可仅以一条连续边接触轴",
-            "区间旋转失败");
+            "区间旋转失败", "revolve.materialization");
     }
     return ok_result(body, state_->create_diagnostic("已完成区间旋转"));
 }
@@ -1140,19 +1148,19 @@ Result<BodyId> SweepService::sweep_impl(const ProfileRef& profile, CurveId rail,
         return error_result<BodyId>(StatusCode::InvalidInput,diagnostic);
     };
     if (!std::isfinite(end_scale) || !(end_scale > 0.0)) {
-        return detail::invalid_input_result<BodyId>(
+        return modeling_input_failure(
             *state_, diag_codes::kCoreParameterOutOfRange,
-            "变截面扫描失败：终端比例必须有限且严格为正", "变截面扫描失败");
+            "变截面扫描失败：终端比例必须有限且严格为正", "变截面扫描失败", "sweep.input_gate");
     }
     if (profile.label.empty() || !detail::has_curve(*state_, rail)) {
-        return detail::invalid_input_result<BodyId>(
+        return modeling_input_failure(
             *state_, diag_codes::kCoreInvalidHandle,
-            "扫描失败：轮廓为空或导轨曲线不存在", "扫描失败");
+            "扫描失败：轮廓为空或导轨曲线不存在", "扫描失败", "sweep.input_gate");
     }
     if (end_scale != 1.0 && profile.polygon_xyz.empty()) {
-        return detail::invalid_input_result<BodyId>(
+        return modeling_input_failure(
             *state_, diag_codes::kCoreParameterOutOfRange,
-            "变截面扫描失败：非单位比例要求显式 polygon 轮廓", "变截面扫描失败");
+            "变截面扫描失败：非单位比例要求显式 polygon 轮廓", "变截面扫描失败", "sweep.input_gate");
     }
     const auto& curve = state_->curves.at(rail.value);
     if (!profile.polygon_xyz.empty() || !profile.holes_xyz.empty()) {
@@ -1163,23 +1171,23 @@ Result<BodyId> SweepService::sweep_impl(const ProfileRef& profile, CurveId rail,
                             curve.kind == detail::CurveKind::BSpline || curve.kind == detail::CurveKind::Nurbs ||
                             curve.kind == detail::CurveKind::CompositeChain;
         if ((!linear && !curved) || profile.polygon_xyz.size() < 3 || (linear && curve.poles.size() < 2)) {
-            return detail::invalid_input_result<BodyId>(
+            return modeling_input_failure(
                 *state_, diag_codes::kCoreParameterOutOfRange,
-                "扫描失败：显式 polygon 轮廓须有至少三个点，导轨须为线段、折线、整圆或受支持的样条", "扫描失败");
+                "扫描失败：显式 polygon 轮廓须有至少三个点，导轨须为线段、折线、整圆或受支持的样条", "扫描失败", "sweep.input_gate");
         }
         if (curved) {
             std::vector<Point3> origins;
             std::vector<Vec3> tangents;
             bool closed = false;
             if (!sample_curved_sweep_rail(*state_, curve, origins, tangents, closed)) {
-                return detail::invalid_input_result<BodyId>(
+                return modeling_input_failure(
                     *state_, diag_codes::kCoreParameterOutOfRange,
-                    "曲线扫掠失败：导轨求值退化、具有尖点，或复合导轨接缝的位置/切向不连续", "曲线扫掠失败");
+                    "曲线扫掠失败：导轨求值退化、具有尖点，或复合导轨接缝的位置/切向不连续", "曲线扫掠失败", "sweep.input_gate");
             }
             if (closed && end_scale != 1.0) {
-                return detail::invalid_input_result<BodyId>(
+                return modeling_input_failure(
                     *state_, diag_codes::kCoreParameterOutOfRange,
-                    "变截面扫描失败：周期导轨的首尾截面比例必须一致", "变截面扫描失败");
+                    "变截面扫描失败：周期导轨的首尾截面比例必须一致", "变截面扫描失败", "sweep.input_gate");
             }
             if (closed && !section_stations.empty() &&
                 std::min({std::abs(section_stations.back().twist_angle),
@@ -1192,9 +1200,9 @@ Result<BodyId> SweepService::sweep_impl(const ProfileRef& profile, CurveId rail,
             const Scalar normal_length = detail::norm(raw_normal);
             const Scalar plane_tol = std::max(Scalar(1e-7), state_->config.tolerance.linear * Scalar(100.0));
             if (!std::isfinite(normal_length) || normal_length <= 1e-14) {
-                return detail::invalid_input_result<BodyId>(
+                return modeling_input_failure(
                     *state_, diag_codes::kCoreParameterOutOfRange,
-                    "曲线扫掠失败：截面面积退化", "曲线扫掠失败");
+                    "曲线扫掠失败：截面面积退化", "曲线扫掠失败", "sweep.input_gate");
             }
             const Vec3 profile_normal = detail::scale(raw_normal, 1.0 / normal_length);
             const Vec3 start_tangent = detail::normalize(tangents.front());
@@ -1214,17 +1222,17 @@ Result<BodyId> SweepService::sweep_impl(const ProfileRef& profile, CurveId rail,
             if (normal_alignment < 1.0 - 1e-6 || !inspect_ring(profile.polygon_xyz) ||
                 !std::all_of(profile.holes_xyz.begin(), profile.holes_xyz.end(), inspect_ring) ||
                 !std::isfinite(profile_radius) || profile_radius <= plane_tol) {
-                return detail::invalid_input_result<BodyId>(
+                return modeling_input_failure(
                     *state_, diag_codes::kCoreParameterOutOfRange,
-                    "曲线扫掠失败：起始截面须有限、非退化、经过导轨起点且垂直于起始切向", "曲线扫掠失败");
+                    "曲线扫掠失败：起始截面须有限、非退化、经过导轨起点且垂直于起始切向", "曲线扫掠失败", "sweep.input_gate");
             }
             Scalar maximum_scale = std::max(Scalar(1.0), end_scale);
             for (const auto& key : stations) maximum_scale = std::max(maximum_scale, key.scale);
             profile_radius *= maximum_scale;
             if (!std::isfinite(profile_radius)) {
-                return detail::invalid_input_result<BodyId>(
+                return modeling_input_failure(
                     *state_, diag_codes::kCoreParameterOutOfRange,
-                    "变截面扫描失败：比例后的截面尺度溢出", "变截面扫描失败");
+                    "变截面扫描失败：比例后的截面尺度溢出", "变截面扫描失败", "sweep.input_gate");
             }
 
             // Conservative tube gates: every sampled turn must have a radius of
@@ -1239,18 +1247,18 @@ Result<BodyId> SweepService::sweep_impl(const ProfileRef& profile, CurveId rail,
                 if (!closed && next == 0) break;
                 const Scalar step = detail::norm(detail::subtract(origins[next], origins[i]));
                 if (!std::isfinite(step) || step <= plane_tol) {
-                    return detail::invalid_input_result<BodyId>(
+                    return modeling_input_failure(
                         *state_, diag_codes::kCoreParameterOutOfRange,
-                        "曲线扫掠失败：采样导轨含重复或近退化站点", "曲线扫掠失败");
+                        "曲线扫掠失败：采样导轨含重复或近退化站点", "曲线扫掠失败", "sweep.input_gate");
                 }
                 rail_length += step;
                 if (next != 0) accumulated_length[next] = rail_length;
                 const Scalar cosine = std::clamp(detail::dot(detail::normalize(tangents[i]),
                                                               detail::normalize(tangents[next])), -1.0, 1.0);
                 if (cosine <= 0.5) {
-                    return detail::invalid_input_result<BodyId>(
+                    return modeling_input_failure(
                         *state_, diag_codes::kCoreParameterOutOfRange,
-                        "曲线扫掠失败：导轨转折过急或切向反转", "曲线扫掠失败");
+                        "曲线扫掠失败：导轨转折过急或切向反转", "曲线扫掠失败", "sweep.input_gate");
                 }
                 const Scalar sine_half = std::sqrt(std::max(Scalar(0.0), (1.0 - cosine) * 0.5));
                 if (sine_half > 1e-10) {
@@ -1259,9 +1267,9 @@ Result<BodyId> SweepService::sweep_impl(const ProfileRef& profile, CurveId rail,
                         detail::norm(detail::subtract(origins[i], origins[previous]));
                     const Scalar curvature_radius = std::min(step, previous_step) / (2.0 * sine_half);
                     if (!std::isfinite(curvature_radius) || profile_radius >= 0.35 * curvature_radius) {
-                        return detail::invalid_input_result<BodyId>(
+                        return modeling_input_failure(
                             *state_, diag_codes::kCoreParameterOutOfRange,
-                            "曲线扫掠失败：截面相对导轨曲率过大，可能折叠", "曲线扫掠失败");
+                            "曲线扫掠失败：截面相对导轨曲率过大，可能折叠", "曲线扫掠失败", "sweep.input_gate");
                     }
                 }
             }
@@ -1274,9 +1282,9 @@ Result<BodyId> SweepService::sweep_impl(const ProfileRef& profile, CurveId rail,
                     // arc length to represent distinct tube neighborhoods.
                     if (along <= 3.0 * profile_radius) continue;
                     if (detail::norm(detail::subtract(origins[i], origins[j])) <= 2.25 * profile_radius) {
-                        return detail::invalid_input_result<BodyId>(
+                        return modeling_input_failure(
                             *state_, diag_codes::kCoreParameterOutOfRange,
-                            "曲线扫掠失败：非相邻导轨区段过近，截面可能自相交", "曲线扫掠失败");
+                            "曲线扫掠失败：非相邻导轨区段过近，截面可能自相交", "曲线扫掠失败", "sweep.input_gate");
                     }
                 }
             }
@@ -1312,9 +1320,9 @@ Result<BodyId> SweepService::sweep_impl(const ProfileRef& profile, CurveId rail,
                     const Scalar distance_squared = sweep_segment_distance_squared(
                         origins[i], origins[i_next], origins[j], origins[j_next]);
                     if (distance_squared <= clearance_squared) {
-                        return detail::invalid_input_result<BodyId>(
+                        return modeling_input_failure(
                             *state_, diag_codes::kCoreParameterOutOfRange,
-                            "曲线扫掠失败：非相邻导轨弦段相交或过近，截面可能自相交", "曲线扫掠失败");
+                            "曲线扫掠失败：非相邻导轨弦段相交或过近，截面可能自相交", "曲线扫掠失败", "sweep.input_gate");
                     }
                 }
             }
@@ -1353,9 +1361,9 @@ Result<BodyId> SweepService::sweep_impl(const ProfileRef& profile, CurveId rail,
                 transported = {transported.x + correction.x, transported.y + correction.y,
                                transported.z + correction.z};
                 if (detail::norm(transported) <= 1e-12) {
-                    return detail::invalid_input_result<BodyId>(
+                    return modeling_input_failure(
                         *state_, diag_codes::kCoreParameterOutOfRange,
-                        "曲线扫掠失败：无法构造稳定的平行移动截面标架", "曲线扫掠失败");
+                        "曲线扫掠失败：无法构造稳定的平行移动截面标架", "曲线扫掠失败", "sweep.input_gate");
                 }
                 transported = detail::normalize(transported);
                 frame_u.push_back(transported);
@@ -1387,9 +1395,9 @@ Result<BodyId> SweepService::sweep_impl(const ProfileRef& profile, CurveId rail,
                     std::clamp(detail::dot(seam_u, frame_u.front()), -1.0, 1.0));
                 const Scalar correction_length = accumulated_length.back();
                 if (!std::isfinite(residual) || !(correction_length > plane_tol)) {
-                    return detail::invalid_input_result<BodyId>(
+                    return modeling_input_failure(
                         *state_, diag_codes::kCoreParameterOutOfRange,
-                        "闭合曲线扫掠失败：无法构造连续的周期截面标架", "闭合曲线扫掠失败");
+                        "闭合曲线扫掠失败：无法构造连续的周期截面标架", "闭合曲线扫掠失败", "sweep.input_gate");
                 }
                 for (std::size_t i = 1; i < station_count; ++i) {
                     const Scalar angle = residual * accumulated_length[i] / correction_length;
@@ -1439,9 +1447,9 @@ Result<BodyId> SweepService::sweep_impl(const ProfileRef& profile, CurveId rail,
                 if (!stations.empty()) return law_failure("sweep_law_materialization",
                     "截面律扫掠失败：实际截面退化、侧壁折叠/接触、接触候选超限或闭壳质量积分失败",
                     sampled_intervals);
-                return detail::invalid_input_result<BodyId>(
+                return modeling_input_failure(
                     *state_, diag_codes::kCoreParameterOutOfRange,
-                    "曲线扫掠失败：截面、孔、导轨或采样闭壳发生数值退化", "曲线扫掠失败");
+                    "曲线扫掠失败：截面、孔、导轨或采样闭壳发生数值退化", "曲线扫掠失败", "sweep.materialization");
             }
             return ok_result(body, state_->create_diagnostic("已完成随导轨标架曲线扫掠"));
         }
@@ -1449,12 +1457,22 @@ Result<BodyId> SweepService::sweep_impl(const ProfileRef& profile, CurveId rail,
         const auto displacement = detail::subtract(curve.poles.back(), curve.poles.front());
         const auto length = std::hypot(displacement.x, displacement.y, displacement.z);
         if (!std::isfinite(length) || length <= 0.0) {
-            return detail::invalid_input_result<BodyId>(
+            return modeling_input_failure(
                 *state_, diag_codes::kCoreParameterOutOfRange,
-                "扫描失败：导轨位移必须有限且非退化", "扫描失败");
+                "扫描失败：导轨位移必须有限且非退化", "扫描失败", "sweep.input_gate");
         }
         if (curve.kind == detail::CurveKind::LineSegment && end_scale == 1.0 && stations.empty()) {
-            return extrude(profile, detail::scale(displacement, 1.0 / length), length);
+            auto result = extrude(profile, detail::scale(displacement, 1.0 / length), length);
+            if (!result.value) {
+                const auto diagnostic = state_->diagnostics.find(result.diagnostic_id.value);
+                if (diagnostic != state_->diagnostics.end()) {
+                    auto issues = diagnostic->second.issues;
+                    for (auto& issue : issues)
+                        if (issue.stage.starts_with("extrude.")) issue.stage.replace(0, 7, "sweep");
+                    result.diagnostic_id = state_->create_diagnostic("扫描失败", std::move(issues));
+                }
+            }
+            return result;
         }
         detail::BodyRecord record;
         record.kind = detail::BodyKind::Sweep;
@@ -1475,9 +1493,9 @@ Result<BodyId> SweepService::sweep_impl(const ProfileRef& profile, CurveId rail,
             if (!std::isfinite(normal_length) || normal_length <= 1e-14 ||
                 std::abs(detail::dot(detail::scale(raw_normal, 1.0 / normal_length),
                                      detail::subtract(curve.poles.front(), profile.polygon_xyz.front()))) > plane_tol) {
-                return detail::invalid_input_result<BodyId>(
+                return modeling_input_failure(
                     *state_, diag_codes::kCoreParameterOutOfRange,
-                    "变截面扫描失败：直线或折线导轨起点必须位于轮廓平面", "变截面扫描失败");
+                    "变截面扫描失败：直线或折线导轨起点必须位于轮廓平面", "变截面扫描失败", "sweep.input_gate");
             }
             if (!section_stations.empty()) {
                 // Fixed-plane polyline sections roll about their oriented normal,
@@ -1490,17 +1508,17 @@ Result<BodyId> SweepService::sweep_impl(const ProfileRef& profile, CurveId rail,
             for (std::size_t i = 1; i < curve.poles.size(); ++i) {
                 const Scalar step = detail::norm(detail::subtract(curve.poles[i], curve.poles[i - 1]));
                 if (!std::isfinite(step) || !(step > 0.0)) {
-                    return detail::invalid_input_result<BodyId>(
+                    return modeling_input_failure(
                         *state_, diag_codes::kCoreParameterOutOfRange,
-                        "变截面扫描失败：导轨含重复或非有限站点", "变截面扫描失败");
+                        "变截面扫描失败：导轨含重复或非有限站点", "变截面扫描失败", "sweep.input_gate");
                 }
                 path_length += step;
                 station_distances[i] = path_length;
             }
             if (!std::isfinite(path_length) || !(path_length > 0.0)) {
-                return detail::invalid_input_result<BodyId>(
+                return modeling_input_failure(
                     *state_, diag_codes::kCoreParameterOutOfRange,
-                    "变截面扫描失败：导轨弧长退化", "变截面扫描失败");
+                    "变截面扫描失败：导轨弧长退化", "变截面扫描失败", "sweep.input_gate");
             }
             record.extrude_scale_center = curve.poles.front();
             record.sweep_station_scales.reserve(station_distances.size());
@@ -1524,9 +1542,9 @@ Result<BodyId> SweepService::sweep_impl(const ProfileRef& profile, CurveId rail,
             if (!stations.empty()) return law_failure("sweep_law_materialization",
                 "截面律扫掠失败：实际截面退化、轮廓或孔无效、侧壁接触、导轨非单调或闭壳质量积分失败",
                 sampled_intervals);
-            return detail::invalid_input_result<BodyId>(
+            return modeling_input_failure(
                 *state_, diag_codes::kCoreParameterOutOfRange,
-                "扫描失败：轮廓无效或导轨未沿轮廓法向严格单调推进，无法形成有效闭壳", "扫描失败");
+                "扫描失败：轮廓无效或导轨未沿轮廓法向严格单调推进，无法形成有效闭壳", "扫描失败", "sweep.materialization");
         }
         return ok_result(body, state_->create_diagnostic(
             end_scale == 1.0 ? "已完成折线平移扫掠" : "已完成折线变截面扫掠"));
@@ -1551,9 +1569,9 @@ Result<BodyId> SweepService::loft(std::span<const ProfileRef> profiles) {
         std::any_of(profiles.begin(), profiles.end(), [](const ProfileRef& profile) {
             return profile.label.empty() || profile.polygon_xyz.size() < 3;
         })) {
-        return detail::invalid_input_result<BodyId>(
+        return modeling_input_failure(
             *state_, diag_codes::kCoreParameterOutOfRange,
-            "放样失败：至少需要两个带显式平面多边形的有效截面", "放样失败");
+            "放样失败：至少需要两个带显式平面多边形的有效截面", "放样失败", "loft.input_gate");
     }
     detail::BodyRecord record;
     record.kind = detail::BodyKind::Sweep;
@@ -1570,37 +1588,158 @@ Result<BodyId> SweepService::loft(std::span<const ProfileRef> profiles) {
     record.bbox = detail::make_bbox(profiles.front().polygon_xyz.front(), profiles.front().polygon_xyz.front());
     const auto body = make_body(state_, std::move(record), "已完成兼容多边形截面放样");
     if (body.value == 0) {
-        return detail::invalid_input_result<BodyId>(
+        return modeling_input_failure(
             *state_, diag_codes::kCoreParameterOutOfRange,
-            "放样失败：截面须简单共面、拓扑兼容、严格有序，且截面间插值不得退化或折叠", "放样失败");
+            "放样失败：截面须简单共面、拓扑兼容、严格有序，且截面间插值不得退化或折叠", "放样失败", "loft.materialization");
     }
     return ok_result(body, state_->create_diagnostic("已完成兼容多边形截面放样"));
 }
 
 Result<BodyId> SweepService::thicken(FaceId face_id, Scalar distance) {
-    if (state_->faces.find(face_id.value) == state_->faces.end() || distance <= 0.0) {
-        return detail::invalid_input_result<BodyId>(
-            *state_, diag_codes::kModShellFailure,
-            "加厚失败：目标面不存在或厚度非法", "加厚失败");
+    const auto failure = [&](StatusCode status, std::string_view code,
+                             std::string_view stage, std::string message) {
+        auto issue = detail::make_error_issue(code, std::move(message), {face_id.value});
+        issue.stage = std::string(stage);
+        issue.numeric_evidence = {{"distance", distance, "model_unit"}};
+        return error_result<BodyId>(status, state_->create_diagnostic("加厚失败", {std::move(issue)}));
+    };
+    const auto face = state_->faces.find(face_id.value);
+    if (face == state_->faces.end()) {
+        return failure(StatusCode::InvalidInput, diag_codes::kCoreInvalidHandle,
+                       "thicken.input_gate", "加厚失败：目标面不存在");
     }
+    if (!std::isfinite(distance) || !(distance > 0)) {
+        return failure(StatusCode::InvalidInput, diag_codes::kModShellFailure,
+                       "thicken.input_gate", "加厚失败：厚度必须有限且为正");
+    }
+    const auto surface = state_->surfaces.find(face->second.surface_id.value);
+    if (surface == state_->surfaces.end()) {
+        return failure(StatusCode::InvalidTopology, diag_codes::kModShellFailure,
+                       "thicken.topology_gate", "加厚失败：支撑曲面引用无效");
+    }
+    if (face->second.mass_boundary_proxy || surface->second.kind != detail::SurfaceKind::Plane) {
+        return failure(StatusCode::NotImplemented, diag_codes::kCoreOperationUnsupported,
+                       "thicken.support_gate", "加厚仅支持真实平面直边面，不支持代理面或曲面");
+    }
+    const Scalar normal_length = detail::norm(surface->second.normal);
+    if (!std::isfinite(normal_length) || !(normal_length > 1e-14)) {
+        return failure(StatusCode::DegenerateGeometry, diag_codes::kModShellFailure,
+                       "thicken.topology_gate", "加厚失败：支撑平面法向退化");
+    }
+    const Vec3 normal = detail::scale(surface->second.normal, 1 / normal_length);
+    const Scalar tolerance = std::max(Scalar(1e-12), state_->config.tolerance.linear);
     detail::BodyRecord record;
     record.kind = detail::BodyKind::Sweep;
     record.rep_kind = RepKind::ExactBRep;
-    record.label = "thicken";
-    append_unique_face(record.source_faces, face_id);
-    append_shells_for_face(*state_, record.source_shells, face_id);
-    auto bbox = face_bbox(*state_, face_id);
-    if (!bbox.is_valid) {
-        bbox = detail::make_bbox({0.0, 0.0, 0.0}, {1.0, 1.0, 1.0});
-    }
+    record.label = "thicken:planar";
+    record.axis = normal;
     record.b = distance;
-    const auto face_area_est = bbox_max_axis_rectangle_area(bbox);
-    if (face_area_est > 1e-30) {
-        record.extrude_poly_cap_area = face_area_est;
-        record.a = face_area_est * distance;
+    // Read actual oriented boundary chains, never the face bounds. Preflight
+    // remains in temporary vectors and does not populate evaluation caches.
+    std::vector<LoopId> loops {face->second.outer_loop};
+    loops.insert(loops.end(), face->second.inner_loops.begin(), face->second.inner_loops.end());
+    for (std::size_t ring_index = 0; ring_index < loops.size(); ++ring_index) {
+        const auto loop = state_->loops.find(loops[ring_index].value);
+        if (loop == state_->loops.end() || loop->second.coedges.size() < 3) {
+            return failure(StatusCode::InvalidTopology, diag_codes::kModShellFailure,
+                           "thicken.topology_gate", "加厚失败：面边界环不完整");
+        }
+        std::vector<Point3> ring;
+        VertexId first {}, previous {};
+        for (const auto coedge_id : loop->second.coedges) {
+            const auto coedge = state_->coedges.find(coedge_id.value);
+            if (coedge == state_->coedges.end()) {
+                return failure(StatusCode::InvalidTopology, diag_codes::kModShellFailure,
+                               "thicken.topology_gate", "加厚失败：定向边引用无效");
+            }
+            const auto edge = state_->edges.find(coedge->second.edge_id.value);
+            if (edge == state_->edges.end()) {
+                return failure(StatusCode::InvalidTopology, diag_codes::kModShellFailure,
+                               "thicken.topology_gate", "加厚失败：边引用无效");
+            }
+            const auto curve = state_->curves.find(edge->second.curve_id.value);
+            const auto v0 = state_->vertices.find(edge->second.v0.value);
+            const auto v1 = state_->vertices.find(edge->second.v1.value);
+            if (curve == state_->curves.end() || v0 == state_->vertices.end() || v1 == state_->vertices.end()) {
+                return failure(StatusCode::InvalidTopology, diag_codes::kModShellFailure,
+                               "thicken.topology_gate", "加厚失败：边支撑曲线或端点无效");
+            }
+            const auto& c = curve->second;
+            if (c.kind != detail::CurveKind::Line && c.kind != detail::CurveKind::LineSegment) {
+                return failure(StatusCode::NotImplemented, diag_codes::kCoreOperationUnsupported,
+                               "thicken.support_gate", "加厚失败：曲边不能用端点弦替代");
+            }
+            const VertexId start = coedge->second.reversed ? edge->second.v1 : edge->second.v0;
+            const VertexId end = coedge->second.reversed ? edge->second.v0 : edge->second.v1;
+            if ((!ring.empty() && previous.value != start.value) || start.value == end.value) {
+                return failure(StatusCode::InvalidTopology, diag_codes::kModShellFailure,
+                               "thicken.topology_gate", "加厚失败：边界链不连续或端点重复");
+            }
+            if (ring.empty()) first = start;
+            previous = end;
+            Point3 origin = c.origin;
+            Vec3 direction = c.direction;
+            if (c.kind == detail::CurveKind::LineSegment) {
+                if (c.poles.size() != 2) {
+                    return failure(StatusCode::InvalidTopology, diag_codes::kModShellFailure,
+                                   "thicken.topology_gate", "加厚失败：线段支撑退化");
+                }
+                origin = c.poles.front();
+                direction = detail::subtract(c.poles.back(), origin);
+            }
+            const Scalar length = detail::norm(direction);
+            if (!std::isfinite(length) || !(length > 0)) {
+                return failure(StatusCode::InvalidTopology, diag_codes::kModShellFailure,
+                               "thicken.topology_gate", "加厚失败：边支撑方向退化");
+            }
+            const Vec3 unit = detail::scale(direction, 1 / length);
+            for (const auto& point : {v0->second.point, v1->second.point}) {
+                const Vec3 offset = detail::subtract(point, origin);
+                const Scalar along = detail::dot(offset, unit);
+                const Scalar residual = detail::norm(detail::cross(offset, unit));
+                const Scalar plane_distance = detail::dot(detail::subtract(point, surface->second.origin), normal);
+                if (!std::isfinite(along) || !std::isfinite(residual) || residual > tolerance ||
+                    !std::isfinite(plane_distance) || std::abs(plane_distance) > tolerance ||
+                    (c.kind == detail::CurveKind::LineSegment && (along < -tolerance || along > length+tolerance))) {
+                    return failure(StatusCode::InvalidTopology, diag_codes::kModShellFailure,
+                                   "thicken.topology_gate", "加厚失败：端点不在支撑曲线或平面上");
+                }
+            }
+            if (edge->second.has_parameter_interval) {
+                const Scalar a = edge->second.start_parameter, b = edge->second.end_parameter;
+                if (!std::isfinite(a) || !std::isfinite(b) || a == b ||
+                    (c.kind == detail::CurveKind::LineSegment && (a < 0 || a > 1 || b < 0 || b > 1)) ||
+                    detail::norm(detail::subtract(detail::add_point_vec(origin, detail::scale(direction,a)),
+                                                   v0->second.point)) > tolerance ||
+                    detail::norm(detail::subtract(detail::add_point_vec(origin, detail::scale(direction,b)),
+                                                   v1->second.point)) > tolerance) {
+                    return failure(StatusCode::InvalidTopology, diag_codes::kModShellFailure,
+                                   "thicken.topology_gate", "加厚失败：边裁剪区间与端点不一致");
+                }
+            }
+            ring.push_back(coedge->second.reversed ? v1->second.point : v0->second.point);
+        }
+        if (previous.value != first.value) {
+            return failure(StatusCode::InvalidTopology, diag_codes::kModShellFailure,
+                           "thicken.topology_gate", "加厚失败：边界链未闭合");
+        }
+        if (ring_index == 0) record.extrude_profile_xyz = std::move(ring);
+        else record.extrude_holes_xyz.push_back(std::move(ring));
     }
-    record.bbox = offset_bbox(bbox, distance);
-    return ok_result(make_body(state_, record, "已完成加厚"), state_->create_diagnostic("已完成加厚"));
+    record.source_faces = {face_id};
+    append_shells_for_face(*state_, record.source_shells, face_id);
+    for (const auto shell : record.source_shells) {
+        const auto owners = state_->shell_to_bodies.find(shell.value);
+        if (owners != state_->shell_to_bodies.end())
+            for (const auto owner : owners->second) append_unique_body(record.source_bodies, BodyId {owner});
+    }
+    record.bbox = detail::make_bbox(record.extrude_profile_xyz.front(), record.extrude_profile_xyz.front());
+    const auto body = make_body(state_, std::move(record), "已完成平面面片加厚");
+    if (body.value == 0) {
+        return failure(StatusCode::InvalidInput, diag_codes::kModShellFailure,
+                       "thicken.materialization", "加厚失败：面区域或厚度退化，无法形成真实闭壳");
+    }
+    return ok_result(body, state_->create_diagnostic("已完成平面面片加厚"));
 }
 
 BooleanService::BooleanService(std::shared_ptr<detail::KernelState> state) : state_(std::move(state)) {}
