@@ -1,16 +1,18 @@
 # AxiomKernel 当前开发进度
 
-> **第 73 切片（FR-TOPO-001，专项门禁闭合）**：跨环边界冲突从单段 Line/LineSegment 扩展到带显式裁剪区间的 CompositePolyline 与仅含线性子曲线的 CompositeChain；按真实参数方向精确拆分线性片段，支持递增/递减区间，并保留“复合曲线内部折点 ≠ 拓扑边端点”语义。`first_boundary_conflict` / `create_face` / `validate_face` 继续共用同一精确线段谓词；回归覆盖内部相交、共线重叠、容差邻近、只读预检、建面零污染与存量面验证。完整构建、Geo/Topo/Query/Core 定向回归 4/4 及除既有超长 `axiom_ops_heal_test` 外的 CTest **15/15 通过、0 失败、总耗时 25.57 s**，文档检查 35/35 通过；圆锥曲线/样条的误差受控求交仍未闭合。
+> **第 74 批（cycle-0072，FR-GEO-001 / FR-TOPO-001 / NFR-REL-001，已通过完整门禁）**：曲面 `closest_point_detailed` 新增 Plane/Cylinder/Cone/规则 Sphere/Torus 及嵌套 Offset 的无缓存解析全域求解，公开 `Analytic`、`effective_domain` 和自动有限化证据；Bezier/BSpline/NURBS 对非空结点片和递归子片使用正权有理 Bezier 控制网凸包 AABB 下界，并公开控制网/剪枝计数。跨环冲突复用 Geo 有限区间求交，覆盖显式 trim 的圆锥曲线、Bezier、BSpline、NURBS 与混合 CompositeChain，新增 `AXM-TOPO-E-0030..0033` 和求解工作量证据。拓扑事务新增嵌套保存点、LIFO 释放、可重复局部回滚、移动所有权和累计审计，无效句柄复用 `AXM-TX-E-0003`，取消仍以 `AXM-TX-E-0007` 优先恢复整事务。首次全量 CTest 为 15/16，保存点移动所有权夹具误提交孤立顶点，触发既有 `AXM-TOPO-E-0013` 不变量并使取消断言误报；repair 改为提交对既有面的合法曲面替换。第二次全量为 15/16，`axiom_ops_heal_test` 在闭合样条扫掠阶段 120.03 s 超时；repair 把体验证的重复全量反向索引扫描改为一次收集线性核对，复用已完成的闭壳/流形/Strict 结果，并用无序边键物化闭合扫掠，定向回归为 95.88 s、通过 120 s 限制。调度器最终独立完整构建成功，`ctest --test-dir /workspaces/axiom/build-agent --output-on-failure --no-tests=error` **16/16 通过、0 失败、总耗时 120.81 s**（`axiom_ops_heal_test` 95.13 s，IO workflow 12.78 s，representation/IO 9.54 s，Geo 0.58 s，Topo 0.13 s，性能基线 1.57 s）。构建日志仍有一处本批 `BoundaryEdge` 缺失成员初始化告警，以及既有聚合初始化/未使用参数告警，未导致构建或测试失败。本批无“待验收/待统一门禁”状态。
+
+> **第 73 切片（FR-TOPO-001，专项门禁闭合）**：跨环边界冲突从单段 Line/LineSegment 扩展到带显式裁剪区间的 CompositePolyline 与仅含线性子曲线的 CompositeChain；按真实参数方向精确拆分线性片段，支持递增/递减区间，并保留“复合曲线内部折点 ≠ 拓扑边端点”语义。`first_boundary_conflict` / `create_face` / `validate_face` 继续共用同一精确线段谓词；回归覆盖内部相交、共线重叠、容差邻近、只读预检、建面零污染与存量面验证。完整构建、Geo/Topo/Query/Core 定向回归 4/4 及除既有超长 `axiom_ops_heal_test` 外的 CTest **15/15 通过、0 失败、总耗时 25.57 s**，文档检查 35/35 通过；当时未闭合的圆锥曲线/样条误差受控求交已由第 74 批在显式 trim 子域内闭合。
 
 > **第 72 批（FR-TOPO-001 / FR-QUERY-001，专项门禁闭合）**：公开 `create_trimmed_edge` 与 `edge_curve_interval`，在 EdgeId 分配前校验参数有限非零、曲线定义域和参数端点与 v0/v1 的容差一致性；显式裁剪曲边的长度查询复用真实曲线区间，解析区间极值或样条控制点凸包进入拓扑 bbox。旧 `create_edge` 兼容，未携带区间的曲边继续拒绝弦长冒充弧长；失败不写事务计数或几何求值缓存。完整构建与文档检查通过；除既有超长 `axiom_ops_heal_test` 外的 CTest **15/15 通过、0 失败、总耗时 29.61 s**，该 Ops 长矩阵未因本批重跑。
 
-> **第 71 批（FR-GEO-001 / FR-OPS-001 / FR-QUERY-001，已通过完整门禁）**：在已公开的有界曲面 `closest_point_detailed`、带孔 `revolve`、拓扑兼容凹/带孔 `loft` 及 `body_shell_regions` 基础上，新增 `SweepService::revolve_between` 的偏置/对称起始角、顺逆时针不超过一周区间和正负整周语义；新增 `sweep_scaled`，支持开放直线、CompositePolyline、Bezier、BSpline、NURBS 与 CompositeChain 导轨上从 1 按采样弧长线性变化到有限正终端比例；新增 `GeometryIntersectionService::intersect_curve_curve`，返回离散横交/相切/端点、连续重合区间、残差和工作量证据。首次全量 CTest 为 15/16，曲线求交回归失败；repair 以相对端点弦的保守偏差终止 Bezier 相切邻域重复细分，并修正非连续 CompositeChain 子片首尾的右/左极限包围。随后 Geo/Query 定向复验通过，调度器最终独立完整构建成功，`ctest --test-dir /workspaces/axiom/build-agent --output-on-failure --no-tests=error` **16/16 通过、0 失败、总耗时 1865.97 s**（`axiom_ops_heal_test` 1838.47 s，`axiom_query_eval_test` 0.32 s，`axiom_geometry_test` 0.75 s，性能基线 2.40 s）。构建日志仍有既有聚合初始化、未使用参数和测试窄化转换告警，未导致构建或测试失败。本批及第 60/61/62/65 等既有包均无“待验收/待统一门禁”状态。
+> **第 71 批（FR-GEO-001 / FR-OPS-001 / FR-QUERY-001，已通过完整门禁）**：在已公开的有界曲面 `closest_point_detailed`、带孔 `revolve`、拓扑兼容凹/带孔 `loft` 及 `body_shell_regions` 基础上，新增 `SweepService::revolve_between` 的偏置/对称起始角、顺逆时针不超过一周区间和正负整周语义；新增 `sweep_scaled`，支持开放直线、CompositePolyline、Bezier、BSpline、NURBS 与 CompositeChain 导轨上从 1 按采样弧长线性变化到有限正终端比例；新增 `GeometryIntersectionService::intersect_curve_curve`，返回离散横交/相切/端点、连续重合区间、残差和工作量证据。首次全量 CTest 为 15/16，曲线求交回归失败；repair 以相对端点弦的保守偏差终止 Bezier 相切邻域重复细分，并修正非连续 CompositeChain 子片首尾的右/左极限包围。随后 Geo/Query 定向复验通过，调度器独立完整构建成功；同一命令连续两次完整 CTest 均为 **16/16 通过、0 失败**：总耗时分别为 **1865.97 s**（`axiom_ops_heal_test` 1838.47 s，`axiom_query_eval_test` 0.32 s，`axiom_geometry_test` 0.75 s，性能基线 2.40 s）和 **1863.95 s**（对应 1823.22 s、0.20 s、1.04 s、1.74 s）。门禁日志中的两次文档检查也均为 35 个 Markdown、0 错误、0 警告。构建日志仍有既有聚合初始化、未使用参数和测试窄化转换告警，未导致构建或测试失败。本批及第 60/61/62/65 等既有包均无“待验收/待统一门禁”状态。
 
 本文档用于记录 `AxiomKernel` 当前阶段的实际开发状态、已完成内容、当前风险和下一阶段执行重点。
 
 > **第 70 批（NFR-DIA-001 / FR-OPS-001 / FR-QUERY-001）**：AXMJSON、Axiom IGES 元数据与 Axiom BREP JSON 子集在物化前完成普通文件、64 MiB/短读、严格结构和几何验证，失败绑定 `io.import.<format>.input/path/open/read/parse/validation` 且不污染 Body/Mesh/ID；`SweepService` 新增首尾 G1 连续闭合样条、开放/闭合 `CompositeChain` 导轨和部分角多边形旋转的真实多面体闭壳；`TopologyQueryService` 新增 `shell_mass_properties/body_mass_properties`，从平面直边双边流形闭壳的当前拓扑重算单位密度体积、面积、质心和惯性。repair 修正了测试入口误用、早期 AXMJSON 兼容、扫掠弦段局部邻域判定、闭合复合导轨夹具和旋转闭壳绕向翻转后重算。调度器独立完整构建成功，最终 `ctest --test-dir /workspaces/axiom/build-agent --output-on-failure --no-tests=error` **16/16 通过、0 失败、总耗时 1539.20 s**（`axiom_ops_heal_test` 1510.78 s，`axiom_io_workflow_test` 14.96 s，`axiom_query_eval_test` 0.17 s，性能基线 1.90 s）。本批门禁已闭合，第 60/61/62/65 等既有包不再有“待验收”状态。当批尚缺的带孔旋转、空腔多壳与有向区间/变截面扫掠已由第 71 批部分闭合；当前仍为保守采样多面体 BRep，并且嵌套复合导轨、显式轮廓历史、曲面/曲边质量积分、相交多壳和标准 IGES 实体仍不支持。
 
-> **第 69 批（FR-GEO-001 / FR-TOPO-001 / NFR-REL-001 / FR-DIAG-001）**：公开曲线全域最近点详细查询与精度/预算/收敛证书；公开跨环有限直线边界冲突预检并补齐共线重叠、容差邻近错误码；拓扑事务新增协作式取消、写者状态和累计取消审计；诊断新增结构化数值证据、证据覆盖审计与 JSON 导出，BOOL 受覆盖失败分支已接入门禁。调度器首次完整 CTest 为 14/16 通过（`axiom_geometry_test`、`axiom_query_eval_test` 失败），repair 以二阶保守距离下界和证书后的剩余预算精修修复两项回归；随后独立完整构建成功，最终 `ctest --test-dir /workspaces/axiom/build-agent --output-on-failure --no-tests=error` **16/16 通过、0 失败、总耗时 126.00 s**（性能基线 1.63 s）。构建日志仍有 `Issue::numeric_evidence` 聚合初始化缺失及一处既有未使用参数告警，但未导致构建或测试失败。本批门禁已闭合。需求仍为受限可用：曲面全域最近点证书、一般曲线跨环求交、抢占式/长流程内部取消，以及 HEAL/IO 全失败分支数值证据尚未闭合。
+> **第 69 批（FR-GEO-001 / FR-TOPO-001 / NFR-REL-001 / FR-DIAG-001）**：公开曲线全域最近点详细查询与精度/预算/收敛证书；公开跨环有限直线边界冲突预检并补齐共线重叠、容差邻近错误码；拓扑事务新增协作式取消、写者状态和累计取消审计；诊断新增结构化数值证据、证据覆盖审计与 JSON 导出，BOOL 受覆盖失败分支已接入门禁。调度器首次完整 CTest 为 14/16 通过（`axiom_geometry_test`、`axiom_query_eval_test` 失败），repair 以二阶保守距离下界和证书后的剩余预算精修修复两项回归；随后独立完整构建成功，最终 `ctest --test-dir /workspaces/axiom/build-agent --output-on-failure --no-tests=error` **16/16 通过、0 失败、总耗时 126.00 s**（性能基线 1.63 s）。构建日志仍有 `Issue::numeric_evidence` 聚合初始化缺失及一处既有未使用参数告警，但未导致构建或测试失败。本批门禁已闭合。当时缺少的解析无界面/高阶有理曲面最近点证书、显式 trim 真曲线跨环求交和受限事务保存点已由第 74 批闭合；抢占式/长流程内部取消、通用无限派生面证书及 HEAL/IO 全失败分支数值证据仍未闭合。
 
 > **第 68 批（FR-OPS-001 / FR-QUERY-001）**：公开 `SweepService` 新增 `extrude_to_plane`，并完成整周显式多边形 `revolve` 与旋转最小化标架曲线 `sweep` 的真实多面体 BRep 物化；公开 `TopologyQueryService::face_area` 支持 Plane/Cylinder/Cone/Sphere/Torus 及 Trimmed/Offset 的折线 PCurve 修剪面积。故障复验修复了整周旋转的编译错误，并把周期带孔扫掠的互不连通边界正确物化为多个独立闭壳。调度器独立 `build-agent` 完整构建成功，`ctest --test-dir /workspaces/axiom/build-agent --output-on-failure --no-tests=error` **16/16 通过、0 失败、总耗时 136.35 s**（`axiom_ops_heal_test` 111.16 s，`axiom_query_eval_test` 0.15 s，性能基线 1.70 s）。第 60/61/62/65/66 包和第 63/67 包的现有回归也在该次全量门禁中通过，不再标记为“待统一验收”。需求仍为进行中，因为解析扫掠/旋转曲面、通用样条面积、曲边裁剪参数与通用质量属性等尚未闭合。
 
@@ -252,16 +254,17 @@ Stage 3 已有多条可回归的子路径，但统一支持矩阵、跨模块一
   - **建议测试入口**：`axiom_math_services_test`（本阶段 P1 条目已闭合）；跨模块对齐见各 workflow 测试
 
 - **geo（Curves/Surfaces/PCurve/Eval/Closest）**
-  - **已具备**：曲线/曲面/PCurve 的创建与 eval/domain/bbox/closest，含批量接口；曲线与有界曲面均公开 `closest_point_detailed`，返回距离下界、参数不确定度、预算计数与终止原因；曲面覆盖 Bezier/BSpline/NURBS、Revolved/Swept、Trimmed/Offset、非空结点片和修剪孔边界，可认证平面包装/共面张量面/直线轮廓扫掠走解析或支撑平面快路；旧复杂曲面最近参数复用主流程且不写 eval 缓存
+  - **已具备**：曲线/曲面/PCurve 的创建与 eval/domain/bbox/closest，含批量接口；曲线与曲面均公开 `closest_point_detailed`，返回距离下界、参数不确定度、预算计数与终止原因；Plane/Cylinder/Cone/规则 Sphere/Torus 及其嵌套 Offset 链支持无界域解析自动有限化，高阶 Bezier/BSpline/NURBS 使用随细分收紧的正权有理控制网凸包界，并穿透 Trimmed/嵌套 Offset；Revolved/Swept、修剪孔边界及旧复杂曲面最近参数复用同一主流程且不写 eval 缓存
   - **主要不足**：
-    - **曲面全域精度合同后续**：无限域仍须先修剪；高阶变化界、通用退化曲面、极端尺度与大模型性能仍未工业化
+    - **曲面全域精度合同后续**：通用无限派生面尚未自动有限化；spindle/horn 环面仍无解析证书；旋转/扫掠面尚缺专用局部几何界，通用退化曲面、极端尺度与大模型性能仍未工业化
     - **真实 Trim 语义**：Trimmed 目前偏“参数域裁剪占位”，缺基于 loop/coedge/PCurve 的修剪边界
   - **建议测试入口**：`axiom_geometry_test`（增加曲率/导数/退化场景后再逐步收紧）
 
 - **topo（Transaction/Query/Validation/Trim Bridge）**
-  - **第 69 批一致性与可靠性增量**：`first_boundary_conflict`、`create_face` 与 `validate_face` 共享有限 Line/LineSegment 最近段流程，统一分类内部相交、端点相接、共线正长度重叠及容差内正距离邻近；新增 `AXM-TOPO-E-0028/0029` 与可查询最近点/距离证据，拒绝不分配 FaceId、不改索引或事务计数。`TopologyCancellationSource/Token`、带令牌事务、显式轮询、状态/写次数查询及累计指标覆盖预取消、写/提交/显式回滚/析构边界，取消恢复完整快照、释放写者槽且不推进版本或成功提交审计。最终完整 CTest 16/16 通过。一般曲线 trim 求交、长耗时流程内部轮询和子事务/保存点仍未实现。
+  - **第 74 批一致性与可靠性增量（已通过完整门禁）**：`first_boundary_conflict/create_face/validate_face` 对显式 trim 的圆锥曲线、Bezier、BSpline、NURBS 和混合 CompositeChain 复用 Geo 层受预算/误差约束的有限区间求交，分类内部相交、端点接触、容差邻近与可证连续重合；缺 trim、损坏曲线或预算/数值失败闭合拒绝。`TopologyTransaction` 新增嵌套保存点，支持保留目标的重复回滚、回滚外层时使内层失效、LIFO 释放、移动所有权和取消优先整事务恢复；保存点累计审计纳入 core runtime invariant。当前保存点是内存全拓扑快照。
+  - **第 69 批一致性与可靠性增量**：`first_boundary_conflict`、`create_face` 与 `validate_face` 共享有限 Line/LineSegment 最近段流程，统一分类内部相交、端点相接、共线正长度重叠及容差内正距离邻近；新增 `AXM-TOPO-E-0028/0029` 与可查询最近点/距离证据，拒绝不分配 FaceId、不改索引或事务计数。`TopologyCancellationSource/Token`、带令牌事务、显式轮询、状态/写次数查询及累计指标覆盖预取消、写/提交/显式回滚/析构边界，取消恢复完整快照、释放写者槽且不推进版本或成功提交审计。当时尚缺的一般曲线 trim 求交与事务保存点已由第 74 批闭合受支持子域；BOOL/HEAL/IO 长耗时内部轮询仍待实现。
   - **第 56 切片一致性增量**：`create_face` 与 `validate_face` 拒绝不同边界环的非平行直线边在端点相接，`AXM-TOPO-E-0027` 关联两环与两边；`axiom_topology_test` 覆盖外/内及内/内相接、合法面、诊断 JSON、失败不污染和回滚。曲线求交、共线重叠、容差邻近相接、完整 trim bridge 与持久命名仍待覆盖，FR-TOPO-001 保持受限可用。
-  - **第 52 切片一致性增量**：`create_face` 与 `validate_face` 检查不同边界环的直线/线段边在三维内部相交，`AXM-TOPO-E-0026` 关联两环与两边；`axiom_topology_test` 覆盖外/内及内/内相交、合法面、诊断 JSON、失败不污染和回滚。曲线边、端点触碰、共线重叠与容差邻近相接仍待覆盖，FR-TOPO-001 保持受限可用。
+  - **第 52 切片一致性增量**：`create_face` 与 `validate_face` 检查不同边界环的直线/线段边在三维内部相交，`AXM-TOPO-E-0026` 关联两环与两边；`axiom_topology_test` 覆盖外/内及内/内相交、合法面、诊断 JSON、失败不污染和回滚。当时缺少的端点触碰、共线重叠、容差邻近及显式 trim 真曲线冲突已由第 56/69/74 批次逐步闭合；FR-TOPO-001 仍因完整 trim bridge 等限制保持受限可用。
   - **第 47 切片一致性增量**：`create_face` 与 `validate_face` 拒绝跨环独立顶点的有限三维坐标精确重合，`AXM-TOPO-E-0025` 关联两环与两顶点；`axiom_topology_test` 覆盖外/内、内/内、成功、诊断 JSON、失败不污染及回滚。FR-TOPO-001 仍为受限可用，边段相交、容差邻近相接和完整 trim bridge 尚未闭合。
   - **第 42 切片一致性增量**：`create_face` 在分配面 ID 前拒绝不同边界环共用 VertexId，`validate_face` 对存量面执行同一规则；`AXM-TOPO-E-0024` 关联两环与冲突顶点。`axiom_topology_test` 覆盖外/内及内/内环相接、合法双孔面、诊断 JSON、失败不污染和回滚；FR-TOPO-001 仍为受限可用，几何自交及完整 trim bridge 未闭合。
   - **第 37 切片一致性增量**：`create_face` 在分配面 ID 前检查外/内环的面绑定边数规则，拒绝非同曲线的单/双边环，复用 `AXM-TOPO-E-0003/0004` 并关联问题环；同曲线双弧例外保持。`axiom_topology_test` 覆盖外/内环拒绝、诊断 JSON、状态与写计数不污染、合法重试及回滚；FR-TOPO-001 仍为受限可用。
@@ -322,17 +325,17 @@ Stage 3 已有多条可回归的子路径，但统一支持矩阵、跨模块一
 
 ### 需求 7.1 几何基础对象管理（GeoCore）
 
-- **FR-GEO-001 第 69 批（已通过完整门禁）**：新增 `CurveService::closest_point_detailed`、精度/预算选项和解析/距离容差/参数容差终止结果；解析覆盖 Line/LineSegment/Circle/CompositePolyline，分支限界覆盖 Ellipse/Parabola/Hyperbola/Bezier/BSpline/NURBS/CompositeChain，样条按全部非空结点段独立覆盖并以保守速度/加速度界剪枝。旧非解析 `closest_parameter/closest_point` 复用该流程；预算、非法选项和数值不可表示均结构化失败且不写求值缓存。首次全量测试的椭圆与 NURBS 参数回归经 repair 修复，最终完整 CTest 16/16 通过。曲面详细全域精度入口仍未实现，需求保持受限可用。
+- **FR-GEO-001 第 69 批（已通过完整门禁）**：新增 `CurveService::closest_point_detailed`、精度/预算选项和解析/距离容差/参数容差终止结果；解析覆盖 Line/LineSegment/Circle/CompositePolyline，分支限界覆盖 Ellipse/Parabola/Hyperbola/Bezier/BSpline/NURBS/CompositeChain，样条按全部非空结点段独立覆盖并以保守速度/加速度界剪枝。旧非解析 `closest_parameter/closest_point` 复用该流程；预算、非法选项和数值不可表示均结构化失败且不写求值缓存。首次全量测试的椭圆与 NURBS 参数回归经 repair 修复，最终完整 CTest 16/16 通过。当时尚缺的曲面详细入口已由后续批次公开，第 74 批又补齐了受支持解析无界面和高阶有理控制网证书。
 
-- **FR-GEO-001 第 55 切片**：UV 折线 PCurve 最近参数的逐段投影和距离比较使用扩展精度中间量，有限大坐标的距离平方超出 `Scalar` 范围时仍能选中正确分段。`axiom_geometry_test` 覆盖段内最近点、端点、重复点、非法查询/句柄、稳定错误码、失败不污染与重试。该切片未改变公开签名；3D 曲线全域精度合同已由第 69 批闭合，PCurve 详细证书与曲面合同仍待推进。
-- **FR-GEO-001 第 51 切片**：线段最近参数的解析投影使用扩展精度中间量，有限大尺度端点和查询点不再因 `Scalar` 长度平方溢出产生非有限参数；保持端点钳制。`axiom_geometry_test` 覆盖段内最近点、端点、退化创建、非法查询/句柄、稳定错误码、几何与缓存不污染及重试。该切片未改变公开签名；其余 3D 曲线全域精度合同已由第 69 批闭合，PCurve 详细证书与曲面合同仍待推进。
+- **FR-GEO-001 第 55 切片**：UV 折线 PCurve 最近参数的逐段投影和距离比较使用扩展精度中间量，有限大坐标的距离平方超出 `Scalar` 范围时仍能选中正确分段。`axiom_geometry_test` 覆盖段内最近点、端点、重复点、非法查询/句柄、稳定错误码、失败不污染与重试。该切片未改变公开签名；3D 曲线全域精度合同已由第 69 批闭合，曲面合同已由第 71/74 批扩展到有界派生面、受支持解析面和高阶有理控制网证书，PCurve 详细证书仍待推进。
+- **FR-GEO-001 第 51 切片**：线段最近参数的解析投影使用扩展精度中间量，有限大尺度端点和查询点不再因 `Scalar` 长度平方溢出产生非有限参数；保持端点钳制。`axiom_geometry_test` 覆盖段内最近点、端点、退化创建、非法查询/句柄、稳定错误码、几何与缓存不污染及重试。该切片未改变公开签名；其余 3D 曲线全域精度合同已由第 69 批闭合，曲面合同已由第 71/74 批扩展，PCurve 详细证书及通用无限派生面仍待推进。
 - **FR-GEO-001 第 46 切片**：3D 复合折线最近参数逐段解析投影并按三维距离比较，有限大坐标用扩展精度中间量防止平方溢出；等距取最早参数，重复控制点按零长度段处理。`axiom_geometry_test` 覆盖窄分支、段内投影、退化段、大坐标、非法查询/句柄、错误码、失败不污染与重试。未改变公开签名或错误码，其他曲线/曲面全局最近点精度仍待定义，需求保持受限可用。
 - **FR-GEO-001 第 41 切片**：UV 折线 PCurve 最近参数逐段投影并比较距离，避免固定全域采样漏掉短分段；重复控制点形成的零长度段可安全参与比较，等距取最早参数。`axiom_geometry_test` 覆盖短分段、段内投影、重复点、非法查询与句柄、错误码、失败不污染及重试。未改变公开签名或错误码，不扩展至任意曲线的全局精度保证，需求保持受限可用。
 - **FR-GEO-001 第 36 切片**：椭圆最近参数以粗采样为初值按三维欧氏距离阻尼细化，周期缝结果归一到 `[0, 2pi)`；创建时拒绝轴长或派生法向长度溢出。回归覆盖解析可知最近点、周期缝、非有限查询、有限但溢出的轴向量及失败不污染。未改变公开签名或错误码，不宣称任意退化椭圆全局最优，需求保持受限可用。
 - **FR-GEO-001 第 31 切片**：BSpline/NURBS 曲面满重数断点、上端点及域外钳制的点值、一二阶偏导和曲率统一使用同一非空单侧片；回归覆盖双轴断点、非单位权重、常值退化、非法结点失败不污染和既有曲面继续求值。未改变公开签名或错误码，不宣称断点全局可微，需求保持受限可用。
 - **FR-GEO-001 第 26 切片**：BSpline/NURBS 曲面最近点初值逐个覆盖非空张量积结点片，修复固定全域网格漏掉极窄、双轴满重数隔离片的问题；回归覆盖多项式与非单位权重有理曲面、非法查询及几何/缓存不污染。未改变公开签名或错误码，不宣称任意曲面全局最优，需求保持受限可用。
 - **FR-GEO-001 第 21 切片**：BSpline/NURBS 曲面 u/v 显式结点现在拒绝零长度有效域和超过 `degree + 1` 的结点重数，复用 `AXM-GEO-E-0002`；回归覆盖两轴、两类曲面、合法满重数断点、失败诊断以及几何/缓存不污染。未改变公开签名或错误码，需求保持受限可用。
-- **FR-GEO-001 第 16 切片**：BSpline/NURBS 最近参数初值搜索逐个覆盖非空结点分段，修复固定全域网格漏掉极窄、满重数断开分支的问题；回归覆盖显式/推断次数、非单位权重、常值退化、非法查询点诊断和失败不污染。该切片当时仅为初值改进；第 69 批已补曲线全域预算与收敛证书，曲面合同仍待推进。
+- **FR-GEO-001 第 16 切片**：BSpline/NURBS 最近参数初值搜索逐个覆盖非空结点分段，修复固定全域网格漏掉极窄、满重数断开分支的问题；回归覆盖显式/推断次数、非单位权重、常值退化、非法查询点诊断和失败不污染。该切片当时仅为初值改进；第 69 批已补曲线全域预算与收敛证书，第 71/74 批已补曲面详细入口及高阶有理控制网证书，剩余缺口是通用无限派生面、退化曲面与大模型性能证书。
 
 - **FR-GEO-001 第 11 切片**：非夹持 BSpline/NURBS 有效域重复端点按非空单侧分段求值，修复端点及导数结点向量选中零长度分段造成的错误点值/导数/曲率；`axiom_geometry_test` 覆盖二次解析参考（含非单位权重）、显式/推断次数、域外钳制、常值退化和失败不污染。未改变公开签名或错误码，需求保持受限可用。
 
@@ -350,9 +353,9 @@ Stage 3 已有多条可回归的子路径，但统一支持矩阵、跨模块一
 
 ### 需求 7.2 拓扑结构管理（TopoCore）
 
-- **FR-TOPO-001 第 73 切片线性复合边跨环冲突（专项门禁闭合）**：显式裁剪 CompositePolyline 与线性 CompositeChain 按参数折点展开为精确有限线段，共用既有跨环冲突分类、错误码与事务隔离。内部折点不冒充拓扑边端点，递减区间与线性嵌套链可用；含任一真曲线子段的链保守跳过，不以弦线冒充真实边界。
+- **FR-TOPO-001 第 73 切片线性复合边跨环冲突（专项门禁闭合）**：显式裁剪 CompositePolyline 与线性 CompositeChain 按参数折点展开为精确有限线段，共用既有跨环冲突分类、错误码与事务隔离。内部折点不冒充拓扑边端点，递减区间与线性嵌套链可用；当时保守跳过的真曲线子段已由第 74 批接入误差受控 Geo 求交器。
 
-- **FR-TOPO-001 第 72 批显式边裁剪区间（专项门禁闭合）**：`EdgeRecord` 保存有向起止参数；`create_trimmed_edge` 以稳定错误码拒绝非有限/零区间、越域或端点不一致，拒绝发生在 ID 分配前并携带数值证据。`edge_curve_interval` 区分显式区间与兼容旧边；校验器同步检查存量区间。圆、椭圆、抛物线、双曲线、Bezier/BSpline/NURBS、折线及复合链可据真实区间查询长度，拓扑 bbox 纳入解析极值或保守控制凸包。一般曲线跨环求交、完整 PCurve trim bridge 与持久命名仍未闭合。
+- **FR-TOPO-001 第 72 批显式边裁剪区间（专项门禁闭合）**：`EdgeRecord` 保存有向起止参数；`create_trimmed_edge` 以稳定错误码拒绝非有限/零区间、越域或端点不一致，拒绝发生在 ID 分配前并携带数值证据。`edge_curve_interval` 区分显式区间与兼容旧边；校验器同步检查存量区间。圆、椭圆、抛物线、双曲线、Bezier/BSpline/NURBS、折线及复合链可据真实区间查询长度，拓扑 bbox 纳入解析极值或保守控制凸包。其真曲线跨环求交消费路径已由第 74 批闭合；完整 PCurve trim bridge、周期缝/奇点与持久命名仍待推进。
 
 - **FR-TOPO-001 第 69 批（已通过完整门禁）**：新增只读 `first_boundary_conflict` 及冲突类别、两环/两边、最近点与距离证据；`create_face` 和 `validate_face` 复用同一有限 Line/LineSegment 最近段流程，除既有内部相交和端点相接外，新增 `AXM-TOPO-E-0028` 共线正长度重叠与 `AXM-TOPO-E-0029` 容差内正距离邻近。失败不分配 FaceId、不改反向索引或事务写计数。一般曲线因边尚无显式 trim 区间仍未覆盖，需求保持受限可用。
 
@@ -375,7 +378,7 @@ Stage 3 已有多条可回归的子路径，但统一支持矩阵、跨模块一
   - **NFR-REL-001 第 8 切片**：修复活动事务调用 `clear_tracking_records` 丢失撤销记录的问题（S0：回滚后模型污染）。入口现在返回 `OperationFailed` / `AXM-TX-E-0006`，包括空事务；提交或回滚后仍允许重复清理且不改变模型。`axiom_topology_test` 覆盖创建记录、删除体快照及 PCurve 修改快照在拒绝后保留、后续提交/回滚、计数与句柄不变量、诊断 JSON 和关闭后幂等清理。需求保持受限可用，完整事务隔离与取消仍未交付。验证：`ctest --test-dir build-agent -R '^axiom_(topology|kernel_runtime_invariant)_test$' --output-on-failure` 2/2 通过；`python3 scripts/check_docs.py` 通过。
   - **NFR-REL-001 可靠性增量**：`set_coedge_pcurve` 保存首次修改前的绑定，回滚恢复已有共边的原 PCurve（含未绑定状态）；重复绑定/清除不覆盖原快照，无效句柄拒绝不改变绑定、存储数量或事务写计数。`axiom_topology_test` 覆盖提交保留、重复绑定、清除、失败诊断与回滚后共边验证；需求仍为受限可用，尚不代表完整事务隔离或取消能力。
   - **已完成（基础可用）**：begin/commit/rollback；删除面/壳/体支持；回滚后索引恢复回归覆盖
-  - **未开始/缺失**：更细粒度写集/读集与隔离级别、子事务/保存点、跨进程并发语义；BOOL/HEAL/IO 长耗时内部阶段取消轮询
+  - **未开始/缺失**：增量保存点与结构共享、更细粒度写集/读集与隔离级别、完整子事务和跨进程并发语义；BOOL/HEAL/IO 长耗时内部阶段取消轮询
 
 ### 需求 7.3 基础建模能力（OpsCore/TopoCore/GeoCore）
 
@@ -411,7 +414,7 @@ Stage 3 已有多条可回归的子路径，但统一支持矩阵、跨模块一
 
 - **FR-QUERY-001 第 72 批曲边区间长度（专项门禁闭合）**：显式裁剪曲边由 `edge_length` 调用 `CurveService::length(curve,t0,t1)`，环和面边界长度自然复用；闭合双半圆、NURBS/Bezier 子域、递增/递减区间、越域/零区间/端点错配、区间查询、曲边 bbox、缓存/对象/事务不污染及回滚均进入 `axiom_query_eval_test`。旧无区间曲边继续 `NotImplemented`，不扩大到曲边面积或质量积分。
 
-- **FR-QUERY-001 第 71 批一般有界 3D 曲线求交（已通过完整门禁）**：公开 `GeometryIntersectionService::intersect_curve_curve` 及位置/参数/角容差、可选有限区间和求值/细分预算；返回横交/相切/端点、残差、连续重合区间和工作量证据。分段线性子域走解析 3D 路径，Bezier/BSpline/NURBS/圆锥曲线/CompositeChain 走保守包围、确定性细分和阻尼精化；无限 Line 须显式有限窗口，空集成功。回归覆盖反向重合、常值退化、Bezier 双交/相切、样条、周期缝、复合链、预算失败和只读事务。首次全量失败后修正相切终止与 CompositeChain 子片单侧端点语义，最终 `axiom_query_eval_test` 通过且完整 CTest 16/16 通过。一般高阶异参连续重合、无限曲线自动搜索窗口及拓扑曲边调用模型仍未闭合。
+- **FR-QUERY-001 第 71 批一般有界 3D 曲线求交（已通过完整门禁）**：公开 `GeometryIntersectionService::intersect_curve_curve` 及位置/参数/角容差、可选有限区间和求值/细分预算；返回横交/相切/端点、残差、连续重合区间和工作量证据。分段线性子域走解析 3D 路径，Bezier/BSpline/NURBS/圆锥曲线/CompositeChain 走保守包围、确定性细分和阻尼精化；无限 Line 须显式有限窗口，空集成功。回归覆盖反向重合、常值退化、Bezier 双交/相切、样条、周期缝、复合链、预算失败和只读事务。首次全量失败后修正相切终止与 CompositeChain 子片单侧端点语义，最终 `axiom_query_eval_test` 通过且完整 CTest 16/16 通过。拓扑曲边有限 trim 调用模型已由第 74 批闭合；一般高阶异参连续重合和无限曲线自动搜索窗口仍未闭合。
 
 - **FR-QUERY-001 第 71 批多闭壳空间层级（已通过完整门禁）**：公开 `body_shell_regions`，以严格包含深度给出 Material/Void 和直接父壳；`body_mass_properties` 对独立材料相加、空腔相减、材料岛再相加，边界面积全部保留。壳相交、重叠或容差接触返回 `InvalidTopology / AXM-QUERY-E-0006`，查询仍不发布 MeshId、不写缓存。单壳直接复用质量积分，三角面临时边界走直取快路；随第 71 批最终完整 CTest 16/16 通过。
 
@@ -448,9 +451,10 @@ Stage 3 已有多条可回归的子路径，但统一支持矩阵、跨模块一
 
 ### 需求 7.11 版本/事务/增量更新（Core/EvalGraph）
 
+- **NFR-REL-001 第 74 批（已通过完整门禁）**：公开 `TopologySavepoint`、事务内创建/重复局部回滚/LIFO 释放/活动数量查询及 `TopologySavepointMetrics`；回滚到外层会使内层点失效，移动事务转移保存点所有权，非法或跨事务句柄以 `AXM-TX-E-0003` 失败且不污染模型，取消以 `AXM-TX-E-0007` 优先恢复整事务并清空保存点。保存点累计审计已纳入 `core_runtime_invariants_hold`。最终完整 CTest 16/16 通过；当前实现为内存全拓扑快照。
 - **NFR-REL-001 第 69 批（已通过完整门禁）**：公开 `TopologyCancellationSource/Token`、带令牌 `begin_transaction`、显式 `poll_cancellation`、取消请求/观察/回滚写次数、活动写者查询及累计取消指标；预取消不占写者槽，取消在拓扑写入、提交、显式回滚和析构边界观察，完整恢复创建/删除/替换及反向索引，不推进版本或成功提交审计；`AXM-TX-E-0007` 可稳定导出，取消审计纳入 `core_runtime_invariants_hold`。
-- **部分完成**：版本号与单写者快照事务、协作式取消与累计审计、EvalGraph 基础失效传播/重算计数/循环依赖保护
-- **未开始/缺失**：单个调用的抢占式取消、BOOL/HEAL/IO 长耗时阶段轮询、子事务/保存点、更细粒度隔离、结构共享策略细化、跨模块增量重算和缓存命中指标体系
+- **部分完成**：版本号与单写者快照事务、协作式取消与累计审计、嵌套保存点与局部回滚审计、EvalGraph 基础失效传播/重算计数/循环依赖保护
+- **未开始/缺失**：单个调用的抢占式取消、BOOL/HEAL/IO 长耗时阶段轮询、真正嵌套子事务、增量/结构共享保存点、更细粒度隔离、跨模块增量重算和缓存命中指标体系
 
 ### 需求 7.12 插件扩展（PluginSDK）
 
@@ -500,15 +504,15 @@ Stage 3 已有多条可回归的子路径，但统一支持矩阵、跨模块一
 
 ### A) GeoCore：高质量几何与鲁棒查询不足
 
-- **样条与高阶曲面工业化**：曲线 B-Spline/NURBS 已有完整有效域的最近点预算与收敛证书，但高质量导数/曲率与退化处理仍不足；高阶及派生/修剪曲面的全域反求尚无同等级合同。
+- **样条与高阶曲面工业化**：曲线 B-Spline/NURBS 已有完整有效域的最近点预算与收敛证书；Bezier/BSpline/NURBS 曲面已用正权有理控制网凸包提供局部收紧证书，并穿透 Trimmed/Offset。高质量导数/曲率、极小齐次权重退化处理、旋转/扫掠专用局部界及大模型性能证书仍不足。
 - **Trim 语义未工业化**：当前 `Trimmed` 更多是参数域裁剪占位；缺少基于 loop/coedge/PCurve 的真实修剪边界、以及与 3D curve 一致性的完整规则与算法闭环。
 - **统一公差与尺度策略的贯通不足**：几何求值/最近点/求交/验证/修复对 tolerance 的一致解释仍需要进一步收敛到“可预测、可回归”的策略中心。
 
 ### B) TopoCore：一致性规则集与 trim bridge 不足
 
-- **拓扑规则集不完整**：有限 Line/LineSegment 及显式裁剪的折线/线性复合链已统一覆盖跨环相交、相接、重叠与容差邻近；圆锥曲线与样条的误差受控求交、面环方向及重复/悬挂/非流形完整规则仍不足。
+- **拓扑规则集不完整**：有限 Line/LineSegment、显式裁剪折线/线性复合链以及带 trim 的圆锥曲线、Bezier、BSpline、NURBS 和混合 CompositeChain 已统一进入跨环冲突门禁；一般高阶异参连续重合证明、面环方向及重复/悬挂/非流形完整规则仍不足。
 - **PCurve-3D 一致性（trim bridge）未闭环**：已有最小校验接口，但缺少可用于工业修剪的强一致性约束与修复策略。
-- **事务隔离深度不足**：单写者、快照回滚、协作式取消和累计审计已落地；细粒度写集/读集、子事务/保存点、长流程内部轮询与跨进程隔离仍不足。
+- **事务隔离深度不足**：单写者、整事务快照回滚、协作式取消、嵌套保存点和累计审计已落地；保存点仍复制完整拓扑，细粒度写集/读集、真正嵌套子事务、长流程内部轮询与跨进程隔离仍不足。
 
 ### C) OpsCore：工业级建模算法缺失（最大缺口）
 
@@ -554,10 +558,10 @@ Stage 3 已有多条可回归的子路径，但统一支持矩阵、跨模块一
 
 1. **diag + heal/io**：把 HEAL 验证/修复/回滚与 IO 导入导出/后验验证/批处理的重量级失败分支迁移到阶段、实体、数值证据门禁。
    **DoD**：`audit_evidence` 模块级门禁通过；`axiom_diagnostics_test` / `axiom_heal_test` / `axiom_io_workflow_test` 不回归。
-2. **geo**：把第 69 批曲线全域最近点合同扩展到 Bezier/BSpline/NURBS 与派生/修剪曲面的完整参数域和 trim 边界。
-   **DoD**：公开预算、距离/参数终止证据；`axiom_geometry_test` 覆盖窄参数片、边界和失败不污染。
-3. **topo + reliability**：为拓扑边增加显式 trim 区间并覆盖一般曲线跨环求交；把协作式取消扩展到 BOOL/HEAL/IO 长耗时内部阶段。
-   **DoD**：`axiom_topology_test` / 对应 workflow 测试覆盖取消、回滚、诊断和审计不变量。
+2. **geo**：在第 74 批解析无界面与高阶有理控制网证书之上，补通用无限派生面、旋转/扫掠专用局部界、极端退化曲面和大模型批量性能证书。
+   **DoD**：公开可复用空间证书与稳定预算语义；`axiom_geometry_test` 覆盖退化、派生链、批量查询和失败不污染，并建立独立性能证据。
+3. **topo + reliability**：推进完整 3D edge trim ↔ PCurve/曲面参数域双向一致性、周期缝/奇点和持久命名；把协作式取消扩展到 BOOL/HEAL/IO 长耗时内部阶段，并降低保存点全快照成本。
+   **DoD**：`axiom_topology_test` / 对应 workflow 测试覆盖 trim 一致性、取消、局部/整事务回滚、诊断和审计不变量。
 4. **ops**：布尔真求交子里程碑（面级候选 → 交线 → imprint）按 DoD 切片交付。
    **DoD**：对应码与结构化证据可审计；`axiom_boolean_workflow_test` / `axiom_boolean_prep_test` 不回归。
 
@@ -571,7 +575,8 @@ Stage 3 已有多条可回归的子路径，但统一支持矩阵、跨模块一
 | P0～P1 | 已闭合（首批） | diag/ops/io/heal | 工作流 `Issue.stage` + JSON 导出可聚合；Heal 独立门禁 | `axiom_diagnostics_test`、`axiom_boolean_workflow_test`、`axiom_heal_test`、`axiom_ops_heal_test` | core |
 | P1 | 已闭合（本阶段回归） | math | 退化/尺度谓词与容差策略回归（`orient*_effective`、`max_local`/`min_local`、`resolve_*_for_scale` 非有限尺度、大坐标谓词/点等） | `axiom_math_services_test` | core |
 | P0～P1 | 已闭合（第 69 批） | diag/geo/topo/core | 数值证据审计、曲线最近点证书、有限直线跨环冲突、拓扑协作式取消 | `axiom_diagnostics_test`、`axiom_geometry_test`、`axiom_topology_test`、`axiom_query_eval_test` | math/core |
-| P1～P2 | 进行中 | geo/topo | 曲面全域最近点、一般曲线显式 trim / trim bridge / Strict 规则 | `axiom_geometry_test`、`axiom_topology_test` | math |
+| P1 | 已闭合（第 74 批子域） | geo/topo/core | 解析无界面与高阶有理曲面最近点证书；显式 trim 真曲线跨环冲突；嵌套保存点与累计审计 | `axiom_geometry_test`、`axiom_topology_test`、`axiom_kernel_runtime_invariant_test` | math/geo |
+| P1～P2 | 进行中 | geo/topo | 通用无限派生面与大模型证书；完整 trim bridge、周期缝/奇点、持久命名和 Strict 规则 | `axiom_geometry_test`、`axiom_topology_test` | math |
 | P1～P2 | 进行中 | diag/heal/io | HEAL/IO 数值证据与模块级审计门禁 | `axiom_diagnostics_test`、`axiom_heal_test`、`axiom_io_workflow_test` | core |
 | P2 | 进行中 | ops | 布尔非 bbox 结果子里程碑 | `axiom_boolean_*` | geo/topo |
 | P2～P3 | 进行中 | eval/rep | 重算指标、Rep 误差预算 | `axiom_query_eval_test`、`axiom_representation_io_test` | ops（部分） |

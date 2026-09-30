@@ -113,11 +113,13 @@ struct CurveClosestPointResult {
     CurveClosestPointConvergence convergence {CurveClosestPointConvergence::Analytic};
 };
 
-/// 有界曲面最近点全域搜索的终止原因。两种成功终止都覆盖完整有效参数域，
-/// 包括多边形修剪的外环、孔边界以及样条的每个非空结点片。
+/// 曲面最近点全域搜索的终止原因。所有成功终止都覆盖完整有效参数域，
+/// 包括多边形修剪的外环、孔边界、样条的每个非空结点片以及可解析证明的无界域。
 enum class SurfaceClosestPointConvergence : std::uint8_t {
-    DistanceTolerance,
-    ParameterTolerance
+    DistanceTolerance = 0,
+    ParameterTolerance = 1,
+    /// 由解析投影及全域几何下界直接证明，不消耗数值求值预算。
+    Analytic = 2
 };
 
 struct SurfaceClosestPointOptions {
@@ -125,7 +127,7 @@ struct SurfaceClosestPointOptions {
     Scalar distance_tolerance {1e-8};
     /// 距离界不能提前证明时，候选参数矩形的 u/v 边长须分别细分到此阈值。
     Scalar parameter_tolerance {1e-4};
-    /// 无缓存点值求值总预算；须至少为 5。预算耗尽时失败且不返回部分结果。
+    /// 无缓存数值点值求值总预算；须至少为 5。解析终止不消耗此预算；预算耗尽时失败且不返回部分结果。
     std::uint32_t max_evaluations {250000};
 };
 
@@ -141,7 +143,16 @@ struct SurfaceClosestPointResult {
     Scalar v_uncertainty {};
     std::uint32_t evaluations {};
     std::uint32_t patches_processed {};
+    /// 以 Bezier/BSpline/NURBS（含 Trimmed/Offset 包装）局部有理控制网凸包建立空间下界的参数片数量。
+    /// 该计数可用于确认高阶曲面查询实际启用了随细分收紧的全域证书；解析路径为 0。
+    std::uint32_t control_net_bound_patches {};
+    /// 已由保守下界证明不可能改进当前最优值、因而未继续细分的参数片数量。
+    std::uint32_t pruned_patches {};
     SurfaceClosestPointConvergence convergence {SurfaceClosestPointConvergence::DistanceTolerance};
+    /// 数值搜索覆盖的原有有界域，或解析证明包含至少一个全域极小点的有限化参数域。
+    Range2D effective_domain {};
+    /// true 表示原始曲面含无界参数方向，`effective_domain` 由本次查询自动构造。
+    bool domain_was_finiteized {false};
 };
 
 class CurveService {
@@ -204,9 +215,12 @@ public:
     Result<SurfaceEvalResult> eval(SurfaceId surface_id, Scalar u, Scalar v, int deriv_order) const;
     Result<std::vector<SurfaceEvalResult>> eval_batch(
         SurfaceId surface_id, std::span<const std::pair<Scalar, Scalar>> uvs, int deriv_order) const;
-    /// 对完整有界参数域执行确定性分支限界搜索。Bezier/BSpline/NURBS、旋转/线性扫掠、
-    /// 偏置及修剪包装均受支持；样条按非空结点片覆盖，修剪多边形的外环和孔边界均参与搜索。
-    /// 无限参数域须先修剪；预算耗尽、选项非法或数值界不可建立时失败，不写 surface eval 缓存。
+    /// 对完整参数域求全域最近点。Plane/Cylinder/Cone 等无界解析面及可解析的嵌套
+    /// Offset 自动构造包含全域极小点的有限参数域并给出解析证书；它们不消耗数值预算。
+    /// Bezier/BSpline/NURBS 使用随子片收紧的（有理）控制网凸包空间界；旋转/线性扫掠、
+    /// 通用偏置及修剪包装执行确定性分支限界。样条按非空结点片覆盖，修剪多边形的外环和
+    /// 孔边界均参与搜索；结果公开控制网界与剪枝计数作为预算/性能证据。预算耗尽、选项非法、
+    /// 偏置退化/自交或数值界不可建立时失败，不返回部分结果且不写 surface eval 缓存。
     Result<SurfaceClosestPointResult> closest_point_detailed(
         SurfaceId surface_id, const Point3& point,
         const SurfaceClosestPointOptions& options = {}) const;

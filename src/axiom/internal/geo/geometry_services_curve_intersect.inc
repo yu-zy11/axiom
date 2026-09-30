@@ -807,7 +807,11 @@ bool curve_intersection_interval_valid(const Range1D &range) {
 }
 
 Result<CurveCurveIntersectionResult> curve_intersection_failure(
-    detail::KernelState &state, StatusCode status, std::string message) {
+    detail::KernelState &state, StatusCode status, std::string message,
+    bool emit_diagnostic) {
+  if (!emit_diagnostic) {
+    return error_result<CurveCurveIntersectionResult>(status, {});
+  }
   return detail::failed_result<CurveCurveIntersectionResult>(
       state, status, diag_codes::kGeoIntersectionFailure, std::move(message),
       "曲线-曲线求交失败");
@@ -815,16 +819,25 @@ Result<CurveCurveIntersectionResult> curve_intersection_failure(
 
 } // namespace
 
-Result<CurveCurveIntersectionResult>
-GeometryIntersectionService::intersect_curve_curve(
-    CurveId first_curve, CurveId second_curve,
-    const CurveCurveIntersectionOptions &options) const {
-  const auto first_it = state_->curves.find(first_curve.value);
-  const auto second_it = state_->curves.find(second_curve.value);
-  if (first_it == state_->curves.end() || second_it == state_->curves.end()) {
+namespace {
+
+Result<CurveCurveIntersectionResult> intersect_curve_curve_impl(
+    detail::KernelState &state, CurveId first_curve, CurveId second_curve,
+    const CurveCurveIntersectionOptions &options, bool emit_diagnostic) {
+  const auto invalid_input = [&](std::string_view code, std::string message) {
+    if (!emit_diagnostic) {
+      return error_result<CurveCurveIntersectionResult>(StatusCode::InvalidInput,
+                                                        {});
+    }
     return detail::invalid_input_result<CurveCurveIntersectionResult>(
-        *state_, diag_codes::kCoreInvalidHandle,
-        "曲线-曲线求交失败：目标曲线不存在", "曲线-曲线求交失败");
+        state, code, std::move(message), "曲线-曲线求交失败");
+  };
+
+  const auto first_it = state.curves.find(first_curve.value);
+  const auto second_it = state.curves.find(second_curve.value);
+  if (first_it == state.curves.end() || second_it == state.curves.end()) {
+    return invalid_input(diag_codes::kCoreInvalidHandle,
+                         "曲线-曲线求交失败：目标曲线不存在");
   }
   if (!std::isfinite(options.position_tolerance) ||
       !(options.position_tolerance > 0.0) ||
@@ -833,10 +846,8 @@ GeometryIntersectionService::intersect_curve_curve(
       !std::isfinite(options.angular_tolerance) ||
       options.angular_tolerance < 0.0 || options.angular_tolerance > 1.0 ||
       options.max_evaluations < 6 || options.max_subdivisions == 0) {
-    return detail::invalid_input_result<CurveCurveIntersectionResult>(
-        *state_, diag_codes::kCoreParameterOutOfRange,
-        "曲线-曲线求交失败：容差或求值/细分预算非法",
-        "曲线-曲线求交失败");
+    return invalid_input(diag_codes::kCoreParameterOutOfRange,
+                         "曲线-曲线求交失败：容差或求值/细分预算非法");
   }
 
   Range1D first_range =
@@ -849,27 +860,23 @@ GeometryIntersectionService::intersect_curve_curve(
     std::swap(second_range.min, second_range.max);
   if (!curve_intersection_interval_valid(first_range) ||
       !curve_intersection_interval_valid(second_range)) {
-    return detail::invalid_input_result<CurveCurveIntersectionResult>(
-        *state_, diag_codes::kCoreParameterOutOfRange,
-        "曲线-曲线求交失败：无限曲线需要显式有限参数区间",
-        "曲线-曲线求交失败");
+    return invalid_input(diag_codes::kCoreParameterOutOfRange,
+                         "曲线-曲线求交失败：无限曲线需要显式有限参数区间");
   }
   const auto first_domain = curve_domain(first_it->second);
   const auto second_domain = curve_domain(second_it->second);
   if (first_range.min < first_domain.min || first_range.max > first_domain.max ||
       second_range.min < second_domain.min ||
       second_range.max > second_domain.max) {
-    return detail::invalid_input_result<CurveCurveIntersectionResult>(
-        *state_, diag_codes::kGeoParameterOutOfDomain,
-        "曲线-曲线求交失败：请求参数区间超出曲线定义域",
-        "曲线-曲线求交失败");
+    return invalid_input(diag_codes::kGeoParameterOutOfDomain,
+                         "曲线-曲线求交失败：请求参数区间超出曲线定义域");
   }
 
   CurveCurveIntersectionResult output;
-  CurveIntersectionContext context{*state_, options};
+  CurveIntersectionContext context{state, options};
 
   const bool same_parameterization =
-      same_curve_parameterization(*state_, first_curve, second_curve);
+      same_curve_parameterization(state, first_curve, second_curve);
   const Scalar common_begin = std::max(first_range.min, second_range.min);
   const Scalar common_end = std::min(first_range.max, second_range.max);
   const bool has_parameter_overlap =
@@ -884,14 +891,14 @@ GeometryIntersectionService::intersect_curve_curve(
   std::vector<LinearCurveSpan> first_linear;
   std::vector<LinearCurveSpan> second_linear;
   const bool first_entirely_linear = collect_linear_curve_spans(
-      *state_, first_curve, first_range, first_linear);
+      state, first_curve, first_range, first_linear);
   const bool second_entirely_linear = collect_linear_curve_spans(
-      *state_, second_curve, second_range, second_linear);
+      state, second_curve, second_range, second_linear);
   if (first_entirely_linear && second_entirely_linear) {
     for (const auto &first_span : first_linear) {
       for (const auto &second_span : second_linear) {
         intersect_linear_span_pair(
-            *state_, first_curve, first_span, second_curve, second_span,
+            state, first_curve, first_span, second_curve, second_span,
             first_range, second_range, options, output);
         ++output.parameter_rectangles_processed;
       }
@@ -908,8 +915,11 @@ GeometryIntersectionService::intersect_curve_curve(
                   return lhs.first_interval.min < rhs.first_interval.min;
                 return lhs.second_interval.min < rhs.second_interval.min;
               });
-    return ok_result(std::move(output),
-                     state_->create_diagnostic("曲线-曲线解析分段直线求交完成"));
+    return ok_result(
+        std::move(output),
+        emit_diagnostic
+            ? state.create_diagnostic("曲线-曲线解析分段直线求交完成")
+            : DiagnosticId{});
   }
 
   // Zero-width intervals are legitimate point-vs-curve queries. Give them a
@@ -1041,18 +1051,21 @@ GeometryIntersectionService::intersect_curve_curve(
 
   if (context.evaluation_budget_exhausted) {
     return curve_intersection_failure(
-        *state_, StatusCode::OperationFailed,
-        "曲线-曲线求交失败：点值求值预算耗尽，未返回部分交集");
+        state, StatusCode::OperationFailed,
+        "曲线-曲线求交失败：点值求值预算耗尽，未返回部分交集",
+        emit_diagnostic);
   }
   if (context.numerical_failure) {
     return curve_intersection_failure(
-        *state_, StatusCode::NumericalInstability,
-        "曲线-曲线求交失败：无法建立有限保守界或参数精化停滞");
+        state, StatusCode::NumericalInstability,
+        "曲线-曲线求交失败：无法建立有限保守界或参数精化停滞",
+        emit_diagnostic);
   }
   if (!pending.empty()) {
     return curve_intersection_failure(
-        *state_, StatusCode::OperationFailed,
-        "曲线-曲线求交失败：候选参数矩形预算耗尽，未返回部分交集");
+        state, StatusCode::OperationFailed,
+        "曲线-曲线求交失败：候选参数矩形预算耗尽，未返回部分交集",
+        emit_diagnostic);
   }
 
   output.evaluations = context.evaluations;
@@ -1069,6 +1082,26 @@ GeometryIntersectionService::intersect_curve_curve(
                 return lhs.first_interval.min < rhs.first_interval.min;
               return lhs.second_interval.min < rhs.second_interval.min;
             });
-  return ok_result(std::move(output),
-                   state_->create_diagnostic("曲线-曲线全域有界求交完成"));
+  return ok_result(
+      std::move(output),
+      emit_diagnostic ? state.create_diagnostic("曲线-曲线全域有界求交完成")
+                      : DiagnosticId{});
+}
+
+} // namespace
+
+Result<CurveCurveIntersectionResult>
+GeometryIntersectionService::intersect_curve_curve(
+    CurveId first_curve, CurveId second_curve,
+    const CurveCurveIntersectionOptions &options) const {
+  return intersect_curve_curve_impl(*state_, first_curve, second_curve, options,
+                                    true);
+}
+
+Result<CurveCurveIntersectionResult>
+geo_internal::intersect_curve_curve_no_diagnostics(
+    detail::KernelState &state, CurveId first_curve, CurveId second_curve,
+    const CurveCurveIntersectionOptions &options) {
+  return intersect_curve_curve_impl(state, first_curve, second_curve, options,
+                                    false);
 }

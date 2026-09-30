@@ -96,13 +96,20 @@ face_cross_loop_coincident_vertices(const detail::KernelState &state,
                                     LoopId outer_loop,
                                     std::span<const LoopId> inner_loops);
 
-// Returns the first conflict between finite linear boundary pieces in distinct
-// loops.  In addition to Line/LineSegment edges, explicitly trimmed
-// CompositePolyline and linear-only CompositeChain edges are expanded exactly.
-// Exact intersections, endpoint touches, collinear overlap, and
-// positive-distance contacts within `linear_tolerance` are distinguished.
-std::optional<FaceBoundaryConflict> face_cross_loop_boundary_conflict(
-    const detail::KernelState &state, LoopId outer_loop,
+struct FaceBoundaryConflictSearchResult {
+  StatusCode status {StatusCode::Ok};
+  std::optional<FaceBoundaryConflict> conflict;
+  EdgeId first_edge {};
+  EdgeId second_edge {};
+};
+
+// Returns the first conflict between finite boundary curves in distinct loops.
+// Linear pieces are expanded exactly. Explicitly trimmed conics, splines and
+// composite chains use GeoCore's bounded curve-curve solver without diagnostics
+// or cache writes. A non-Ok status means completeness could not be certified;
+// callers must fail closed rather than accepting a possibly intersecting face.
+FaceBoundaryConflictSearchResult face_cross_loop_boundary_conflict(
+    detail::KernelState &state, LoopId outer_loop,
     std::span<const LoopId> inner_loops, Scalar linear_tolerance);
 
 bool face_record_references_loop(const detail::FaceRecord &face,

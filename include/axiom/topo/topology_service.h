@@ -69,18 +69,53 @@ struct TopologyCancellationMetrics {
     std::uint64_t last_rolled_back_write_operations{};
 };
 
+/// 拓扑事务内保存点的不可伪造句柄；默认构造值无效，且只能交回创建它的活动事务。
+class TopologySavepoint {
+public:
+    TopologySavepoint() = default;
+    bool is_valid() const noexcept {
+        return transaction_cookie_ != 0 && sequence_ != 0;
+    }
+
+private:
+    TopologySavepoint(std::uint64_t transaction_cookie,
+                      std::uint64_t sequence)
+        : transaction_cookie_(transaction_cookie), sequence_(sequence) {}
+
+    std::uint64_t transaction_cookie_{};
+    std::uint64_t sequence_{};
+
+    friend class TopologyTransaction;
+};
+
+/// 同一内核实例内保存点操作的累计审计。事务最终提交或回滚不会改写既有保存点审计。
+struct TopologySavepointMetrics {
+    std::uint64_t created_count{};
+    std::uint64_t rollback_count{};
+    std::uint64_t released_count{};
+    /// 回滚到外层保存点时一并作废的更内层保存点数量。
+    std::uint64_t discarded_nested_count{};
+    /// 各次局部回滚丢弃的成功拓扑写操作数之和。
+    std::uint64_t rolled_back_write_operations_total{};
+    std::uint64_t last_rolled_back_write_operations{};
+};
+
 /// 同一面不同边界环之间的首个几何冲突类别。
-/// 当前精确覆盖有限 Line/LineSegment，以及带显式 trim 区间的
-/// CompositePolyline 和仅含线性子曲线的 CompositeChain；真曲边仍待扩展。
+/// 有限 Line/LineSegment、CompositePolyline 和纯线性 CompositeChain 使用解析
+/// 分段判定；携带显式 trim 区间的圆锥曲线、Bezier、B-spline、NURBS 与混合
+/// CompositeChain 使用误差受控求交。
 enum class FaceBoundaryConflictKind : std::uint8_t {
     ProperIntersection = 0,
     EndpointTouch = 1,
     CollinearOverlap = 2,
     NearContact = 3,
+    /// 非线性曲线存在连续重合参数区间。
+    CurveOverlap = 4,
 };
 
-/// 跨环边界冲突的可查询证据。`first_point` / `second_point` 是两条有限边段上的最近点；
-/// 精确相交或重叠时 `distance` 为 0，容差邻近时为有限正值。
+/// 跨环边界冲突的可查询证据。`first_point` / `second_point` 是两条有限边上的对应点；
+/// 解析精确相交或重叠时 `distance` 为 0，误差受控曲线求交时为求解残差，
+/// 容差邻近时为有限正值。
 struct FaceBoundaryConflict {
     FaceBoundaryConflictKind kind {FaceBoundaryConflictKind::ProperIntersection};
     LoopId first_loop {};
@@ -90,6 +125,13 @@ struct FaceBoundaryConflict {
     Point3 first_point {};
     Point3 second_point {};
     Scalar distance {};
+    /// true 表示冲突由误差受控曲线求交器给出；false 表示解析线性谓词。
+    bool error_controlled {false};
+    /// 曲线求交使用的位置容差；解析线性谓词为 0。
+    Scalar solver_tolerance {};
+    /// 曲线求交的实际无缓存点值求值数与候选参数矩形数；解析路径均为 0。
+    std::uint32_t curve_evaluations {};
+    std::uint32_t parameter_rectangles_processed {};
 };
 
 /// 拓扑边在其支撑三维曲线上的有向裁剪区间。
@@ -276,6 +318,15 @@ public:
     Result<void> replace_surface(FaceId face_id, SurfaceId replacement);
     Result<VersionId> commit();
     Result<void> rollback();
+    /// 捕获当前事务的拓扑与审计状态，建立可重复回滚的嵌套保存点。
+    /// 当前实现为内存全拓扑快照，适合阶段性原子工作流；不会回收已分配对象 ID。
+    Result<TopologySavepoint> create_savepoint();
+    /// 恢复到指定保存点并保留该保存点供再次回滚；其后创建的内层保存点全部失效。
+    /// 外部事务或已释放/失效句柄返回 OperationFailed / AXM-TX-E-0003，模型不变。
+    Result<void> rollback_to_savepoint(TopologySavepoint savepoint);
+    /// 按 LIFO 顺序释放最内层保存点并保留其后的模型修改；非最内层句柄失败且不修改模型。
+    Result<void> release_savepoint(TopologySavepoint savepoint);
+    Result<std::uint64_t> active_savepoint_count() const;
     /// 主动观察取消边界。已请求时，原子式恢复事务前模型、关闭事务并释放写者槽，
     /// 返回 OperationFailed / AXM-TX-E-0007；未请求时成功且不改变事务。
     Result<void> poll_cancellation();
@@ -371,8 +422,10 @@ public:
     Result<void> validate_vertex(VertexId vertex_id) const;
     Result<void> validate_coedge(CoedgeId coedge_id) const;
     Result<void> validate_loop(LoopId loop_id) const;
-    /// 建面前返回候选外/内环间的首个线性边界冲突；无冲突为成功的空 optional。
-    /// 精确覆盖 Line/LineSegment 与显式裁剪的 CompositePolyline/线性 CompositeChain。
+    /// 建面前返回候选外/内环间的首个边界冲突；无冲突为成功的空 optional。
+    /// 线性分段使用解析谓词；显式裁剪圆锥曲线、样条与混合 CompositeChain
+    /// 使用无缓存、受预算和误差约束的曲线求交。缺少必要 trim、数值界无法建立
+    /// 或预算耗尽时失败且不返回部分结果。
     /// `linear_tolerance == 0` 使用内核容差策略，正值会按策略上下限钳制；负值或非有限值失败。
     /// 只读查询不会修改拓扑、反向索引或活动事务计数。
     Result<std::optional<FaceBoundaryConflict>> first_boundary_conflict(
@@ -433,6 +486,8 @@ public:
     Result<bool> has_active_write_transaction() const;
     /// 返回自内核创建起的协作式取消累计审计；读取本身不创建或关闭事务。
     Result<TopologyCancellationMetrics> cancellation_metrics() const;
+    /// 返回自内核创建起的保存点创建、局部回滚、释放和丢弃写入累计审计。
+    Result<TopologySavepointMetrics> savepoint_metrics() const;
     TopologyQueryService& query();
     TopologyValidationService& validate();
 

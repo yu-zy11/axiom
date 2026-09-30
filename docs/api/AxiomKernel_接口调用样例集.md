@@ -166,7 +166,32 @@ print(closest.value->parameter,
       closest.value->intervals_processed);
 ```
 
-Line、LineSegment、Circle 与折线返回 `Analytic`；Ellipse、Parabola、Hyperbola、Bezier、BSpline、NURBS 和 CompositeChain 对完整有效域做分支限界。此结果类型只用于曲线；有界曲面可通过 `SurfaceService::closest_point_detailed` 获取对应的二维参数域证据。
+Line、LineSegment、Circle 与折线返回 `Analytic`；Ellipse、Parabola、Hyperbola、Bezier、BSpline、NURBS 和 CompositeChain 对完整有效域做分支限界。此结果类型只用于曲线；曲面使用对应的二维证据：
+
+```cpp
+SurfaceClosestPointOptions surface_options;
+surface_options.distance_tolerance = 1e-8;
+surface_options.parameter_tolerance = 1e-5;
+surface_options.max_evaluations = 250000;
+
+auto surface_closest = kernel.surface_service().closest_point_detailed(
+    surface_id, query_p, surface_options);
+if (!surface_closest.value) {
+  handle_error(surface_closest);  // 失败无部分值，不写 surface eval 缓存
+  return;
+}
+
+print(surface_closest.value->u, surface_closest.value->v,
+      surface_closest.value->point, surface_closest.value->distance,
+      surface_closest.value->distance_lower_bound,
+      surface_closest.value->effective_domain,
+      surface_closest.value->domain_was_finiteized,
+      surface_closest.value->control_net_bound_patches,
+      surface_closest.value->pruned_patches,
+      surface_closest.value->convergence);
+```
+
+Plane、Cylinder、Cone、规则 Sphere/Torus 及嵌套 Offset 链返回 `Analytic`；若原始域含无界方向，`domain_was_finiteized` 为 true，`effective_domain` 给出本次解析证书使用的有限域，且不消耗数值求值预算。Bezier/BSpline/NURBS 的 `control_net_bound_patches` 与 `pruned_patches` 反映有理控制网凸包证书与剪枝工作量，Trimmed 和 Offset 包装保留保守性。当前 spindle/horn 环面仍走有界数值路径，通用无限派生面尚不自动有限化；偏置半径坍缩、负向完整锥面偏置自交或数值溢出都会结构化失败。
 
 ## 4.4 有界 3D 曲线-曲线求交
 
@@ -179,6 +204,8 @@ CurveCurveIntersectionOptions options;
 options.position_tolerance = 1e-7;  // 模型长度单位
 options.parameter_tolerance = 1e-7;
 options.angular_tolerance = 1e-6;
+options.max_evaluations = 200000;
+options.max_subdivisions = 100000;
 
 auto hits = kernel.geometry_intersection().intersect_curve_curve(
     *arch.value, *line.value, options);
@@ -191,9 +218,11 @@ for (const auto& overlap : hits.value->overlaps) {
     print(overlap.first_interval, overlap.second_interval,
           overlap.same_direction, overlap.maximum_separation);
 }
+print(hits.value->evaluations,
+      hits.value->parameter_rectangles_processed);  // 本次查询的工作量证据
 ```
 
-空交集会成功返回两个空容器。无限 `Line` 必须在对应的 `first_interval` 或 `second_interval` 中显式给出有限参数窗口。离散交点分为 `Transverse/Tangent/Endpoint`；共线分段直线和可证明同参的高阶曲线返回连续 `overlaps`，一般高阶异参重合尚不作完备证明。非法句柄/区间/容差、无法建界或预算耗尽都不返回部分结果，也不写求值缓存、Intersection/拓扑存储或活动事务计数。
+空交集会成功返回两个空容器。无限 `Line` 必须在对应的 `first_interval` 或 `second_interval` 中显式给出有限参数窗口，例如 `options.second_interval = Range1D{-10.0, 10.0}`；不会自动从另一条曲线推断搜索域。离散交点分为 `Transverse/Tangent/Endpoint`；共线分段直线和可证明同参的高阶曲线返回连续 `overlaps`，一般高阶异参重合尚不作完备证明。非法句柄/区间/容差、无法建界或任一预算耗尽都不返回部分结果，也不写求值缓存、Intersection/拓扑存储或活动事务计数。
 
 ## 5. 基础体构造样例
 
@@ -667,7 +696,33 @@ if (cancelled.status == StatusCode::OperationFailed) {
 
 取消只在 API 边界协作式观察，不抢占单个正在执行的拓扑调用。预取消事务不会取得写者槽；移动事务唯一转移取消权限；被单写者规则拒绝的重叠事务不能借取消影响所有者。
 
-## 13.4 创建带显式参数区间的曲边
+## 13.4 嵌套保存点
+
+```cpp
+auto txn = kernel.topology().begin_transaction();
+auto outer = txn.create_savepoint();
+if (!outer.value) { handle_error(outer); return; }
+
+auto tentative_face = txn.create_face(surface_id, candidate_outer, candidate_holes);
+if (!tentative_face.value) {
+  auto restored = txn.rollback_to_savepoint(*outer.value);
+  if (restored.status != StatusCode::Ok) { handle_error(restored); return; }
+  // outer 仍有效，可修正输入后重试，或再次回滚到同一点。
+}
+
+auto inner = txn.create_savepoint();
+if (!inner.value) { handle_error(inner); return; }
+// ... 执行另一个受限阶段 ...
+auto released = txn.release_savepoint(*inner.value); // 只能 LIFO 释放最内层点
+if (released.status != StatusCode::Ok) { handle_error(released); return; }
+
+auto version = txn.commit();
+auto audit = kernel.topology().savepoint_metrics();
+```
+
+`rollback_to_savepoint` 恢复拓扑主存储、完整撤销基线和写审计，保留目标供重复回滚，但会使目标之后的所有内层保存点失效。无效、跨事务、已失效或非栈顶释放句柄返回 `OperationFailed / AXM-TX-E-0003` 且不改模型。保存点随移动事务转移所有权；取消已请求时，整事务恢复和 `AXM-TX-E-0007` 优先，不只回滚局部保存点。当前实现使用内存全拓扑快照，大模型需评估内存成本。
+
+## 13.5 创建带显式参数区间的曲边
 
 ```cpp
 const double pi = std::acos(-1.0);
@@ -687,7 +742,7 @@ auto length = kernel.topology().query().edge_length(*arc.value); // 5*pi/2
 
 参数端点与拓扑顶点须在内核线性容差内一致，且参数位于曲线定义域；创建失败不会分配 EdgeId 或增加事务写计数。旧 `create_edge` 创建的曲边没有显式区间，长度查询仍结构化拒绝，不使用弦长近似。
 
-## 13.5 建面前检查跨环边界冲突
+## 13.6 建面前检查跨环边界冲突
 
 ```cpp
 auto conflict = kernel.topology().validate().first_boundary_conflict(
@@ -701,12 +756,14 @@ if (conflict.value->has_value()) {
   const auto& evidence = conflict.value->value();
   print(evidence.first_loop.value, evidence.second_loop.value,
         evidence.first_edge.value, evidence.second_edge.value,
-        evidence.distance);
+        evidence.distance, evidence.error_controlled,
+        evidence.solver_tolerance, evidence.curve_evaluations,
+        evidence.parameter_rectangles_processed);
   return;  // 不进入 create_face
 }
 ```
 
-当前预检精确覆盖 Line/LineSegment，以及带显式 trim 区间的 CompositePolyline 和线性 CompositeChain，可区分内部相交、真实拓扑边端点相接、共线正长度重叠和容差内正距离邻近；圆锥曲线与样条的误差受控求交仍待接入。
+Line/LineSegment、CompositePolyline 和线性 CompositeChain 使用解析分段谓词；带显式 trim 区间的圆锥曲线、Bezier、BSpline、NURBS 与混合 CompositeChain 使用无缓存、受预算和误差约束的 Geo 求交流程。返回可区分内部相交、真实拓扑边端点接触、线性共线重叠、曲线连续重合和容差邻近；真曲线证据的 `error_controlled` 为 true。缺失必要 trim、曲线损坏或预算/数值失败会以 `AXM-TOPO-E-0030` 失败且不返回部分冲突。一般高阶异参连续重合仍不作完备证明，近接能力受统一求交预算约束。
 
 ## 14. 诊断与错误处理样例
 

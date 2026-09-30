@@ -492,9 +492,15 @@ Result<void> ValidationService::validate_all(BodyId body_id, ValidationMode mode
     if (topology.status != StatusCode::Ok) {
         return topology;
     }
-    auto manifold = validate_manifold(body_id, mode);
-    if (manifold.status != StatusCode::Ok) {
-        return manifold;
+    const auto& body = state_->bodies.at(body_id.value);
+    // Owned B-Rep topology validation already checks the body, per-edge closed
+    // manifold use, strict shell connectivity, and cross-shell face ownership.
+    // Keep the standalone manifold entry strong without repeating that full scan here.
+    if (body.rep_kind != RepKind::ExactBRep || body.shells.empty()) {
+        auto manifold = validate_manifold(body_id, mode);
+        if (manifold.status != StatusCode::Ok) {
+            return manifold;
+        }
     }
     auto self_intersection = validate_self_intersection(body_id, mode);
     if (self_intersection.status != StatusCode::Ok) {

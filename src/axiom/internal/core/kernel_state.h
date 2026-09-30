@@ -313,6 +313,12 @@ struct KernelState {
     std::uint64_t topology_cancellation_rollback_count{0};
     std::uint64_t topology_cancelled_write_operations_total{0};
     std::uint64_t topology_last_cancelled_write_operations{0};
+    std::uint64_t topology_savepoint_created_count{0};
+    std::uint64_t topology_savepoint_rollback_count{0};
+    std::uint64_t topology_savepoint_released_count{0};
+    std::uint64_t topology_savepoint_discarded_nested_count{0};
+    std::uint64_t topology_savepoint_rolled_back_write_operations_total{0};
+    std::uint64_t topology_savepoint_last_rolled_back_write_operations{0};
     /// 当前拓扑写事务的唯一所有权令牌；事务关闭后弱引用自动失效。
     std::weak_ptr<void> active_topology_transaction;
 

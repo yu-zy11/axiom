@@ -393,6 +393,250 @@ void tighten_tensor_patch_bounds(const detail::KernelState &state,
   }
 }
 
+struct TensorPatchHull {
+  std::array<long double, 3> minimum{
+      std::numeric_limits<long double>::infinity(),
+      std::numeric_limits<long double>::infinity(),
+      std::numeric_limits<long double>::infinity()};
+  std::array<long double, 3> maximum{
+      -std::numeric_limits<long double>::infinity(),
+      -std::numeric_limits<long double>::infinity(),
+      -std::numeric_limits<long double>::infinity()};
+  long double offset_padding{};
+};
+
+int exact_knot_multiplicity(const std::vector<Scalar> &knots, Scalar knot) {
+  return static_cast<int>(
+      std::count(knots.begin(), knots.end(), knot));
+}
+
+// Inserts one knot through every row/column of a homogeneous tensor net.  The
+// operation is affine in R4, so positive rational weights stay positive and the
+// Euclidean control points of an extracted patch retain the convex-hull property.
+bool insert_tensor_surface_knot(std::vector<Hom4> &net, int &nu, int &nv,
+                                std::vector<Scalar> &knots, int degree,
+                                Scalar knot, bool along_u) {
+  const int axis_count = along_u ? nu : nv;
+  const int strip_count = along_u ? nv : nu;
+  if (axis_count < 1 || degree < 0 || degree >= axis_count ||
+      static_cast<int>(knots.size()) != axis_count + degree + 1 ||
+      static_cast<int>(net.size()) != nu * nv) {
+    return false;
+  }
+  const int multiplicity = exact_knot_multiplicity(knots, knot);
+  if (multiplicity >= degree + 1) {
+    return true;
+  }
+  const int span = bspline_find_span(static_cast<std::size_t>(axis_count),
+                                     degree, knot, knots);
+  if (span < degree || span >= axis_count) {
+    return false;
+  }
+
+  std::vector<Scalar> inserted_knots;
+  inserted_knots.reserve(knots.size() + 1);
+  inserted_knots.insert(inserted_knots.end(), knots.begin(),
+                        knots.begin() + span + 1);
+  inserted_knots.push_back(knot);
+  inserted_knots.insert(inserted_knots.end(), knots.begin() + span + 1,
+                        knots.end());
+
+  const int new_nu = along_u ? nu + 1 : nu;
+  const int new_nv = along_u ? nv : nv + 1;
+  std::vector<Hom4> inserted_net(
+      static_cast<std::size_t>(new_nu * new_nv));
+  const auto old_at = [&](int axis, int strip) -> const Hom4 & {
+    const int i = along_u ? axis : strip;
+    const int j = along_u ? strip : axis;
+    return net[static_cast<std::size_t>(i * nv + j)];
+  };
+  const auto assign = [&](int axis, int strip, const Hom4 &value) {
+    const int i = along_u ? axis : strip;
+    const int j = along_u ? strip : axis;
+    inserted_net[static_cast<std::size_t>(i * new_nv + j)] = value;
+  };
+  for (int strip = 0; strip < strip_count; ++strip) {
+    for (int i = 0; i <= span - degree; ++i) {
+      assign(i, strip, old_at(i, strip));
+    }
+    for (int i = span - multiplicity; i < axis_count; ++i) {
+      assign(i + 1, strip, old_at(i, strip));
+    }
+    for (int i = span - degree + 1; i <= span - multiplicity; ++i) {
+      const Scalar denominator =
+          knots[static_cast<std::size_t>(i + degree)] -
+          knots[static_cast<std::size_t>(i)];
+      if (!(denominator > 0.0) || !finite_scalar(denominator)) {
+        return false;
+      }
+      const Scalar alpha =
+          (knot - knots[static_cast<std::size_t>(i)]) / denominator;
+      if (!finite_scalar(alpha) || alpha < 0.0 || alpha > 1.0) {
+        return false;
+      }
+      assign(i, strip,
+             lerp_hom4(old_at(i - 1, strip), old_at(i, strip), alpha));
+    }
+  }
+  net = std::move(inserted_net);
+  knots = std::move(inserted_knots);
+  nu = new_nu;
+  nv = new_nv;
+  return true;
+}
+
+bool insert_tensor_surface_knot_to_full_multiplicity(
+    std::vector<Hom4> &net, int &nu, int &nv, std::vector<Scalar> &knots,
+    int degree, Scalar knot, bool along_u) {
+  while (exact_knot_multiplicity(knots, knot) < degree + 1) {
+    if (!insert_tensor_surface_knot(net, nu, nv, knots, degree, knot,
+                                    along_u)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+int restricted_patch_control_begin(const std::vector<Scalar> &knots,
+                                   Scalar lower, int degree) {
+  int last = -1;
+  for (std::size_t i = 0; i < knots.size(); ++i) {
+    if (knots[i] == lower) {
+      last = static_cast<int>(i);
+    }
+  }
+  return last - degree;
+}
+
+bool tensor_surface_patch_hull(const detail::SurfaceRecord &surface,
+                               const Range2D &patch, TensorPatchHull &hull) {
+  if (surface.kind != detail::SurfaceKind::Bezier &&
+      surface.kind != detail::SurfaceKind::BSpline &&
+      surface.kind != detail::SurfaceKind::Nurbs) {
+    return false;
+  }
+  const auto [rows_size, cols_size] =
+      infer_surface_grid_dims(surface.poles.size());
+  if (rows_size < 1 || cols_size < 1) {
+    return false;
+  }
+  int nu = static_cast<int>(rows_size);
+  int nv = static_cast<int>(cols_size);
+  int degree_u = nu - 1;
+  int degree_v = nv - 1;
+  std::vector<Scalar> knots_u;
+  std::vector<Scalar> knots_v;
+  if (surface.kind == detail::SurfaceKind::Bezier) {
+    knots_u = bspline_open_uniform_knots(rows_size, degree_u);
+    knots_v = bspline_open_uniform_knots(cols_size, degree_v);
+  } else if (!nurbs_tensor_surface_prepare(surface, nu, nv, degree_u,
+                                            degree_v, knots_u, knots_v)) {
+    return false;
+  }
+  if (!(patch.u.max > patch.u.min) || !(patch.v.max > patch.v.min) ||
+      patch.u.min < knots_u[static_cast<std::size_t>(degree_u)] ||
+      patch.u.max > knots_u[static_cast<std::size_t>(nu)] ||
+      patch.v.min < knots_v[static_cast<std::size_t>(degree_v)] ||
+      patch.v.max > knots_v[static_cast<std::size_t>(nv)]) {
+    return false;
+  }
+
+  std::vector<Hom4> net = nurbs_surface_homogeneous_net(surface, nu, nv);
+  if (!insert_tensor_surface_knot_to_full_multiplicity(
+          net, nu, nv, knots_u, degree_u, patch.u.min, true) ||
+      !insert_tensor_surface_knot_to_full_multiplicity(
+          net, nu, nv, knots_u, degree_u, patch.u.max, true) ||
+      !insert_tensor_surface_knot_to_full_multiplicity(
+          net, nu, nv, knots_v, degree_v, patch.v.min, false) ||
+      !insert_tensor_surface_knot_to_full_multiplicity(
+          net, nu, nv, knots_v, degree_v, patch.v.max, false)) {
+    return false;
+  }
+  const int begin_u =
+      restricted_patch_control_begin(knots_u, patch.u.min, degree_u);
+  const int begin_v =
+      restricted_patch_control_begin(knots_v, patch.v.min, degree_v);
+  if (begin_u < 0 || begin_v < 0 || begin_u + degree_u >= nu ||
+      begin_v + degree_v >= nv) {
+    return false;
+  }
+
+  for (int i = begin_u; i <= begin_u + degree_u; ++i) {
+    for (int j = begin_v; j <= begin_v + degree_v; ++j) {
+      const Hom4 &control =
+          net[static_cast<std::size_t>(i * nv + j)];
+      // The evaluator protects division below 1e-30 by clamping its
+      // denominator.  Only issue a convex-hull certificate when the extracted
+      // positive net proves that clamp cannot be reached anywhere in the patch.
+      if (!(control.w > static_cast<Scalar>(1e-30)) || !finite_scalar(control.x) ||
+          !finite_scalar(control.y) || !finite_scalar(control.z) ||
+          !finite_scalar(control.w)) {
+        return false;
+      }
+      const std::array<long double, 3> point{
+          static_cast<long double>(control.x) / control.w,
+          static_cast<long double>(control.y) / control.w,
+          static_cast<long double>(control.z) / control.w};
+      for (std::size_t axis = 0; axis < point.size(); ++axis) {
+        if (!std::isfinite(point[axis])) {
+          return false;
+        }
+        hull.minimum[axis] = std::min(hull.minimum[axis], point[axis]);
+        hull.maximum[axis] = std::max(hull.maximum[axis], point[axis]);
+      }
+    }
+  }
+  return true;
+}
+
+bool tensor_surface_patch_hull(const detail::KernelState &state,
+                               SurfaceId surface_id, const Range2D &patch,
+                               TensorPatchHull &hull,
+                               std::uint32_t depth = 0) {
+  if (depth > 32) {
+    return false;
+  }
+  const auto found = state.surfaces.find(surface_id.value);
+  if (found == state.surfaces.end()) {
+    return false;
+  }
+  const auto &surface = found->second;
+  if (surface.kind == detail::SurfaceKind::Trimmed) {
+    return tensor_surface_patch_hull(state, surface.base_surface_id, patch,
+                                     hull, depth + 1);
+  }
+  if (surface.kind == detail::SurfaceKind::Offset) {
+    hull.offset_padding +=
+        std::abs(static_cast<long double>(surface.offset_distance));
+    if (!std::isfinite(hull.offset_padding)) {
+      return false;
+    }
+    return tensor_surface_patch_hull(state, surface.base_surface_id, patch,
+                                     hull, depth + 1);
+  }
+  return tensor_surface_patch_hull(surface, patch, hull);
+}
+
+long double point_to_tensor_patch_hull_distance(const Point3 &query,
+                                                const TensorPatchHull &hull) {
+  const std::array<long double, 3> coordinates{
+      static_cast<long double>(query.x), static_cast<long double>(query.y),
+      static_cast<long double>(query.z)};
+  long double squared = 0.0L;
+  for (std::size_t axis = 0; axis < coordinates.size(); ++axis) {
+    const long double lower = hull.minimum[axis] - hull.offset_padding;
+    const long double upper = hull.maximum[axis] + hull.offset_padding;
+    long double separation = 0.0L;
+    if (coordinates[axis] < lower) {
+      separation = lower - coordinates[axis];
+    } else if (coordinates[axis] > upper) {
+      separation = coordinates[axis] - upper;
+    }
+    squared += separation * separation;
+  }
+  return std::sqrt(squared);
+}
+
 Range2D surface_search_domain(const detail::KernelState &state,
                              const detail::SurfaceRecord &surface,
                              std::uint32_t depth = 0) {
@@ -559,6 +803,349 @@ bool surface_search_patch_may_be_feasible(const detail::KernelState &state,
       state, surface.base_surface_id, u0, u1, v0, v1, depth + 1);
 }
 
+enum class AnalyticSurfaceClosestStatus : std::uint8_t {
+  NotApplicable,
+  Success,
+  DegenerateOffset,
+  NumericalFailure
+};
+
+struct AnalyticSurfaceClosestAttempt {
+  AnalyticSurfaceClosestStatus status{AnalyticSurfaceClosestStatus::NotApplicable};
+  SurfaceClosestPointResult result{};
+};
+
+struct AnalyticSurfaceStack {
+  const detail::SurfaceRecord *root{};
+  long double offset{};
+  // Traversal starts at the queried wrapper.  Reverse iteration therefore
+  // validates every materialized intermediate parallel surface from root out.
+  std::vector<long double> offset_layers;
+};
+
+AnalyticSurfaceClosestStatus unwrap_analytic_surface_stack(
+    const detail::KernelState &state, SurfaceId surface_id,
+    AnalyticSurfaceStack &stack) {
+  SurfaceId current = surface_id;
+  for (std::uint32_t depth = 0; depth <= 32; ++depth) {
+    const auto found = state.surfaces.find(current.value);
+    if (found == state.surfaces.end()) {
+      return AnalyticSurfaceClosestStatus::NumericalFailure;
+    }
+    const auto &surface = found->second;
+    if (surface.kind == detail::SurfaceKind::Offset) {
+      const long double layer = surface.offset_distance;
+      stack.offset_layers.push_back(layer);
+      stack.offset += layer;
+      if (!std::isfinite(stack.offset)) {
+        return AnalyticSurfaceClosestStatus::NumericalFailure;
+      }
+      current = surface.base_surface_id;
+      continue;
+    }
+    switch (surface.kind) {
+    case detail::SurfaceKind::Plane:
+    case detail::SurfaceKind::Sphere:
+    case detail::SurfaceKind::Cylinder:
+    case detail::SurfaceKind::Cone:
+    case detail::SurfaceKind::Torus:
+      stack.root = &surface;
+      return AnalyticSurfaceClosestStatus::Success;
+    default:
+      return AnalyticSurfaceClosestStatus::NotApplicable;
+    }
+  }
+  return AnalyticSurfaceClosestStatus::NumericalFailure;
+}
+
+bool finite_long_double_point(long double x, long double y, long double z) {
+  const long double limit = std::numeric_limits<Scalar>::max();
+  return std::isfinite(x) && std::isfinite(y) && std::isfinite(z) &&
+         std::abs(x) <= limit && std::abs(y) <= limit && std::abs(z) <= limit;
+}
+
+bool analytic_point_from_local(const Point3 &origin, const OrthoFrame &frame,
+                               long double x, long double y, long double z,
+                               Point3 &point) {
+  const long double px = static_cast<long double>(origin.x) + frame.u.x * x +
+                         frame.v.x * y + frame.w.x * z;
+  const long double py = static_cast<long double>(origin.y) + frame.u.y * x +
+                         frame.v.y * y + frame.w.y * z;
+  const long double pz = static_cast<long double>(origin.z) + frame.u.z * x +
+                         frame.v.z * y + frame.w.z * z;
+  if (!finite_long_double_point(px, py, pz)) {
+    return false;
+  }
+  point = Point3{static_cast<Scalar>(px), static_cast<Scalar>(py),
+                 static_cast<Scalar>(pz)};
+  return finite_point(point);
+}
+
+bool analytic_query_local(const Point3 &query, const Point3 &origin,
+                          const OrthoFrame &frame, long double &x,
+                          long double &y, long double &z) {
+  const long double dx = static_cast<long double>(query.x) - origin.x;
+  const long double dy = static_cast<long double>(query.y) - origin.y;
+  const long double dz = static_cast<long double>(query.z) - origin.z;
+  x = dx * frame.u.x + dy * frame.u.y + dz * frame.u.z;
+  y = dx * frame.v.x + dy * frame.v.y + dz * frame.v.z;
+  z = dx * frame.w.x + dy * frame.w.y + dz * frame.w.z;
+  return std::isfinite(x) && std::isfinite(y) && std::isfinite(z);
+}
+
+Scalar canonical_surface_angle(long double y, long double x) {
+  const long double two_pi = 2.0L * std::acos(-1.0L);
+  long double angle = std::atan2(y, x);
+  if (angle < 0.0L) {
+    angle += two_pi;
+  }
+  if (angle >= two_pi) {
+    angle = 0.0L;
+  }
+  return static_cast<Scalar>(angle);
+}
+
+bool finalize_analytic_surface_closest(const Point3 &query, Scalar u, Scalar v,
+                                       const Point3 &point,
+                                       const Range2D &effective_domain,
+                                       bool finiteized,
+                                       AnalyticSurfaceClosestAttempt &attempt) {
+  const long double distance = closest_distance(point, query);
+  if (!finite_scalar(u) || !finite_scalar(v) || !finite_point(point) ||
+      !std::isfinite(distance) ||
+      distance > std::numeric_limits<Scalar>::max()) {
+    attempt.status = AnalyticSurfaceClosestStatus::NumericalFailure;
+    return false;
+  }
+  auto &result = attempt.result;
+  result.u = u;
+  result.v = v;
+  result.point = point;
+  result.distance = static_cast<Scalar>(distance);
+  result.distance_lower_bound = result.distance;
+  result.evaluations = 0;
+  result.patches_processed = 0;
+  result.convergence = SurfaceClosestPointConvergence::Analytic;
+  result.effective_domain = effective_domain;
+  result.domain_was_finiteized = finiteized;
+  attempt.status = AnalyticSurfaceClosestStatus::Success;
+  return true;
+}
+
+AnalyticSurfaceClosestAttempt try_analytic_surface_closest(
+    const detail::KernelState &state, SurfaceId surface_id,
+    const Point3 &query) {
+  AnalyticSurfaceClosestAttempt attempt;
+  AnalyticSurfaceStack stack;
+  attempt.status =
+      unwrap_analytic_surface_stack(state, surface_id, stack);
+  if (attempt.status != AnalyticSurfaceClosestStatus::Success ||
+      stack.root == nullptr) {
+    return attempt;
+  }
+
+  const auto &surface = *stack.root;
+  const auto frame = make_frame_from_axis(surface.normal);
+  long double qx = 0.0L;
+  long double qy = 0.0L;
+  long double qz = 0.0L;
+  if (!analytic_query_local(query, surface.origin, frame, qx, qy, qz)) {
+    attempt.status = AnalyticSurfaceClosestStatus::NumericalFailure;
+    return attempt;
+  }
+  const long double pi = std::acos(-1.0L);
+  const long double two_pi = 2.0L * pi;
+  const Range1D periodic{0.0, static_cast<Scalar>(two_pi)};
+
+  switch (surface.kind) {
+  case detail::SurfaceKind::Plane: {
+    const long double shifted_z = stack.offset;
+    Point3 point{};
+    if (!analytic_point_from_local(surface.origin, frame, qx, qy, shifted_z,
+                                   point)) {
+      attempt.status = AnalyticSurfaceClosestStatus::NumericalFailure;
+      return attempt;
+    }
+    const Scalar u = static_cast<Scalar>(qx);
+    const Scalar v = static_cast<Scalar>(qy);
+    const Range2D witness{{u, u}, {v, v}};
+    finalize_analytic_surface_closest(query, u, v, point, witness, true,
+                                      attempt);
+    return attempt;
+  }
+  case detail::SurfaceKind::Sphere: {
+    const long double radius =
+        static_cast<long double>(surface.radius_a) + stack.offset;
+    long double cumulative_offset = 0.0L;
+    for (auto layer = stack.offset_layers.rbegin();
+         layer != stack.offset_layers.rend(); ++layer) {
+      cumulative_offset += *layer;
+      if (!(static_cast<long double>(surface.radius_a) + cumulative_offset >
+            static_cast<long double>(kEpsilon))) {
+        attempt.status = AnalyticSurfaceClosestStatus::DegenerateOffset;
+        return attempt;
+      }
+    }
+    const long double query_radius = std::hypot(qx, qy, qz);
+    long double dx = 0.0L;
+    long double dy = 0.0L;
+    long double dz = 1.0L;
+    if (query_radius > 0.0L) {
+      dx = qx / query_radius;
+      dy = qy / query_radius;
+      dz = qz / query_radius;
+    }
+    Point3 point{};
+    // Sphere evaluation is intentionally expressed in the world XYZ frame.
+    const long double px = static_cast<long double>(surface.origin.x) + radius * dx;
+    const long double py = static_cast<long double>(surface.origin.y) + radius * dy;
+    const long double pz = static_cast<long double>(surface.origin.z) + radius * dz;
+    if (!finite_long_double_point(px, py, pz)) {
+      attempt.status = AnalyticSurfaceClosestStatus::NumericalFailure;
+      return attempt;
+    }
+    point = {static_cast<Scalar>(px), static_cast<Scalar>(py),
+             static_cast<Scalar>(pz)};
+    const Scalar u = query_radius > 0.0L ? canonical_surface_angle(dy, dx) : 0.0;
+    const Scalar v = query_radius > 0.0L
+                         ? static_cast<Scalar>(std::acos(std::clamp(dz, -1.0L, 1.0L)))
+                         : 0.0;
+    const Range2D domain{periodic, {0.0, static_cast<Scalar>(pi)}};
+    finalize_analytic_surface_closest(query, u, v, point, domain, false,
+                                      attempt);
+    return attempt;
+  }
+  case detail::SurfaceKind::Cylinder: {
+    const long double radius =
+        static_cast<long double>(surface.radius_a) + stack.offset;
+    long double cumulative_offset = 0.0L;
+    for (auto layer = stack.offset_layers.rbegin();
+         layer != stack.offset_layers.rend(); ++layer) {
+      cumulative_offset += *layer;
+      if (!(static_cast<long double>(surface.radius_a) + cumulative_offset >
+            static_cast<long double>(kEpsilon))) {
+        attempt.status = AnalyticSurfaceClosestStatus::DegenerateOffset;
+        return attempt;
+      }
+    }
+    const long double planar = std::hypot(qx, qy);
+    const long double cx = planar > 0.0L ? qx / planar : 1.0L;
+    const long double cy = planar > 0.0L ? qy / planar : 0.0L;
+    Point3 point{};
+    if (!analytic_point_from_local(surface.origin, frame, radius * cx,
+                                   radius * cy, qz, point)) {
+      attempt.status = AnalyticSurfaceClosestStatus::NumericalFailure;
+      return attempt;
+    }
+    const Scalar u = planar > 0.0L ? canonical_surface_angle(qy, qx) : 0.0;
+    const Scalar v = static_cast<Scalar>(qz);
+    const Range2D witness{periodic, {v, v}};
+    finalize_analytic_surface_closest(query, u, v, point, witness, true,
+                                      attempt);
+    return attempt;
+  }
+  case detail::SurfaceKind::Cone: {
+    const long double angle = surface.semi_angle;
+    const long double slope = std::tan(angle);
+    const long double sine = std::sin(angle);
+    const long double cosine = std::cos(angle);
+    if (!std::isfinite(slope) || !(slope > 0.0L) || !(cosine > 0.0L)) {
+      attempt.status = AnalyticSurfaceClosestStatus::NumericalFailure;
+      return attempt;
+    }
+    // A negative parallel offset crosses the axis before the original apex and
+    // is self-intersecting/normal-singular over the declared v >= 0 domain.
+    long double cumulative_offset = 0.0L;
+    for (auto layer = stack.offset_layers.rbegin();
+         layer != stack.offset_layers.rend(); ++layer) {
+      cumulative_offset += *layer;
+      if (cumulative_offset < 0.0L) {
+        attempt.status = AnalyticSurfaceClosestStatus::DegenerateOffset;
+        return attempt;
+      }
+    }
+    const long double planar = std::hypot(qx, qy);
+    const long double boundary_radius = stack.offset * cosine;
+    const long double boundary_z = -stack.offset * sine;
+    const long double numerator =
+        slope * (planar - boundary_radius) + (qz - boundary_z);
+    const long double axial = std::max(0.0L, numerator / (1.0L + slope * slope));
+    const long double radial = boundary_radius + slope * axial;
+    const long double z = boundary_z + axial;
+    const long double cx = planar > 0.0L ? qx / planar : 1.0L;
+    const long double cy = planar > 0.0L ? qy / planar : 0.0L;
+    Point3 point{};
+    if (!analytic_point_from_local(surface.origin, frame, radial * cx,
+                                   radial * cy, z, point)) {
+      attempt.status = AnalyticSurfaceClosestStatus::NumericalFailure;
+      return attempt;
+    }
+    const Scalar u = planar > 0.0L ? canonical_surface_angle(qy, qx) : 0.0;
+    const Scalar v = static_cast<Scalar>(axial);
+    const Range2D witness{periodic, {0.0, v}};
+    finalize_analytic_surface_closest(query, u, v, point, witness, true,
+                                      attempt);
+    return attempt;
+  }
+  case detail::SurfaceKind::Torus: {
+    const long double major_radius = surface.radius_a;
+    const long double minor_radius =
+        static_cast<long double>(surface.radius_b) + stack.offset;
+    // The closed-form meridian-circle certificate below is for a regular ring
+    // torus. Spindle/horn tori remain on the bounded generic solver.
+    const long double regularity_epsilon = static_cast<long double>(kEpsilon);
+    const bool root_is_regular =
+        static_cast<long double>(surface.radius_b) > regularity_epsilon &&
+        major_radius > static_cast<long double>(surface.radius_b) +
+                           regularity_epsilon;
+    if (!root_is_regular) {
+      attempt.status = AnalyticSurfaceClosestStatus::NotApplicable;
+      return attempt;
+    }
+    long double cumulative_offset = 0.0L;
+    for (auto layer = stack.offset_layers.rbegin();
+         layer != stack.offset_layers.rend(); ++layer) {
+      cumulative_offset += *layer;
+      const long double intermediate_minor =
+          static_cast<long double>(surface.radius_b) + cumulative_offset;
+      if (!(intermediate_minor > regularity_epsilon) ||
+          !(major_radius > intermediate_minor + regularity_epsilon)) {
+        attempt.status = AnalyticSurfaceClosestStatus::DegenerateOffset;
+        return attempt;
+      }
+    }
+    const long double planar = std::hypot(qx, qy);
+    const long double meridian_x = planar - major_radius;
+    const long double meridian_length = std::hypot(meridian_x, qz);
+    const long double mx = meridian_length > 0.0L
+                               ? meridian_x / meridian_length
+                               : 1.0L;
+    const long double mz = meridian_length > 0.0L ? qz / meridian_length : 0.0L;
+    const long double radial = major_radius + minor_radius * mx;
+    const long double z = minor_radius * mz;
+    const long double cx = planar > 0.0L ? qx / planar : 1.0L;
+    const long double cy = planar > 0.0L ? qy / planar : 0.0L;
+    Point3 point{};
+    if (!analytic_point_from_local(surface.origin, frame, radial * cx,
+                                   radial * cy, z, point)) {
+      attempt.status = AnalyticSurfaceClosestStatus::NumericalFailure;
+      return attempt;
+    }
+    const Scalar u = planar > 0.0L ? canonical_surface_angle(qy, qx) : 0.0;
+    const Scalar v = meridian_length > 0.0L
+                         ? canonical_surface_angle(qz, meridian_x)
+                         : 0.0;
+    const Range2D domain{periodic, periodic};
+    finalize_analytic_surface_closest(query, u, v, point, domain, false,
+                                      attempt);
+    return attempt;
+  }
+  default:
+    attempt.status = AnalyticSurfaceClosestStatus::NotApplicable;
+    return attempt;
+  }
+}
+
 } // namespace
 
 Result<SurfaceClosestPointResult> SurfaceService::closest_point_detailed(
@@ -578,6 +1165,29 @@ Result<SurfaceClosestPointResult> SurfaceService::closest_point_detailed(
     return detail::failed_result<SurfaceClosestPointResult>(
         *state_, StatusCode::InvalidInput, diag_codes::kGeoParameterSolveFailure,
         "曲面全域最近点求解失败：目标曲面不存在", "曲面全域最近点求解失败");
+  }
+  const auto analytic =
+      try_analytic_surface_closest(*state_, surface_id, query);
+  if (analytic.status == AnalyticSurfaceClosestStatus::Success) {
+    return ok_result(analytic.result,
+                     state_->create_diagnostic(
+                         analytic.result.domain_was_finiteized
+                             ? "曲面全域最近点已解析求解并自动有限化"
+                             : "曲面全域最近点已解析求解"));
+  }
+  if (analytic.status == AnalyticSurfaceClosestStatus::DegenerateOffset) {
+    return detail::failed_result<SurfaceClosestPointResult>(
+        *state_, StatusCode::DegenerateGeometry,
+        diag_codes::kGeoOffsetSelfIntersection,
+        "曲面全域最近点求解失败：解析偏置链半径坍缩或在完整参数域内自交",
+        "曲面全域最近点求解失败");
+  }
+  if (analytic.status == AnalyticSurfaceClosestStatus::NumericalFailure) {
+    return detail::failed_result<SurfaceClosestPointResult>(
+        *state_, StatusCode::NumericalInstability,
+        diag_codes::kGeoParameterSolveFailure,
+        "曲面全域最近点求解失败：解析有限化参数或结果超出可表示范围",
+        "曲面全域最近点求解失败");
   }
   const Range2D domain = surface_search_domain(*state_, found->second);
   if (!finite_scalar(domain.u.min) || !finite_scalar(domain.u.max) ||
@@ -618,6 +1228,7 @@ Result<SurfaceClosestPointResult> SurfaceService::closest_point_detailed(
     result.distance_lower_bound = distance;
     result.evaluations = 1;
     result.convergence = SurfaceClosestPointConvergence::DistanceTolerance;
+    result.effective_domain = domain;
     return ok_result(result,
                      state_->create_diagnostic("曲面全域最近点已解析求解"));
   }
@@ -691,6 +1302,7 @@ Result<SurfaceClosestPointResult> SurfaceService::closest_point_detailed(
       result.distance_lower_bound = result.distance;
       result.evaluations = 1;
       result.convergence = SurfaceClosestPointConvergence::DistanceTolerance;
+      result.effective_domain = domain;
       return ok_result(result,
                        state_->create_diagnostic("曲面全域最近点已解析求解"));
     }
@@ -811,6 +1423,7 @@ Result<SurfaceClosestPointResult> SurfaceService::closest_point_detailed(
         result.evaluations = planar_evaluations;
         result.patches_processed = 1;
         result.convergence = SurfaceClosestPointConvergence::DistanceTolerance;
+        result.effective_domain = domain;
         return ok_result(result,
                          state_->create_diagnostic("曲面全域最近点已由平面界认证"));
       }
@@ -848,6 +1461,8 @@ Result<SurfaceClosestPointResult> SurfaceService::closest_point_detailed(
   std::priority_queue<Patch, std::vector<Patch>, LowerFirst> pending;
   std::uint32_t evaluations = preliminary_evaluations;
   std::uint32_t patches_processed = 0;
+  std::uint32_t control_net_bound_patches = 0;
+  std::uint32_t pruned_patches = 0;
   long double best_distance = std::numeric_limits<long double>::infinity();
   Scalar best_u = domain.u.min;
   Scalar best_v = domain.v.min;
@@ -921,7 +1536,19 @@ Result<SurfaceClosestPointResult> SurfaceService::closest_point_detailed(
         patch_bounds.du * (static_cast<long double>(u1) - u0) * 0.5L +
         patch_bounds.dv * (static_cast<long double>(v1) - v0) * 0.5L +
         patch_bounds.fixed_radius;
-    const long double lower = std::max(0.0L, center_distance - radius);
+    long double lower = std::max(0.0L, center_distance - radius);
+    TensorPatchHull hull;
+    const bool has_control_net_bound = tensor_surface_patch_hull(
+        *state_, surface_id, patch_domain, hull);
+    if (has_control_net_bound) {
+      const long double hull_lower =
+          point_to_tensor_patch_hull_distance(query, hull);
+      if (!std::isfinite(hull_lower)) {
+        return false;
+      }
+      lower = std::max(lower, hull_lower);
+      ++control_net_bound_patches;
+    }
     pending.push(Patch{u0, u1, v0, v1, lower});
     return true;
   };
@@ -970,6 +1597,7 @@ Result<SurfaceClosestPointResult> SurfaceService::closest_point_detailed(
     pending.pop();
     ++patches_processed;
     if (current.lower >= best_distance) {
+      ++pruned_patches;
       continue;
     }
     const long double width_u = static_cast<long double>(current.u1) - current.u0;
@@ -1089,7 +1717,10 @@ Result<SurfaceClosestPointResult> SurfaceService::closest_point_detailed(
       static_cast<Scalar>(std::clamp(global_lower, 0.0L, best_distance));
   result.evaluations = evaluations;
   result.patches_processed = patches_processed;
+  result.control_net_bound_patches = control_net_bound_patches;
+  result.pruned_patches = pruned_patches;
   result.convergence = convergence;
+  result.effective_domain = domain;
   if (convergence == SurfaceClosestPointConvergence::ParameterTolerance) {
     result.u_uncertainty = static_cast<Scalar>(max_terminal_u);
     result.v_uncertainty = static_cast<Scalar>(max_terminal_v);

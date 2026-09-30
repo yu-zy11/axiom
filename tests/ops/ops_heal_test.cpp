@@ -2956,13 +2956,25 @@ bool test_polygon_lofts() {
 }  // namespace
 
 int main() {
-    if (!test_holed_extrusions() || !test_polyline_sweeps() || !test_curve_frame_sweeps() ||
-        !test_closed_spline_sweeps() || !test_composite_chain_sweeps() || !test_scaled_rail_sweeps() ||
-        !test_polygon_lofts() ||
-        !test_scaled_extrusions() ||
-        !test_holed_polygon_revolutions() || !test_partial_polygon_revolutions() ||
-        !test_directed_interval_revolutions() || !test_full_polygon_revolutions() ||
-        !test_extrusions_to_plane()) return 1;
+    const auto run_stage = [](const char* name, const auto& test) {
+        std::cerr << "[stage] " << name << " begin\n";
+        const bool passed = test();
+        std::cerr << "[stage] " << name << " " << (passed ? "passed" : "failed") << '\n';
+        return passed;
+    };
+    if (!run_stage("holed_extrusions", test_holed_extrusions) ||
+        !run_stage("polyline_sweeps", test_polyline_sweeps) ||
+        !run_stage("curve_frame_sweeps", test_curve_frame_sweeps) ||
+        !run_stage("closed_spline_sweeps", test_closed_spline_sweeps) ||
+        !run_stage("composite_chain_sweeps", test_composite_chain_sweeps) ||
+        !run_stage("scaled_rail_sweeps", test_scaled_rail_sweeps) ||
+        !run_stage("polygon_lofts", test_polygon_lofts) ||
+        !run_stage("scaled_extrusions", test_scaled_extrusions) ||
+        !run_stage("holed_polygon_revolutions", test_holed_polygon_revolutions) ||
+        !run_stage("partial_polygon_revolutions", test_partial_polygon_revolutions) ||
+        !run_stage("directed_interval_revolutions", test_directed_interval_revolutions) ||
+        !run_stage("full_polygon_revolutions", test_full_polygon_revolutions) ||
+        !run_stage("extrusions_to_plane", test_extrusions_to_plane)) return 1;
     // Fresh primitive and derived indexing must preserve new and pre-existing
     // adjacency, including cloned source topology and explicit apex topology.
     {

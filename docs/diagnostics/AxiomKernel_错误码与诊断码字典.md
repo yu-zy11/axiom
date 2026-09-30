@@ -255,7 +255,11 @@
 | `AXM-TOPO-E-0026` | Error | 同一面中不同边界环的有限线性边界片段在三维空间内部相交；精确覆盖 Line/LineSegment 与显式裁剪的 CompositePolyline/线性 CompositeChain；`create_face` 在写入前拒绝，`validate_face` 检出存量缺陷，关联两个环与两条边 ID |
 | `AXM-TOPO-E-0027` | Error | 上述线性边界片段在至少一条拓扑边的真实端点相接；复合折线/链的内部分段点不会被误当为边端点；创建与验证关联两环两边 ID |
 | `AXM-TOPO-E-0028` | Error | 上述线性边界片段共线且存在正长度重叠；`create_face` 在分配 FaceId 前拒绝，`validate_face` 检出存量缺陷，关联两环两边 ID |
-| `AXM-TOPO-E-0029` | Error | 上述线性边界片段未精确相交，但最近距离为有限正值且不超过有效线性容差；`create_face` 与 `validate_face` 共用该判定。圆锥曲线与样条的误差受控求交仍未覆盖 |
+| `AXM-TOPO-E-0029` | Error | 不同边界环的线性片段或显式裁剪真曲线未以更严格容差命中，但在有效拓扑线性容差内邻近相接；`create_face` 与 `validate_face` 共用该判定 |
+| `AXM-TOPO-E-0030` | Error | 跨环边界冲突无法确定：真曲边缺失必要的显式 trim，支撑曲线损坏，或有限区间求交无法在预算/数值约束内完成；预检、建面和存量面验证都闭合失败且无部分结果 |
+| `AXM-TOPO-E-0031` | Error | 不同边界环的显式裁剪非线性曲线存在可证明的连续重合参数区间 |
+| `AXM-TOPO-E-0032` | Error | 不同边界环的显式裁剪非线性曲线在拓扑边内部相交；使用误差受控 Geo 求交主流程 |
+| `AXM-TOPO-E-0033` | Error | 不同边界环的显式裁剪非线性曲线在至少一条真实拓扑边端点接触 |
 
 ## 7.5 `BOOL` 布尔模块错误码
 
@@ -400,7 +404,7 @@
 |---|---|---|
 | `AXM-TX-E-0001` | Error | 提交失败 |
 | `AXM-TX-E-0002` | Error | 回滚失败 |
-| `AXM-TX-E-0003` | Error | 写事务冲突 |
+| `AXM-TX-E-0003` | Error | 写事务冲突，或保存点句柄无效/跨事务/已失效，或尝试释放非最内层保存点；均返回 `OperationFailed` 且不改模型 |
 | `AXM-TX-E-0004` | Error | 目标版本不存在 |
 | `AXM-TX-E-0005` | Fatal | 版本图损坏 |
 | `AXM-TX-E-0006` | Error | 活动事务禁止清空跟踪记录；`clear_tracking_records` 返回 `OperationFailed`，保留模型与撤销记录，须先提交或回滚（含空事务） |
@@ -647,6 +651,33 @@
 - `AXM-GEO-E-0007`：点值求值或候选参数矩形预算耗尽时为 `OperationFailed`；无法建立有限保守界或参数精化停滞时为 `NumericalInstability`。
 
 空交集为成功的空结果，不生成错误码。上述失败均不返回部分交点/重合区间，不写曲线求值缓存、Intersection/拓扑存储或活动事务计数；仅新增可检索诊断。
+
+第 71 批 repair 只修正 Bezier 相切邻域的细分终止判据和非连续 CompositeChain 子片的单侧端点建界；既有位置/参数/角容差、包围排除、最终残差判定和预算失败合同均未放宽，也未新增或改变错误码。
+
+### FR-GEO-001 曲面全域最近点证书（第 74 批）
+
+- `AXM-CORE-E-0002`：查询点非有限，距离/参数容差非法，或数值求值预算小于 5；`InvalidInput`。
+- `AXM-GEO-E-0006`：目标曲面不存在、通用无限派生面尚无有限搜索域，解析有限化/结果超出可表示范围，或有界搜索无法建立保守变化界、初始片或后续细分耗尽预算；状态按根因为 `InvalidInput` / `NumericalInstability` / `OperationFailed` / `DegenerateGeometry`。
+- `AXM-GEO-E-0010`：嵌套 Offset 链在中间层或最终层发生有效半径坍缩，负向完整圆锥偏置在全域自交，或规则环面偏置失去规则性；`DegenerateGeometry`。
+
+Plane/Cylinder/Cone/规则 Sphere/Torus 及其嵌套 Offset 的成功解析路径返回 `Analytic`，无界域同时提供 `effective_domain` 和 `domain_was_finiteized=true`。Bezier/BSpline/NURBS 以正权有理控制网凸包 AABB 建立下界，并通过 `control_net_bound_patches/pruned_patches` 暴露证书工作量。上述失败均无部分值、不写 surface eval 缓存。
+
+### FR-TOPO-001 显式真曲边跨环冲突（第 74 批）
+
+- `AXM-TOPO-E-0030`：真曲边缺少有限 trim、曲线记录损坏，或 Geo 求交预算/数值失败。`first_boundary_conflict` 不返回部分 `optional`；`create_face/validate_face` 闭合失败。
+- `AXM-TOPO-E-0031`：两条显式裁剪非线性边界曲线存在可证明的连续重合区间；`InvalidTopology`。
+- `AXM-TOPO-E-0032`：两条显式裁剪非线性边界曲线在拓扑边内部相交；`InvalidTopology`。
+- `AXM-TOPO-E-0033`：两条显式裁剪非线性边界曲线在真实拓扑边端点接触；`InvalidTopology`。
+- `AXM-TOPO-E-0029`：第二轮统一线性容差求交发现真曲线邻近接触；与既有线性路径复用同一语义。
+
+冲突证据的 `error_controlled/solver_tolerance/curve_evaluations/parameter_rectangles_processed` 标识真曲线求解路径、有效容差和工作量。该路径不写曲线求值缓存或 Intersection 存储；建面失败不分配实体、不增加事务写计数。
+
+### NFR-REL-001 拓扑事务保存点（第 74 批）
+
+- `AXM-TX-E-0003`：`rollback_to_savepoint/release_savepoint` 收到默认、跨事务、已失效句柄，或释放目标不是当前最内层保存点；`OperationFailed`，模型、撤销基线、写审计和保存点栈不变。
+- `AXM-TX-E-0007`：保存点操作入口观察到取消；优先恢复整个事务快照、关闭事务并清空保存点，不执行局部回滚。
+
+正常局部回滚不生成错误码；目标保存点保留供重复回滚，其内层句柄失效。`TopologySavepointMetrics` 累计创建/回滚/释放/内层丢弃及局部回滚写次数，`core_runtime_invariants_hold()` 验证审计自洽性。
 
 ### FR-OPS-001 SweepService 新路径诊断（第 68/70/71 批）
 

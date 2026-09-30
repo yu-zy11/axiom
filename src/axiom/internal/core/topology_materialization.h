@@ -2359,7 +2359,13 @@ inline bool try_materialize_sweep_curve_frame_body(KernelState& state, BodyRecor
     }();
     const Scalar triangle_tol = std::max(Scalar(1e-20),
         Scalar(256) * std::numeric_limits<Scalar>::epsilon() * coordinate_scale * coordinate_scale);
-    std::map<std::pair<int, int>, int> edge_use_count;
+    const auto edge_key = [](int a, int b) {
+        const auto lo = static_cast<std::uint32_t>(std::min(a, b));
+        const auto hi = static_cast<std::uint32_t>(std::max(a, b));
+        return (static_cast<std::uint64_t>(lo) << 32U) | static_cast<std::uint64_t>(hi);
+    };
+    std::unordered_map<std::uint64_t, int> edge_use_count;
+    edge_use_count.reserve(triangles.size() * 2);
     for (const auto& triangle : triangles) {
         const auto area2 = norm(cross(subtract(positions[triangle[1]], positions[triangle[0]]),
                                       subtract(positions[triangle[2]], positions[triangle[0]])));
@@ -2367,7 +2373,7 @@ inline bool try_materialize_sweep_curve_frame_body(KernelState& state, BodyRecor
         for (int i = 0; i < 3; ++i) {
             const int a = triangle[static_cast<std::size_t>(i)];
             const int b = triangle[static_cast<std::size_t>((i + 1) % 3)];
-            ++edge_use_count[{std::min(a, b), std::max(a, b)}];
+            ++edge_use_count[edge_key(a, b)];
         }
     }
     if (triangles.empty() || edge_use_count.empty() ||
@@ -2413,15 +2419,17 @@ inline bool try_materialize_sweep_curve_frame_body(KernelState& state, BodyRecor
         state.vertices.emplace(vertices[i].value, VertexRecord {positions[i]});
     }
     std::vector<EdgeId> edges;
-    std::map<std::pair<int, int>, int> edge_to_index;
+    std::unordered_map<std::uint64_t, int> edge_to_index;
+    edge_to_index.reserve(edge_use_count.size());
     const auto edge_index_for_pair = [&](int a, int b) -> int {
-        const auto key = std::make_pair(std::min(a, b), std::max(a, b));
+        const int lo = std::min(a, b), hi = std::max(a, b);
+        const auto key = edge_key(lo, hi);
         if (const auto found = edge_to_index.find(key); found != edge_to_index.end()) return found->second;
-        const auto curve = create_materialized_line(state, positions[static_cast<std::size_t>(key.first)],
-                                                    positions[static_cast<std::size_t>(key.second)]);
+        const auto curve = create_materialized_line(state, positions[static_cast<std::size_t>(lo)],
+                                                    positions[static_cast<std::size_t>(hi)]);
         const auto edge = EdgeId {state.allocate_id()};
-        state.edges.emplace(edge.value, EdgeRecord {curve, vertices[static_cast<std::size_t>(key.first)],
-                                                    vertices[static_cast<std::size_t>(key.second)]});
+        state.edges.emplace(edge.value, EdgeRecord {curve, vertices[static_cast<std::size_t>(lo)],
+                                                    vertices[static_cast<std::size_t>(hi)]});
         const int index = static_cast<int>(edges.size());
         edges.push_back(edge);
         edge_to_index.emplace(key, index);
@@ -2457,13 +2465,14 @@ inline bool try_materialize_sweep_curve_frame_body(KernelState& state, BodyRecor
         }
         return face;
     };
-    std::map<std::pair<int, int>, std::size_t> first_face_of_edge;
+    std::unordered_map<std::uint64_t, std::size_t> first_face_of_edge;
+    first_face_of_edge.reserve(edge_use_count.size());
     for (std::size_t face = 0; face < triangles.size(); ++face) {
         const auto& triangle = triangles[face];
         for (int i = 0; i < 3; ++i) {
             const int a = triangle[static_cast<std::size_t>(i)];
             const int b = triangle[static_cast<std::size_t>((i + 1) % 3)];
-            const auto key = std::make_pair(std::min(a, b), std::max(a, b));
+            const auto key = edge_key(a, b);
             const auto [it, inserted] = first_face_of_edge.emplace(key, face);
             if (!inserted) {
                 const auto lhs = component_root(face);

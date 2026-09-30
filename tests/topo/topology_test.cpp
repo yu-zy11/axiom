@@ -5199,6 +5199,321 @@ int main() {
         }
     }
 
+    // FR-TOPO-001: explicit curve trims participate in cross-loop preflight
+    // through the bounded Geo solver. Cover conics, splines, decreasing trims,
+    // mixed composite chains, continuous overlap, indeterminate input and
+    // rejected-face transaction isolation.
+    {
+        axiom::KernelConfig config;
+        config.tolerance.linear = 1e-6;
+        config.tolerance.min_local = 1e-10;
+        config.tolerance.max_local = 1e-3;
+        auto state = std::make_shared<axiom::detail::KernelState>(config);
+        axiom::TopologyService topo{state};
+        axiom::DiagnosticService diagnostics{state};
+        axiom::SurfaceFactory surfaces{state};
+        axiom::CurveFactory curves{state};
+        axiom::CurveService curve_query{state};
+        const auto plane = surfaces.make_plane({0, 0, 0}, {0, 0, 1});
+        if (!plane.value) return 1;
+
+        struct TrimmedLoop {
+            axiom::LoopId loop;
+            axiom::EdgeId trimmed_edge;
+            std::array<axiom::VertexId, 3> vertices;
+        };
+        auto setup = topo.begin_transaction();
+        const auto make_trimmed_loop = [&](axiom::CurveId curve,
+                                           double start_parameter,
+                                           double end_parameter,
+                                           axiom::Point3 closing_point)
+            -> std::optional<TrimmedLoop> {
+            const auto first = curve_query.point_at_parameter(curve, start_parameter);
+            const auto second = curve_query.point_at_parameter(curve, end_parameter);
+            if (!first.value || !second.value) return {};
+            TrimmedLoop result{};
+            for (std::size_t i = 0; i < result.vertices.size(); ++i) {
+                const auto point = i == 0 ? *first.value
+                                  : i == 1 ? *second.value
+                                           : closing_point;
+                const auto vertex = setup.create_vertex(point);
+                if (!vertex.value) return {};
+                result.vertices[i] = *vertex.value;
+            }
+            const auto curved_edge = setup.create_trimmed_edge(
+                curve, start_parameter, end_parameter, result.vertices[0],
+                result.vertices[1]);
+            if (!curved_edge.value) return {};
+            result.trimmed_edge = *curved_edge.value;
+            std::array<axiom::CoedgeId, 3> coedges;
+            const auto curved_coedge =
+                setup.create_coedge(*curved_edge.value, false);
+            if (!curved_coedge.value) return {};
+            coedges[0] = *curved_coedge.value;
+            for (std::size_t i = 1; i < 3; ++i) {
+                const auto next = (i + 1) % 3;
+                const auto line = curves.make_line_segment(
+                    state->vertices.at(result.vertices[i].value).point,
+                    state->vertices.at(result.vertices[next].value).point);
+                if (!line.value) return {};
+                const auto edge = setup.create_edge(
+                    *line.value, result.vertices[i], result.vertices[next]);
+                const auto coedge = edge.value
+                    ? setup.create_coedge(*edge.value, false)
+                    : axiom::Result<axiom::CoedgeId>{};
+                if (!edge.value || !coedge.value) return {};
+                coedges[i] = *coedge.value;
+            }
+            const auto loop = setup.create_loop(coedges);
+            if (!loop.value) return {};
+            result.loop = *loop.value;
+            return result;
+        };
+
+        const auto make_line_loop = [&](std::array<axiom::Point3, 3> points)
+            -> std::optional<TrimmedLoop> {
+            TrimmedLoop result{};
+            std::array<axiom::CoedgeId, 3> coedges;
+            for (std::size_t i = 0; i < 3; ++i) {
+                const auto vertex = setup.create_vertex(points[i]);
+                if (!vertex.value) return {};
+                result.vertices[i] = *vertex.value;
+            }
+            for (std::size_t i = 0; i < 3; ++i) {
+                const auto next = (i + 1) % 3;
+                const auto line = curves.make_line_segment(points[i], points[next]);
+                if (!line.value) return {};
+                const auto edge = setup.create_edge(
+                    *line.value, result.vertices[i], result.vertices[next]);
+                if (!edge.value) return {};
+                if (i == 0) result.trimmed_edge = *edge.value;
+                const auto coedge = setup.create_coedge(*edge.value, false);
+                if (!coedge.value) return {};
+                coedges[i] = *coedge.value;
+            }
+            const auto loop = setup.create_loop(coedges);
+            if (!loop.value) return {};
+            result.loop = *loop.value;
+            return result;
+        };
+
+        const auto circle = curves.make_circle({0, 0, 0}, {0, 0, 1}, 5);
+        const double pi = std::acos(-1.0);
+        const auto circle_mid = circle.value
+            ? curve_query.point_at_parameter(*circle.value, pi * .5)
+            : axiom::Result<axiom::Point3>{};
+        if (!circle.value || !circle_mid.value) return 1;
+        const axiom::Vec3 radial{circle_mid.value->x, circle_mid.value->y,
+                                 circle_mid.value->z};
+        const axiom::Point3 radial_out{radial.x * 1.25, radial.y * 1.25,
+                                       radial.z * 1.25};
+        const auto circle_arc = make_trimmed_loop(
+            *circle.value, 0.0, pi, {9, -9, 0});
+        const auto reversed_circle_arc = make_trimmed_loop(
+            *circle.value, pi, 0.0, {-9, -9, 0});
+        const auto radial_crossing = make_line_loop(
+            {{{0, 0, 0}, radial_out, {radial_out.x + 1, radial_out.y, 0}}});
+        const auto overlapping_circle_arc = make_trimmed_loop(
+            *circle.value, .25, 2.5, {8, -8, 0});
+
+        axiom::BSplineCurveDesc spline_desc;
+        spline_desc.poles = {{0, 0, 0}, {1, 3, 0}, {2, 0, 0}};
+        spline_desc.degree = 2;
+        const auto spline = curves.make_bspline(spline_desc);
+        const auto spline_mid = spline.value
+            ? curve_query.point_at_parameter(*spline.value, 1.0)
+            : axiom::Result<axiom::Point3>{};
+        const auto spline_loop = spline.value
+            ? make_trimmed_loop(*spline.value, .2, 1.8, {3, -2, 0})
+            : std::optional<TrimmedLoop>{};
+        const auto spline_crossing = spline_mid.value
+            ? make_line_loop({{{spline_mid.value->x, -1, 0},
+                               {spline_mid.value->x, 4, 0},
+                               {spline_mid.value->x + .5, -1, 0}}})
+            : std::optional<TrimmedLoop>{};
+
+        const auto child_join = spline.value
+            ? curve_query.point_at_parameter(*spline.value, 1.0)
+            : axiom::Result<axiom::Point3>{};
+        const auto chain_line = child_join.value
+            ? curves.make_line_segment(*child_join.value, {4, 0, 0})
+            : axiom::Result<axiom::CurveId>{};
+        const auto chain = spline.value && chain_line.value
+            ? curves.make_composite_chain(
+                  std::array<axiom::CurveId, 2>{*spline.value,
+                                                *chain_line.value})
+            : axiom::Result<axiom::CurveId>{};
+        const auto chain_hit = chain.value
+            ? curve_query.point_at_parameter(*chain.value, .65)
+            : axiom::Result<axiom::Point3>{};
+        const auto chain_loop = chain.value
+            ? make_trimmed_loop(*chain.value, .2, 1.8, {5, -2, 0})
+            : std::optional<TrimmedLoop>{};
+        const auto chain_crossing = chain_hit.value
+            ? make_line_loop({{{chain_hit.value->x, -1, 0},
+                               {chain_hit.value->x, 4, 0},
+                               {chain_hit.value->x + .4, -1, 0}}})
+            : std::optional<TrimmedLoop>{};
+
+        // A legacy curved edge deliberately has no finite support-curve trim.
+        // It remains a valid topological loop, but complete curved preflight
+        // must reject the indeterminate geometry instead of silently skipping it.
+        const auto legacy_p0 = curve_query.point_at_parameter(*circle.value, 3.2);
+        const auto legacy_p1 = curve_query.point_at_parameter(*circle.value, 4.0);
+        std::optional<TrimmedLoop> legacy_curve_loop;
+        if (legacy_p0.value && legacy_p1.value) {
+            TrimmedLoop candidate{};
+            const std::array<axiom::Point3, 3> points{
+                *legacy_p0.value, *legacy_p1.value, axiom::Point3{-8, -8, 0}};
+            std::array<axiom::CoedgeId, 3> coedges;
+            for (std::size_t i = 0; i < 3; ++i) {
+                const auto vertex = setup.create_vertex(points[i]);
+                if (!vertex.value) return 1;
+                candidate.vertices[i] = *vertex.value;
+            }
+            const auto unsupported = setup.create_edge(
+                *circle.value, candidate.vertices[0], candidate.vertices[1]);
+            if (!unsupported.value) return 1;
+            candidate.trimmed_edge = *unsupported.value;
+            const auto unsupported_coedge =
+                setup.create_coedge(*unsupported.value, false);
+            if (!unsupported_coedge.value) return 1;
+            coedges[0] = *unsupported_coedge.value;
+            for (std::size_t i = 1; i < 3; ++i) {
+                const auto next = (i + 1) % 3;
+                const auto line = curves.make_line_segment(points[i], points[next]);
+                if (!line.value) return 1;
+                const auto edge = setup.create_edge(
+                    *line.value, candidate.vertices[i], candidate.vertices[next]);
+                const auto coedge = edge.value
+                    ? setup.create_coedge(*edge.value, false)
+                    : axiom::Result<axiom::CoedgeId>{};
+                if (!edge.value || !coedge.value) return 1;
+                coedges[i] = *coedge.value;
+            }
+            const auto loop = setup.create_loop(coedges);
+            if (!loop.value) return 1;
+            candidate.loop = *loop.value;
+            legacy_curve_loop = candidate;
+        }
+
+        if (!circle_arc || !reversed_circle_arc || !radial_crossing ||
+            !overlapping_circle_arc || !spline_loop || !spline_crossing ||
+            !chain_loop || !chain_crossing || !legacy_curve_loop ||
+            setup.commit().status != axiom::StatusCode::Ok) return 1;
+
+        const auto cache_entries_before = state->curve_eval_cache.size();
+        const auto intersection_records_before = state->intersections.size();
+        const auto circle_conflict = topo.validate().first_boundary_conflict(
+            circle_arc->loop,
+            std::array<axiom::LoopId, 1>{radial_crossing->loop});
+        const auto reversed_conflict = topo.validate().first_boundary_conflict(
+            reversed_circle_arc->loop,
+            std::array<axiom::LoopId, 1>{radial_crossing->loop});
+        const auto spline_conflict = topo.validate().first_boundary_conflict(
+            spline_loop->loop,
+            std::array<axiom::LoopId, 1>{spline_crossing->loop});
+        const auto chain_conflict = topo.validate().first_boundary_conflict(
+            chain_loop->loop,
+            std::array<axiom::LoopId, 1>{chain_crossing->loop});
+        const auto overlap_conflict = topo.validate().first_boundary_conflict(
+            circle_arc->loop,
+            std::array<axiom::LoopId, 1>{overlapping_circle_arc->loop});
+        const auto check_hit = [](const auto& result, axiom::EdgeId edge,
+                                  axiom::FaceBoundaryConflictKind kind) {
+            return result.status == axiom::StatusCode::Ok && result.value &&
+                   result.value->has_value() &&
+                   result.value->value().first_edge.value == edge.value &&
+                   result.value->value().kind == kind &&
+                   std::isfinite(result.value->value().distance) &&
+                   result.value->value().error_controlled &&
+                   result.value->value().solver_tolerance > 0 &&
+                   result.value->value().curve_evaluations > 0;
+        };
+        if (!check_hit(circle_conflict, circle_arc->trimmed_edge,
+                       axiom::FaceBoundaryConflictKind::ProperIntersection) ||
+            !check_hit(reversed_conflict, reversed_circle_arc->trimmed_edge,
+                       axiom::FaceBoundaryConflictKind::ProperIntersection) ||
+            !check_hit(spline_conflict, spline_loop->trimmed_edge,
+                       axiom::FaceBoundaryConflictKind::ProperIntersection) ||
+            !check_hit(chain_conflict, chain_loop->trimmed_edge,
+                       axiom::FaceBoundaryConflictKind::ProperIntersection) ||
+            !check_hit(overlap_conflict, circle_arc->trimmed_edge,
+                       axiom::FaceBoundaryConflictKind::CurveOverlap) ||
+            state->curve_eval_cache.size() != cache_entries_before ||
+            state->intersections.size() != intersection_records_before) {
+            std::cerr << "trimmed curved boundary preflight coverage failed\n";
+            return 1;
+        }
+
+        const auto missing_trim = topo.validate().first_boundary_conflict(
+            legacy_curve_loop->loop,
+            std::array<axiom::LoopId, 1>{radial_crossing->loop});
+        const auto missing_trim_report =
+            diagnostics.get(missing_trim.diagnostic_id);
+        if (missing_trim.status != axiom::StatusCode::InvalidTopology ||
+            missing_trim.value || !missing_trim_report.value ||
+            !issue_links_entities(
+                *missing_trim_report.value,
+                axiom::diag_codes::kTopoFaceBoundaryIntersectionIndeterminate,
+                {legacy_curve_loop->trimmed_edge.value})) {
+            std::cerr << "missing curved trim was not diagnosed\n";
+            return 1;
+        }
+
+        const auto original_spline_pole = state->curves.at(spline.value->value).poles[1];
+        state->curves.at(spline.value->value).poles[1].y =
+            std::numeric_limits<double>::quiet_NaN();
+        const auto damaged = topo.validate().first_boundary_conflict(
+            spline_loop->loop,
+            std::array<axiom::LoopId, 1>{spline_crossing->loop});
+        const auto damaged_report = diagnostics.get(damaged.diagnostic_id);
+        state->curves.at(spline.value->value).poles[1] = original_spline_pole;
+        if (damaged.status != axiom::StatusCode::NumericalInstability ||
+            damaged.value || !damaged_report.value ||
+            !issue_links_entities(
+                *damaged_report.value,
+                axiom::diag_codes::kTopoFaceBoundaryIntersectionIndeterminate,
+                {spline_loop->trimmed_edge.value})) {
+            std::cerr << "damaged spline boundary did not fail closed\n";
+            return 1;
+        }
+
+        auto face_txn = topo.begin_transaction();
+        const auto next_id = state->next_id;
+        const auto writes_before = face_txn.write_operation_count();
+        const auto rejected = face_txn.create_face(
+            *plane.value, circle_arc->loop,
+            std::array<axiom::LoopId, 1>{radial_crossing->loop});
+        const auto rejected_report = diagnostics.get(rejected.diagnostic_id);
+        const auto overlap_rejected = face_txn.create_face(
+            *plane.value, circle_arc->loop,
+            std::array<axiom::LoopId, 1>{overlapping_circle_arc->loop});
+        const auto overlap_report = diagnostics.get(overlap_rejected.diagnostic_id);
+        if (rejected.status != axiom::StatusCode::InvalidTopology || rejected.value ||
+            !rejected_report.value ||
+            !issue_links_entities(
+                *rejected_report.value,
+                axiom::diag_codes::kTopoFaceCrossLoopCurveIntersection,
+                {circle_arc->loop.value, radial_crossing->loop.value,
+                 circle_arc->trimmed_edge.value}) ||
+            overlap_rejected.status != axiom::StatusCode::InvalidTopology ||
+            overlap_rejected.value || !overlap_report.value ||
+            !issue_links_entities(
+                *overlap_report.value,
+                axiom::diag_codes::kTopoFaceCrossLoopCurveOverlap,
+                {circle_arc->loop.value, overlapping_circle_arc->loop.value,
+                 circle_arc->trimmed_edge.value}) ||
+            state->next_id != next_id || !state->faces.empty() ||
+            face_txn.created_face_count().value !=
+                std::optional<std::uint64_t>{0} ||
+            face_txn.write_operation_count().value != writes_before.value ||
+            face_txn.rollback().status != axiom::StatusCode::Ok) {
+            std::cerr << "curved boundary rejection polluted transaction\n";
+            return 1;
+        }
+    }
+
     // ---- Stage 2+: PCurve trim -> underlying surface + Trimmed materialization (nested face surface) ----
     {
         auto plane = kernel.surfaces().make_plane({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0});
@@ -5781,6 +6096,223 @@ int main() {
         if (!after_empty.create_vertex({10, 11, 12}).value ||
             after_empty.rollback().status != axiom::StatusCode::Ok) {
             std::cerr << "empty transaction scope did not release writer ownership\n";
+            return 1;
+        }
+    }
+
+    // NFR-REL-001: nested savepoints provide a bounded subtransaction workflow.
+    // Rolling back an outer point restores mixed create/delete/replace changes,
+    // invalidates younger points, restores write audit, and leaves the writer
+    // active for a retry and final commit.
+    {
+        axiom::Kernel savepoint_kernel;
+        auto& topo = savepoint_kernel.topology();
+        const auto body = savepoint_kernel.primitives().box(
+            {0, 0, 0}, 2, 3, 4);
+        const auto replacement = savepoint_kernel.surfaces().make_plane(
+            {50, 60, 70}, {0, 0, 1});
+        if (!body.value || !replacement.value) return 1;
+        const auto faces = topo.query().faces_of_body(*body.value);
+        if (!faces.value || faces.value->empty()) return 1;
+        const auto face = faces.value->front();
+        const auto original_surface = topo.query().surface_of_face(face);
+        const auto baseline_count = savepoint_kernel.topology_count();
+        if (!original_surface.value || !baseline_count.value) return 1;
+
+        auto transaction = topo.begin_transaction();
+        const auto outer = transaction.create_savepoint();
+        if (!outer.value ||
+            transaction.active_savepoint_count().value !=
+                std::optional<std::uint64_t>{1}) return 1;
+
+        const auto invalid_rollback = transaction.rollback_to_savepoint({});
+        const auto invalid_report = savepoint_kernel.diagnostics().get(
+            invalid_rollback.diagnostic_id);
+        if (invalid_rollback.status != axiom::StatusCode::OperationFailed ||
+            !invalid_report.value ||
+            !has_issue_code(*invalid_report.value,
+                            axiom::diag_codes::kTxConflict) ||
+            transaction.active_savepoint_count().value !=
+                std::optional<std::uint64_t>{1} ||
+            transaction.write_operation_count().value !=
+                std::optional<std::uint64_t>{0}) {
+            std::cerr << "invalid savepoint handle changed transaction state\n";
+            return 1;
+        }
+
+        const auto transient_before_inner =
+            transaction.create_vertex({10, 11, 12});
+        if (!transient_before_inner.value ||
+            transaction.replace_surface(face, *replacement.value).status !=
+                axiom::StatusCode::Ok ||
+            transaction.delete_body(*body.value).status !=
+                axiom::StatusCode::Ok) return 1;
+        const auto inner = transaction.create_savepoint();
+        const auto transient_after_inner =
+            transaction.create_vertex({13, 14, 15});
+        if (!inner.value || !transient_after_inner.value ||
+            transaction.active_savepoint_count().value !=
+                std::optional<std::uint64_t>{2} ||
+            transaction.write_operation_count().value !=
+                std::optional<std::uint64_t>{4} ||
+            topo.query().has_body(*body.value).value !=
+                std::optional<bool>{false}) return 1;
+
+        // Savepoints are released in stack order. Rejection must preserve both
+        // the live model and the complete rollback baseline.
+        const auto non_lifo_release =
+            transaction.release_savepoint(*outer.value);
+        const auto release_report = savepoint_kernel.diagnostics().get(
+            non_lifo_release.diagnostic_id);
+        if (non_lifo_release.status != axiom::StatusCode::OperationFailed ||
+            !release_report.value ||
+            !has_issue_code(*release_report.value,
+                            axiom::diag_codes::kTxConflict) ||
+            transaction.active_savepoint_count().value !=
+                std::optional<std::uint64_t>{2} ||
+            transaction.write_operation_count().value !=
+                std::optional<std::uint64_t>{4} ||
+            topo.query().has_vertex(*transient_after_inner.value).value !=
+                std::optional<bool>{true}) {
+            std::cerr << "non-LIFO savepoint release polluted live state\n";
+            return 1;
+        }
+
+        if (transaction.rollback_to_savepoint(*outer.value).status !=
+                axiom::StatusCode::Ok ||
+            transaction.active_savepoint_count().value !=
+                std::optional<std::uint64_t>{1} ||
+            transaction.write_operation_count().value !=
+                std::optional<std::uint64_t>{0} ||
+            transaction.created_vertex_count().value !=
+                std::optional<std::uint64_t>{0} ||
+            transaction.deleted_body_count().value !=
+                std::optional<std::uint64_t>{0} ||
+            transaction.replaced_surface_count().value !=
+                std::optional<std::uint64_t>{0} ||
+            transaction.has_snapshot_body(*body.value).value !=
+                std::optional<bool>{false} ||
+            topo.query().has_vertex(*transient_before_inner.value).value !=
+                std::optional<bool>{false} ||
+            topo.query().has_vertex(*transient_after_inner.value).value !=
+                std::optional<bool>{false} ||
+            topo.query().has_body(*body.value).value !=
+                std::optional<bool>{true} ||
+            topo.query().surface_of_face(face).value != original_surface.value ||
+            savepoint_kernel.topology_count().value != baseline_count.value ||
+            topo.validate().validate_indices_consistency().status !=
+                axiom::StatusCode::Ok) {
+            std::cerr << "outer savepoint did not restore mixed topology snapshot\n";
+            return 1;
+        }
+        const auto stale_inner =
+            transaction.rollback_to_savepoint(*inner.value);
+        if (stale_inner.status != axiom::StatusCode::OperationFailed ||
+            transaction.active_savepoint_count().value !=
+                std::optional<std::uint64_t>{1}) {
+            std::cerr << "discarded nested savepoint remained usable\n";
+            return 1;
+        }
+
+        // Rollback-to retains the target and can be used repeatedly.
+        const auto retry_transient = transaction.create_vertex({20, 21, 22});
+        if (!retry_transient.value ||
+            transaction.rollback_to_savepoint(*outer.value).status !=
+                axiom::StatusCode::Ok ||
+            topo.query().has_vertex(*retry_transient.value).value !=
+                std::optional<bool>{false}) return 1;
+
+        // Moving a transaction transfers the savepoint stack and its unique
+        // transaction cookie; the moved-from object cannot operate on it.
+        axiom::TopologyTransaction moved(std::move(transaction));
+        if (transaction.active_savepoint_count().value !=
+                std::optional<std::uint64_t>{0} ||
+            transaction.rollback_to_savepoint(*outer.value).status !=
+                axiom::StatusCode::OperationFailed ||
+            moved.active_savepoint_count().value !=
+                std::optional<std::uint64_t>{1} ||
+            moved.release_savepoint(*outer.value).status !=
+                axiom::StatusCode::Ok ||
+            moved.active_savepoint_count().value !=
+                std::optional<std::uint64_t>{0}) return 1;
+        const auto durable = moved.replace_surface(face, *replacement.value);
+        if (durable.status != axiom::StatusCode::Ok ||
+            moved.commit().status != axiom::StatusCode::Ok ||
+            topo.query().surface_of_face(face).value != replacement.value ||
+            moved.active_savepoint_count().value !=
+                std::optional<std::uint64_t>{0}) return 1;
+        const auto commit_audit = savepoint_kernel.topology_commit_audit();
+        if (!commit_audit.value ||
+            commit_audit.value->last_commit_write_operations != 1 ||
+            commit_audit.value->last_commit_write_breakdown.replaced_surfaces !=
+                1) {
+            std::cerr << "savepoint rollback writes leaked into commit audit\n";
+            return 1;
+        }
+
+        // Handles cannot cross transaction lifetimes. An empty rollback is a
+        // valid degenerate checkpoint and reports zero discarded writes.
+        auto empty_transaction = topo.begin_transaction();
+        const auto foreign =
+            empty_transaction.rollback_to_savepoint(*outer.value);
+        const auto empty_point = empty_transaction.create_savepoint();
+        if (foreign.status != axiom::StatusCode::OperationFailed ||
+            !empty_point.value ||
+            empty_transaction.rollback_to_savepoint(*empty_point.value).status !=
+                axiom::StatusCode::Ok ||
+            empty_transaction.release_savepoint(*empty_point.value).status !=
+                axiom::StatusCode::Ok ||
+            empty_transaction.rollback().status != axiom::StatusCode::Ok) {
+            std::cerr << "foreign or empty savepoint contract failed\n";
+            return 1;
+        }
+
+        auto savepoint_metrics = topo.savepoint_metrics();
+        if (!savepoint_metrics.value ||
+            savepoint_metrics.value->created_count != 3 ||
+            savepoint_metrics.value->rollback_count != 3 ||
+            savepoint_metrics.value->released_count != 2 ||
+            savepoint_metrics.value->discarded_nested_count != 1 ||
+            savepoint_metrics.value->rolled_back_write_operations_total != 5 ||
+            savepoint_metrics.value->last_rolled_back_write_operations != 0) {
+            std::cerr << "savepoint cumulative audit is inconsistent\n";
+            return 1;
+        }
+
+        // Cancellation always closes and restores the full transaction, not
+        // merely its youngest savepoint, while leaving savepoint rollback
+        // metrics distinct from cancellation metrics.
+        axiom::TopologyCancellationSource cancel_source;
+        auto cancelled = topo.begin_transaction(cancel_source.token());
+        const auto before_point = cancelled.create_vertex({40, 41, 42});
+        const auto cancel_point = cancelled.create_savepoint();
+        const auto after_point = cancelled.create_vertex({43, 44, 45});
+        if (!before_point.value || !cancel_point.value || !after_point.value ||
+            !cancel_source.request_cancellation()) return 1;
+        const auto cancelled_savepoint =
+            cancelled.rollback_to_savepoint(*cancel_point.value);
+        const auto cancelled_report = savepoint_kernel.diagnostics().get(
+            cancelled_savepoint.diagnostic_id);
+        if (cancelled_savepoint.status != axiom::StatusCode::OperationFailed ||
+            !cancelled_report.value ||
+            !has_issue_code(*cancelled_report.value,
+                            axiom::diag_codes::kTxCancellationRequested) ||
+            cancelled.is_active().value != std::optional<bool>{false} ||
+            cancelled.active_savepoint_count().value !=
+                std::optional<std::uint64_t>{0} ||
+            topo.query().has_vertex(*before_point.value).value !=
+                std::optional<bool>{false} ||
+            topo.query().has_vertex(*after_point.value).value !=
+                std::optional<bool>{false} ||
+            topo.savepoint_metrics().value->rollback_count != 3 ||
+            topo.savepoint_metrics().value->created_count != 4 ||
+            topo.cancellation_metrics().value->rolled_back_write_operations_total !=
+                2 ||
+            savepoint_kernel.core_runtime_invariants_hold().value !=
+                std::optional<bool>{true} ||
+            topo.validate().validate_indices_consistency().status !=
+                axiom::StatusCode::Ok) {
+            std::cerr << "cancellation did not supersede savepoint rollback\n";
             return 1;
         }
     }
