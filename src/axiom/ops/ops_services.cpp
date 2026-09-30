@@ -24,6 +24,217 @@ using namespace ops_internal;
 
 namespace {
 
+constexpr Scalar kSweepPi = 3.1415926535897932384626433832795;
+
+// Refine the already sampled rail for scale and optional roll, keeping its
+// original corners and every law key. Arc-length keys are not curve parameters.
+// Work stays in temporary vectors until the complete schedule has been checked.
+bool refine_sweep_scale_law(detail::BodyRecord& record, std::span<const SweepScaleStation> keys,
+                            std::span<const SweepLawStation> section_keys = {}) {
+    constexpr std::size_t kMaxIntervals = 4096;
+    const bool framed = !record.sweep_frame_origins.empty();
+    const bool closed = framed && record.sweep_frame_closed;
+    std::vector<Point3> origins;
+    std::vector<Vec3> u, v;
+    if (framed) {
+        origins = record.sweep_frame_origins;
+        u = record.sweep_frame_u;
+        v = record.sweep_frame_v;
+        if (origins.size() != u.size() || origins.size() != v.size()) return false;
+        if (closed) {
+            origins.push_back(origins.front());
+            u.push_back(u.front());
+            v.push_back(v.front());
+        }
+    } else {
+        origins.reserve(record.sweep_station_offsets.size());
+        for (const auto& offset : record.sweep_station_offsets)
+            origins.push_back(detail::add_point_vec(record.extrude_scale_center, offset));
+    }
+    if (origins.size() < 2 || origins.size() > kMaxIntervals + 1 || keys.size() < 2 ||
+        (closed && keys.back().scale != 1.0)) return false;
+    if (!section_keys.empty() && (section_keys.size() != keys.size() ||
+        (closed && std::min({std::abs(section_keys.back().twist_angle),
+                            std::abs(section_keys.back().twist_angle-2*kSweepPi),
+                            std::abs(section_keys.back().twist_angle+2*kSweepPi)}) > 1e-10))) return false;
+
+    std::vector<long double> distances(origins.size(), 0.0L);
+    for (std::size_t i = 1; i < origins.size(); ++i) {
+        const long double dx = static_cast<long double>(origins[i].x) - origins[i-1].x;
+        const long double dy = static_cast<long double>(origins[i].y) - origins[i-1].y;
+        const long double dz = static_cast<long double>(origins[i].z) - origins[i-1].z;
+        const long double step = std::hypot(dx, dy, dz);
+        distances[i] = distances[i-1] + step;
+        if (!std::isfinite(step) || !(step > 0) || !std::isfinite(distances[i]) ||
+            !(distances[i] > distances[i-1])) return false;
+    }
+    const long double total_length = distances.back();
+    if (!(total_length > 0) || total_length > std::numeric_limits<Scalar>::max()) return false;
+    std::vector<Scalar> rail_fractions;
+    rail_fractions.reserve(origins.size());
+    for (const auto distance : distances) rail_fractions.push_back(static_cast<Scalar>(distance / total_length));
+    rail_fractions.front() = 0.0;
+    rail_fractions.back() = 1.0;
+    for (std::size_t i = 1; i < rail_fractions.size(); ++i)
+        if (!(rail_fractions[i] > rail_fractions[i-1])) return false;
+
+    struct Knot { Scalar fraction; bool key; };
+    std::vector<Knot> knots;
+    knots.reserve(rail_fractions.size() + keys.size());
+    for (const auto fraction : rail_fractions) knots.push_back({fraction, false});
+    for (const auto& key : keys) knots.push_back({key.fraction, true});
+    std::sort(knots.begin(), knots.end(), [](const Knot& a, const Knot& b) {
+        return a.fraction < b.fraction || (a.fraction == b.fraction && a.key > b.key);
+    });
+    // A caller key near an existing sampled station owns the fraction. This
+    // removes floating-point duplicates, never coalesces two distinct law keys,
+    // and preserves the original rail position/frame at numerical coincidences.
+    constexpr Scalar kFractionResolution = 64 * std::numeric_limits<Scalar>::epsilon();
+    std::vector<Knot> merged;
+    for (const auto& knot : knots) {
+        if (!merged.empty() && knot.fraction - merged.back().fraction <= kFractionResolution) {
+            if (knot.key && merged.back().key && knot.fraction != merged.back().fraction) return false;
+            if (!knot.key && !merged.back().key && knot.fraction != merged.back().fraction) return false;
+            if (knot.key) merged.back() = knot;
+        } else {
+            merged.push_back(knot);
+        }
+    }
+    if (merged.size() < 2 || merged.size() > kMaxIntervals + 1) return false;
+    const auto scale_at = [&](Scalar fraction) {
+        const auto it = std::lower_bound(keys.begin(), keys.end(), fraction,
+            [](const SweepScaleStation& key, Scalar value) { return key.fraction < value; });
+        if (it == keys.begin()) return keys.front().scale;
+        if (it == keys.end()) return keys.back().scale;
+        if (it->fraction == fraction) return it->scale;
+        const auto& a = *(it - 1);
+        const long double t = (static_cast<long double>(fraction) - a.fraction) /
+                              (static_cast<long double>(it->fraction) - a.fraction);
+        return static_cast<Scalar>((1-t) * a.scale + t * it->scale);
+    };
+    const auto angle_at = [&](Scalar fraction) {
+        if (section_keys.empty()) return Scalar(0);
+        const auto it = std::lower_bound(section_keys.begin(),section_keys.end(),fraction,
+            [](const SweepLawStation& key, Scalar value) { return key.fraction < value; });
+        if (it == section_keys.begin()) return section_keys.front().twist_angle;
+        if (it == section_keys.end()) return section_keys.back().twist_angle;
+        if (it->fraction == fraction) return it->twist_angle;
+        const auto& a = *(it-1);
+        const long double t = (static_cast<long double>(fraction)-a.fraction) /
+                              (static_cast<long double>(it->fraction)-a.fraction);
+        return static_cast<Scalar>((1-t)*a.twist_angle+t*it->twist_angle);
+    };
+    std::vector<Scalar> fractions {merged.front().fraction};
+    std::vector<Scalar> scales {keys.front().scale};
+    std::vector<Scalar> angles {Scalar(0)};
+    for (std::size_t i = 1; i < merged.size(); ++i) {
+        const Scalar a = scale_at(merged[i-1].fraction), b = scale_at(merged[i].fraction);
+        const Scalar angle_a = angle_at(merged[i-1].fraction), angle_b = angle_at(merged[i].fraction);
+        const long double steps = std::max({1.0L, std::ceil(
+            std::abs(static_cast<long double>(b) - a) / (0.25L * std::min(a,b))),
+            static_cast<long double>(std::ceil(std::abs(angle_b-angle_a)/(kSweepPi/24)))});
+        if (!std::isfinite(steps) || steps > static_cast<long double>(kMaxIntervals + 1 - fractions.size()))
+            return false;
+        const auto count = static_cast<std::size_t>(steps);
+        for (std::size_t j = 1; j <= count; ++j) {
+            const long double t = static_cast<long double>(j) / count;
+            const Scalar fraction = j == count ? merged[i].fraction : static_cast<Scalar>(
+                (1-t) * merged[i-1].fraction + t * merged[i].fraction);
+            const Scalar section_scale = j == count ? b : static_cast<Scalar>((1-t) * a + t * b);
+            if (!(fraction > fractions.back()) || !std::isfinite(section_scale) || !(section_scale > 0))
+                return false;
+            fractions.push_back(fraction);
+            scales.push_back(section_scale);
+            angles.push_back(j == count ? angle_b : static_cast<Scalar>((1-t)*angle_a+t*angle_b));
+        }
+    }
+
+    std::vector<Point3> refined_origins;
+    std::vector<Vec3> refined_u, refined_v;
+    refined_origins.reserve(fractions.size());
+    if (framed) { refined_u.reserve(fractions.size()); refined_v.reserve(fractions.size()); }
+    std::size_t segment = 0;
+    const auto rotate_vector = [](const Vec3& vector, const Vec3& axis, Scalar angle) -> Vec3 {
+        const Scalar cosine = std::cos(angle), sine = std::sin(angle);
+        const Vec3 first = detail::scale(vector, cosine);
+        const Vec3 second = detail::scale(detail::cross(axis, vector), sine);
+        const Vec3 third = detail::scale(axis, detail::dot(axis, vector) * (1-cosine));
+        return {first.x+second.x+third.x, first.y+second.y+third.y, first.z+second.z+third.z};
+    };
+    for (const Scalar fraction : fractions) {
+        while (segment + 2 < rail_fractions.size() && fraction > rail_fractions[segment+1]) ++segment;
+        const Scalar begin = rail_fractions[segment], end = rail_fractions[segment+1];
+        Scalar t = (fraction-begin) / (end-begin);
+        if (std::abs(fraction-begin) <= kFractionResolution) t = 0;
+        if (std::abs(fraction-end) <= kFractionResolution) t = 1;
+        if (!std::isfinite(t) || t < 0 || t > 1) return false;
+        const auto& a = origins[segment];
+        const auto& b = origins[segment+1];
+        const Point3 origin = t == 0 ? a : t == 1 ? b : Point3 {
+            static_cast<Scalar>((1-static_cast<long double>(t))*a.x + static_cast<long double>(t)*b.x),
+            static_cast<Scalar>((1-static_cast<long double>(t))*a.y + static_cast<long double>(t)*b.y),
+            static_cast<Scalar>((1-static_cast<long double>(t))*a.z + static_cast<long double>(t)*b.z)};
+        if (!std::isfinite(origin.x) || !std::isfinite(origin.y) || !std::isfinite(origin.z)) return false;
+        if (!refined_origins.empty() && detail::norm(detail::subtract(origin, refined_origins.back())) <= 1e-14)
+            return false;
+        refined_origins.push_back(origin);
+        if (!framed) continue;
+        if (t == 0 || t == 1) {
+            const std::size_t index = segment + (t == 1 ? 1 : 0);
+            refined_u.push_back(u[index]);
+            refined_v.push_back(v[index]);
+            continue;
+        }
+        // Interpolate the minimal rotation of the tangent, then the remaining
+        // axial frame correction. This preserves orthonormality and both endpoint
+        // frames, including the holonomy correction at a periodic seam.
+        const Vec3 ta = detail::normalize(detail::cross(u[segment], v[segment]));
+        const Vec3 tb = detail::normalize(detail::cross(u[segment+1], v[segment+1]));
+        const Vec3 cross_t = detail::cross(ta,tb);
+        const Scalar sine = detail::norm(cross_t);
+        const Scalar cosine = std::clamp(detail::dot(ta,tb), Scalar(-1), Scalar(1));
+        if (!std::isfinite(sine) || !std::isfinite(cosine) || cosine <= 0.5) return false;
+        Vec3 tangent = ta, axis_u = u[segment], terminal_u = axis_u;
+        if (sine > 1e-14) {
+            const Vec3 axis = detail::scale(cross_t,1/sine);
+            const Scalar angle = std::atan2(sine,cosine);
+            tangent = rotate_vector(ta,axis,t*angle);
+            axis_u = rotate_vector(axis_u,axis,t*angle);
+            terminal_u = rotate_vector(terminal_u,axis,angle);
+        }
+        const Scalar residual = std::atan2(detail::dot(tb,detail::cross(terminal_u,u[segment+1])),
+                                           detail::dot(terminal_u,u[segment+1]));
+        axis_u = detail::normalize(rotate_vector(axis_u,tangent,t*residual));
+        const Vec3 axis_v = detail::normalize(detail::cross(tangent,axis_u));
+        if (!std::isfinite(residual) || detail::norm(axis_u) <= 1e-14 || detail::norm(axis_v) <= 1e-14)
+            return false;
+        refined_u.push_back(axis_u);
+        refined_v.push_back(axis_v);
+    }
+    if (closed) {
+        refined_origins.pop_back();
+        refined_u.pop_back();
+        refined_v.pop_back();
+        scales.pop_back();
+    }
+    if (framed) {
+        record.sweep_frame_origins = std::move(refined_origins);
+        record.sweep_frame_u = std::move(refined_u);
+        record.sweep_frame_v = std::move(refined_v);
+        record.sweep_frame_scales = std::move(scales);
+        if (!section_keys.empty()) record.sweep_frame_angles = std::move(angles);
+    } else {
+        record.sweep_station_offsets.clear();
+        for (const auto& origin : refined_origins)
+            record.sweep_station_offsets.push_back(detail::subtract(origin, record.extrude_scale_center));
+        record.sweep_station_scales = std::move(scales);
+        if (!section_keys.empty()) record.sweep_station_angles = std::move(angles);
+    }
+    record.b = static_cast<Scalar>(total_length);
+    record.sweep_scale_law = true;
+    return true;
+}
+
 Scalar sweep_segment_distance_squared(const Point3& p0, const Point3& p1,
                                       const Point3& q0, const Point3& q1) {
     // Closest points of two bounded 3-D segments. Keeping this local to sweep
@@ -566,6 +777,122 @@ Result<BodyId> SweepService::extrude_twisted(const ProfileRef& profile, const Ve
     return ok_result(body, state_->create_diagnostic("已完成扭转拉伸"));
 }
 
+Result<BodyId> SweepService::extrude_with_law(const ProfileRef& profile, const Vec3& direction, Scalar distance,
+                                           const Point3& center, std::span<const ExtrusionLawStation> stations) {
+    constexpr Scalar kTwoPi = 6.283185307179586476925286766559;
+    constexpr Scalar kMaxStationAngle = kTwoPi / 48.0;
+    constexpr std::size_t kMaxIntervals = 4096;
+    const Scalar length = std::hypot(direction.x, direction.y, direction.z);
+    if (profile.label.empty() || profile.polygon_xyz.size() < 3 ||
+        !std::isfinite(length) || length <= 1e-14 || !std::isfinite(distance) || distance <= 0.0 ||
+        !std::isfinite(center.x) || !std::isfinite(center.y) || !std::isfinite(center.z) ||
+        stations.size() < 2 || stations.size() > kMaxIntervals + 1) {
+        return detail::invalid_input_result<BodyId>(
+            *state_, diag_codes::kCoreParameterOutOfRange,
+            "截面律拉伸失败：须有显式轮廓、有限共面中心、有效方向、正距离和 2 至 4097 个截面律关键站",
+            "截面律拉伸失败");
+    }
+    const Vec3 axis = detail::scale(direction, 1.0 / length);
+    const Vec3 raw_normal = detail::newell_normal_unnormalized_poly(profile.polygon_xyz);
+    const Scalar normal_length = detail::norm(raw_normal);
+    if (!std::isfinite(normal_length) || normal_length <= 1e-14) {
+        return detail::invalid_input_result<BodyId>(
+            *state_, diag_codes::kCoreParameterOutOfRange,
+            "截面律拉伸失败：轮廓面积退化", "截面律拉伸失败");
+    }
+    const Vec3 normal = detail::scale(raw_normal, 1.0 / normal_length);
+    const Scalar plane_tol = std::max(Scalar(1e-7), state_->config.tolerance.linear * Scalar(100.0));
+    const Scalar center_offset = detail::dot(normal, detail::subtract(center, profile.polygon_xyz.front()));
+    const Scalar alignment = std::abs(detail::dot(normal, axis));
+    if (!std::isfinite(center_offset) || std::abs(center_offset) > plane_tol ||
+        !std::isfinite(alignment) || alignment < 1.0 - 1e-10) {
+        return detail::invalid_input_result<BodyId>(
+            *state_, diag_codes::kCoreParameterOutOfRange,
+            "截面律拉伸失败：中心必须共面，方向必须垂直于轮廓平面", "截面律拉伸失败");
+    }
+
+    // Validate the entire law before creating stations. In particular, do not clamp
+    // malformed endpoints or silently discard a key whose height rounds away.
+    if (stations.front().fraction != 0.0 || stations.back().fraction != 1.0 ||
+        stations.front().scale != 1.0 || stations.front().twist_angle != 0.0) {
+        return detail::invalid_input_result<BodyId>(
+            *state_, diag_codes::kCoreParameterOutOfRange,
+            "截面律拉伸失败：首站必须为 (0,1,0)，末站高度比例必须为 1", "截面律拉伸失败");
+    }
+    Scalar angular_travel = 0.0;
+    std::size_t total_intervals = 0;
+    std::vector<std::size_t> interval_counts;
+    interval_counts.reserve(stations.size() - 1);
+    for (std::size_t i = 0; i < stations.size(); ++i) {
+        const auto& key = stations[i];
+        if (!std::isfinite(key.fraction) || !std::isfinite(key.scale) || !(key.scale > 0.0) ||
+            !std::isfinite(key.twist_angle) || key.fraction < 0.0 || key.fraction > 1.0 ||
+            (i != 0 && key.fraction <= stations[i - 1].fraction)) {
+            return detail::invalid_input_result<BodyId>(
+                *state_, diag_codes::kCoreParameterOutOfRange,
+                "截面律拉伸失败：高度比例须严格递增且有限，比例须有限且为正，扭角须有限", "截面律拉伸失败");
+        }
+        if (i == 0) continue;
+        const auto& previous = stations[i - 1];
+        const Scalar angle_step = std::abs(key.twist_angle - previous.twist_angle);
+        angular_travel += angle_step;
+        const Scalar scale_step = std::abs(key.scale - previous.scale) / std::min(key.scale, previous.scale);
+        const Scalar intervals = std::max({Scalar(1.0), std::ceil(angle_step / kMaxStationAngle),
+                                           std::ceil(scale_step / 0.25)});
+        if (!std::isfinite(angular_travel) || angular_travel > kTwoPi + 1e-10 ||
+            !std::isfinite(intervals) || intervals > static_cast<Scalar>(kMaxIntervals - total_intervals)) {
+            return detail::invalid_input_result<BodyId>(
+                *state_, diag_codes::kCoreParameterOutOfRange,
+                "截面律拉伸失败：累计绝对扭角不得超过一周，采样区间总数不得超过 4096", "截面律拉伸失败");
+        }
+        const auto count = static_cast<std::size_t>(intervals);
+        total_intervals += count;
+        interval_counts.push_back(count);
+    }
+
+    detail::BodyRecord record;
+    record.kind = detail::BodyKind::Sweep;
+    record.rep_kind = RepKind::ExactBRep;
+    record.label = "extrude:law:" + profile.label;
+    record.axis = axis;
+    record.b = distance;
+    record.extrude_profile_xyz = profile.polygon_xyz;
+    record.extrude_holes_xyz = profile.holes_xyz;
+    record.extrude_scale_center = center;
+    record.sweep_station_offsets.reserve(total_intervals + 1);
+    record.sweep_station_scales.reserve(total_intervals + 1);
+    record.sweep_station_angles.reserve(total_intervals + 1);
+    record.sweep_station_offsets.push_back({0,0,0});
+    record.sweep_station_scales.push_back(1.0);
+    record.sweep_station_angles.push_back(0.0);
+    for (std::size_t i = 1; i < stations.size(); ++i) {
+        const auto& a = stations[i - 1];
+        const auto& b = stations[i];
+        const auto count = interval_counts[i - 1];
+        for (std::size_t j = 1; j <= count; ++j) {
+            const Scalar t = static_cast<Scalar>(j) / static_cast<Scalar>(count);
+            // Copy the exact key at each interval end; this preserves requested
+            // intermediate sections and avoids accumulated interpolation error.
+            const Scalar fraction = j == count ? b.fraction : a.fraction + t * (b.fraction - a.fraction);
+            const Scalar section_scale = j == count ? b.scale : a.scale + t * (b.scale - a.scale);
+            const Scalar angle = j == count ? b.twist_angle : a.twist_angle + t * (b.twist_angle - a.twist_angle);
+            record.sweep_station_offsets.push_back(detail::scale(axis, distance * fraction));
+            record.sweep_station_scales.push_back(section_scale);
+            record.sweep_station_angles.push_back(angle);
+        }
+    }
+    record.bbox = detail::make_bbox(profile.polygon_xyz.front(), profile.polygon_xyz.front());
+    // The shared materializer validates rounded rings, slab walls and the complete
+    // mass integral before allocating any geometry, topology or body IDs.
+    const auto body = make_body(state_, std::move(record), "已完成分段截面律拉伸");
+    if (body.value == 0) {
+        return detail::invalid_input_result<BodyId>(
+            *state_, diag_codes::kCoreParameterOutOfRange,
+            "截面律拉伸失败：轮廓或孔无效、采样截面数值坍塌、侧壁相交或闭壳退化", "截面律拉伸失败");
+    }
+    return ok_result(body, state_->create_diagnostic("已完成分段截面律拉伸"));
+}
+
 Result<BodyId> SweepService::extrude_to_plane(const ProfileRef& profile, const Vec3& direction,
                                             const Plane& end_plane) {
     const auto length = std::hypot(direction.x, direction.y, direction.z);
@@ -702,6 +1029,116 @@ Result<BodyId> SweepService::sweep(const ProfileRef& profile, CurveId rail) {
 }
 
 Result<BodyId> SweepService::sweep_scaled(const ProfileRef& profile, CurveId rail, Scalar end_scale) {
+    return sweep_impl(profile, rail, end_scale, {});
+}
+
+Result<BodyId> SweepService::sweep_with_scale_law(const ProfileRef& profile, CurveId rail,
+                                                std::span<const SweepScaleStation> stations) {
+    if (stations.size() < 2 || stations.size() > 4097 || profile.polygon_xyz.size() < 3 ||
+        stations.front().fraction != 0 || stations.back().fraction != 1 || stations.front().scale != 1) {
+        return detail::invalid_input_result<BodyId>(
+            *state_, diag_codes::kCoreParameterOutOfRange,
+            "截面律扫掠失败：需要显式轮廓及 2 至 4097 个关键站，首站为 (0,1)，末站弧长比例为 1",
+            "截面律扫掠失败");
+    }
+    long double minimum_intervals = 0;
+    for (std::size_t i = 0; i < stations.size(); ++i) {
+        const auto& key = stations[i];
+        if (!std::isfinite(key.fraction) || key.fraction < 0 || key.fraction > 1 ||
+            !std::isfinite(key.scale) || !(key.scale > 0) ||
+            (i != 0 && !(key.fraction > stations[i-1].fraction))) {
+            return detail::invalid_input_result<BodyId>(
+                *state_, diag_codes::kCoreParameterOutOfRange,
+                "截面律扫掠失败：弧长比例必须有限且严格递增，所有截面比例必须有限且严格为正",
+                "截面律扫掠失败");
+        }
+        if (i == 0) continue;
+        minimum_intervals += std::max(1.0L, std::ceil(
+            std::abs(static_cast<long double>(key.scale) - stations[i-1].scale) /
+            (0.25L * std::min(key.scale, stations[i-1].scale))));
+        if (!std::isfinite(minimum_intervals) || minimum_intervals > 4096) {
+            return detail::invalid_input_result<BodyId>(
+                *state_, diag_codes::kCoreParameterOutOfRange,
+                "截面律扫掠失败：比例变化要求的采样区间超过 4096", "截面律扫掠失败");
+        }
+    }
+    return sweep_impl(profile, rail, stations.back().scale, stations);
+}
+
+Result<BodyId> SweepService::sweep_with_law(const ProfileRef& profile, CurveId rail,
+                                          std::span<const SweepLawStation> stations) {
+    if (stations.size() < 2 || stations.size() > 4097 || profile.polygon_xyz.size() < 3 ||
+        stations.front().fraction != 0 || stations.back().fraction != 1 ||
+        stations.front().scale != 1 || stations.front().twist_angle != 0) {
+        return detail::invalid_input_result<BodyId>(
+            *state_,diag_codes::kCoreParameterOutOfRange,
+            "联合截面律扫掠失败：需要显式轮廓和 2 至 4097 个关键站，首站为 (0,1,0)，末站弧长比例为 1",
+            "联合截面律扫掠失败");
+    }
+    std::vector<SweepScaleStation> scales;
+    scales.reserve(stations.size());
+    long double travel = 0, minimum_intervals = 0;
+    for (std::size_t i = 0; i < stations.size(); ++i) {
+        const auto& key = stations[i];
+        if (!std::isfinite(key.fraction) || key.fraction < 0 || key.fraction > 1 ||
+            !std::isfinite(key.scale) || !(key.scale > 0) || !std::isfinite(key.twist_angle) ||
+            (i != 0 && !(key.fraction > stations[i-1].fraction))) {
+            return detail::invalid_input_result<BodyId>(
+                *state_,diag_codes::kCoreParameterOutOfRange,
+                "联合截面律扫掠失败：弧长比例须有限且严格递增，比例须有限且为正，扭角须有限",
+                "联合截面律扫掠失败");
+        }
+        scales.push_back({key.fraction,key.scale});
+        if (i == 0) continue;
+        const auto& previous = stations[i-1];
+        const long double angle_step = std::abs(static_cast<long double>(key.twist_angle)-previous.twist_angle);
+        travel += angle_step;
+        minimum_intervals += std::max({1.0L,static_cast<long double>(std::ceil(
+            static_cast<Scalar>(angle_step)/(kSweepPi/24))),
+            std::ceil(std::abs(static_cast<long double>(key.scale)-previous.scale) /
+                      (0.25L*std::min(key.scale,previous.scale)))});
+        if (!std::isfinite(travel) || travel > 2*kSweepPi+1e-10L ||
+            !std::isfinite(minimum_intervals) || minimum_intervals > 4096) {
+            return detail::invalid_input_result<BodyId>(
+                *state_,diag_codes::kCoreParameterOutOfRange,
+                "联合截面律扫掠失败：累计绝对扭角超过一周或联合采样要求超过 4096 区间",
+                "联合截面律扫掠失败");
+        }
+    }
+    return sweep_impl(profile,rail,stations.back().scale,scales,stations);
+}
+
+Result<BodyId> SweepService::sweep_impl(const ProfileRef& profile, CurveId rail, Scalar end_scale,
+                                      std::span<const SweepScaleStation> stations,
+                                      std::span<const SweepLawStation> section_stations) {
+    const auto law_failure = [&](std::string_view stage, std::string message, std::size_t intervals) {
+        auto issue = detail::make_error_issue(diag_codes::kCoreParameterOutOfRange,std::move(message),{rail.value});
+        issue.stage = std::string(stage);
+        Scalar minimum_scale = 1, maximum_scale = 1;
+        for (const auto& key : stations) {
+            minimum_scale = std::min(minimum_scale,key.scale);
+            maximum_scale = std::max(maximum_scale,key.scale);
+        }
+        issue.numeric_evidence = {
+            {"law_key_count",static_cast<Scalar>(stations.size()),"count"},
+            {"sampled_intervals",static_cast<Scalar>(intervals),"count"},
+            {"maximum_intervals",4096,"count"},
+            {"minimum_scale",minimum_scale,"ratio"},
+            {"maximum_scale",maximum_scale,"ratio"},
+            {"maximum_scale_step_ratio",0.25,"ratio"},
+            {"maximum_contact_candidates",2000000,"count"},
+        };
+        if (!section_stations.empty()) {
+            Scalar travel = 0;
+            for (std::size_t i = 1; i < section_stations.size(); ++i)
+                travel += std::abs(section_stations[i].twist_angle-section_stations[i-1].twist_angle);
+            issue.numeric_evidence.push_back({"absolute_twist_travel",travel,"rad"});
+            issue.numeric_evidence.push_back({"maximum_twist_step",kSweepPi/24,"rad"});
+            issue.numeric_evidence.push_back({"terminal_twist",section_stations.back().twist_angle,"rad"});
+        }
+        const DiagnosticId diagnostic = state_->create_diagnostic("截面律扫掠失败",{std::move(issue)});
+        return error_result<BodyId>(StatusCode::InvalidInput,diagnostic);
+    };
     if (!std::isfinite(end_scale) || !(end_scale > 0.0)) {
         return detail::invalid_input_result<BodyId>(
             *state_, diag_codes::kCoreParameterOutOfRange,
@@ -744,6 +1181,13 @@ Result<BodyId> SweepService::sweep_scaled(const ProfileRef& profile, CurveId rai
                     *state_, diag_codes::kCoreParameterOutOfRange,
                     "变截面扫描失败：周期导轨的首尾截面比例必须一致", "变截面扫描失败");
             }
+            if (closed && !section_stations.empty() &&
+                std::min({std::abs(section_stations.back().twist_angle),
+                          std::abs(section_stations.back().twist_angle-2*kSweepPi),
+                          std::abs(section_stations.back().twist_angle+2*kSweepPi)}) > 1e-10) {
+                return law_failure("sweep_law_seam",
+                    "联合截面律扫掠失败：周期导轨末端扭角须为零或正负一周，不推断截面对称顶点置换",0);
+            }
             const auto raw_normal = detail::newell_normal_unnormalized_poly(profile.polygon_xyz);
             const Scalar normal_length = detail::norm(raw_normal);
             const Scalar plane_tol = std::max(Scalar(1e-7), state_->config.tolerance.linear * Scalar(100.0));
@@ -774,7 +1218,9 @@ Result<BodyId> SweepService::sweep_scaled(const ProfileRef& profile, CurveId rai
                     *state_, diag_codes::kCoreParameterOutOfRange,
                     "曲线扫掠失败：起始截面须有限、非退化、经过导轨起点且垂直于起始切向", "曲线扫掠失败");
             }
-            profile_radius *= std::max(Scalar(1.0), end_scale);
+            Scalar maximum_scale = std::max(Scalar(1.0), end_scale);
+            for (const auto& key : stations) maximum_scale = std::max(maximum_scale, key.scale);
+            profile_radius *= maximum_scale;
             if (!std::isfinite(profile_radius)) {
                 return detail::invalid_input_result<BodyId>(
                     *state_, diag_codes::kCoreParameterOutOfRange,
@@ -980,9 +1426,19 @@ Result<BodyId> SweepService::sweep_scaled(const ProfileRef& profile, CurveId rai
                 }
             }
             record.sweep_frame_closed = closed;
+            if (!stations.empty() && !refine_sweep_scale_law(record, stations, section_stations)) {
+                return law_failure("sweep_law_sampling",
+                    "截面律扫掠失败：关键站或导轨无法分辨、比例采样超过 4096 或插值标架退化",
+                    0);
+            }
             record.bbox = detail::make_bbox(profile.polygon_xyz.front(), profile.polygon_xyz.front());
+            const std::size_t sampled_intervals = closed ? record.sweep_frame_origins.size() :
+                                                           record.sweep_frame_origins.size()-1;
             const auto body = make_body(state_, std::move(record), "已完成随导轨标架曲线扫掠");
             if (body.value == 0) {
+                if (!stations.empty()) return law_failure("sweep_law_materialization",
+                    "截面律扫掠失败：实际截面退化、侧壁折叠/接触、接触候选超限或闭壳质量积分失败",
+                    sampled_intervals);
                 return detail::invalid_input_result<BodyId>(
                     *state_, diag_codes::kCoreParameterOutOfRange,
                     "曲线扫掠失败：截面、孔、导轨或采样闭壳发生数值退化", "曲线扫掠失败");
@@ -997,7 +1453,7 @@ Result<BodyId> SweepService::sweep_scaled(const ProfileRef& profile, CurveId rai
                 *state_, diag_codes::kCoreParameterOutOfRange,
                 "扫描失败：导轨位移必须有限且非退化", "扫描失败");
         }
-        if (curve.kind == detail::CurveKind::LineSegment && end_scale == 1.0) {
+        if (curve.kind == detail::CurveKind::LineSegment && end_scale == 1.0 && stations.empty()) {
             return extrude(profile, detail::scale(displacement, 1.0 / length), length);
         }
         detail::BodyRecord record;
@@ -1012,7 +1468,7 @@ Result<BodyId> SweepService::sweep_scaled(const ProfileRef& profile, CurveId rai
         for (const auto& p : curve.poles) {
             record.sweep_station_offsets.push_back(detail::subtract(p, curve.poles.front()));
         }
-        if (end_scale != 1.0) {
+        if (end_scale != 1.0 || !stations.empty()) {
             const auto raw_normal = detail::newell_normal_unnormalized_poly(profile.polygon_xyz);
             const Scalar normal_length = detail::norm(raw_normal);
             const Scalar plane_tol = std::max(Scalar(1e-7), state_->config.tolerance.linear * Scalar(100.0));
@@ -1022,6 +1478,12 @@ Result<BodyId> SweepService::sweep_scaled(const ProfileRef& profile, CurveId rai
                 return detail::invalid_input_result<BodyId>(
                     *state_, diag_codes::kCoreParameterOutOfRange,
                     "变截面扫描失败：直线或折线导轨起点必须位于轮廓平面", "变截面扫描失败");
+            }
+            if (!section_stations.empty()) {
+                // Fixed-plane polyline sections roll about their oriented normal,
+                // even when the translating rail has an in-plane component.
+                const Vec3 normal = detail::scale(raw_normal,1/normal_length);
+                record.axis = detail::scale(normal,detail::dot(normal,displacement) < 0 ? -1.0 : 1.0);
             }
             Scalar path_length = 0.0;
             std::vector<Scalar> station_distances(curve.poles.size(), 0.0);
@@ -1047,12 +1509,21 @@ Result<BodyId> SweepService::sweep_scaled(const ProfileRef& profile, CurveId rai
                     1.0 + (end_scale - 1.0) * distance / path_length);
             }
         }
+        if (!stations.empty() && !refine_sweep_scale_law(record, stations, section_stations)) {
+            return law_failure("sweep_law_sampling",
+                "截面律扫掠失败：关键站或折线无法分辨、比例采样超过 4096 或导轨退化",
+                0);
+        }
         // The materializer computes the full bounds and all geometric gates before
         // allocating any entity. make_body must not fall back to a bounding box.
         record.bbox = detail::make_bbox(profile.polygon_xyz.front(), profile.polygon_xyz.front());
+        const std::size_t sampled_intervals = record.sweep_station_offsets.size()-1;
         const auto body = make_body(state_, std::move(record),
                                     end_scale == 1.0 ? "已完成折线平移扫掠" : "已完成折线变截面扫掠");
         if (body.value == 0) {
+            if (!stations.empty()) return law_failure("sweep_law_materialization",
+                "截面律扫掠失败：实际截面退化、轮廓或孔无效、侧壁接触、导轨非单调或闭壳质量积分失败",
+                sampled_intervals);
             return detail::invalid_input_result<BodyId>(
                 *state_, diag_codes::kCoreParameterOutOfRange,
                 "扫描失败：轮廓无效或导轨未沿轮廓法向严格单调推进，无法形成有效闭壳", "扫描失败");

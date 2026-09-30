@@ -159,6 +159,55 @@ struct BodyShellRegion {
     std::optional<ShellId> parent_shell;
 };
 
+/// 相对于实体材料的点/线段位置；空腔内部属于 Outside。
+enum class BodyPointLocation : std::uint8_t {
+    Outside = 0,
+    Inside = 1,
+    Boundary = 2,
+};
+
+struct BodySpatialQueryOptions {
+    /// 模型长度单位；0 使用当前内核线性容差，负数/非有限值失败。
+    Scalar position_tolerance {};
+    /// 完成拓扑/壳层级前置检查之后的三角形距离、求交和绕数计算总预算。
+    /// 前置检查与已有质量属性查询相同，不计入此预算；0 非法，耗尽失败且无部分结果。
+    std::uint64_t max_triangle_tests {1000000};
+};
+
+struct BodyBoundaryPoint {
+    Point3 point {};
+    ShellId shell {};
+    FaceId face {};
+    /// 非负欧氏距离，单位为模型长度单位；最近位置可能在面内、边或顶点。
+    Scalar distance {};
+};
+
+struct BodyPointQuery {
+    BodyPointLocation location {BodyPointLocation::Outside};
+    /// 空实体为空；非空实体始终返回最近真实边界，包含空腔/材料岛边界。
+    /// 等距时按 ShellId、FaceId 选择，和实体壳插入顺序无关。
+    std::optional<BodyBoundaryPoint> nearest_boundary;
+    Scalar position_tolerance {};
+    std::uint64_t triangle_tests {};
+};
+
+struct BodySegmentInterval {
+    /// p(t) = start + t * (end - start)，0 <= t <= 1；端点包含在区间内。
+    Range1D parameters {};
+    /// Inside 表示开区间内部为材料，端点可在边界；Boundary 表示共面边界段或孤立接触点。
+    BodyPointLocation location {BodyPointLocation::Inside};
+};
+
+struct BodySegmentQuery {
+    /// 有序、内部不重叠的材料/边界区间；相邻同类区间合并，Outside 区间省略。
+    /// 相切点以 [t,t] 表示，已经被 Inside 或 Boundary 区间包含的接触点不重复返回。
+    std::vector<BodySegmentInterval> intervals;
+    /// 区间内部为材料的总长度；共面边界段和孤立接触点不计入。
+    Scalar material_length {};
+    Scalar position_tolerance {};
+    std::uint64_t triangle_tests {};
+};
+
 class TopologyQueryService {
 public:
     explicit TopologyQueryService(std::shared_ptr<detail::KernelState> state);
@@ -230,6 +279,22 @@ public:
     /// 独立最外层壳相加，奇数包含深度空腔相减，偶数深度材料岛再相加；壳接触/相交/重叠失败。
     /// `area` 为所有材料/空腔边界面积之和；其余单位及失败/只读语义同 `shell_mass_properties`。
     Result<MassProperties> body_mass_properties(BodyId body_id) const;
+    /// 平面直边、多面体实体的真实材料定位与最近边界；支持凹面、孔、多壳、空腔、材料岛。
+    /// 与 shell_mass_properties/body_shell_regions 共用闭壳/面/壳间接触前置检查；输入须为无自交的嵌入闭壳。
+    /// 最近边界距离 <= position_tolerance 时为 Boundary，否则按闭壳包含奇偶判断 Inside/Outside。
+    /// 非有限坐标、无效预算/容差、数值溢出失败；空实体成功返回 Outside 和空 nearest_boundary。
+    /// 不创建几何/网格、不写求值缓存或 Eval 状态；当前事务修改即时可见，回滚后恢复。
+    Result<BodyPointQuery> locate_point(
+        BodyId body_id, const Point3& point, const BodySpatialQueryOptions& options = {}) const;
+    /// 对有限线段执行真实面片裁剪，返回材料开区间、共面边界段和孤立相切点，参数为无量纲。
+    /// 支持范围/前置条件/只读语义同 locate_point；不将 position_tolerance 膨胀为材料厚度。
+    /// position_tolerance 用于短段退化判断：长度 <= 该容差的线段失败；壳间检查仍使用内核建模容差。
+    /// 求交和共面判断使用局部浮点舍入尺度；可分辨的窄空腔不会按位置容差合并。
+    /// 不同边界事件在归一化参数舍入尺度内无法可靠分离时返回 NumericalInstability，无部分区间。
+    /// 空实体或完全在材料外且不接触边界的线段成功返回空集合和零长度。
+    Result<BodySegmentQuery> clip_segment(
+        BodyId body_id, const Point3& start, const Point3& end,
+        const BodySpatialQueryOptions& options = {}) const;
     /// 显式裁剪边按支撑曲线区间计算真实弧长；兼容旧 Line/LineSegment 边的端点距离。
     /// 曲边缺少裁剪区间返回 NotImplemented；区间、端点或曲线不一致返回 InvalidTopology。
     Result<Scalar> edge_length(EdgeId edge_id) const;

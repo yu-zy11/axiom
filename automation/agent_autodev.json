@@ -1,4 +1,103 @@
 {
+  "stage_plan": {
+  "stage": 3,
+  "roadmap": "docs/plan/AxiomKernel_主开发计划与阶段路线图.md",
+  "tasks": [
+    {
+      "id": "S3-QUERY",
+      "requirement_id": "FR-QUERY-001",
+      "goal": "关闭已支持 Stage 3 体类的截面与最近点/最近距离主链；优先修复通用 QueryService 的 bbox 占位及与专用接口不一致的失败、空结果语义。",
+      "acceptance": [
+        "对已声明支持的真实建模体计算实际平面截面；用非轴对齐与凹/带孔案例证明不返回 bbox 角点伪截面。",
+        "最近点/最近距离使用实际几何或真实拓扑边界；独立参考值覆盖 bbox 重叠但实体分离及相切场景。",
+        "明确精确/采样计算和不支持范围；不支持输入返回稳定错误码及 Issue.stage，空交集语义一致。",
+        "成功、退化、失败及查询不污染模型/缓存/Eval/事务的回归齐全。"
+      ],
+      "tests": [
+        "axiom_query_eval_test",
+        "axiom_ops_heal_test"
+      ],
+      "depends_on": []
+    },
+    {
+      "id": "S3-MASS",
+      "requirement_id": "FR-QUERY-001",
+      "goal": "统一 Stage 3 已支持模型的体积、面积、重心和惯性，消除静默 bbox 质量回退和来源记录与实际拓扑漂移。",
+      "acceptance": [
+        "已支持的 primitive 和 extrude/revolve/sweep/loft/thicken 质量属性有独立解析或数值参考，说明采样误差。",
+        "公开质量查询与当前拓扑/表示一致；编辑后重新查询、回滚恢复和多壳材料/空腔语义有回归。",
+        "未知或不支持体类不以 bbox 质量冒充正确结果；失败有稳定诊断阶段且无部分数值。"
+      ],
+      "tests": [
+        "axiom_query_eval_test",
+        "axiom_ops_heal_test",
+        "axiom_representation_io_test"
+      ],
+      "depends_on": [
+        "S3-QUERY"
+      ]
+    },
+    {
+      "id": "S3-MODELING",
+      "requirement_id": "FR-OPS-001",
+      "goal": "核验并补齐 Stage 3 五类建模主路径；只修复退出要求缺口，已有路径满足时补验收，不继续扩展无关变体。",
+      "kind": "acceptance",
+      "acceptance": [
+        "extrude/revolve/sweep/loft/thicken 各有一条非占位、非 bbox 近似的真实拓扑主路径并通过 Strict 验证。",
+        "每条主路径覆盖公开面/边/壳查询、实际表示与质量属性，精确或采样属性明确。",
+        "边界/退化/不支持输入有结构化诊断；活动事务失败不污染，回滚后可重试。"
+      ],
+      "tests": [
+        "axiom_ops_heal_test",
+        "axiom_topology_test"
+      ],
+      "depends_on": [
+        "S3-MASS"
+      ]
+    },
+    {
+      "id": "S3-CONSISTENCY",
+      "requirement_id": "FR-OPS-001",
+      "goal": "打通基础零件建模到查询、表示、来源和 Eval 的一致性验收，修复失败回滚与 fallback 漂移。",
+      "kind": "acceptance",
+      "acceptance": [
+        "代表性基础零件通过建模→验证→截面/距离/质量查询→表示转换的集成闭环。",
+        "topology/rep/provenance/eval 对同一主链结果一致，关联实体有效。",
+        "修改/失败/回滚后的拓扑、表示、来源与 Eval 状态一致并有回归。"
+      ],
+      "tests": [
+        "axiom_ops_heal_test",
+        "axiom_query_eval_test",
+        "axiom_representation_io_test",
+        "axiom_kernel_runtime_invariant_test"
+      ],
+      "depends_on": [
+        "S3-MODELING"
+      ]
+    },
+    {
+      "id": "S3-EXIT",
+      "requirement_id": "FR-QUERY-001",
+      "goal": "按主路线图 Stage 3 退出标准收口统一支持矩阵、阶段证据和文档；不把工业功能需求全部满足作为 Stage 3 完成前提。",
+      "kind": "acceptance",
+      "acceptance": [
+        "统一支持矩阵映射体类、五类建模、截面/最近点/距离/质量、精确/采样/不支持范围及自动化证据。",
+        "Stage 3 退出项逐条对应集成回归，未纳入本阶段的工业能力明确保留限制。",
+        "完整构建/CTest 和文档检查通过后同步当前进度、需求矩阵及 Backlog；压缩所涉历史 strict warnings，记录残余告警。"
+      ],
+      "tests": [
+        "axiom_ops_heal_test",
+        "axiom_query_eval_test",
+        "axiom_representation_io_test",
+        "axiom_kernel_runtime_invariant_test",
+        "axiom_smoke_test"
+      ],
+      "depends_on": [
+        "S3-CONSISTENCY"
+      ]
+    }
+  ]
+},
   "agent_command": ["codex", "exec", "--sandbox", "workspace-write", "-"],
   "build_dir": "build-agent",
   "build_parallel_jobs": 4,

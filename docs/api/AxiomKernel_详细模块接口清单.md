@@ -516,6 +516,34 @@ struct BodyShellRegion {
   std::optional<ShellId> parent_shell;
 };
 
+enum class BodyPointLocation : std::uint8_t { Outside = 0, Inside = 1, Boundary = 2 };
+struct BodySpatialQueryOptions {
+  Scalar position_tolerance {};  // 模型长度单位；0 使用内核线性容差
+  std::uint64_t max_triangle_tests {1000000};
+};
+struct BodyBoundaryPoint {
+  Point3 point {};
+  ShellId shell {};
+  FaceId face {};
+  Scalar distance {};  // 非负欧氏距离，模型长度单位
+};
+struct BodyPointQuery {
+  BodyPointLocation location {BodyPointLocation::Outside};
+  std::optional<BodyBoundaryPoint> nearest_boundary;
+  Scalar position_tolerance {};
+  std::uint64_t triangle_tests {};
+};
+struct BodySegmentInterval {
+  Range1D parameters {};  // p(t)=start+t*(end-start)，0≤t≤1，无量纲
+  BodyPointLocation location {BodyPointLocation::Inside};
+};
+struct BodySegmentQuery {
+  std::vector<BodySegmentInterval> intervals;
+  Scalar material_length {};  // 模型长度单位，仅累计 Inside 区间
+  Scalar position_tolerance {};
+  std::uint64_t triangle_tests {};
+};
+
 struct EdgeCurveInterval {
   Scalar start_parameter;  // 对应 v0
   Scalar end_parameter;    // 对应 v1，可小于 start_parameter
@@ -537,6 +565,10 @@ public:
   Result<MassProperties> shell_mass_properties(ShellId) const;
   Result<std::vector<BodyShellRegion>> body_shell_regions(BodyId) const;
   Result<MassProperties> body_mass_properties(BodyId) const;
+  Result<BodyPointQuery> locate_point(BodyId, const Point3&,
+                                    const BodySpatialQueryOptions& options = {}) const;
+  Result<BodySegmentQuery> clip_segment(BodyId, const Point3& start, const Point3& end,
+                                       const BodySpatialQueryOptions& options = {}) const;
   Result<std::optional<EdgeCurveInterval>> edge_curve_interval(EdgeId) const;
   Result<Scalar> edge_length(EdgeId) const;
   Result<Scalar> loop_length(LoopId) const;
@@ -559,6 +591,20 @@ PCurve 必须为至少两点的折线，按 coedge 方向连续闭合，各点�
 `edge_curve_interval / edge_length / loop_length / face_boundary_length` 组成拓扑边界长度接口族，单位为模型长度单位。`create_trimmed_edge` 创建的边保存有向参数区间，`edge_length` 调用同一支撑曲线的区间弧长实现，覆盖圆/椭圆/抛物线/双曲线、Bezier/BSpline/NURBS、折线和复合链；递减区间合法，区间起止必须分别对应 v0/v1。旧 `create_edge` 保持兼容：Line/LineSegment 继续按端点真实距离计算，未携带区间的曲边仍返回 `NotImplemented / AXM-CORE-E-0004`，绝不以弦长冒充弧长。显式曲边还会把解析区间极值或控制点凸包纳入面/壳/体拓扑包围盒，避免半圆等边界只取端点而低估范围。
 
 裁剪参数越域在创建时返回 `InvalidInput / AXM-GEO-E-0004`；参数非有限/相同返回 `InvalidInput / AXM-CORE-E-0002`；参数求值与拓扑端点超出线性容差返回 `InvalidTopology / AXM-TOPO-E-0008`，诊断携带两端距离和容差。失败发生在 EdgeId 分配前，不增加事务写计数或几何缓存。零长度或存量不一致边同样返回 `AXM-TOPO-E-0008`，缺失边引用返回 `AXM-TOPO-E-0006`。环查询要求闭合且无重复成员；面查询返回**外环加全部内环**的长度，方向无关。所有失败均无部分数值；查询从当前拓扑重算，不修改模型、事务写计数、几何/网格缓存或 Eval 状态。
+
+### 6.1.1 实体空间查询（cycle-0074，已通过完整门禁）
+
+`locate_point` 对真实平面直边多面体材料返回 `Inside/Outside/Boundary`，空腔为 Outside，偶数包含深度的材料岛为 Inside。非空实体总是返回最近真实边界位置（可在面内、边或顶点）、非负距离及所属 `ShellId/FaceId`；等距时按 ShellId、FaceId 的稳定句柄顺序选择，与壳插入顺序无关。最近距离不大于有效 `position_tolerance` 时归为 Boundary；空实体成功返回 Outside 和空 `nearest_boundary`。
+
+`clip_segment` 返回按无量纲 `t` 递增、内部不重叠的材料/边界区间，省略 Outside 区间。Inside 指开区间内部为材料，端点包含且可位于边界；Boundary 指共面边界段或孤立相切点 `[t,t]`。相邻同类区间合并，已被区间包含的接触点不重复返回。`material_length` 仅累加 Inside 区间的实际长度，共面段/相切点不计入；完全无交集及空实体成功返回空集合和零长度。反向线段仍按自身从 start 到 end 的参数返回。
+
+位置容差为模型长度单位，0 使用内核有效线性容差（至少 `1e-12`），负数或非有限值失败。线段长度不大于该容差时为退化失败；该容差不膨胀材料，不合并可分辨的薄层或窄空腔。求交/共面采用局部浮点舍入尺度；边界事件在归一化参数舍入尺度内无法可靠分离时返回 `NumericalInstability`，无部分区间。
+
+两入口共用 `shell_mass_properties/body_shell_regions` 的闭壳质量、壳间接触和严格包含前置检查，支持凹面、孔、无序多壳、空腔与材料岛。仅支持无自交的嵌入平面直边双边流形闭壳；本批未新增壳自身全局自交证明。共享前置检查明确拒绝曲面/曲边（含显式 trim 曲边），不以端点弦替代曲边，并检查面边界位于支撑平面。壳相交/重叠/建模容差接触仍失败；调用方的位置容差不改变壳间建模容差。
+
+`max_triangle_tests` 默认 1000000，须非零，仅限制前置检查之后的新三角形距离、求交和绕数计算；成功的 `triangle_tests` 是实际工作量，可用作精确预算重放，预算耗尽不返回部分结果。既有质量/壳关系前置检查不计入预算，尚无大规模空间加速。局部 `long double` 距离/平面裁剪和补偿立体角绕数用于计算，非有限坐标及溢出结构化失败；错误码见字典的 cycle-0074 空间查询条目。
+
+查询从当前拓扑重算，事务替换/删除即时可见，回滚后恢复；仅增加诊断和一次顶层 Topo 查询审计，不创建几何或 MeshId，不写缓存、Eval 状态或事务写计数。`axiom_query_eval_test` 的最近面/边/角、容差带、穿透/反向/内部/端点/相切/共面/空集、薄层、多壳奇偶、姿态尺度、预算/数值失败、支撑面编辑回滚和不污染回归随 cycle-0074 完整 CTest 16/16 通过。
 
 ### 6.2 拓扑事务接口
 
@@ -785,6 +831,21 @@ public:
 ```
 
 ```cpp
+struct ExtrusionLawStation {
+  Scalar fraction {};  // 归一化高度
+  Scalar scale {1.0};
+  Scalar twist_angle {};  // 弧度
+};
+struct SweepScaleStation {
+  Scalar fraction {};  // 归一化采样导轨弦长
+  Scalar scale {1.0};
+};
+struct SweepLawStation {
+  Scalar fraction {};  // 归一化采样导轨弦长
+  Scalar scale {1.0};
+  Scalar twist_angle {};  // 弧度
+};
+
 class SweepService {
 public:
   Result<BodyId> extrude(const ProfileRef&, const Vec3& direction, Scalar distance);
@@ -792,12 +853,18 @@ public:
                                 const Point3& center, Scalar end_scale);
   Result<BodyId> extrude_twisted(const ProfileRef&, const Vec3& direction, Scalar distance,
                                  const Point3& center, Scalar twist_angle);
+  Result<BodyId> extrude_with_law(const ProfileRef&, const Vec3& direction, Scalar distance,
+                                  const Point3& center, std::span<const ExtrusionLawStation> stations);
   Result<BodyId> extrude_to_plane(const ProfileRef&, const Vec3& direction, const Plane& end_plane);
   Result<BodyId> revolve(const ProfileRef&, const Axis3&, Scalar angle);
   Result<BodyId> revolve_between(const ProfileRef&, const Axis3&,
                                  Scalar start_angle, Scalar end_angle);
   Result<BodyId> sweep(const ProfileRef&, CurveId rail);
   Result<BodyId> sweep_scaled(const ProfileRef&, CurveId rail, Scalar end_scale);
+  Result<BodyId> sweep_with_scale_law(const ProfileRef&, CurveId rail,
+                                     std::span<const SweepScaleStation> stations);
+  Result<BodyId> sweep_with_law(const ProfileRef&, CurveId rail,
+                               std::span<const SweepLawStation> stations);
   Result<BodyId> loft(std::span<const ProfileRef> profiles);
   Result<BodyId> thicken(FaceId, Scalar distance);
 };
@@ -827,13 +894,29 @@ public:
 
 `revolve_between` 以弧度解释有向区间 `[start_angle,end_angle]`，有符号跨度必须有限、非零且绝对值不超过 `2π`。递增/递减区间分别按轴方向的正向/反向旋转，支持偏置起始角和对称区间；部分角结果的首尾端盖绕向与方向匹配。正负整周保留周期多壳语义且几何与起始角无关。`revolve(profile,axis,angle)` 的正角合同不变，等价委托 `[0,angle]`。轮廓、轴分离和数值退化限制与 `revolve` 相同。
 
+第 74 批（cycle-0074）新增三个截面律入口，均已通过完整门禁，复用既有错误码：
+
+| 入口 / 关键站 | 自变量与插值 | 方向与周期合同 |
+|---|---|---|
+| `extrude_with_law / ExtrusionLawStation` | `fraction` 为归一化高度，scale 和有向 twist_angle 分段线性插值；每个关键站原值保留 | 方向须垂直于截面平面，按单位方向右手规则扭转；中心有限且共面，距离有限且正，方向反转同时反转旋转轴 |
+| `sweep_with_scale_law / SweepScaleStation` | `fraction` 为既有导轨采样弦长的归一化累计值，正比例分段线性插值 | 直线/折线以共面的导轨起点为中心，截面保持世界方向；曲线沿旋转最小标架；周期曲线要求末比例恰为 1 |
+| `sweep_with_law / SweepLawStation` | 同一采样弦长上的正比例和有向扭角联合分段线性插值 | 直线/折线绕按净推进方向定向的初始截面法向旋转；曲线相对传输标架绕局部前向切向旋转；周期末比例为 1、末角为 0 或 ±2π（`1e-10 rad` 容差） |
+
+关键站须有 2 至 4097 个，fraction 有限、从 0 到 1 严格递增；首站为 `(0,1)` 或 `(0,1,0)`。所有比例须有限且严格正，扭角须有限。支持中间扩张/收缩/比例停顿、扭转停顿及反向，凸/凹简单轮廓与分离非嵌套孔、任意空间朝向和方向反转；外环与孔共享比例/扭转，不自动匹配截面。每步比例变化不超过较小端比例的 25%；带扭角时每步不超过 7.5°，累计绝对扭角 `Σ|Δangle|` 最多一周（数值检查余量 `1e-10 rad`），反向后终角较小也不能绕过累计门禁。联合采样最多 4096 区间，不按两个律分别给预算。
+
+两个扫掠律入口保留全部原导轨站和关键站；数值重合的导轨站/关键站共享位置和标架，不可分辨的不同关键站拒绝。支持直线、每段严格同向穿过初始截面平面的折线、既有 Bezier/BSpline/NURBS 和非嵌套 G1 连续 CompositeChain；周期圆/椭圆及既有闭合样条/复合链也支持。采样弧长不是曲线参数或解析弧长。插入曲线标架通过切向最小旋转和轴向残差插值保持正交及端点标架。周期末环与首环焊接且无端盖；联合律保留末端角检查接缝采样，不根据截面对称性推断顶点置换。周期带孔沿用外环与各孔分别物化闭壳的语义。
+
+共享物化器在分配前检查所有实际舍入截面、复用盖片对应、推进/折叠、非相邻侧壁（曲线为无共享顶点三角形）的交叠或容差接触及质量积分。曲线接触检查按最大空间跨度排序宽相并做局部坐标 SAT，最多 2000000 宽相候选；保守曲率/导轨间距门禁采用全律最大比例。扭转侧壁使用交替对角线。成功生成真实三角 Face、共享 Edge/Vertex 和闭壳，bbox 包含实际中间截面，质量属性属于实际采样多面体，连续律独立 Gauss 积分仅作近似对照。失败不分配模型/拓扑/几何/ID，不改变活动事务、求值/网格缓存或 Eval；允许新增诊断。扫掠律采样/物化/周期扭角失败分别提供 `sweep_law_sampling/materialization/seam` 阶段及比例、采样/候选上限、累计/末端扭角等有限数值证据；前置输入失败仍复用既有诊断路径。
+
+`extrude_twisted`、`sweep_scaled` 和 `sweep` 的旧合同保留，零扭角比例律及两关键站兼容回归通过。输出仍为采样多面体 BRep；新律不支持零/负比例、尖顶、至平面组合、嵌套复合导轨、一般非线性解析律、解析扫掠/螺旋曲面或任意截面匹配。三个入口的独立体积/质心/完整惯性、真实拓扑/边长/面面积/Strict/索引/网格、中间关键站、周期正负整周、无效/数值退化/采样预算、阶段诊断、活动事务失败原子性和编辑回滚重试回归随 `axiom_ops_heal_test` 通过（106.39 s）；整批 CTest 16/16、0 失败、134.05 s，见 [cycle-0074 门禁日志](../../.axiom-agent/logs/cycle-0074-gates.log)。FR-OPS-001 保持进行中。
+
 `loft` 要求至少两个显式平面多边形截面。各站外环以及同索引孔环必须保持相同顶点数，以顶点顺序定义直纹侧壁对应关系；环绕向可独立变化。截面须沿共同横向严格有序，站间插值区域不得退化、翻折或相交。成功时生成真实共享面边点的单闭壳并缓存闭合多面体质量属性；不同环拓扑、自动顶点匹配、分支、尖顶/坍塌截面和无显式轮廓路径拒绝，不再返回 bbox 占位体。
 
 `sweep` 还支持显式凹多边形或带孔截面沿 Bezier/BSpline/NURBS 开放导轨、显式端点重合且首尾切向连续的闭合样条、整圆/椭圆周期导轨，以及 `CompositeChain` 复合导轨。复合链子段可为有界直线/线段、圆/椭圆弧、Bezier、BSpline、NURBS 或 polyline 首段，按公开链语义的子曲线局部参数 `[0,1]` 取值；接缝必须位置连续且 G1 切向连续。截面必须位于导轨起点且其平面法向与起始切向对齐；开放导轨生成两端盖，闭合样条与闭合复合链生成无端盖周期闭壳。空间闭环使用沿采样弧长分布的旋转最小标架 holonomy 校正，避免首尾截面隐藏扭转缝。周期带孔截面的外边界与每个孔边界是互不连通的闭壳，因此一个 Body 含 `1 + holes_xyz.size()` 个 Shell，`owned_topo_welded` 网格也报告同数量的连通分量；开放带孔导轨由端盖连成单壳，周期无孔也为单壳。
 
 `sweep_scaled` 在上述路径上把截面统一缩放比从起点的 1 按采样弧长线性插值到有限且严格为正的 `end_scale`。直线与 CompositePolyline 以导轨起点为截面平面内缩放中心；曲线导轨在旋转最小标架中逐站缩放。凹轮廓和带孔轮廓均生成真实共享面边点闭壳；物化前检查比例、截面平面、前向非折叠、端盖、流形边和质量属性。非单位比例仅支持开放导轨；周期导轨仅接受 1，因为缝两侧截面必须一致。`sweep(profile,rail)` 与 `sweep_scaled(profile,rail,1)` 兼容。
 
-当前只有常量正终端比例与线性弧长插值；不支持零比例尖顶、负比例/反射、非线性比例律和嵌套复合导轨。过小比例或相对曲率过大的截面可因数值退化/自交风险被保守拒绝。结果仍是采样多面体 BRep，不是解析扫掠曲面。
+`sweep_scaled` 保留正终端比例与线性采样弧长插值合同；分段比例/扭转律由上述新入口提供。零比例尖顶、负比例/反射、一般非线性解析律和嵌套复合导轨仍不支持。过小比例或相对曲率过大的截面可因数值退化/自交风险被保守拒绝。结果仍是采样多面体 BRep，不是解析扫掠曲面。
 
 曲线扫掠的端点伪闭合、首尾切向断裂、接缝错位/折角/尖点、嵌套复合链、抛物线/双曲线复合子段、过紧曲率、非局部弦段自靠近、局部不前进及退化物化都以 `InvalidInput / AXM-CORE-E-0002` 拒绝，不产生模型、拓扑、ID、事务写或求值/网格缓存污染。当前仅支持显式平面多边形截面，不保留显式轮廓历史。结果是保守采样多面体 BRep，不是解析扫掠曲面；无显式轮廓仍为历史 bbox 占位路径。
 

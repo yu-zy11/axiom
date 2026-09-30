@@ -1616,6 +1616,100 @@ inline bool triangulate_extrude_region(const std::vector<Point3>& outer,
            std::abs(cap_area - expected_area) <= area_tol * points.size();
 }
 
+// SAT for actual materialized triangles, including in-plane axes for coplanar
+// contact. Local projections avoid cancellation at translated world origins.
+inline bool materialization_triangles_separated(const std::vector<Point3>& positions,
+                                                 const std::array<int,3>& a,
+                                                 const std::array<int,3>& b, Scalar contact_tol) {
+    std::array<Vec3,3> ae {}, be {};
+    for (std::size_t edge = 0; edge < 3; ++edge) {
+        ae[edge] = subtract(positions[a[(edge+1)%3]],positions[a[edge]]);
+        be[edge] = subtract(positions[b[(edge+1)%3]],positions[b[edge]]);
+    }
+    const Vec3 an = cross(ae[0],ae[1]), bn = cross(be[0],be[1]);
+    const auto separates = [&](const Vec3& raw_axis) {
+        const Scalar axis_length = norm(raw_axis);
+        if (!std::isfinite(axis_length) || axis_length <= 1e-30) return false;
+        const Vec3 axis = scale(raw_axis,1/axis_length);
+        Scalar a_low = std::numeric_limits<Scalar>::infinity(), a_high = -a_low;
+        Scalar b_low = a_low, b_high = -b_low;
+        for (std::size_t vertex = 0; vertex < 3; ++vertex) {
+            const Scalar ap = dot(axis,subtract(positions[a[vertex]],positions[a[0]]));
+            const Scalar bp = dot(axis,subtract(positions[b[vertex]],positions[a[0]]));
+            if (!std::isfinite(ap) || !std::isfinite(bp)) return false;
+            a_low = std::min(a_low,ap); a_high = std::max(a_high,ap);
+            b_low = std::min(b_low,bp); b_high = std::max(b_high,bp);
+        }
+        return a_high + contact_tol < b_low || b_high + contact_tol < a_low;
+    };
+    if (separates(an) || separates(bn)) return true;
+    for (std::size_t edge = 0; edge < 3; ++edge) {
+        if (separates(cross(an,ae[edge])) || separates(cross(bn,be[edge]))) return true;
+        for (std::size_t other = 0; other < 3; ++other)
+            if (separates(cross(ae[edge],be[other]))) return true;
+    }
+    return false;
+}
+
+// Broad phase over the largest spatial extent, followed by actual triangle SAT.
+// Shared vertices describe permitted local mesh adjacency. The conservative tube
+// and forward-wall gates separately reject folded neighborhoods around that
+// adjacency. A bounded candidate count keeps validation from becoming unbounded
+// for pathological laws; failure still precedes all model entity allocation.
+inline bool validate_materialization_triangle_contacts(const std::vector<Point3>& positions,
+                                                        const std::vector<std::array<int,3>>& triangles,
+                                                        Scalar contact_tol) {
+    struct TriangleBounds { std::array<Scalar,3> low, high; std::size_t index; };
+    std::vector<TriangleBounds> bounds;
+    bounds.reserve(triangles.size());
+    BoundingBox full {};
+    for (std::size_t i = 0; i < triangles.size(); ++i) {
+        TriangleBounds item {{std::numeric_limits<Scalar>::infinity(),
+                              std::numeric_limits<Scalar>::infinity(),
+                              std::numeric_limits<Scalar>::infinity()}, {}, i};
+        for (std::size_t axis = 0; axis < 3; ++axis) item.high[axis] = -item.low[axis];
+        for (const auto index : triangles[i]) {
+            const auto& p = positions[index];
+            const std::array<Scalar,3> point {p.x,p.y,p.z};
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+                if (!std::isfinite(point[axis])) return false;
+                item.low[axis] = std::min(item.low[axis],point[axis]);
+                item.high[axis] = std::max(item.high[axis],point[axis]);
+            }
+            extend_materialization_bbox(full,p);
+        }
+        bounds.push_back(item);
+    }
+    if (!full.is_valid) return false;
+    const std::array<Scalar,3> extent {full.max.x-full.min.x,full.max.y-full.min.y,full.max.z-full.min.z};
+    const std::size_t sweep_axis = static_cast<std::size_t>(
+        std::max_element(extent.begin(),extent.end())-extent.begin());
+    std::sort(bounds.begin(),bounds.end(),[&](const TriangleBounds& a, const TriangleBounds& b) {
+        return a.low[sweep_axis] < b.low[sweep_axis] ||
+            (a.low[sweep_axis] == b.low[sweep_axis] && a.index < b.index);
+    });
+    std::size_t candidates = 0;
+    for (std::size_t i = 0; i < bounds.size(); ++i) {
+        for (std::size_t j = i+1; j < bounds.size(); ++j) {
+            if (bounds[j].low[sweep_axis] > bounds[i].high[sweep_axis] + contact_tol) break;
+            if (++candidates > 2000000) return false;
+            bool disjoint = false;
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+                if (bounds[i].high[axis] + contact_tol < bounds[j].low[axis] ||
+                    bounds[j].high[axis] + contact_tol < bounds[i].low[axis]) disjoint = true;
+            }
+            if (disjoint) continue;
+            const auto& a = triangles[bounds[i].index];
+            const auto& b = triangles[bounds[j].index];
+            if (std::any_of(a.begin(),a.end(),[&](int vertex) {
+                    return std::find(b.begin(),b.end(),vertex) != b.end();
+                })) continue;
+            if (!materialization_triangles_separated(positions,a,b,contact_tol)) return false;
+        }
+    }
+    return true;
+}
+
 /// 简单平面多边形（可凹、可带孔）直线/至平面/扭转拉伸、等比变截面拉伸或折线平移扫掠：三角端盖 + 平面侧壁。
 /// 所有可失败检查在对象分配前完成，禁止失败时留下部分拓扑。
 inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRecord& record) {
@@ -1673,7 +1767,8 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
         return false;
     }
     // Adjacent stations share one ring. Strict monotonicity separates segment
-    // interiors into disjoint slabs, so no self-intersection SAT is needed here.
+    // interiors into disjoint slabs; combined scale/twist laws additionally check
+    // nonadjacent side triangles within each slab below.
     auto offsets = record.sweep_station_offsets;
     if (offsets.empty()) offsets = {{0, 0, 0}, scale(D, h)};
     if (offsets.size() < 2 || norm(offsets.front()) != 0.0 ||
@@ -1689,10 +1784,20 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
     }
     std::vector<Scalar> station_angles(offsets.size(), 0.0);
     const bool twisted_stations = !record.sweep_station_angles.empty();
+    const bool section_law = (scaled_stations && twisted_stations) || record.sweep_scale_law;
+    if (record.sweep_scale_law) {
+        if (!scaled_stations || offsets.size() > 4097 || record.extrude_end_plane.has_value() ||
+            record.extrude_end_scale != 1.0) return false;
+        for (std::size_t station = 1; station < offsets.size(); ++station) {
+            const Scalar change = std::abs(station_scales[station]-station_scales[station-1]);
+            if (!std::isfinite(change) || change >
+                0.25 * std::min(station_scales[station],station_scales[station-1]) * (1+1e-12)) return false;
+        }
+    }
     if (twisted_stations) {
         constexpr Scalar kMaxStationAngle = 3.1415926535897932384626433832795 / 24.0;
         if (record.sweep_station_offsets.empty() || record.sweep_station_angles.size() != offsets.size() ||
-            scaled_stations || record.extrude_end_plane.has_value() || record.extrude_end_scale != 1.0 ||
+            record.extrude_end_plane.has_value() || record.extrude_end_scale != 1.0 ||
             std::abs(dot(n_unit, D)) < 1.0 - 1e-10 ||
             !std::isfinite(record.extrude_scale_center.x) ||
             !std::isfinite(record.extrude_scale_center.y) ||
@@ -1704,12 +1809,19 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
                 return !std::isfinite(value);
             })) return false;
         const Scalar direction = station_angles.back() < 0.0 ? -1.0 : 1.0;
-        if (station_angles.back() == 0.0 ||
+        if ((!section_law && station_angles.back() == 0.0) ||
             std::abs(station_angles.back()) > 2.0 * 3.1415926535897932384626433832795 + 1e-10) return false;
+        Scalar angular_travel = 0.0;
         for (std::size_t k = 1; k < station_angles.size(); ++k) {
             const Scalar step = station_angles[k] - station_angles[k - 1];
-            if (step * direction <= 0.0 || std::abs(step) > kMaxStationAngle + 1e-12) return false;
+            angular_travel += std::abs(step);
+            if ((!section_law && step * direction <= 0.0) ||
+                std::abs(step) > kMaxStationAngle + 1e-12) return false;
+            if (section_law && std::abs(station_scales[k] - station_scales[k - 1]) >
+                0.25 * std::min(station_scales[k], station_scales[k - 1]) * (1.0 + 1e-12)) return false;
         }
+        if (!std::isfinite(angular_travel) || angular_travel >
+            2.0 * 3.1415926535897932384626433832795 + 1e-10) return false;
     }
     const Scalar sign = dot(n_unit, D) < 0.0 ? -1.0 : 1.0;
     for (std::size_t k = 1; k < offsets.size(); ++k) {
@@ -1749,7 +1861,7 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
             record.extrude_scale_center, scale(subtract(p, record.extrude_scale_center), section_scale));
         if (twisted_stations) {
             const Scalar angle = station_angles[station];
-            section_point = rodrigues_rotate_point_revolve(
+            if (angle != 0) section_point = rodrigues_rotate_point_revolve(
                 section_point, record.extrude_scale_center, D, std::cos(angle), std::sin(angle));
         }
         return add_point_vec(section_point, offsets[station]);
@@ -1865,6 +1977,69 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
         if (!std::isfinite(area) || area <= 1e-14) return false;
     }
 
+    if (section_law) {
+        // Endpoints alone do not establish that an intermediate expansion or
+        // contraction survives rounding. Validate every actual transformed region
+        // and its reused cap correspondence before allocating model objects.
+        for (std::size_t k = 1; k < offsets.size(); ++k) {
+            const auto transformed_ring = [&](const std::vector<Point3>& ring) {
+                std::vector<Point3> result;
+                result.reserve(ring.size());
+                for (const auto& p : ring) result.push_back(station_point(p, k));
+                return result;
+            };
+            auto outer = transformed_ring(poly_in);
+            std::vector<std::array<int, 3>> section_caps;
+            if (record.extrude_holes_xyz.empty()) {
+                if (!triangulate_extrude_profile(outer, n_unit, section_caps)) return false;
+            } else {
+                std::vector<std::vector<Point3>> holes;
+                for (const auto& hole : record.extrude_holes_xyz) holes.push_back(transformed_ring(hole));
+                std::vector<Point3> section_base;
+                std::vector<std::pair<int, int>> section_boundary;
+                if (!triangulate_extrude_region(outer, holes, n_unit, plane_tol,
+                                                section_base, section_boundary, section_caps) ||
+                    section_boundary != boundary) return false;
+            }
+            const auto start = k * base.size();
+            for (const auto& cap : caps) {
+                if (dot(n_unit, cross(subtract(pos[start + cap[1]], pos[start + cap[0]]),
+                                      subtract(pos[start + cap[2]], pos[start + cap[0]]))) <= 1e-14) return false;
+            }
+        }
+
+        // Slabs have disjoint interiors. Within each slab, test the actual side
+        // triangles rather than the ideal homothetic section: the chosen diagonals
+        // can make narrow concave notches or hole clearances intersect during twist.
+        // SAT includes in-plane edge normals so coplanar contacts are detected too.
+        // Adjacent triangles meet on their shared topology and are allowed there.
+        std::vector<BoundingBox> triangle_bounds;
+        triangle_bounds.reserve(tris.size());
+        for (const auto& t : tris) {
+            BoundingBox bounds {};
+            for (const auto index : t) extend_materialization_bbox(bounds, pos[index]);
+            triangle_bounds.push_back(bounds);
+        }
+        const Scalar contact_tol = std::max(state.config.tolerance.linear, Scalar(1e-12));
+        for (std::size_t k = 0; k + 1 < offsets.size(); ++k) {
+            const std::size_t first = 2 * caps.size() + 2 * boundary.size() * k;
+            const std::size_t end = first + 2 * boundary.size();
+            for (std::size_t i = first; i < end; ++i) for (std::size_t j = i + 1; j < end; ++j) {
+                const auto& a = tris[i];
+                const auto& b = tris[j];
+                if (std::any_of(a.begin(), a.end(), [&](int vertex) {
+                        return std::find(b.begin(), b.end(), vertex) != b.end();
+                    })) continue;
+                const auto& ab = triangle_bounds[i];
+                const auto& bb = triangle_bounds[j];
+                if (ab.max.x + contact_tol < bb.min.x || bb.max.x + contact_tol < ab.min.x ||
+                    ab.max.y + contact_tol < bb.min.y || bb.max.y + contact_tol < ab.min.y ||
+                    ab.max.z + contact_tol < bb.min.z || bb.max.z + contact_tol < ab.min.z) continue;
+                if (!materialization_triangles_separated(pos, a, b, contact_tol)) return false;
+            }
+        }
+    }
+
     Scalar vol_chk = 0.0;
     Point3 cm_tmp {};
     std::array<Scalar, 9> in_tmp {};
@@ -1969,7 +2144,7 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
     record.sweep_inertia_about_centroid = in_tmp;
     record.a = vol_chk;
     record.extrude_poly_cap_area = vol_chk / (align * h);
-    if (final_scale != 1.0 || to_plane) {
+    if (final_scale != 1.0 || to_plane || section_law) {
         record.extrude_poly_cap_area = 0.0;
         for (const auto& cap : caps) record.extrude_poly_cap_area += 0.5 * norm(
             cross(subtract(pos[cap[1]], pos[cap[0]]), subtract(pos[cap[2]], pos[cap[0]])));
@@ -2285,9 +2460,28 @@ inline bool try_materialize_sweep_curve_frame_body(KernelState& state, BodyRecor
                 return !std::isfinite(value) || !(value > 0.0);
             }) || std::abs(station_scales.front() - 1.0) > 1e-12) return false;
     }
-    if (record.sweep_frame_closed && std::any_of(station_scales.begin(), station_scales.end(), [](Scalar value) {
+    if (record.sweep_frame_closed && !record.sweep_scale_law &&
+        std::any_of(station_scales.begin(), station_scales.end(), [](Scalar value) {
             return std::abs(value - 1.0) > 1e-12;
         })) return false;
+    const auto& angles = record.sweep_frame_angles;
+    const bool rolled_sections = std::any_of(angles.begin(),angles.end(),[](Scalar value) { return value != 0; });
+    if (!angles.empty()) {
+        constexpr Scalar kPi = 3.1415926535897932384626433832795;
+        if (!record.sweep_scale_law || angles.size() != stations + (record.sweep_frame_closed ? 1 : 0) ||
+            angles.front() != 0 || std::any_of(angles.begin(),angles.end(),[](Scalar value) {
+                return !std::isfinite(value);
+            })) return false;
+        Scalar travel = 0;
+        for (std::size_t station = 1; station < angles.size(); ++station) {
+            const Scalar step = std::abs(angles[station]-angles[station-1]);
+            travel += step;
+            if (step > kPi/24+1e-12) return false;
+        }
+        if (!std::isfinite(travel) || travel > 2*kPi+1e-10 ||
+            (record.sweep_frame_closed && std::min({std::abs(angles.back()),
+                std::abs(angles.back()-2*kPi),std::abs(angles.back()+2*kPi)}) > 1e-10)) return false;
+    }
     const Vec3 u0 = normalize(record.sweep_frame_u.front());
     const Vec3 v0 = normalize(record.sweep_frame_v.front());
     const Vec3 tangent0 = normalize(cross(u0, v0));
@@ -2300,9 +2494,12 @@ inline bool try_materialize_sweep_curve_frame_body(KernelState& state, BodyRecor
 
     std::vector<Point3> positions;
     positions.reserve(base.size() * stations);
+    std::vector<Vec3> section_u, section_v;
+    section_u.reserve(stations);
+    section_v.reserve(stations);
     for (std::size_t station = 0; station < stations; ++station) {
         const auto& origin = record.sweep_frame_origins[station];
-        const Vec3 u = normalize(record.sweep_frame_u[station]);
+        Vec3 u = normalize(record.sweep_frame_u[station]);
         Vec3 v = normalize(record.sweep_frame_v[station]);
         const Vec3 tangent = normalize(cross(u, v));
         if (!std::isfinite(origin.x) || !std::isfinite(origin.y) || !std::isfinite(origin.z) ||
@@ -2311,6 +2508,13 @@ inline bool try_materialize_sweep_curve_frame_body(KernelState& state, BodyRecor
         // Recompute v after validation so accumulated frame drift cannot change
         // section scale or make the two coordinates nonorthogonal.
         v = normalize(cross(tangent, u));
+        if (!angles.empty() && angles[station] != 0) {
+            const Scalar cosine = std::cos(angles[station]), sine = std::sin(angles[station]);
+            u = normalize({cosine*u.x+sine*v.x,cosine*u.y+sine*v.y,cosine*u.z+sine*v.z});
+            v = normalize(cross(tangent,u));
+        }
+        section_u.push_back(u);
+        section_v.push_back(v);
         for (const auto& p : base) {
             const Vec3 offset = subtract(p, record.sweep_frame_origins.front());
             const Scalar x = dot(offset, u0), y = dot(offset, v0);
@@ -2323,6 +2527,56 @@ inline bool try_materialize_sweep_curve_frame_body(KernelState& state, BodyRecor
                 !std::isfinite(transformed.z)) return false;
             positions.push_back(transformed);
         }
+    }
+    if (record.sweep_scale_law) {
+        if (record.sweep_frame_scales.size() != stations || stations > 4097) return false;
+        // Homothetic sections are valid in exact arithmetic; each actual rounded
+        // section must retain its simple outer ring, separated holes and cap
+        // correspondence. Checking only the end section misses a collapsed waist.
+        const auto transform_ring = [&](const std::vector<Point3>& ring, std::size_t station) {
+            std::vector<Point3> result;
+            result.reserve(ring.size());
+            const auto& origin = record.sweep_frame_origins[station];
+            const Vec3 u = section_u[station];
+            const Vec3 v = section_v[station];
+            for (const auto& p : ring) {
+                const Vec3 offset = subtract(p,record.sweep_frame_origins.front());
+                const Scalar x = dot(offset,u0), y = dot(offset,v0), s = station_scales[station];
+                result.push_back(add_point_vec(origin,{s*(u.x*x+v.x*y),s*(u.y*x+v.y*y),s*(u.z*x+v.z*y)}));
+            }
+            return result;
+        };
+        const Scalar orientation = dot(profile_normal,tangent0) < 0 ? -1.0 : 1.0;
+        for (std::size_t station = 0; station < stations; ++station) {
+            const Vec3 normal = scale(normalize(cross(record.sweep_frame_u[station],
+                                                       record.sweep_frame_v[station])),orientation);
+            auto section_outer = transform_ring(outer,station);
+            std::vector<std::array<int,3>> section_caps;
+            if (record.extrude_holes_xyz.empty()) {
+                if (!triangulate_extrude_profile(section_outer,normal,section_caps)) return false;
+            } else {
+                std::vector<std::vector<Point3>> holes;
+                for (const auto& hole : record.extrude_holes_xyz) holes.push_back(transform_ring(hole,station));
+                std::vector<Point3> section_points;
+                std::vector<std::pair<int,int>> section_boundary;
+                if (!triangulate_extrude_region(section_outer,holes,normal,plane_tol,
+                                                section_points,section_boundary,section_caps) ||
+                    section_boundary != boundary) return false;
+            }
+            for (const auto& cap : caps) {
+                const std::size_t offset = station * base.size();
+                const Scalar area2 = dot(normal,cross(
+                    subtract(positions[offset+cap[1]],positions[offset+cap[0]]),
+                    subtract(positions[offset+cap[2]],positions[offset+cap[0]])));
+                if (!std::isfinite(area2) || area2 <= 1e-14) return false;
+            }
+            if (station == 0) continue;
+            const Scalar change = std::abs(station_scales[station]-station_scales[station-1]);
+            if (change > 0.25 * std::min(station_scales[station],station_scales[station-1]) * (1+1e-12))
+                return false;
+        }
+        if (record.sweep_frame_closed && std::abs(station_scales.back()-1) >
+            0.25 * std::min(station_scales.back(),Scalar(1)) * (1+1e-12)) return false;
     }
     // Independently recheck that the serialized frames describe a forward,
     // nonfolding tube. In particular, every corresponding section vertex must
@@ -2382,8 +2636,13 @@ inline bool try_materialize_sweep_curve_frame_body(KernelState& state, BodyRecor
         const int lo = static_cast<int>(station * base.size());
         const int hi = static_cast<int>(((station + 1) % stations) * base.size());
         for (const auto& [i, j] : boundary) {
-            triangles.push_back({lo + i, lo + j, hi + j});
-            triangles.push_back({lo + i, hi + j, hi + i});
+            if (rolled_sections && station % 2 != 0) {
+                triangles.push_back({lo + i, lo + j, hi + i});
+                triangles.push_back({lo + j, hi + j, hi + i});
+            } else {
+                triangles.push_back({lo + i, lo + j, hi + j});
+                triangles.push_back({lo + i, hi + j, hi + i});
+            }
         }
     }
     if (orientation < 0.0) {
@@ -2416,6 +2675,9 @@ inline bool try_materialize_sweep_curve_frame_body(KernelState& state, BodyRecor
     if (triangles.empty() || edge_use_count.empty() ||
         std::any_of(edge_use_count.begin(), edge_use_count.end(),
                     [](const auto& item) { return item.second != 2; })) return false;
+
+    if (record.sweep_scale_law && !validate_materialization_triangle_contacts(
+            positions,triangles,std::max(state.config.tolerance.linear,Scalar(1e-12)))) return false;
 
     std::vector<Point3> local_positions;
     local_positions.reserve(positions.size());

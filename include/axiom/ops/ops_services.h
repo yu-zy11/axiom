@@ -26,6 +26,27 @@ private:
     std::shared_ptr<detail::KernelState> state_;
 };
 
+/// A key in a piecewise-linear straight extrusion law. Angles are radians about
+/// the extrusion direction, and scales act about the caller's coplanar center.
+struct ExtrusionLawStation {
+    Scalar fraction {};
+    Scalar scale {1.0};
+    Scalar twist_angle {};
+};
+
+/// A positive uniform section scale at a normalized sampled rail arc length.
+struct SweepScaleStation {
+    Scalar fraction {};
+    Scalar scale {1.0};
+};
+
+/// Uniform scale and signed radians of section roll at a sampled rail arc length.
+struct SweepLawStation {
+    Scalar fraction {};
+    Scalar scale {1.0};
+    Scalar twist_angle {};
+};
+
 class SweepService {
 public:
     explicit SweepService(std::shared_ptr<detail::KernelState> state);
@@ -49,6 +70,22 @@ public:
     /// helicoidal surface.
     Result<BodyId> extrude_twisted(const ProfileRef& profile, const Vec3& direction, Scalar distance,
                                   const Point3& center, Scalar twist_angle);
+    /// Extrude an explicit planar polygon with a piecewise-linear scale/twist law.
+    /// Requires a positive finite distance, a direction normal to the profile and a finite
+    /// coplanar center. At least two keys must strictly increase in fraction from 0 to 1;
+    /// the first key has scale 1 and angle 0. Scales must remain finite and strictly positive.
+    /// Expansion/contraction, twist plateaus and reversals are supported, with total absolute
+    /// angular travel at most 2*pi. Convex/concave outlines and disjoint non-nested holes keep
+    /// their correspondence. Each interval is subdivided to at most 7.5 degrees of twist
+    /// and at most 25% of its smaller endpoint scale per step; all keys are retained.
+    /// Up to 4096 sampled intervals are accepted. The owned triangulated BRep represents
+    /// the sampled law, including intermediate bounds and polyhedral mass properties;
+    /// rounded section degeneracy and intersecting or tolerance-touching nonadjacent walls
+    /// fail before allocation.
+    /// Zero/apex, reflected sections, analytic helicoidal surfaces and to-plane termination
+    /// are not supported. Failure leaves model stores and any active topology transaction intact.
+    Result<BodyId> extrude_with_law(const ProfileRef& profile, const Vec3& direction, Scalar distance,
+                                   const Point3& center, std::span<const ExtrusionLawStation> stations);
     /// Extrude an explicit planar polygon (including concavities/holes) along direction to a plane.
     /// Every boundary point must reach the plane strictly forward, beyond the planarity tolerance.
     /// Direction must be transverse to both planes; normal sign and vector magnitudes are immaterial.
@@ -90,6 +127,54 @@ public:
     /// strictly positive. Periodic rails only accept 1 because unequal seam sections cannot
     /// form a closed shell; zero/apex and negative/reflected sections are not supported.
     Result<BodyId> sweep_scaled(const ProfileRef& profile, CurveId rail, Scalar end_scale);
+    /// Sweep an explicit convex/concave polygon, optionally with disjoint non-nested
+    /// holes, with a piecewise-linear positive scale law centered on the rail.
+    /// Keys strictly increase from fraction 0 to 1, with initial scale 1. Fractions
+    /// refer to the existing sampled rail's chord arc length, not its parameter or
+    /// analytic arc length. Intermediate expansions, contractions and plateaus are
+    /// retained, along with every original rail station. Curved rails transport the
+    /// section in rotation-minimizing frames; inserted frames interpolate transport
+    /// between those stations. Linear/polyline rails keep the section in world space
+    /// and must advance strictly through its plane with a coplanar starting point.
+    /// Periodic curved rails accept varying scales when the final key is exactly 1;
+    /// the repeated end ring is welded to the start and receives no cap.
+    /// Each step changes scale by at most 25% of its smaller endpoint scale, with
+    /// at most 4096 intervals including original stations and law keys. Rounded
+    /// section degeneracy, folds and contacts between triangles without shared
+    /// vertices fail before allocation. Existing conservative curvature/clearance
+    /// gates use the largest requested scale. Curve-wall validation accepts at
+    /// most 2,000,000 broad-phase candidate pairs. Numerically coincident law keys
+    /// are rejected; a key coincident with an original rail station shares that
+    /// station's position and frame. Sampling/materialization diagnostics include
+    /// their stage and requested scale bounds. Results are sampled polyhedral BReps
+    /// with actual topology, intermediate bounds and polyhedral mass properties.
+    /// Zero/negative scales, apexes, nested composite rails and analytic sweep
+    /// surfaces are unsupported. Failure preserves stores and active transactions.
+    Result<BodyId> sweep_with_scale_law(const ProfileRef& profile, CurveId rail,
+                                      std::span<const SweepScaleStation> stations);
+    /// Sweep with piecewise-linear positive scale and signed section twist laws.
+    /// Keys strictly increase in sampled chord arc-length fraction from (0,1,0)
+    /// to fraction 1. All original rail stations and caller keys are retained.
+    /// Roll is relative to the transported frame, about the local forward tangent
+    /// for curved rails. Linear/polyline rails retain parallel section planes and
+    /// roll about the initial profile normal oriented toward the rail's net advance;
+    /// every segment must advance through that plane, and the start is coplanar.
+    /// Supports convex/concave outlines and disjoint non-nested holes, expansion,
+    /// contraction, twist pauses and reversals. Total absolute roll travel is at
+    /// most 2*pi; each step has at most 7.5 degrees of roll and a scale change of
+    /// at most 25% of its smaller endpoint, with at most 4096 combined intervals.
+    /// Periodic curved rails require final scale 1 and final roll exactly 0 or
+    /// +/-2*pi (within 1e-10 radians). The last ring is welded to the first without
+    /// caps; no symmetry-based vertex permutation is inferred. Numerically close
+    /// distinct keys fail; keys coincident with rail stations share their frames.
+    /// Uses the scale-law curvature/clearance and contact-candidate gates, validates
+    /// every rounded section and wall before allocation, and returns queryable
+    /// sampled polyhedral topology, bounds and mass properties. Alternating wall
+    /// diagonals reduce systematic twist volume bias. Zero/negative scale, apexes,
+    /// nested composite rails and analytic sweep surfaces remain unsupported.
+    /// Failure leaves model stores and active topology transactions intact.
+    Result<BodyId> sweep_with_law(const ProfileRef& profile, CurveId rail,
+                                std::span<const SweepLawStation> stations);
     /// Loft two or more explicit planar polygon sections into an owned triangulated closed BRep.
     /// Sections may be concave and may carry corresponding disjoint holes. Outer rings and each
     /// same-index hole must keep the same vertex count, because vertices define the ruled-wall
@@ -100,6 +185,9 @@ public:
     Result<BodyId> thicken(FaceId face_id, Scalar distance);
 
 private:
+    Result<BodyId> sweep_impl(const ProfileRef& profile, CurveId rail, Scalar end_scale,
+                              std::span<const SweepScaleStation> stations,
+                              std::span<const SweepLawStation> section_stations = {});
     std::shared_ptr<detail::KernelState> state_;
 };
 

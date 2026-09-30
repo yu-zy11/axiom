@@ -13,7 +13,7 @@
 
 当前阶段可定义为：
 
-`Stage 1 已达成；Stage 2 可测基线已达成；当前为 Stage 2 深化与 Stage 3 准备：基础建模与查询分析为主线`
+`Stage 1 已达成；Stage 2 可测基线已达成；当前主线为 Stage 3：基础建模与查询分析（进行中）`
 
 **说明**：原 **Stage 1.5 / Stage 2 过渡** 所承载的 backlog 批次已在《当前开发进度》**§5.2 归档表**全部闭合；**不等于**工业级引擎完成（工业布尔等见 Stage 4 与进度文档 §3.4）。**进行中 backlog** 以《当前开发进度》**§5.2.1** 为唯一入口。这里描述的是**阶段定位**，不是“当前分支此刻全量测试已绿”的声明。
 
@@ -115,7 +115,9 @@
 
 ## 4.4 `Stage 3` 基础建模与查询分析
 
-**与当前仓库对齐**：本阶段并非从零开始。当前代码已具备若干可回归的 Stage 3 子路径，包括 polygon `extrude`、子午面 polygon `revolve`、line-segment / polyline 子集 `sweep`、polygon `loft`、planar / subset 非平面 `thicken`、单面 `draft`、sphere-plane `section`、sphere-sphere / sphere-box 最近距离，以及部分 polyhedral / 解析体 `mass_properties`。但这些仍以“可证明子集 + 前置拒绝 + 回滚不污染”为主，尚未形成可对外宣称的 Stage 3 主链闭环。
+**状态：进行中，当前主线。** 已验收子路径包括显式凸/凹及带孔 polygon 拉伸、轴分离有向区间旋转、开放/周期采样曲线扫掠、拓扑兼容 polygon 放样、受限 `thicken/draft/section`、解析体与平面直边闭壳质量属性。cycle-0074 补齐 `extrude_with_law`、`sweep_with_scale_law`、`sweep_with_law` 的分段正比例/有向扭转采样多面体，以及 `locate_point/clip_segment` 的平面直边实体空间查询；调度器完整构建后 CTest 16/16 通过（134.05 s），详见[当前进度](AxiomKernel_当前开发进度.md)。这些仍以“可证明子集 + 前置拒绝 + 回滚不污染”为主，Stage 3 完整退出标准尚未收口。
+
+cycle-0074 是升级前检查点，按原范围验收并同步文档；下一批开始围绕本阶段目标调度任务。FR-OPS-001 / FR-QUERY-001 继续进行中，不因本批通过而标记需求或阶段完成。
 
 目标：
 
@@ -131,7 +133,7 @@
 - `section`、最近点/最近距离、`mass_properties` 在 Stage 3 已声明支持的体类上保持一致语义，失败路径具备稳定 `Issue.stage`
 - topology / rep / provenance / eval 对 Stage 3 主链结果保持一致，不因失败回滚或 fallback 漂移
 
-**进入本阶段前仍需收口的事项**：
+**本阶段退出前仍需收口的事项**：
 
 - 把当前分散在 `ops_heal`、`query_eval`、`representation_io`、`geometry` 中的 Stage 3 frontier 证据整理为统一支持矩阵
 - 收敛查询分析的 fallback 语义，避免 `section_bbox_plane`、局部解析截面与质量属性恢复在不同体类上口径不一
@@ -323,6 +325,6 @@
 
 从下一步开始，执行重点将保持在：
 
-`Stage 2 深化（Geo/Topo/Math/Diag）+ Stage 3 主攻（基础建模与查询分析），工业布尔闭环仍按 Stage 4 排期`
+`Stage 3 主线（基础建模与查询分析）；按需要深化 Geo/Topo/Math/Diag 支撑能力，工业布尔闭环仍按 Stage 4 排期`
 
 （**历史**：曾表述为 `Stage 1.5 / Stage 2 过渡`，该过渡 backlog 已全闭合，见《当前开发进度》§5.2。）

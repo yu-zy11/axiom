@@ -188,11 +188,12 @@ struct BodyRecord {
     /// Straight sampled sweep station displacements relative to the profile/rail start.
     /// Empty for a single extrusion; otherwise starts at zero and is strictly monotone through the profile plane.
     std::vector<Vec3> sweep_station_offsets;
-    /// Optional positive uniform section scale at every fixed-orientation station. When present,
+    /// Optional positive uniform section scale at every translated/rotated station. When present,
     /// it matches sweep_station_offsets and scales about extrude_scale_center.
     std::vector<Scalar> sweep_station_scales;
     /// Optional signed rotation about `axis` at every straight-extrusion station. It matches
-    /// sweep_station_offsets, begins at zero and rotates about extrude_scale_center.
+    /// sweep_station_offsets, begins at zero and rotates about extrude_scale_center. Together
+    /// with station scales it may contain plateaus/reversals with bounded total angular travel.
     std::vector<Scalar> sweep_station_angles;
     /// Curve-following sweep stations. `u/v` are a rotation-minimizing section frame at each
     /// rail point; open rails include both endpoints, while a closed rail omits its repeated end.
@@ -203,7 +204,13 @@ struct BodyRecord {
     std::vector<Vec3> sweep_frame_v;
     /// Optional positive uniform section scale at each curve-frame station.
     std::vector<Scalar> sweep_frame_scales;
+    /// Optional roll relative to the transported frame. Periodic sweeps retain
+    /// one extra terminal angle for the welded seam's subdivision check.
+    std::vector<Scalar> sweep_frame_angles;
     bool sweep_frame_closed {false};
+    /// Piecewise arc-length section law: validate every rounded section and actual
+    /// wall contact before allocation; periodic interior scales may differ from 1.
+    bool sweep_scale_law {false};
     /// Explicit compatible-section loft. Each station owns one outer polygon and
     /// the same-index collection of hole rings; corresponding rings have equal counts.
     std::vector<std::vector<Point3>> loft_profiles_xyz;
