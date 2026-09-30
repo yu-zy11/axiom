@@ -231,6 +231,42 @@ def load_config(path: Path) -> dict[str, Any]:
     config.setdefault("batch_enabled", True)
     if type(config["batch_enabled"]) is not bool:
         raise RunnerError("batch_enabled must be a boolean")
+    plan = config.get("stage_plan")
+    if plan is not None:
+        if not config["batch_enabled"]:
+            raise RunnerError("stage_plan requires batch_enabled")
+        if (not isinstance(plan, dict) or type(plan.get("stage")) is not int
+                or not 0 <= plan["stage"] <= 8 or not isinstance(plan.get("tasks"), list)
+                or not plan["tasks"]):
+            raise RunnerError("stage_plan requires a stage (0..8) and non-empty tasks")
+        roadmap = plan.get("roadmap", "")
+        if (not isinstance(roadmap, str) or Path(roadmap).is_absolute()
+                or ".." in Path(roadmap).parts or not roadmap.startswith("docs/")
+                or not (ROOT / roadmap).is_file()):
+            raise RunnerError("stage_plan roadmap must be an existing repository document")
+        available_tests = {name for names in config["module_tests"].values() for name in names}
+        seen = set()
+        for task in plan["tasks"]:
+            if (not isinstance(task, dict) or not isinstance(task.get("id"), str)
+                    or not re.fullmatch(r"S[0-8]-[A-Z][A-Z0-9-]*", task["id"])
+                    or not task["id"].startswith(f"S{plan['stage']}-") or task["id"] in seen
+                    or task.get("requirement_id") not in known_ids
+                    or not isinstance(task.get("goal"), str) or not task["goal"].strip()
+                    or task.get("kind", "implementation") not in {"implementation", "acceptance"}):
+                raise RunnerError("invalid or duplicate stage task")
+            for field in ("acceptance", "tests"):
+                values = task.get(field)
+                if (not isinstance(values, list) or not values
+                        or not all(isinstance(v, str) and v.strip() for v in values)):
+                    raise RunnerError(f"stage task {task['id']} requires non-empty {field}")
+            dependencies = task.get("depends_on", [])
+            if (not isinstance(dependencies, list)
+                    or not all(isinstance(v, str) and v in seen for v in dependencies)
+                    or len(dependencies) != len(set(dependencies))):
+                raise RunnerError("stage dependencies must refer to earlier tasks")
+            if set(task["tests"]) - available_tests:
+                raise RunnerError(f"stage task {task['id']} names unknown tests")
+            seen.add(task["id"])
     return config
 
 
@@ -253,6 +289,11 @@ def select_target(
     requirements: Sequence[Requirement], state: dict[str, Any], config: dict[str, Any]
 ) -> Requirement | None:
     """Rotate across explicitly unlocked tiers without changing requirement status."""
+    if config.get("stage_plan"):
+        task = stage_task(state, config)
+        if task is None:
+            return None
+        return next(item for item in requirements if item.requirement_id == task["requirement_id"])
     by_id = {item.requirement_id: item for item in requirements}
     weights: dict[str, int] = config.get("requirement_weights", {})
     counts: dict[str, int] = state.get(
@@ -510,6 +551,17 @@ def verify_slice(
     )
     execute_gate(["cmake", "--build", str(build_dir), "--parallel",
                   str(config.get("build_parallel_jobs", 4))], log_file)
+    if report.get("stage_task_id"):
+        task = next(t for t in config["stage_plan"]["tasks"] if t["id"] == report["stage_task_id"])
+        listing = run(["ctest", "--test-dir", str(build_dir), "--show-only=json-v1"], capture=True)
+        try:
+            registered = {t["name"] for t in json.loads(listing.stdout)["tests"]
+                          if not any(p.get("name") == "DISABLED" and p.get("value")
+                                     for p in t.get("properties", []))}
+        except (ValueError, TypeError, KeyError) as exc:
+            raise RunnerError("cannot read stage acceptance test inventory") from exc
+        if listing.returncode or set(task["tests"]) - registered:
+            raise RunnerError("stage acceptance tests are missing from the configured build")
     test_names = set(relevant_tests(report["module"], config))
     for module in report.get("modules", []):
         test_names.update(relevant_tests(module, config))
@@ -583,6 +635,77 @@ def is_document(name: str) -> bool:
     return name.startswith("docs/") and name.endswith(".md")
 
 
+def stage_task(state: dict[str, Any], config: dict[str, Any]) -> dict[str, Any] | None:
+    """Select the first unaccepted exit task, independently of industrial FR status."""
+    plan = config.get("stage_plan")
+    if not plan:
+        return None
+    records = state.get("stage_tasks", {}).get(str(plan["stage"]), {})
+    accepted = set()
+    for task in plan["tasks"]:
+        record = records.get(task["id"], {})
+        dependencies = task.get("depends_on", [])
+        if (record.get("task_fingerprint") == stage_fingerprint(task)
+                and all(dep in accepted for dep in dependencies)
+                and record.get("dependencies", {}) == {dep: records[dep]["commit"] for dep in dependencies}):
+            accepted.add(task["id"])
+    for task in plan["tasks"]:
+        if task["id"] in accepted:
+            continue
+        if not all(dep in accepted for dep in task.get("depends_on", [])):
+            raise RunnerError(f"stage task dependencies not accepted: {task['id']}")
+        return task
+    return None
+
+
+def stage_fingerprint(value: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def stage_context(state: dict[str, Any], config: dict[str, Any], batch: dict[str, Any]) -> str:
+    plan = config.get("stage_plan")
+    if not plan:
+        return ""
+    # A resumed legacy batch finishes its original scope before stage scheduling starts.
+    task = next((t for t in plan["tasks"] if t["id"] == batch.get("stage_task_id")), None)
+    if task is None:
+        return (f"当前主线：Stage {plan['stage']}，路线图 {plan['roadmap']}。\n"
+                "本批为升级前的检查点，按原范围验收和提交；下一批开始阶段任务调度。\n")
+    roadmap = (ROOT / plan["roadmap"]).read_text(encoding="utf-8")
+    heading = re.search(rf"(?m)^## [^\n]*`Stage {plan['stage']}`[^\n]*$", roadmap)
+    if heading is None:
+        raise RunnerError(f"roadmap has no Stage {plan['stage']} section")
+    end = re.search(r"(?m)^## ", roadmap[heading.end():])
+    section = roadmap[heading.start():heading.end() + end.start() if end else len(roadmap)]
+    return (f"阶段主线：Stage {plan['stage']}；唯一退出任务：{task['id']}。\n"
+            f"阶段依据：{plan['roadmap']}\n{section}\n"
+            f"本任务目标：{task['goal']}\n"
+            f"逐项验收要求：{json.dumps(task['acceptance'], ensure_ascii=False)}\n"
+            f"必需回归：{', '.join(task['tests'])}\n"
+            "阶段任务优先于需求权重、历史 remaining 和新增变体。基础层修复仅限本任务的直接阻断项；"
+            "不能自行扩大到后续阶段或增加与退出要求无关的功能。\n"
+            "develop/repair 报告必须包含 stage_task_id、stage_outcome（progress 或 ready_for_acceptance）、"
+            "stage_evidence（验收条目对应的测试文件/断言、参考结果及限制说明数组，按验收条目逐条排列）。\n"
+            "ready_for_acceptance 必须覆盖全部验收条目，尚未运行的测试不能宣称通过；"
+            "任务仅在调度器完整门禁、文档检查及提交成功后记为已验收。\n"
+            "阶段模式不以新增行数作为继续扩展功能的条件，验收型任务允许只补测试。\n")
+
+
+def validate_stage_report(report: dict[str, Any], batch: dict[str, Any], config: dict[str, Any]) -> None:
+    if not batch.get("stage_task_id"):
+        return
+    if (report.get("stage_task_id") != batch["stage_task_id"]
+            or report.get("stage_outcome") not in {"progress", "ready_for_acceptance"}):
+        raise RunnerError("report does not match the assigned stage exit task")
+    task = next(t for t in config["stage_plan"]["tasks"] if t["id"] == batch["stage_task_id"])
+    evidence = report.get("stage_evidence")
+    if (not isinstance(evidence, list)
+            or not all(isinstance(item, str) and item.strip() for item in evidence)
+            or (report["stage_outcome"] == "ready_for_acceptance"
+                and len(evidence) != len(task["acceptance"]))):
+        raise RunnerError("stage_evidence must cover every acceptance item in order")
+
+
 def batch_target(state: dict[str, Any], batch: dict[str, Any], config: dict[str, Any]) -> Requirement | None:
     # Schedule against accepted and buffered work; the matrix remains unchanged until docs.
     virtual = copy.deepcopy(state)
@@ -606,8 +729,10 @@ def batch_report(batch: dict[str, Any]) -> dict[str, Any]:
 def batch_prompt(cycle: int, target: Requirement, batch: dict[str, Any],
                  state: dict[str, Any], config: dict[str, Any]) -> str:
     phase = batch["phase"]
+    stage = stage_context(state, config, batch)
     if phase == "docs":
         return f"""本批次代码已通过调度器的独立编译和测试。现在只同步文档。
+{stage}
 遵守 AGENTS.md，只允许编辑 docs/ 下的 Markdown；禁止修改代码、测试、配置、脚本、
 自动开发进度台账或 .axiom-agent/，不要提交或推送，不要重新构建测试。
 根据下列功能报告、实际 diff 和门禁日志更新 API/错误码字典/样例/矩阵/当前进度/Backlog。
@@ -619,22 +744,29 @@ def batch_prompt(cycle: int, target: Requirement, batch: dict[str, Any],
 文档完成后直接结束；不需要另写 result.json。
 """
     brief = config["task_briefs"].get(target.requirement_id, {})
+    if batch.get("stage_task_id"):
+        task = next(t for t in config["stage_plan"]["tasks"] if t["id"] == batch["stage_task_id"])
+        brief = dict(brief, goal=task["goal"])
+    stage_report_fields = (',\n"stage_task_id":' + json.dumps(batch["stage_task_id"])
+                           + ', "stage_outcome":"progress | ready_for_acceptance", "stage_evidence":[]'
+                           if batch.get("stage_task_id") else "")
     row = next((line for line in TRACEABILITY.read_text().splitlines()
                 if line.startswith(f"| {target.requirement_id} |")), "")
     return f"""你是 AxiomKernel 自动开发代理，正在执行第 {cycle} 批，阶段 {phase}。
+{stage}
 遵守 AGENTS.md。用户指定流程：集中开发多个较大功能包 → 调度器统一编译测试 → 更新文档 → 下一批。
 本次唯一目标：{target.requirement_id}（{target.status}）。需求条目：{row}
 方向：{brief.get('goal', '交付一个具备真实主流程、相关变体和回归的完整功能包。')}
 优先入口：{', '.join(brief.get('entrypoints', []))}
-下一验收点：{state.get('next_steps', {}).get(target.requirement_id, '')}
+历史建议（服从当前阶段任务）：{state.get('next_steps', {}).get(target.requirement_id, '')}
 本批已缓冲 {len(batch['reports'])} 个功能包，生产代码新增约 {batch.get('code_lines', 0)} 行。
-批次目标：至少 {config['batch_min_packages']} 个完整功能包、{config['batch_min_code_lines']} 行生产代码新增。
+批次目标：{('关闭当前阶段验收任务；progress 最多累计 ' + str(config['batch_min_packages']) + ' 包后统一验收，不要求代码行数' if batch.get('stage_task_id') else '至少 ' + str(config['batch_min_packages']) + ' 个完整功能包、' + str(config['batch_min_code_lines']) + ' 行生产代码新增')}。
 报告记录：{json.dumps(batch['reports'], ensure_ascii=False)}
 当前问题：{batch.get('error', '无；继续集中开发')}
 
 1. develop 阶段完成本目标下一个较大的功能包，含相关功能模块、公开入口、真实实现、
    成功/失败/退化/事务回归。不要把简单校验当成独立功能包，不为凑行数重复代码或拆碎函数。
-   保留此前缓冲的全部工作。每个功能包完成后写报告，调度器会继续分配功能直到批次规模达到要求。
+   保留此前缓冲的全部工作。每个功能包完成后写报告；阶段任务收口后直接统一验收，不为规模扩展功能。
 2. develop 阶段不要运行构建、测试或更新 docs/；实现所需 API 注释和回归测试随代码编写。
    文档由整批验收通过后的独立阶段同步；未验收的能力不能标记完成。
 3. repair 阶段仅定位并修复当前批次门禁失败，覆盖整个批次，不能新增功能或放宽门禁。
@@ -646,7 +778,7 @@ def batch_prompt(cycle: int, target: Requirement, batch: dict[str, Any],
 结束前写 .axiom-agent/result.json：
 {{"status":"completed_slice | blocked", "requirement_id":"{target.requirement_id}",
 "module":"Core|Math|Geo|Topo|Rep|Ops|Heal|Eval|IO|Plugin|SDK|Diagnostics",
-"summary":"实际完成的功能与限制", "tests":[], "remaining":"下一功能与文档需同步条目"}}
+"summary":"实际完成的功能与限制", "tests":[], "remaining":"下一功能与文档需同步条目"{stage_report_fields}}}
 tests 只记录实际执行命令；开发阶段保持空数组。无需自行重复验收。
 """
 
@@ -664,13 +796,22 @@ def run_batches(args: argparse.Namespace, config: dict[str, Any], state: dict[st
         if not batch:
             target = batch_target(state, {"reports": []}, config)
             if target is None:
+                if config.get("stage_plan"):
+                    print(f"Stage {config['stage_plan']['stage']} exit tasks accepted; stopped at stage boundary")
                 return 0
             batch = dict(batch_version=1, head=checked_output(["git", "rev-parse", "HEAD"]),
                          phase="develop", reports=[], requirement_id=target.requirement_id,
                          files=workspace_snapshot(), code_lines=0, calls=0)
+            task = stage_task(state, config)
+            if task:
+                batch["stage"] = config["stage_plan"]["stage"]
+                batch["stage_task_id"] = task["id"]
+                batch["stage_plan_fingerprint"] = stage_fingerprint(config["stage_plan"])
             if not args.dry_run:
                 state["pending"] = batch
                 save_state(state)
+                if task:
+                    print(f"Stage {batch['stage']} assigned: {task['id']} - {task['goal']}")
         target = next((r for r in read_requirements() if r.requirement_id == batch["requirement_id"]), None)
         if target is None:
             raise RunnerError("saved requirement no longer exists")
@@ -678,6 +819,10 @@ def run_batches(args: argparse.Namespace, config: dict[str, Any], state: dict[st
             print(batch_prompt(cycle, target, batch, state, config))
             return 0
         phase = batch["phase"]
+        if batch.get("stage_task_id"):
+            if (not config.get("stage_plan") or batch.get("stage") != config["stage_plan"]["stage"]
+                    or batch.get("stage_plan_fingerprint") != stage_fingerprint(config["stage_plan"])):
+                raise RunnerError("saved batch requires its original stage plan")
         if phase == "develop" and len(batch["reports"]) >= config["batch_max_packages"]:
             print("batch package cap reached; increase the cap after reviewing the checkpoint", file=sys.stderr)
             return 1
@@ -716,13 +861,18 @@ def run_batches(args: argparse.Namespace, config: dict[str, Any], state: dict[st
                     batch["phase"] = "commit"
                 else:
                     report = load_report()
+                    validate_stage_report(report, batch, config)
                     if report["requirement_id"] != target.requirement_id:
                         raise RunnerError("agent report does not match assigned requirement")
                     relevant_tests(report["module"], config)
                     if report["status"] != "completed_slice":
                         raise RunnerError(f"agent must complete the assigned package: {report['remaining']}")
-                    if phase == "develop" and not any(Path(k).parts[0] in {"include", "src"} for k in changed):
-                        raise RunnerError("development package made no production code changes")
+                    acceptance_task = batch.get("stage_task_id") and next(
+                        t for t in config["stage_plan"]["tasks"] if t["id"] == batch["stage_task_id"]
+                    ).get("kind") == "acceptance"
+                    allowed = {"include", "src", "tests"} if acceptance_task else {"include", "src"}
+                    if phase == "develop" and not any(Path(k).parts[0] in allowed for k in changed):
+                        raise RunnerError("development package made no required code or regression changes")
                     if phase == "develop":
                         batch["reports"].append(report)
                     else:
@@ -730,6 +880,9 @@ def run_batches(args: argparse.Namespace, config: dict[str, Any], state: dict[st
                     batch["code_lines"] = production_code_lines()
                     ready = (len(batch["reports"]) >= config["batch_min_packages"] and
                              batch["code_lines"] >= config["batch_min_code_lines"])
+                    if batch.get("stage_task_id"):
+                        ready = (report["stage_outcome"] == "ready_for_acceptance"
+                                 or len(batch["reports"]) >= config["batch_min_packages"])
                     if phase == "repair" or ready:
                         batch["phase"] = "gates"
                     else:
@@ -752,6 +905,16 @@ def run_batches(args: argparse.Namespace, config: dict[str, Any], state: dict[st
                 execute_gate([sys.executable, "scripts/check_docs.py"], LOG_DIR / f"cycle-{cycle:04d}-gates.log")
                 commit = commit_slice(report, args.no_commit)
                 state["successful_cycles"] = cycle
+                if batch.get("stage_task_id"):
+                    accepted_report = (batch.get("repairs") or batch["reports"])[-1]
+                    if accepted_report.get("stage_outcome") == "ready_for_acceptance" and not args.no_commit:
+                        task = next(t for t in config["stage_plan"]["tasks"]
+                                    if t["id"] == batch["stage_task_id"])
+                        records = state.setdefault("stage_tasks", {}).setdefault(str(batch["stage"]), {})
+                        records[batch["stage_task_id"]] = dict(
+                            commit=commit, cycle=cycle, task_fingerprint=stage_fingerprint(task),
+                            dependencies={dep: records[dep]["commit"] for dep in task.get("depends_on", [])},
+                            evidence=accepted_report["stage_evidence"])
                 for item in batch["reports"]:
                     rid = item["requirement_id"]
                     for key in ("requirement_cycles", "focus_cycles"):
@@ -762,7 +925,8 @@ def run_batches(args: argparse.Namespace, config: dict[str, Any], state: dict[st
                                              requirement_id=report["requirement_id"], module=report["module"],
                                              summary=report["summary"], packages=batch["reports"],
                                              repairs=batch.get("repairs", []),
-                                             code_lines=batch["code_lines"]))
+                                             code_lines=batch["code_lines"],
+                                             stage=batch.get("stage"), stage_task_id=batch.get("stage_task_id")))
                 state.pop("pending")
                 state.pop("last_error", None)
                 state["consecutive_failures"] = 0

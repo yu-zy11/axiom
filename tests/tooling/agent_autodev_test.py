@@ -272,12 +272,123 @@ class AgentAutodevTest(unittest.TestCase):
         )
 
 
+class StageSchedulingTest(unittest.TestCase):
+    def setUp(self):
+        self.config = agent_autodev.load_config(agent_autodev.DEFAULT_CONFIG)
+        self.plan = self.config["stage_plan"]
+        self.requirements = agent_autodev.read_requirements()
+
+    def accept(self, state, task):
+        records = state.setdefault("stage_tasks", {}).setdefault("3", {})
+        records[task["id"]] = {
+            "task_fingerprint": agent_autodev.stage_fingerprint(task), "commit": "verified",
+            "dependencies": {dep: records[dep]["commit"] for dep in task.get("depends_on", [])}}
+
+    def test_stage_exit_order_overrides_weights_counts_and_industrial_status(self):
+        state = {"focus_cycles": {"FR-QUERY-001": 9999}}
+        requirements = [agent_autodev.Requirement(r.requirement_id, "已满足")
+                        for r in self.requirements]
+        target = agent_autodev.select_target(requirements, state, self.config)
+        self.assertEqual(target.requirement_id, "FR-QUERY-001")
+        self.assertEqual(agent_autodev.stage_task(state, self.config)["id"], "S3-QUERY")
+        self.accept(state, self.plan["tasks"][0])
+        self.assertEqual(agent_autodev.stage_task(state, self.config)["id"], "S3-MASS")
+
+    def test_changed_acceptance_reopens_task_and_all_tasks_done_stop_at_boundary(self):
+        state = {}
+        for task in self.plan["tasks"]:
+            self.accept(state, task)
+        self.assertIsNone(agent_autodev.select_target(self.requirements, state, self.config))
+        self.plan["tasks"][0]["acceptance"].append("new evidence")
+        self.assertEqual(agent_autodev.stage_task(state, self.config)["id"], "S3-QUERY")
+
+    def test_incomplete_dependencies_fail_closed(self):
+        state = {}
+        self.accept(state, self.plan["tasks"][0])
+        self.plan["tasks"][1]["depends_on"] = ["missing"]
+        with self.assertRaisesRegex(agent_autodev.RunnerError, "dependencies"):
+            agent_autodev.stage_task(state, self.config)
+
+    def test_reaccepted_dependency_invalidates_downstream_evidence(self):
+        state = {}
+        for task in self.plan["tasks"]:
+            self.accept(state, task)
+        state["stage_tasks"]["3"]["S3-QUERY"]["commit"] = "new acceptance"
+        self.assertEqual(agent_autodev.stage_task(state, self.config)["id"], "S3-MASS")
+
+    def test_prompt_includes_actual_roadmap_and_overrides_stale_next_steps(self):
+        task = self.plan["tasks"][0]
+        batch = dict(phase="develop", stage_task_id=task["id"], reports=[], code_lines=5)
+        state = {"next_steps": {"FR-QUERY-001": "expand unrelated variants"}}
+        target = next(r for r in self.requirements if r.requirement_id == "FR-QUERY-001")
+        prompt = agent_autodev.batch_prompt(1, target, batch, state, self.config)
+        self.assertIn("基础零件建模闭环跑通", prompt)
+        self.assertIn("S3-QUERY", prompt)
+        self.assertIn("历史建议（服从当前阶段任务）", prompt)
+        self.assertIn("不要求代码行数", prompt)
+        self.assertIn("stage_evidence", prompt)
+
+    def test_report_must_match_task_and_have_evidence_for_each_criterion(self):
+        task = self.plan["tasks"][0]
+        batch = {"stage_task_id": task["id"]}
+        report = dict(stage_task_id=task["id"], stage_outcome="ready_for_acceptance",
+                      stage_evidence=["tests/eval/query_eval_test.cpp: reference assertion"] * len(task["acceptance"]))
+        agent_autodev.validate_stage_report(report, batch, self.config)
+        for change in ({"stage_task_id": "S3-MASS"}, {"stage_outcome": "done"},
+                       {"stage_evidence": []}, {"stage_evidence": [" "] * len(task["acceptance"])},
+                       {"stage_evidence": [1] * len(task["acceptance"])}):
+            with self.subTest(change=change), self.assertRaises(agent_autodev.RunnerError):
+                agent_autodev.validate_stage_report(dict(report, **change), batch, self.config)
+
+    def test_plan_rejects_unknown_requirements_tests_cycles_and_escaping_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            for field, value in (("requirement_id", "FR-UNKNOWN-001"), ("tests", ["unknown"]),
+                                 ("depends_on", ["S3-MASS"]), ("id", "S4-QUERY"),
+                                 ("acceptance", []), ("kind", "freeform")):
+                config = copy.deepcopy(self.config)
+                config["stage_plan"]["tasks"][0][field] = value
+                path.write_text(json.dumps(config))
+                with self.subTest(field=field), self.assertRaises(agent_autodev.RunnerError):
+                    agent_autodev.load_config(path)
+            for value in ("../README.md", "/tmp/readme.md", "src/no.md"):
+                config = copy.deepcopy(self.config)
+                config["stage_plan"]["roadmap"] = value
+                path.write_text(json.dumps(config))
+                with self.assertRaises(agent_autodev.RunnerError):
+                    agent_autodev.load_config(path)
+
+    def test_gate_rejects_build_without_required_stage_tests(self):
+        report = dict(module="Ops", stage_task_id="S3-QUERY")
+        inventories = [[], [{"name": name, "properties": [{"name": "DISABLED", "value": True}]}
+                            for name in self.plan["tasks"][0]["tests"]]]
+        for inventory in inventories:
+            with self.subTest(inventory=inventory), patch.object(agent_autodev, "execute_gate"), \
+                    patch.object(agent_autodev, "changed_paths", return_value=set()), \
+                    patch.object(agent_autodev, "run", return_value=Mock(
+                        returncode=0, stdout=json.dumps({"tests": inventory}))):
+                with self.assertRaisesRegex(agent_autodev.RunnerError, "tests are missing"):
+                    agent_autodev.verify_slice(1, report, self.config, True)
+
+    def test_gate_checks_inventory_and_runs_one_full_suite(self):
+        report = dict(module="Ops", stage_task_id="S3-QUERY")
+        inventory = {"tests": [{"name": name} for name in self.plan["tasks"][0]["tests"]]}
+        with patch.object(agent_autodev, "execute_gate") as execute, \
+                patch.object(agent_autodev, "changed_paths", return_value=set()), \
+                patch.object(agent_autodev, "run", return_value=Mock(returncode=0, stdout=json.dumps(inventory))):
+            self.assertTrue(agent_autodev.verify_slice(1, report, self.config, True))
+        suites = [c.args[0] for c in execute.call_args_list if c.args[0][0] == "ctest"]
+        self.assertEqual(len(suites), 1)
+        self.assertNotIn("-R", suites[0])
+
+
 class RepairLoopTest(unittest.TestCase):
     def run_loop(self, *, failures=(), reports=None, limit=0, commit_fail=False,
                  resume=False, mismatch=False, resume_gates=False,
                  interrupted_agent=False, stop_after_seconds=0):
         config = agent_autodev.load_config(agent_autodev.DEFAULT_CONFIG)
         config["max_consecutive_failures"] = limit
+        config.pop("stage_plan", None)
         config["batch_enabled"] = False  # Exercise legacy checkpoint compatibility.
         config["retry_delay_seconds"] = 0
         targets = [agent_autodev.Requirement("FR-GEO-001", "进行中"),
@@ -427,16 +538,23 @@ class RepairLoopTest(unittest.TestCase):
 class BatchLoopTest(unittest.TestCase):
     def run_batch(self, *, lines=450, docs_fail=False, docs_code_edit=False,
                   gate_fail=False, commit_fail=False, stop_phase=None, pending=None,
-                  dry_run=False):
+                  dry_run=False, stage_mode=False, stage_outcomes=None, tests_only=False, no_commit=False):
         config = agent_autodev.load_config(agent_autodev.DEFAULT_CONFIG)
         ids = ["FR-GEO-001", "FR-OPS-001", "FR-QUERY-001"]
+        if stage_mode:
+            config["stage_plan"]["tasks"] = config["stage_plan"]["tasks"][:1]
+            config["stage_plan"]["tasks"][0]["acceptance"] = ["independent reference"]
+            if tests_only:
+                config["stage_plan"]["tasks"][0]["kind"] = "acceptance"
+        else:
+            config.pop("stage_plan", None)
         targets = [agent_autodev.Requirement(rid, "进行中") for rid in ids]
         config.update(requirement_tiers=[ids], requirement_weights={}, retry_delay_seconds=0,
                       batch_max_packages=4, max_consecutive_failures=3)
         state = dict(successful_cycles=0, consecutive_failures=0, history=[], requirement_cycles={})
         if pending:
             state["pending"] = copy.deepcopy(pending)
-        args = argparse.Namespace(max_cycles=1, no_commit=False, dry_run=dry_run,
+        args = argparse.Namespace(max_cycles=1, no_commit=no_commit, dry_run=dry_run,
                                   config=agent_autodev.DEFAULT_CONFIG, agent_command=None,
                                   allow_dirty=False, resume_failed=pending is not None,
                                   stop_after_seconds=5 if stop_phase else 0)
@@ -456,18 +574,26 @@ class BatchLoopTest(unittest.TestCase):
                 if docs_fail and counts[phase] == 1:
                     return Mock(returncode=1, stdout="", stderr="docs timeout")
             else:
-                files[f"src/axiom/geo/{counts['develop']}.cpp"] = str(counts[phase])
+                prefix = "tests/eval" if tests_only else "src/axiom/geo"
+                files[f"{prefix}/{counts['develop']}.cpp"] = str(counts[phase])
             return Mock(returncode=0, stdout="done", stderr="")
 
         def report():
-            return dict(status="completed_slice", requirement_id=state["pending"]["requirement_id"],
+            value = dict(status="completed_slice", requirement_id=state["pending"]["requirement_id"],
                         module="Geo", summary=f"feature {counts['develop']}", tests=[], remaining="next")
+            if stage_mode:
+                outcome = (stage_outcomes or {}).get((state["pending"]["phase"], counts[state["pending"]["phase"]]),
+                                                     "ready_for_acceptance")
+                value.update(stage_task_id="S3-QUERY", stage_outcome=outcome,
+                             stage_evidence=["independent reference regression"])
+            return value
 
         def gates(*a, **kw):
             events.append("gates")
             counts["gates"] += 1
             self.assertTrue(kw["force_full"])
-            self.assertGreaterEqual(len(state["pending"]["reports"]), 3)
+            if not stage_mode:
+                self.assertGreaterEqual(len(state["pending"]["reports"]), 3)
             if gate_fail and counts["gates"] == 1:
                 raise agent_autodev.RunnerError("compile error")
             return True
@@ -573,6 +699,48 @@ class BatchLoopTest(unittest.TestCase):
         self.assertEqual(events, [])
         self.assertEqual(snapshots, [])
         self.assertNotIn("pending", state)
+
+    def test_stage_ready_package_validates_without_line_or_package_quota(self):
+        _, state, events, _, _, snapshots = self.run_batch(stage_mode=True, lines=5)
+        self.assertEqual(events[:3], ["develop", "gates", "docs"])
+        self.assertEqual(state["stage_tasks"]["3"]["S3-QUERY"]["commit"], "commit")
+        self.assertTrue(all("stage_tasks" not in s for s in snapshots[:-1]))
+
+    def test_stage_progress_commits_without_closing_task(self):
+        outcomes = {("develop", n): "progress" for n in range(1, 4)}
+        _, state, events, _, _, _ = self.run_batch(stage_mode=True, lines=5, stage_outcomes=outcomes)
+        self.assertEqual(events[:4], ["develop"] * 3 + ["gates"])
+        self.assertNotIn("stage_tasks", state)
+
+    def test_no_commit_debug_run_does_not_accept_stage_task(self):
+        _, state, _, _, _, _ = self.run_batch(stage_mode=True, no_commit=True)
+        self.assertNotIn("stage_tasks", state)
+
+    def test_stage_acceptance_task_can_change_only_tests(self):
+        _, state, events, _, _, _ = self.run_batch(stage_mode=True, lines=0, tests_only=True)
+        self.assertEqual(events[:3], ["develop", "gates", "docs"])
+        self.assertIn("S3-QUERY", state["stage_tasks"]["3"])
+
+    def test_stage_gate_and_commit_retries_do_not_accept_prematurely(self):
+        _, state, events, _, _, snapshots = self.run_batch(stage_mode=True, gate_fail=True, commit_fail=True)
+        self.assertEqual(events[:5], ["develop", "gates", "repair", "gates", "docs"])
+        self.assertEqual(events.count("commit"), 2)
+        self.assertTrue(all("stage_tasks" not in s for s in snapshots[:-1]))
+        self.assertIn("S3-QUERY", state["stage_tasks"]["3"])
+
+    def test_repair_can_reopen_ready_task(self):
+        _, state, _, _, _, _ = self.run_batch(stage_mode=True, gate_fail=True,
+            stage_outcomes={("repair", 1): "progress"})
+        self.assertNotIn("stage_tasks", state)
+
+    def test_stage_checkpoint_resumes_docs_and_rejects_changed_plan(self):
+        _, state, _, _, _, _ = self.run_batch(stage_mode=True, stop_phase="docs")
+        _, resumed, events, _, _, _ = self.run_batch(stage_mode=True, pending=state["pending"])
+        self.assertEqual(events[:2], ["docs", "docs_check"])
+        self.assertIn("S3-QUERY", resumed["stage_tasks"]["3"])
+        state["pending"]["stage_plan_fingerprint"] = "changed"
+        with self.assertRaisesRegex(agent_autodev.RunnerError, "original stage plan"):
+            self.run_batch(stage_mode=True, pending=state["pending"])
 
     def test_code_count_includes_staged_and_untracked_excludes_tests_docs_and_deletions(self):
         with tempfile.TemporaryDirectory() as directory:
