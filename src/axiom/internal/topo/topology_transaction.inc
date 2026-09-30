@@ -1,12 +1,11 @@
 namespace {
 
-// A compatibility shell cannot re-certify an edited analytic primitive. Use the
-// same body undo records as topology deletion so rollback and savepoints agree.
-void revoke_analytic_mass_for_face(detail::KernelState& state,
+// Every face edit dirties the owning bodies and their Eval consumers. The body
+// undo record also restores analytic eligibility on rollback and savepoints.
+void invalidate_body_for_face_edit(detail::KernelState& state,
                                   detail::TopologyTransactionState& transaction,
                                   FaceId face_id) {
   for (auto &[body_value, body] : state.bodies) {
-    if (!body.analytic_mass_valid) continue;
     const bool owns_face = std::any_of(body.shells.begin(), body.shells.end(),
         [&](ShellId shell_id) {
           const auto shell = state.shells.find(shell_id.value);
@@ -17,7 +16,37 @@ void revoke_analytic_mass_for_face(detail::KernelState& state,
     if (owns_face) {
       transaction.snapshot_body(state, BodyId{body_value});
       body.analytic_mass_valid = false;
+      body.primitive_tessellation_valid = false;
+      detail::invalidate_eval_for_body(state, BodyId{body_value});
     }
+  }
+}
+
+// A discarded body cannot remain the owner of runtime meshes or Eval bindings.
+// Run after restoration (or commit), so temporarily deleted bodies retain their
+// associations when rollback restores them. This only manages Core handle stores.
+void discard_removed_body_runtime(detail::KernelState& state) {
+  for (auto it = state.eval_body_bindings.begin(); it != state.eval_body_bindings.end();) {
+    if (state.bodies.contains(it->first)) {
+      ++it;
+    } else {
+      detail::invalidate_eval_for_body(state, BodyId{it->first});
+      it = state.eval_body_bindings.erase(it);
+    }
+  }
+  for (auto it = state.meshes.begin(); it != state.meshes.end();) {
+    if (it->second.source_body.value != 0 && !state.bodies.contains(it->second.source_body.value))
+      it = state.meshes.erase(it);
+    else
+      ++it;
+  }
+  for (auto it = state.tessellation_cache.begin(); it != state.tessellation_cache.end();) {
+    if (!state.meshes.contains(it->second.value)) it = state.tessellation_cache.erase(it);
+    else ++it;
+  }
+  for (auto it = state.face_tessellation_cache.begin(); it != state.face_tessellation_cache.end();) {
+    if (!state.meshes.contains(it->second.value)) it = state.face_tessellation_cache.erase(it);
+    else ++it;
   }
 }
 
@@ -279,7 +308,7 @@ Result<void> TopologyTransaction::set_coedge_pcurve(CoedgeId coedge_id,
       const auto faces = state_->loop_to_faces.find(loop->second);
       if (faces != state_->loop_to_faces.end())
         for (const auto face : faces->second)
-          revoke_analytic_mass_for_face(*state_, *transaction_state_, FaceId{face});
+          invalidate_body_for_face_edit(*state_, *transaction_state_, FaceId{face});
     }
   }
   it->second.pcurve_id = pcurve_id;
@@ -725,6 +754,7 @@ Result<void> TopologyTransaction::delete_face(FaceId face_id) {
   }
 
   transaction_state_->snapshot_face(*state_, face_id);
+  detail::invalidate_eval_for_faces(*state_, std::array{face_id});
 
   std::vector<ShellId> affected_shells;
   std::vector<ShellId> shells_to_remove;
@@ -764,6 +794,7 @@ Result<void> TopologyTransaction::delete_face(FaceId face_id) {
     }
     transaction_state_->snapshot_body(*state_, BodyId{body_value});
     body.analytic_mass_valid = false;
+    body.primitive_tessellation_valid = false;
     const auto old_size = body.shells.size();
     body.shells.erase(
         std::remove_if(body.shells.begin(), body.shells.end(),
@@ -837,7 +868,9 @@ Result<void> TopologyTransaction::delete_shell(ShellId shell_id) {
       continue;
     }
     transaction_state_->snapshot_body(*state_, BodyId{body_value});
+    detail::invalidate_eval_for_body(*state_, BodyId{body_value});
     body.analytic_mass_valid = false;
+    body.primitive_tessellation_valid = false;
     const auto old_size = body.shells.size();
     body.shells.erase(std::remove_if(body.shells.begin(), body.shells.end(),
                                      [shell_id](ShellId current) {
@@ -880,6 +913,7 @@ Result<void> TopologyTransaction::delete_body(BodyId body_id) {
   }
 
   transaction_state_->snapshot_body(*state_, body_id);
+  detail::invalidate_eval_for_body(*state_, body_id);
 
   // Note: we do NOT delete referenced shells/faces automatically here, because
   // shells can be shared by multiple bodies (e.g. boolean provenance tests).
@@ -907,7 +941,7 @@ Result<void> TopologyTransaction::replace_surface(FaceId face_id,
         "替换面失败：目标面不存在或替换曲面不存在", "替换面失败");
   }
   transaction_state_->snapshot_face(*state_, face_id);
-  revoke_analytic_mass_for_face(*state_, *transaction_state_, face_id);
+  invalidate_body_for_face_edit(*state_, *transaction_state_, face_id);
   it->second.surface_id = replacement;
   rebuild_topology_indices(*state_);
   ++txn_replaced_surfaces_;
@@ -924,6 +958,7 @@ Result<VersionId> TopologyTransaction::commit() {
         *state_, StatusCode::OperationFailed, diag_codes::kTxCommitFailure,
         "事务提交失败：事务已关闭", "事务提交失败");
   }
+  discard_removed_body_runtime(*state_);
   if (const auto owner = state_->active_topology_transaction.lock();
       owner.get() == transaction_state_.get()) {
     state_->active_topology_transaction.reset();
@@ -1090,6 +1125,20 @@ TopologyTransaction::rollback_to_savepoint(TopologySavepoint savepoint) {
   const auto nested_count = static_cast<std::uint64_t>(
       std::distance(found, transaction_state_->savepoints.end()) - 1);
 
+  // Recompute may have observed the edited model since the savepoint. Restoring
+  // topology must dirty its consumers again, including bodies being removed.
+  if (rolled_back_write_operations != 0) {
+    for (const auto &[id, record] : transaction_state_->original_bodies) {
+      (void)record;
+      detail::invalidate_eval_for_body(*state_, BodyId{id});
+    }
+  }
+  for (const auto &[id, record] : state_->bodies) {
+    (void)record;
+    if (!bodies.contains(id))
+      detail::invalidate_eval_for_body(*state_, BodyId{id});
+  }
+
   state_->vertices = std::move(vertices);
   state_->edges = std::move(edges);
   state_->coedges = std::move(coedges);
@@ -1117,6 +1166,7 @@ TopologyTransaction::rollback_to_savepoint(TopologySavepoint savepoint) {
   txn_coedge_pcurve_clears_ = coedge_pcurve_clears;
   txn_write_ops_ = restored_write_operations;
   rebuild_topology_indices(*state_);
+  discard_removed_body_runtime(*state_);
 
   transaction_state_->savepoints.erase(std::next(found),
                                         transaction_state_->savepoints.end());
@@ -1201,6 +1251,13 @@ std::optional<DiagnosticId> TopologyTransaction::observe_cancellation(
 }
 
 void TopologyTransaction::restore_model_and_close() {
+  for (const auto &[id, record] : transaction_state_->original_bodies) {
+    (void)record;
+    detail::invalidate_eval_for_body(*state_, BodyId{id});
+  }
+  for (const auto id : created_bodies_) {
+    detail::invalidate_eval_for_body(*state_, BodyId{id});
+  }
   for (const auto &[id, pcurve_id] : transaction_state_->original_coedge_pcurves) {
     const auto it = state_->coedges.find(id);
     if (it != state_->coedges.end()) {
@@ -1292,6 +1349,7 @@ void TopologyTransaction::restore_model_and_close() {
     }
   }
   rebuild_topology_indices(*state_);
+  discard_removed_body_runtime(*state_);
   txn_deleted_faces_ = 0;
   txn_deleted_shells_ = 0;
   txn_deleted_bodies_ = 0;

@@ -1,8 +1,10 @@
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <vector>
 
 #include "axiom/diag/error_codes.h"
@@ -23,9 +25,202 @@ bool has_issue_code(const axiom::DiagnosticReport& report, std::string_view code
     return false;
 }
 
+bool stage3_representation_consistency_regression() {
+    axiom::Kernel kernel;
+    auto& topo = kernel.topology().query();
+    const axiom::ProfileRef first_profile{"same_bbox_first",{{0,0,0},{4,0,0},{0,3,0}}};
+    const axiom::ProfileRef second_profile{"same_bbox_second",{{4,3,0},{0,3,0},{4,0,0}}};
+    const auto first = kernel.sweeps().extrude(first_profile,{0,0,1},2);
+    const auto second = kernel.sweeps().extrude(second_profile,{0,0,1},2);
+    const auto duplicate = kernel.sweeps().extrude(first_profile,{0,0,1},2);
+    if (!first.value || !second.value || !duplicate.value) return false;
+    const auto a = kernel.convert().brep_to_mesh(*first.value,{});
+    const auto b = kernel.convert().brep_to_mesh(*second.value,{});
+    const auto c = kernel.convert().brep_to_mesh(*duplicate.value,{});
+    if (!a.value || !b.value || !c.value || a.value==b.value || a.value==c.value || b.value==c.value) return false;
+    const auto bbox_a = topo.bbox_of_body_from_topology(*first.value);
+    const auto bbox_b = topo.bbox_of_body_from_topology(*second.value);
+    if (!bbox_a.value || !bbox_b.value || bbox_a.value->min.x!=bbox_b.value->min.x ||
+        bbox_a.value->min.y!=bbox_b.value->min.y || bbox_a.value->max.x!=bbox_b.value->max.x ||
+        bbox_a.value->max.y!=bbox_b.value->max.y || bbox_a.value->max.z!=bbox_b.value->max.z) return false;
+
+    // Read the public OBJ output and integrate its actual triangles independently.
+    // Equal bbox/area/height profiles still have different centroids and vertices.
+    const auto check_export = [&](axiom::BodyId body, double volume, double area, axiom::Point3 centroid) {
+        const auto path = std::filesystem::temp_directory_path()/
+            ("axiom_stage3_consistency_"+std::to_string(body.value)+".obj");
+        if (kernel.io().export_obj(body,path.string(),{}).status!=axiom::StatusCode::Ok) return false;
+        std::ifstream input{path};
+        std::vector<axiom::Point3> vertices;
+        long double v = 0, surface_area = 0;
+        std::array<long double,3> moment{};
+        std::string line;
+        bool valid = true;
+        while (std::getline(input,line)) {
+            std::istringstream record{line};
+            std::string kind;
+            record >> kind;
+            if (kind=="v") {
+                axiom::Point3 point{};
+                if (!(record >> point.x >> point.y >> point.z)) { valid=false; break; }
+                vertices.push_back(point);
+            } else if (kind=="f") {
+                std::array<std::size_t,3> ids{};
+                if (!(record >> ids[0] >> ids[1] >> ids[2]) ||
+                    std::any_of(ids.begin(),ids.end(),[&](std::size_t id) { return id==0 || id>vertices.size(); })) {
+                    valid=false; break;
+                }
+                const auto& p=vertices[ids[0]-1];
+                const auto& q=vertices[ids[1]-1];
+                const auto& r=vertices[ids[2]-1];
+                const long double cx=static_cast<long double>(q.y)*r.z-static_cast<long double>(q.z)*r.y;
+                const long double cy=static_cast<long double>(q.z)*r.x-static_cast<long double>(q.x)*r.z;
+                const long double cz=static_cast<long double>(q.x)*r.y-static_cast<long double>(q.y)*r.x;
+                const long double tetra=(p.x*cx+p.y*cy+p.z*cz)/6;
+                v+=tetra;
+                moment[0]+=tetra*(p.x+q.x+r.x)/4;
+                moment[1]+=tetra*(p.y+q.y+r.y)/4;
+                moment[2]+=tetra*(p.z+q.z+r.z)/4;
+                const long double ux=q.x-p.x, uy=q.y-p.y, uz=q.z-p.z;
+                const long double vx=r.x-p.x, vy=r.y-p.y, vz=r.z-p.z;
+                const long double nx=uy*vz-uz*vy, ny=uz*vx-ux*vz, nz=ux*vy-uy*vx;
+                surface_area+=std::sqrt(nx*nx+ny*ny+nz*nz)/2;
+            }
+        }
+        input.close();
+        std::filesystem::remove(path);
+        const auto mass=kernel.query().mass_properties(body);
+        const auto close=[](long double x, long double y) { return std::abs(x-y)<=1e-8L*std::max(1.0L,std::abs(y)); };
+        return valid && mass.value && close(v,volume) && close(surface_area,area) &&
+            close(moment[0]/v,centroid.x) && close(moment[1]/v,centroid.y) && close(moment[2]/v,centroid.z) &&
+            close(v,mass.value->volume) && close(surface_area,mass.value->area) &&
+            close(moment[0]/v,mass.value->centroid.x) && close(moment[1]/v,mass.value->centroid.y) &&
+            close(moment[2]/v,mass.value->centroid.z);
+    };
+    if (!check_export(*first.value,12,36,{4.0/3,1,1}) ||
+        !check_export(*second.value,12,36,{8.0/3,2,1})) return false;
+    const axiom::ProfileRef holed{"mesh_hole",{{0,0,0},{4,0,0},{4,4,0},{0,4,0}},
+        {{{1,1,0},{3,1,0},{3,3,0},{1,3,0}}}};
+    const axiom::ProfileRef concave{"mesh_concave",{{0,0,0},{3,0,0},{3,1,0},{1,1,0},{1,3,0},{0,3,0}}};
+    const auto hole_body=kernel.sweeps().extrude(holed,{0,0,1},2);
+    const auto concave_body=kernel.sweeps().extrude(concave,{0,0,1},2);
+    if (!hole_body.value || !concave_body.value || !check_export(*hole_body.value,24,72,{2,2,1}) ||
+        !check_export(*concave_body.value,10,34,{1.1,1.1,1})) return false;
+    const axiom::ProfileRef rectangle{"mesh_model_chain",{{0,0,0},{2,0,0},{2,3,0},{0,3,0}}};
+    const auto rail=kernel.curves().make_line_segment({0,0,0},{0,0,4});
+    const auto swept=rail.value ? kernel.sweeps().sweep(rectangle,*rail.value) : axiom::Result<axiom::BodyId>{};
+    auto upper=rectangle;
+    for (auto& point : upper.polygon_xyz) point.z=4;
+    const auto lofted=kernel.sweeps().loft(std::array{rectangle,upper});
+    const auto box=kernel.primitives().box({0,0,0},2,3,4);
+    const auto box_faces=box.value ? topo.faces_of_body(*box.value) : axiom::Result<std::vector<axiom::FaceId>>{};
+    const auto thickened=box_faces.value && !box_faces.value->empty()
+        ? kernel.sweeps().thicken(box_faces.value->front(),2) : axiom::Result<axiom::BodyId>{};
+    const axiom::ProfileRef meridian{"mesh_revolve",{{2,0,0},{3,0,0},{3,0,4},{2,0,4}}};
+    const double span=std::acos(-1.0)/2;
+    const auto revolved=kernel.sweeps().revolve_between(meridian,{{0,0,0},{0,0,1}},0,-span);
+    if (!swept.value || !lofted.value || !thickened.value || !revolved.value ||
+        !check_export(*swept.value,24,52,{1,1.5,2}) || !check_export(*lofted.value,24,52,{1,1.5,2}) ||
+        !check_export(*thickened.value,12,32,{1,1.5,-1})) return false;
+    const auto revolve_vertices=topo.vertex_count_of_body(*revolved.value);
+    if (!revolve_vertices.value || *revolve_vertices.value%4!=0 || *revolve_vertices.value<8) return false;
+    const double intervals=static_cast<double>(*revolve_vertices.value/4-1);
+    const double annulus=2.5*intervals*std::sin(span/intervals);
+    const double perimeter=10*intervals*std::sin(span/(2*intervals))+2;
+    // Sum the two homothetic polygon sectors' triangle first moments. The
+    // negative interval puts the centroid in quadrant IV; this is a chord mesh.
+    const double center=19/(15*intervals*std::tan(span/(2*intervals)));
+    if (!check_export(*revolved.value,4*annulus,2*annulus+4*perimeter,{center,-center,2})) return false;
+
+    // mesh_to_brep explicitly rebinds the assembled mesh to its new MeshRep body.
+    // The original body's cache must not return that reassociated record.
+    const auto embedded=kernel.convert().mesh_to_brep(*a.value);
+    const auto rebuilt=kernel.convert().brep_to_mesh(*first.value,{});
+    if (!embedded.value || !rebuilt.value || rebuilt.value==a.value ||
+        kernel.convert().brep_to_mesh(*embedded.value,{}).value!=a.value) return false;
+    const auto faces=topo.faces_of_body(*first.value);
+    const auto shells=topo.shells_of_body(*first.value);
+    const auto sources=topo.source_faces_of_body(*first.value);
+    const auto displaced=kernel.surfaces().make_plane({0,0,100},{0,0,1});
+    const auto curved=kernel.surfaces().make_sphere({0,0,0},1);
+    if (!faces.value || faces.value->empty() || !shells.value || shells.value->size()!=1 ||
+        !sources.value || !displaced.value || !curved.value) return false;
+    auto txn=kernel.topology().begin_transaction();
+    const auto savepoint=txn.create_savepoint();
+    if (!savepoint.value || txn.replace_surface(faces.value->back(),*displaced.value).status!=axiom::StatusCode::Ok) return false;
+    const axiom::TessellationOptions cold{.271,31,true};
+    const auto stores=kernel.runtime_store_counts();
+    const auto objects=kernel.object_count_total();
+    const auto next=kernel.next_object_id();
+    const auto writes=txn.write_operation_count();
+    const auto rejects=[&](const axiom::Result<axiom::MeshId>& result) {
+        const auto report=kernel.diagnostics().get(result.diagnostic_id);
+        const auto after=kernel.runtime_store_counts();
+        return result.status==axiom::StatusCode::OperationFailed && !result.value && report.value &&
+            std::any_of(report.value->issues.begin(),report.value->issues.end(),[&](const axiom::Issue& issue) {
+                return issue.code==axiom::diag_codes::kTesFailure && issue.stage=="rep.tessellation.face" &&
+                    std::find(issue.related_entities.begin(),issue.related_entities.end(),faces.value->back().value)!=issue.related_entities.end();
+            }) && stores.value && after.value && objects.value && next.value && writes.value &&
+            kernel.object_count_total().value==objects.value && kernel.next_object_id().value==next.value &&
+            txn.write_operation_count().value==writes.value && after.value->mesh_records==stores.value->mesh_records &&
+            after.value->tessellation_cache_entries==stores.value->tessellation_cache_entries &&
+            after.value->face_tessellation_cache_entries==stores.value->face_tessellation_cache_entries;
+    };
+    // Warm body cache, cold body/face cache, forced local rebuild and shell path
+    // must all reject a displaced support; no fallback or early-face publication.
+    if (!rejects(kernel.convert().brep_to_mesh(*first.value,{})) ||
+        !rejects(kernel.convert().brep_to_mesh(*first.value,cold)) ||
+        !rejects(kernel.convert().brep_to_mesh_local(*first.value,*faces.value,cold)) ||
+        !rejects(kernel.convert().brep_to_mesh_shell(*first.value,shells.value->front(),cold)) ||
+        txn.rollback_to_savepoint(*savepoint.value).status!=axiom::StatusCode::Ok ||
+        kernel.convert().brep_to_mesh(*first.value,{}).value!=rebuilt.value ||
+        topo.source_faces_of_body(*first.value).value!=sources.value) return false;
+    if (txn.replace_surface(faces.value->front(),*curved.value).status!=axiom::StatusCode::Ok) return false;
+    const auto unsupported=kernel.convert().brep_to_mesh(*first.value,{});
+    const auto support_report=kernel.diagnostics().get(unsupported.diagnostic_id);
+    if (unsupported.status!=axiom::StatusCode::NotImplemented || unsupported.value || !support_report.value ||
+        std::none_of(support_report.value->issues.begin(),support_report.value->issues.end(),[](const axiom::Issue& issue) {
+            return issue.code==axiom::diag_codes::kTesFailure && issue.stage=="rep.tessellation.support";
+        }) || txn.rollback().status!=axiom::StatusCode::Ok ||
+        !check_export(*first.value,12,36,{4.0/3,1,1})) return false;
+
+    const auto before_bad_options=kernel.runtime_store_counts();
+    const auto next_bad_options=kernel.next_object_id();
+    const auto bad_options=kernel.convert().brep_to_mesh(*first.value,{0,15,true});
+    const auto after_bad_options=kernel.runtime_store_counts();
+    const auto options_report=kernel.diagnostics().get(bad_options.diagnostic_id);
+    if (bad_options.status!=axiom::StatusCode::InvalidInput || bad_options.value || !options_report.value ||
+        !has_issue_code(*options_report.value,axiom::diag_codes::kCoreParameterOutOfRange) ||
+        !before_bad_options.value || !after_bad_options.value ||
+        kernel.next_object_id().value!=next_bad_options.value ||
+        before_bad_options.value->mesh_records!=after_bad_options.value->mesh_records ||
+        before_bad_options.value->tessellation_cache_entries!=after_bad_options.value->tessellation_cache_entries ||
+        before_bad_options.value->face_tessellation_cache_entries!=after_bad_options.value->face_tessellation_cache_entries) return false;
+
+    for (const auto primitive : {kernel.primitives().box({0,0,0},2,3,4),
+                                 kernel.primitives().sphere({0,0,0},2)}) {
+        if (!primitive.value) return false;
+        const auto mesh=kernel.convert().brep_to_mesh(*primitive.value,{});
+        const auto owned=topo.faces_of_body(*primitive.value);
+        if (!mesh.value || !owned.value || owned.value->empty()) return false;
+        auto edit=kernel.topology().begin_transaction();
+        if (edit.replace_surface(owned.value->back(),*displaced.value).status!=axiom::StatusCode::Ok) return false;
+        const auto result=kernel.convert().brep_to_mesh(*primitive.value,{});
+        const auto report=kernel.diagnostics().get(result.diagnostic_id);
+        if (result.value || !report.value || !has_issue_code(*report.value,axiom::diag_codes::kTesFailure) ||
+            edit.rollback().status!=axiom::StatusCode::Ok ||
+            kernel.convert().brep_to_mesh(*primitive.value,{}).value!=mesh.value) return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 int main() {
+    if (!stage3_representation_consistency_regression()) {
+        std::cerr << "Stage 3 representation consistency regression failed\n";
+        return 1;
+    }
     axiom::Kernel kernel;
 
     auto box = kernel.primitives().box({0.0, 0.0, 0.0}, 10.0, 20.0, 30.0);

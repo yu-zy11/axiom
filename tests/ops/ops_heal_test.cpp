@@ -4576,6 +4576,152 @@ bool test_stage3_model_mass_references() {
     return true;
 }
 
+bool test_stage3_consistency_chain() {
+    axiom::Kernel kernel;
+    auto& topo = kernel.topology().query();
+    auto& eval = kernel.eval_graph();
+    const auto close = [](double a, double b) {
+        return std::abs(a-b) <= 2e-8*std::max({1.0,std::abs(a),std::abs(b)});
+    };
+    const axiom::ProfileRef rectangle{"consistency_rectangle",{{0,0,0},{2,0,0},{2,3,0},{0,3,0}}};
+    const axiom::ProfileRef perforated{"consistency_perforated",
+        {{0,0,0},{4,0,0},{4,4,0},{0,4,0}},{{{1,1,0},{3,1,0},{3,3,0},{1,3,0}}}};
+    const auto extrude = kernel.sweeps().extrude(perforated,{0,0,1},3);
+    const auto rail = kernel.curves().make_line_segment({0,0,0},{0,0,4});
+    const auto sweep = rail.value ? kernel.sweeps().sweep(rectangle,*rail.value) : axiom::Result<axiom::BodyId>{};
+    auto upper = rectangle;
+    for (auto& point : upper.polygon_xyz) point.z = 4;
+    const auto loft = kernel.sweeps().loft(std::array{rectangle,upper});
+    const double span = std::acos(-1.0)/2;
+    const axiom::ProfileRef meridian{"consistency_meridian",{{2,0,0},{3,0,0},{3,0,4},{2,0,4}}};
+    const auto revolve = kernel.sweeps().revolve_between(meridian,{{0,0,0},{0,0,1}},0,-span);
+    const auto source = kernel.primitives().box({0,0,0},2,3,4);
+    const auto source_faces = source.value ? topo.faces_of_body(*source.value) : axiom::Result<std::vector<axiom::FaceId>>{};
+    if (!extrude.value || !sweep.value || !loft.value || !revolve.value || !source_faces.value || source_faces.value->empty()) return false;
+    const auto thicken = kernel.sweeps().thicken(source_faces.value->front(),2);
+    const auto remote = kernel.primitives().box({50,50,50},1,1,1);
+    const auto revolve_vertices = topo.vertex_count_of_body(*revolve.value);
+    if (!thicken.value || !remote.value || !revolve_vertices.value || *revolve_vertices.value % 4 != 0) return false;
+    const double intervals = static_cast<double>(*revolve_vertices.value/4-1);
+    if (!(intervals > 0)) return false;
+    // The directed revolution is a chord-face polyhedron, with independently
+    // computed polygon-annulus area and perimeter, not a smooth/bbox reference.
+    const double annulus = 2.5*intervals*std::sin(span/intervals);
+    const double perimeter = 10*intervals*std::sin(span/(2*intervals))+2;
+    const std::array bodies{*extrude.value,*sweep.value,*loft.value,*revolve.value,*thicken.value};
+    const std::array volumes{36.0,24.0,24.0,4*annulus,12.0};
+    const std::array areas{96.0,52.0,52.0,2*annulus+4*perimeter,32.0};
+    const std::array section_areas{12.0,6.0,6.0,annulus,6.0};
+    const double revolve_center = 19/(15*intervals*std::tan(span/(2*intervals)));
+    const std::array<axiom::Point3,5> centers{{{2,2,1.5},{1,1.5,2},{1,1.5,2},
+        {revolve_center,-revolve_center,2},{1,1.5,-1}}};
+    // These corners minimize distance to (60,60,mid_z) and to the remote
+    // box's (50,50,50) corner. The directed revolve lies in quadrant IV.
+    const std::array<axiom::Point3,5> nearest_corners{{{4,4,3},{2,3,4},{2,3,4},{3,0,4},{2,3,0}}};
+    const auto remote_faces = topo.faces_of_body(*remote.value);
+    const auto remote_shells = topo.shells_of_body(*remote.value);
+    if (!remote_faces.value || !remote_shells.value || remote_shells.value->size()!=1) return false;
+    for (std::size_t i=0; i<bodies.size(); ++i) {
+        const auto body = bodies[i];
+        const auto bound = eval.register_node(axiom::NodeKind::Analysis,"body:"+std::to_string(body.value));
+        const auto consumer = eval.register_node(axiom::NodeKind::Analysis,"consistency:query_rep");
+        if (!bound.value || !consumer.value || eval.add_dependency(*consumer.value,*bound.value).status != axiom::StatusCode::Ok) return false;
+        const auto nodes = eval.nodes_of_body(body);
+        const auto shells = topo.shells_of_body(body);
+        const auto faces = topo.faces_of_body(body);
+        const auto source_bodies = topo.source_bodies_of_body(body);
+        const auto source_shells = topo.source_shells_of_body(body);
+        const auto sources = topo.source_faces_of_body(body);
+        const auto bbox = topo.bbox_of_body_from_topology(body);
+        const auto mass = kernel.query().mass_properties(body);
+        const auto boundary_mass = topo.body_mass_properties(body);
+        const auto kind = kernel.representation().kind_of_body(body);
+        if (!nodes.value || nodes.value->size()!=1 || nodes.value->front().value!=bound.value->value ||
+            !shells.value || shells.value->size()!=1 || !faces.value || faces.value->empty() ||
+            !source_bodies.value || !source_shells.value || !sources.value || !bbox.value ||
+            !mass.value || !boundary_mass.value || !kind.value || *kind.value != axiom::RepKind::ExactBRep ||
+            !close(mass.value->volume,volumes[i]) || !close(mass.value->area,areas[i]) ||
+            !close(boundary_mass.value->volume,volumes[i]) || !close(boundary_mass.value->area,areas[i]) ||
+            kernel.validate().validate_all(body,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok) return false;
+        for (const auto* result : {&mass,&boundary_mass})
+            if (!close(result->value->centroid.x,centers[i].x) || !close(result->value->centroid.y,centers[i].y) ||
+                !close(result->value->centroid.z,centers[i].z)) return false;
+        if (i==4 && (*source_bodies.value!=std::vector<axiom::BodyId>{*source.value} ||
+                     *sources.value!=std::vector<axiom::FaceId>{source_faces.value->front()})) return false;
+        for (const auto id : *source_bodies.value) {
+            const auto exists = topo.has_body(id);
+            if (!exists.value || !*exists.value || id == body) return false;
+        }
+        for (const auto id : *source_shells.value) {
+            const auto exists = topo.has_shell(id);
+            if (!exists.value || !*exists.value || id == shells.value->front()) return false;
+        }
+        for (const auto id : *sources.value) {
+            const auto exists = topo.has_face(id);
+            if (!exists.value || !*exists.value || std::find(faces.value->begin(),faces.value->end(),id)!=faces.value->end()) return false;
+        }
+        double face_area = 0;
+        for (const auto face : *faces.value) {
+            const auto area = topo.face_area(face);
+            const auto owners = topo.bodies_of_face(face);
+            const auto support = topo.surface_of_face(face);
+            const auto provenance = topo.source_faces_of_face(face);
+            if (!area.value || !owners.value || *owners.value != std::vector<axiom::BodyId>{body} ||
+                !support.value || support.value->value==0 || !provenance.value) return false;
+            for (const auto id : *provenance.value) {
+                const auto exists = topo.has_face(id);
+                if (!exists.value || !*exists.value) return false;
+            }
+            face_area += *area.value;
+        }
+        if (!close(face_area,areas[i])) return false;
+        for (std::size_t k=0; k<9; ++k)
+            if (!close(mass.value->inertia[k],boundary_mass.value->inertia[k])) return false;
+        const double mid_z = (bbox.value->min.z+bbox.value->max.z)/2;
+        const auto section = kernel.query().section_detailed(body,{{0,0,mid_z},{0,0,1}});
+        const auto nearest = kernel.query().closest_point(body,{60,60,mid_z});
+        const auto pair = topo.closest_points(body,*remote.value);
+        const auto distance = kernel.query().min_distance(body,*remote.value);
+        const auto reverse = kernel.query().min_distance(*remote.value,body);
+        const auto& corner = nearest_corners[i];
+        const double point_distance = std::hypot(60-corner.x,60-corner.y);
+        const double body_distance = std::hypot(50-corner.x,50-corner.y,50-corner.z);
+        if (!section.value || !close(section.value->area,section_areas[i]) || section.value->triangles.empty() ||
+            !nearest.value || !nearest.value->nearest_boundary || !pair.value || !distance.value || !reverse.value ||
+            !close(nearest.value->nearest_boundary->distance,point_distance) ||
+            !close(nearest.value->nearest_boundary->point.x,corner.x) ||
+            !close(nearest.value->nearest_boundary->point.y,corner.y) ||
+            !close(nearest.value->nearest_boundary->point.z,mid_z) || !close(*distance.value,body_distance) ||
+            !close(pair.value->distance,*distance.value) || !close(*distance.value,*reverse.value) ||
+            !close(pair.value->first_point.x,corner.x) || !close(pair.value->first_point.y,corner.y) ||
+            !close(pair.value->first_point.z,corner.z) || !close(pair.value->second_point.x,50) ||
+            !close(pair.value->second_point.y,50) || !close(pair.value->second_point.z,50) ||
+            pair.value->first_shell!=shells.value->front() || pair.value->second_shell!=remote_shells.value->front() ||
+            std::find(faces.value->begin(),faces.value->end(),pair.value->first_face)==faces.value->end() ||
+            std::find(remote_faces.value->begin(),remote_faces.value->end(),pair.value->second_face)==remote_faces.value->end() ||
+            nearest.value->nearest_boundary->shell != shells.value->front() ||
+            std::find(faces.value->begin(),faces.value->end(),nearest.value->nearest_boundary->face)==faces.value->end()) return false;
+        const auto full = kernel.convert().brep_to_mesh(body,{});
+        const auto local = kernel.convert().brep_to_mesh_local(body,std::span<const axiom::FaceId>(faces.value->data(),1),{});
+        const auto shell = kernel.convert().brep_to_mesh_shell(body,shells.value->front(),{});
+        for (const auto& mesh : {full,local,shell}) {
+            if (!mesh.value) return false;
+            const auto report = kernel.convert().inspect_mesh(*mesh.value);
+            if (!report.value || report.value->triangle_count==0 || report.value->connected_components!=1 ||
+                report.value->has_out_of_range_indices || report.value->has_degenerate_triangles ||
+                (report.value->tessellation_strategy.find("faces_welded")==std::string::npos &&
+                 report.value->tessellation_strategy!="owned_topo_welded")) return false;
+        }
+        if (kernel.convert().brep_to_mesh(body,{}).value != full.value ||
+            topo.source_faces_of_body(body).value != sources.value ||
+            topo.faces_of_body(body).value != faces.value ||
+            eval.is_invalid(*bound.value).value != std::optional<bool>{false} ||
+            eval.is_invalid(*consumer.value).value != std::optional<bool>{false} ||
+            eval.recompute_count(*bound.value).value != std::optional<std::uint64_t>{0}) return false;
+    }
+    return kernel.core_runtime_invariants_hold().value == std::optional<bool>{true};
+}
+
 bool test_stage3_model_query_chain() {
     axiom::Kernel kernel;
     auto& topo = kernel.topology().query();
@@ -4690,7 +4836,8 @@ int main() {
         std::cerr << "[stage] " << name << " " << (passed ? "passed" : "failed") << '\n';
         return passed;
     };
-    if (!run_stage("planar_face_thicken", test_planar_face_thicken) ||
+    if (!run_stage("stage3_consistency_chain", test_stage3_consistency_chain) ||
+        !run_stage("planar_face_thicken", test_planar_face_thicken) ||
         !run_stage("stage3_modeling_failures", test_stage3_modeling_failures) ||
         !run_stage("stage3_model_mass_references", test_stage3_model_mass_references) ||
         !run_stage("stage3_model_query_chain", test_stage3_model_query_chain) ||

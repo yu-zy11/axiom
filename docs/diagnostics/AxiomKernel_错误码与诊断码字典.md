@@ -805,3 +805,19 @@ Plane/Cylinder/Cone/规则 Sphere/Torus 及其嵌套 Offset 的成功解析路�
 | InvalidInput / `AXM-MOD-E-0003` | `thicken.materialization` | 面区域自交/退化/孔冲突，或正厚度在当前尺度不可分辨，无法形成真实闭壳 |
 
 thicken 失败 issue 关联输入 FaceId；支持正反法向及与其独立的环绕向，读取真实裁剪边。结果曲面编辑后质量查询仍用 `AXM-CORE-E-0004 / query.mass_properties.support_gate` 拒绝且无部分属性，不恢复旧创建质量；回滚恢复当前质量与空间查询。cycle-0077 的真实平面 thicken 不再属于历史占位拒绝夹具；历史代理记录继续拒绝。逐项成功/拒绝/事务证据及真实门禁见 [测试与验收 §1.4](../quality/AxiomKernel_测试与验收方案.md#14-cycle-0077--s3-modeling-门禁与逐项证据)，支持矩阵见 [API §8.1.1](../api/AxiomKernel_详细模块接口清单.md#811-stage-3-五类建模主路径cycle-0077--s3-modeling)。截面律等已有专用阶段名保持原合同。
+
+### cycle-0078 / S3-CONSISTENCY 表示失败与恢复合同
+
+本批没有新增错误码常量或公开签名；owned 表示失败补齐稳定 `Issue.stage` 和关联实体，复用 `AXM-TES-E-0001`（`kTesFailure`）。full/local/shell 转换统一先完成全部面三角化和组装，再发布网格；失败无 value、不分配网格 ID、不遗留部分网格/缓存，禁止以 bbox 或创建参数恢复当前 owned 边界。
+
+| 根因 | status / code | Issue.stage / 实体 | 实际回归边界 |
+|---|---|---|---|
+| 当前面边界不能按支撑三角化（如位移平面错配） | OperationFailed / AXM-TES-E-0001 | rep.tessellation.face；BodyId、ShellId、FaceId | Rep warm/cold/full/local/shell 均拒绝，目标 Face 关联有效，对象/next_id/事务写数/网格及两级缓存计数不增长；编辑 native box 后同样读取当前平面边界，不恢复创建参数 |
+| Stage 3 多面体失去平面支撑，或编辑原生解析体仅剩兼容代理壳 | NotImplemented / AXM-TES-E-0001 | rep.tessellation.support；BodyId、ShellId、FaceId | Rep 明确断言曲面支撑的 status/code/stage；native sphere 编辑断言 TES 拒绝及回滚恢复原网格，不冒称逐 primitive 的 stage 断言覆盖 |
+| owned 组装阶段发现壳/面缺失或空，或建模体缺少当前 owned 边界 | OperationFailed / AXM-TES-E-0001 | rep.tessellation.topology；BodyId，按路径附 ShellId/FaceId | 实现防御合同；本批不声称每个分支均已注入测试。shell 入口的句柄/归属/空壳前置校验仍可返回既有 CORE 错误 |
+| 面网格索引/规模无效或组装为空 | OperationFailed / AXM-TES-E-0001 | rep.tessellation.assembly；BodyId，按路径附 ShellId/FaceId | 同上；主链成功网格索引/连通性已验证 |
+| 无效输入句柄 / tessellation options | InvalidInput / AXM-CORE-E-0001 或 AXM-CORE-E-0002 | 沿用既有 CORE 前置诊断，不新增 TES stage 承诺 | options 失败不改变 next_id、网格及两级缓存计数 |
+
+编辑/删除使 Eval 绑定及下游 dirty；保存点/显式/析构/取消恢复会重新失效已在事务内重算的消费者。移除体在恢复或提交时清理其网格/缓存和体绑定；诊断不回滚，事务 ID 不承诺回收。旧网格是快照，仅当前边界键与正确 source_body 可命中；历史 metadata `bbox_proxy` 显示路径仍保留，不属于 owned 实体 fallback，也不授予质量/实体查询资格。
+
+`stage3_representation_consistency_regression`、`stage3_eval_rollback_consistency_regression`、`stage3_discarded_body_runtime_regression` 及五类 Ops 集成闭环均随调度器完整 CTest **16/16、164.60 s** 通过，详见 [验收 §1.5](../quality/AxiomKernel_测试与验收方案.md#15-cycle-0078--s3-consistency-门禁与逐项证据)。Strict warnings 独立门禁未记录；正式验收条件见当前进度 §5.2.1，Stage 3 保持进行中。

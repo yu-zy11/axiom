@@ -75,6 +75,8 @@ BodyId make_body(std::shared_ptr<detail::KernelState> state, detail::BodyRecord 
     record.analytic_mass_valid = !is_derived && record.rep_kind == RepKind::ExactBRep &&
         (record.kind == detail::BodyKind::Sphere || record.kind == detail::BodyKind::Cylinder ||
          record.kind == detail::BodyKind::Cone || record.kind == detail::BodyKind::Torus);
+    record.primitive_tessellation_valid = record.analytic_mass_valid ||
+        (!is_derived && record.rep_kind == RepKind::ExactBRep && record.kind == detail::BodyKind::Box);
     const bool proxy = record.analytic_mass_valid ||
         (is_derived && !(record.kind == detail::BodyKind::Sweep && record.sweep_polyhedral_mass_valid));
     if (proxy) {

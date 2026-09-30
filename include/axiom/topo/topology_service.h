@@ -427,6 +427,9 @@ public:
     Result<void> delete_body(BodyId body_id);
     Result<void> replace_surface(FaceId face_id, SurfaceId replacement);
     Result<VersionId> commit();
+    /// Restoring edited/deleted topology dirties bound Eval nodes and dependents
+    /// again, including nodes recomputed during the transaction. Runtime meshes
+    /// and bindings of bodies discarded by rollback/commit are removed.
     Result<void> rollback();
     /// 捕获当前事务的拓扑与审计状态，建立可重复回滚的嵌套保存点。
     /// 当前实现为内存全拓扑快照，适合阶段性原子工作流；不会回收已分配对象 ID。

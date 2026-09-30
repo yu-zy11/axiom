@@ -12,6 +12,7 @@
 
 #include "axiom/geo/geometry_services.h"
 #include "axiom/internal/core/diagnostic_helpers.h"
+#include "axiom/internal/core/eval_graph_invalidation.h"
 #include "axiom/internal/core/kernel_state.h"
 #include "axiom/internal/core/topology_materialization.h"
 #include "axiom/internal/math/math_internal_utils.h"

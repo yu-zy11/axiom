@@ -119,7 +119,9 @@
 
 cycle-0074 是升级前检查点。cycle-0075 / S3-QUERY 收敛真实多面体截面/最近位置/距离，repair 后完整 CTest 16/16（148.44 s）；cycle-0076 / S3-MASS 统一当前拓扑与未编辑原生解析质量资格、删除 bbox/来源/创建缓存恢复，完整 CTest 16/16（147.97 s），历史矩阵与证据保留。
 
-当前唯一退出任务 cycle-0077 / S3-MODELING 核验 extrude/revolve/sweep/loft 并补齐真实平面直边 Face thicken；五类公开拓扑/owned 表示/质量/Strict、结构化诊断和活动事务回滚重试已通过调度器完整构建及全量 CTest **16/16、0 失败、153.89 s**。平面 thicken 支持凹形/分离非嵌套孔和有限正厚度，沿支撑法向单侧加厚；曲面/曲边/代理面拒绝。棱柱及共面侧壁 loft 夹具在浮点容差内精确，revolve 仍为采样弦面多面体。当前为 ready_for_acceptance，正式验收须完整门禁、文档检查及调度器提交成功，状态见 [当前进度 §5.2.1](AxiomKernel_当前开发进度.md#521-stage-3-当前退出任务)。日志仍有告警，未记录独立 Strict warnings 门禁。FR-OPS-001 / FR-QUERY-001 和 Stage 3 继续进行中，不自动扩展后续阶段。
+cycle-0077 / S3-MODELING 核验五类真实主路径并补齐平面直边 Face thicken，完整构建及 CTest **16/16、0 失败、153.89 s**，历史矩阵与三条证据保留。thicken 支持凹形/分离非嵌套孔、有限正厚度、沿支撑法向单侧加厚；曲面/曲边/代理面拒绝。棱柱及共面侧壁 loft 夹具在浮点容差内精确，revolve 仍为采样弦面多面体。
+
+当前唯一退出任务 cycle-0078 / S3-CONSISTENCY 打通建模→Strict→截面/最近点/距离/质量→表示/来源/Eval 闭环，补齐体身份/当前边界/source_body 缓存核验、owned 原子失败且禁止 bbox/创建参数 fallback、primitive 编辑资格和恢复、Eval dirty 传播与移除体清理。四个必需回归及保留 Topology 已随调度器独立完整构建和全量 CTest **16/16、0 失败、164.60 s** 通过；[三条逐项证据](../quality/AxiomKernel_测试与验收方案.md#15-cycle-0078--s3-consistency-门禁与逐项证据) 和 [API 一致性合同](../api/AxiomKernel_详细模块接口清单.md#731-stage-3-表示来源与-eval-一致性合同cycle-0078--s3-consistency) 已同步。`stage_outcome=ready_for_acceptance`；正式验收仍须完整门禁、文档检查及调度器提交成功，状态见 [当前进度 §5.2.1](AxiomKernel_当前开发进度.md#521-stage-3-当前退出任务)。日志仍有告警，未记录独立 Strict warnings 门禁；Eval recompute 仅管理图，旧网格是快照，metadata 显示 bbox 代理保留且不取得物理查询资格。FR-OPS-001 / FR-QUERY-001 和 Stage 3 继续进行中，不自动扩展后续阶段。
 
 目标：
 
@@ -139,7 +141,8 @@ cycle-0074 是升级前检查点。cycle-0075 / S3-QUERY 收敛真实多面体�
 
 - cycle-0075 已整理 [S3-QUERY 统一支持矩阵](../api/AxiomKernel_详细模块接口清单.md#612-stage-3-截面最近点与距离支持矩阵cycle-0075--s3-query) 和 [四条验收证据](../quality/AxiomKernel_测试与验收方案.md#12-cycle-0075--s3-query-门禁与逐项证据)；后续声明新支持路径时须继续维护
 - cycle-0076 已同步 [S3-MASS 质量矩阵](../api/AxiomKernel_详细模块接口清单.md#613-stage-3-质量属性支持矩阵cycle-0076--s3-mass) 与 [三条验收证据](../quality/AxiomKernel_测试与验收方案.md#13-cycle-0076--s3-mass-门禁与逐项证据)；旧布尔/Modified、bbox 及 Sweep 创建缓存质量恢复已删除。仅未编辑原生 sphere/cylinder/cone/torus 具解析质量资格，代理壳不是物理边界，metadata/mesh 派生不继承；仍不扩展通用解析/曲边闭壳积分
-- cycle-0077 [五类真实建模主路径](../api/AxiomKernel_详细模块接口清单.md#811-stage-3-五类建模主路径cycle-0077--s3-modeling) 与 [三条验收证据](../quality/AxiomKernel_测试与验收方案.md#14-cycle-0077--s3-modeling-门禁与逐项证据) 已同步；真实平面 Face thicken 缺口已补齐，质量/查询矩阵不再将其列为占位。topology/rep/provenance/质量/查询/缓存/Eval/回滚回归通过；剩余为调度器正式验收及阶段整体退出确认，曲面/曲边加厚等变体不构成本批继续扩展条件
+- cycle-0077 [五类真实建模主路径](../api/AxiomKernel_详细模块接口清单.md#811-stage-3-五类建模主路径cycle-0077--s3-modeling) 与 [三条验收证据](../quality/AxiomKernel_测试与验收方案.md#14-cycle-0077--s3-modeling-门禁与逐项证据) 已同步；真实平面 Face thicken 缺口已补齐，质量/查询矩阵不再将其列为占位。五类路径/质量/查询回归通过；本批进一步跨模块一致性证据见 cycle-0078，不重复扩展建模变体，曲面/曲边加厚等变体不构成本批继续扩展条件
+- cycle-0078 / S3-CONSISTENCY 三条验收的代码全量门禁及文档同步已完成：五类闭环独立参考、有效来源/实体/Eval、编辑/失败/提交/回滚及运行时清理；剩余为调度器完整门禁收口、文档检查及提交成功后的正式验收与 Stage 3 整体退出确认。历史网格缓存可保留但仅当前边界键且正确 owner 命中，不承诺 ID 回收或 Eval 自动算法重算
 - 维持全量 `ctest` 绿并继续压缩 `AXM_ENABLE_STRICT_WARNINGS=ON` 下的历史告警
 
 ## 4.5 `Stage 4` 布尔与验证器第一代
@@ -288,7 +291,7 @@ cycle-0074 是升级前检查点。cycle-0075 / S3-QUERY 收敛真实多面体�
 
 ## 7. 当前立即执行顺序
 
-以[近期迭代与 Backlog](AxiomKernel_近期迭代与Backlog.md)为选取顺序真源：实际回归阻断优先；本批唯一退出任务为 S3-MODELING，五类主路径/质量/查询矩阵、三条逐项证据及文档已同步，cycle-0077 全量门禁通过，正式任务状态只在进度 §5.2.1 维护。不得依据历史 remaining 或需求权重自行追加与退出任务无关的功能。
+以[近期迭代与 Backlog](AxiomKernel_近期迭代与Backlog.md)为选取顺序真源：实际回归阻断优先；本批唯一退出任务为 cycle-0078 / S3-CONSISTENCY，独立完整构建及全量 CTest **16/16、0 失败、164.60 s** 已通过，一致性合同/样例、五类主路径/质量/查询矩阵及三条逐项证据已同步，`stage_outcome=ready_for_acceptance`。S3-MODELING 等保留为历史证据；正式任务状态只在 [当前进度 §5.2.1](AxiomKernel_当前开发进度.md#521-stage-3-当前退出任务) 维护，独立 Strict warnings 门禁未记录，调度器仍须收口完整门禁、文档检查及提交成功。不得依据历史 remaining 或需求权重自行追加与退出任务无关的功能，Stage 3 整体退出按 §4.4 确认。
 
 不重复立项已经完成的骨架、公共存储和基础诊断建设。Geo/Topo/Math/Heal 本轮优先服务上述链路的明确缺口；工业布尔仍是 Stage 4，标准交换是 Stage 5。专题计划中的优先级是专题内部顺序。
 

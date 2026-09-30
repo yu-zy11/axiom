@@ -658,7 +658,9 @@ PCurve 必须为至少两点的折线，按 coedge 方向连续闭合，各点�
 
 详细查询每次消费当前拓扑，只增加诊断与 Topo 只读审计，不写模型/网格/交线存储、曲线/曲面求值缓存、体/面三角化缓存、Eval 失效/重算或事务写计数。编辑失败不得恢复旧拓扑质量或 bbox fallback；rollback 后截面与质量恢复。内部零壳分支约定截面成功空、距离 `DegenerateGeometry / AXM-QUERY-E-0001 / query.distance.empty_gate`，但公共 `create_body({})` 返回 `OperationFailed / AXM-TX-E-0001`，本批仅验证创建拒绝及写计数不变，未构造或验收零壳查询分支。
 
-调度器修复后完整构建及 CTest **16/16 通过、148.44 s**；Query/Eval **0.90 s**、Ops/Heal **121.81 s**、representation/IO **9.87 s**。逐项独立参考与四条验收证据见 [测试与验收方案 §1.2](../quality/AxiomKernel_测试与验收方案.md#12-cycle-0075--s3-query-门禁与逐项证据)，稳定失败码见 [错误码字典](../diagnostics/AxiomKernel_错误码与诊断码字典.md)。该节保留 S3-QUERY 历史代码门禁与支持范围；当前唯一任务为 cycle-0077 / S3-MODELING（§8.1.1），正式状态见当前进度 §5.2.1，不由历史日志推断文档检查/提交成功。Stage 3 / FR-QUERY-001 保持进行中。
+调度器修复后完整构建及 CTest **16/16 通过、148.44 s**；Query/Eval **0.90 s**、Ops/Heal **121.81 s**、representation/IO **9.87 s**。逐项独立参考与四条验收证据见 [测试与验收方案 §1.2](../quality/AxiomKernel_测试与验收方案.md#12-cycle-0075--s3-query-门禁与逐项证据)，稳定失败码见 [错误码字典](../diagnostics/AxiomKernel_错误码与诊断码字典.md)。该节保留 S3-QUERY 历史代码门禁与支持范围；当前唯一任务为 cycle-0078 / S3-CONSISTENCY（§7.3.1），正式状态见当前进度 §5.2.1，不由历史日志推断文档检查/提交成功。Stage 3 / FR-QUERY-001 保持进行中。
+
+本矩阵由 cycle-0078 / S3-CONSISTENCY 继续回归锁定：五类代表建模结果的截面/最近点/距离/质量、owned 表示、有效来源与 Eval 绑定闭环通过；成功提交、失败与回滚的一致性见 [§7.3.1](#731-stage-3-表示来源与-eval-一致性合同cycle-0078--s3-consistency) 和 [验收 §1.5](../quality/AxiomKernel_测试与验收方案.md#15-cycle-0078--s3-consistency-门禁与逐项证据)。全量 16/16、164.60 s；支持体类不扩大，详细查询只读，拓扑修改/恢复自身会传播 Eval dirty。
 
 ### 6.1.3 Stage 3 质量属性支持矩阵（cycle-0076 / S3-MASS）
 
@@ -680,7 +682,9 @@ PCurve 必须为至少两点的折线，按 coedge 方向连续闭合，各点�
 
 所有失败无 `value`，不返回部分体积/面积/重心/惯性。稳定阶段为 `query.mass_properties.support_gate/preflight/empty_gate/numeric`；原生解析溢出/惯性下溢、非有限结果或非正惯性对角项为 `NumericalInstability / AXM-QUERY-E-0003 / numeric`。无效/删除句柄为 `InvalidInput / AXM-CORE-E-0001 / preflight`；其余拓扑根因保留错误码。公共 API 无零壳体夹具，删除最后壳会删除 owner Body，回归核对的是 InvalidInput/preflight，内部 empty_gate 不声称已覆盖。
 
-独立参考、采样误差和三条 `stage_evidence` 见 [测试与验收 §1.3](../quality/AxiomKernel_测试与验收方案.md#13-cycle-0076--s3-mass-门禁与逐项证据)。调度器完整构建成功，全量 CTest **16/16、0 失败、147.97 s**；此为 S3-MASS 历史代码门禁；当前唯一任务 S3-MODELING 的证据见 §8.1.1 与测试与验收 §1.4，正式状态见当前进度 §5.2.1。Stage 3 / FR-QUERY-001 继续进行中。
+独立参考、采样误差和三条 `stage_evidence` 见 [测试与验收 §1.3](../quality/AxiomKernel_测试与验收方案.md#13-cycle-0076--s3-mass-门禁与逐项证据)。调度器完整构建成功，全量 CTest **16/16、0 失败、147.97 s**；此为 S3-MASS 历史代码门禁；当前唯一任务 S3-CONSISTENCY 的证据见 §7.3.1 与测试与验收 §1.5，正式状态见当前进度 §5.2.1。Stage 3 / FR-QUERY-001 继续进行中。
+
+本矩阵由 cycle-0078 / S3-CONSISTENCY 继续回归锁定：五类代表建模结果的截面/最近点/距离/质量、owned 表示、有效来源与 Eval 绑定闭环通过；成功提交、失败与回滚的一致性见 [§7.3.1](#731-stage-3-表示来源与-eval-一致性合同cycle-0078--s3-consistency) 和 [验收 §1.5](../quality/AxiomKernel_测试与验收方案.md#15-cycle-0078--s3-consistency-门禁与逐项证据)。全量 16/16、164.60 s；支持体类不扩大，详细查询只读，拓扑修改/恢复自身会传播 Eval dirty。
 
 ### 6.2 拓扑事务接口
 
@@ -880,6 +884,8 @@ struct RoundTripReport {
 class RepresentationConversionService {
 public:
   Result<MeshId> brep_to_mesh(BodyId, const TessellationOptions&);
+  Result<MeshId> brep_to_mesh_local(BodyId, std::span<const FaceId> dirty_faces, const TessellationOptions&);
+  Result<MeshId> brep_to_mesh_shell(BodyId, ShellId, const TessellationOptions&);
   /// 成功后将 `MeshRecord::source_body` 设为新建 `MeshRep` 体，便于 `brep_to_mesh` 嵌入返回同一网格。
   Result<BodyId> mesh_to_brep(MeshId);
   Result<MeshId> implicit_to_mesh(ImplicitFieldId, const TessellationOptions&);
@@ -890,6 +896,28 @@ public:
   Result<void> export_conversion_error_budget_json(const TessellationOptions&, std::string_view path) const;
 };
 ```
+
+### 7.3.1 Stage 3 表示、来源与 Eval 一致性合同（cycle-0078 / S3-CONSISTENCY）
+
+无公开签名或错误码常量新增；`brep_to_mesh` 和事务 `rollback` 的公开合同注释已补齐。本批统一的是 Stage 3 已声明支持主链的当前实体语义，质量/查询范围沿用 §6.1.2～6.1.3，五类建模边界沿用 §8.1.1。
+
+| 路径 / 状态 | 当前合同 | 回归依据 |
+|---|---|---|
+| 体级 / 面级缓存 | 包含 BodyId、owned 壳/面/环/共边/边/顶点、支撑及 PCurve/裁剪关联与 options；同时核对缓存网格存在且 source_body 等于目标体。相同 bbox/创建参数或重复几何不共享身份；mesh_to_brep 重绑定后原体必须重新转换 | `stage3_representation_consistency_regression` 不同几何同 bbox 与重复体 MeshId 区分、OBJ 独立质心、重绑定缓存拒绝 |
+| full / local / shell owned 转换 | 全部面片三角化、索引检查、组装/焊接完成后才发布面网格和结果网格。任一面失败无 value，不分配 MeshId，不遗留部分网格/两级缓存，不回退 bbox 或创建参数；局部入口强制重算 dirty_faces，其余仅复用符合当前边界且 owner 正确的缓存 | Rep warm/cold/full/local/shell 位移支撑失败，计数/next_id/事务写数保持；Ops 五类三入口网格有效 |
+| 平面直边 owned 面 | 检查当前完整环、Line/LineSegment 边和支撑平面一致性，以凹多边形/带孔区域三角化替代凸面 fan 假设；输出 bbox 来自实际网格顶点 | Rep 凹 L V=10/A=34、带孔 V=24/A=72 的 OBJ 三角积分；不扩展曲边/曲面实体查询 |
+| 原生 primitive 编辑资格 | 创建参数三角化只适用于未编辑原生 primitive；成功面替换、PCurve 绑定及面/壳删除撤销资格，保存点/回滚恢复。编辑 box 使用当前有效平面边界；编辑 sphere/cylinder/cone/torus 的兼容代理壳不能重建原生曲面网格 | Rep native box/sphere 位移支撑拒绝，回滚恢复原 MeshId；其余解析体遵循同一资格门禁，不宣称本批逐体穷举 |
+| provenance / 实体关联 | 新 owned 面/壳与来源实体区分；面 owner、支撑、source_bodies/source_shells/source_faces 和逐面来源可公开核对；thicken 追溯输入 Face 及其已有 owner。来源不能替代物理边界或继承解析资格 | `test_stage3_consistency_chain` 五类来源有效、thicken 精确来源、距离 FaceId/ShellId 属于对应体；SDK 共享源壳派生体清理不改变源 owned 面 |
+| 编辑 / 恢复 / Eval | 成功换面、PCurve 改绑及面/壳/体删除使绑定节点与下游 dirty；非法修改不写入且不脏化。保存点、显式、析构或取消恢复会再次使受影响消费者 dirty，即使事务内已经 recompute；成功提交等价支撑保留质量/来源并使用新当前网格，后续失败回滚恢复该已提交状态 | `stage3_eval_rollback_consistency_regression` bound/downstream dirty、unrelated clean，提交/失败/恢复和独立查询参考 |
+| 移除体的运行时清理 | 回滚/保存点/取消恢复后及提交时，移除已不存在体关联的运行时网格、体/面缓存和 Eval 体绑定，传播消费者失效；保留共享源壳及源体记录 | `stage3_discarded_body_runtime_regression` 网格/缓存回基线、移除体无绑定、源网格不变、Core/Eval 映射不变量 |
+
+失败复用 `AXM-TES-E-0001`：`rep.tessellation.face`（当前面不可三角化）、`.support`（NotImplemented，不支持当前边界）、`.topology`（owned 壳/面缺失）、`.assembly`（无效索引/规模或空组装）；实体关联包含 BodyId，并按路径附 ShellId/FaceId。无效句柄/options 保留既有 CORE 前置错误，不能要求所有失败都使用 TES；具体对照见错误码字典。
+
+旧 MeshId 是不可变边界快照，不代表编辑后的当前实体；存活体可保留历史边界缓存，恢复原边界且 source_body 未重绑定时可重新命中原 MeshId。移除体对应网格则不可继续使用。成功转换会发布网格、填缓存并更新缓存统计，但不自动 invalidate/recompute Eval；详细查询仍只读。Eval recompute 管理图状态与计数，不执行建模、质量或表示算法；不承诺事务对象 ID 回收。无新写入的重复保存点回滚不要求再次 dirty，非法修改也不脏化消费者；这两项与实际恢复已编辑边界时的重新失效分开断言。
+
+旧 metadata-only 体仍可输出显式 `bbox_proxy` 显示网格，此兼容显示路径不证明 owned BRep、物理质量或实体空间查询。`RepresentationService::classify_point/distance_to_body` 仍为 bbox 辅助语义，实体查询使用 QueryService / TopologyQueryService；本批一致性不能扩大到这些旧辅助入口、通用解析体曲面壳或 metadata 派生体。
+
+完整构建及全量 CTest **16/16、0 失败、164.60 s**，四个必需回归通过。按三条要求排列的独立参考与限制见 [验收 §1.5](../quality/AxiomKernel_测试与验收方案.md#15-cycle-0078--s3-consistency-门禁与逐项证据)；`stage_outcome=ready_for_acceptance`，正式验收条件及 Strict warnings 未记录边界见 [当前进度 §5.2.1](../plan/AxiomKernel_当前开发进度.md#521-stage-3-当前退出任务)。
 
 ## 8. `OpsCore` 接口清单
 
@@ -1002,7 +1030,7 @@ public:
 
 ### 8.1.1 Stage 3 五类建模主路径（cycle-0077 / S3-MODELING）
 
-公开签名不变，未新增错误码。本批核验既有四类路径，并以真实平面直边 Face 加厚补齐第五类；下表只声明可证明子集。
+此节保留 cycle-0077 历史五类路径证据；当前唯一任务为 cycle-0078 / S3-CONSISTENCY（§7.3.1）。公开签名不变，未新增错误码。cycle-0077 核验既有四类路径，并以真实平面直边 Face 加厚补齐第五类；下表只声明可证明子集。
 
 | 入口 / 主路径 | 实际拓扑与质量语义 | 本批回归及支持边界 |
 |---|---|---|
@@ -1021,6 +1049,8 @@ public:
 五条主路径均有 `validate_all(Strict)==Ok` 回归。输入与物化失败阶段为 `extrude/revolve/sweep/loft.input_gate` 或 `.materialization`，直线 sweep 委托 extrude 的诊断仍映射为 `sweep.*`。thicken 分为 `input_gate/topology_gate/support_gate/materialization`，status/code 对照见错误码字典。本批失败不改变模型/几何数、next_id、索引、缓存、Eval 或活动事务写计数，诊断可增加；回滚删除临时对象后可重试。结果被换成曲面后质量与空间查询立即拒绝且无部分值，不恢复创建质量；回滚恢复质量/截面/最近边界与 provenance。
 
 调度器完整构建及全量 CTest **16/16、0 失败、153.89 s**；Ops/Heal **126.52 s**、Topology **0.13 s**、Query/Eval **0.95 s**。逐项证据见 [测试与验收 §1.4](../quality/AxiomKernel_测试与验收方案.md#14-cycle-0077--s3-modeling-门禁与逐项证据)。日志未记录独立 Strict warnings 门禁或文档检查/提交成功；Strict 拓扑断言通过不等于无编译告警。`stage_outcome=ready_for_acceptance`，正式验收以调度器完整门禁、文档检查及提交成功为条件；Stage 3 / FR-OPS-001 / FR-QUERY-001 保持进行中。
+
+cycle-0078 / S3-CONSISTENCY 在上述五类支持范围内补齐集成闭环：`test_stage3_consistency_chain` 逐体核对 Strict、当前拓扑质量、独立截面/质心/最近点/距离及双侧见证、有效来源/Eval 绑定和 full/local/shell owned 网格；`stage3_representation_consistency_regression` 独立积分 OBJ 的实际三角形。完整 CTest **16/16、0 失败、164.60 s**，三条逐项证据见 [验收 §1.5](../quality/AxiomKernel_测试与验收方案.md#15-cycle-0078--s3-consistency-门禁与逐项证据)，编辑/失败/回滚合同见 [§7.3.1](#731-stage-3-表示来源与-eval-一致性合同cycle-0078--s3-consistency)。支持矩阵不扩大，历史 S3-MODELING 不再列为当前唯一任务。
 
 ### 8.2 布尔操作接口
 
@@ -1185,6 +1215,8 @@ public:
   Result<EvalGraphTelemetry> telemetry() const;
 };
 ```
+
+cycle-0078 明确拓扑成功编辑、删除及回滚恢复对体绑定和下游节点传播失效；事务内重算后恢复也再次 dirty，移除体清理绑定而不删除消费者节点。只读查询/表示转换不改变 dirty/recompute_count；recompute 只管理图，不自动执行质量/表示算法。完整回归见 §7.3.1 与验收 §1.5。
 
 ### 10.2 缓存接口
 

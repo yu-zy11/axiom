@@ -240,6 +240,9 @@ struct BodyRecord {
     /// Analytic primitive mass is valid only until its owned topology is edited;
     /// body snapshots restore this certificate on rollback/savepoint restoration.
     bool analytic_mass_valid {false};
+    /// Creation parameters may drive primitive tessellation only while the owned
+    /// boundary is unedited. Restored with the same body undo record as mass.
+    bool primitive_tessellation_valid {false};
 };
 
 struct MeshRecord {

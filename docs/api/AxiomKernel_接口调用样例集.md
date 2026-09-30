@@ -888,12 +888,90 @@ tess.compute_normals = true;
 auto mesh = kernel.convert().brep_to_mesh(body_id, tess);
 ```
 
-## 12.2 局部修改后重新取网格
+## 12.2 当前 owned 边界、提交与失败回滚（cycle-0078 / S3-CONSISTENCY）
+
+以下片段接续一个已成功建模的平面直边实体 `body_id` 和 §12.1 的 `tess`；完整独立闭环夹具见 §12.3。所有调用先检查 Result 再使用句柄。等价 Plane 替换仍改变支撑身份，提交后必须使用新当前网格；之后失败回滚恢复的是已提交支撑和网格。
 
 ```cpp
-auto updated = kernel.modify().offset_body(body_id, 1.0, tol);
-auto mesh = kernel.convert().brep_to_mesh(updated.value->output, tess);
+auto& topo = kernel.topology().query();
+auto& eval = kernel.eval_graph();
+auto faces = topo.faces_of_body(body_id);
+auto baseline = kernel.convert().brep_to_mesh(body_id, tess);
+if (!faces.value || faces.value->empty() || !baseline.value) return;
+const auto face = faces.value->front();
+auto support = topo.surface_of_face(face);
+if (!support.value) return;
+auto sample = kernel.surface_service().eval(*support.value, 0, 0, 1);
+if (!sample.value) return;
+auto equivalent = kernel.surfaces().make_plane(sample.value->point, sample.value->normal);
+auto bound = eval.register_node(NodeKind::Analysis, "body:" + std::to_string(body_id.value));
+auto consumer = eval.register_node(NodeKind::Analysis, "consistency:query_rep");
+if (!equivalent.value || !bound.value || !consumer.value) return;
+if (eval.add_dependency(*consumer.value, *bound.value).status != StatusCode::Ok) return;
+
+MeshId committed_mesh{};
+{
+    auto txn = kernel.topology().begin_transaction();
+    if (txn.replace_surface(face, *equivalent.value).status != StatusCode::Ok) return;
+    const std::array dirty_faces{face};
+    auto local = kernel.convert().brep_to_mesh_local(body_id, dirty_faces, tess);
+    auto full = kernel.convert().brep_to_mesh(body_id, tess);
+    if (!local.value || !full.value || *full.value == *baseline.value) return;
+    if (kernel.validate().validate_all(body_id, ValidationMode::Strict).status != StatusCode::Ok) return;
+    if (txn.commit().status != StatusCode::Ok) return;
+    committed_mesh = *full.value;
+}
+if (eval.recompute(*consumer.value).status != StatusCode::Ok) return;
+
+auto displaced = kernel.surfaces().make_plane({0,0,100}, {0,0,1});
+if (!displaced.value) return;
+auto txn = kernel.topology().begin_transaction();
+if (txn.replace_surface(face, *displaced.value).status != StatusCode::Ok) return;
+auto rejected = kernel.convert().brep_to_mesh(body_id, tess);
+if (rejected.status == StatusCode::Ok || rejected.value) return;
+auto diagnostic = kernel.diagnostics().get(rejected.diagnostic_id);
+// 当前支撑错配：AXM-TES-E-0001 / rep.tessellation.face；
+// 日志或 UI 读取 diagnostic.value->issues 中的 stage、related_entities。
+if (!diagnostic.value) return;
+if (eval.recompute(*consumer.value).status != StatusCode::Ok) return;
+if (txn.rollback().status != StatusCode::Ok) return;
+auto restored = kernel.convert().brep_to_mesh(body_id, tess);
+auto restored_support = topo.surface_of_face(face);
+auto dirty_after_restore = eval.is_invalid(*consumer.value);
+if (!restored.value || *restored.value != committed_mesh ||
+    restored_support.value != equivalent.value ||
+    !dirty_after_restore.value || !*dirty_after_restore.value) return;
 ```
+
+旧 MeshId 是不可变快照；存活体可以保留历史缓存，只有当前边界键且 `source_body` 正确才命中。`mesh_to_brep` 会把网格 source_body 重绑定到新 MeshRep 体，原体须重新生成网格。owned 失败不发布部分网格/缓存，也不回退 bbox/创建参数；编辑 native primitive 撤销创建参数资格，回滚恢复。Eval recompute 仅管理图状态，实际查询/表示仍需显式调用；恢复后消费者再次 dirty，不保证自动重算。移除体在恢复或提交后清理关联网格/缓存/体绑定，源体及共享源壳保留。
+
+## 12.3 基础零件建模到查询与表示闭环
+
+```cpp
+ProfileRef profile{"consistency_rectangle",
+    {{0,0,0}, {2,0,0}, {2,3,0}, {0,3,0}}};
+auto body = kernel.sweeps().extrude(profile, {0,0,1}, 4);
+auto remote = kernel.primitives().box({50,50,50}, 1, 1, 1);
+if (!body.value || !remote.value) return;
+const auto body_id = *body.value;
+if (kernel.validate().validate_all(body_id, ValidationMode::Strict).status != StatusCode::Ok) return;
+auto mass = kernel.query().mass_properties(body_id);
+auto boundary_mass = kernel.topology().query().body_mass_properties(body_id);
+auto section = kernel.query().section_detailed(body_id, {{0,0,2}, {0,0,1}});
+auto nearest = kernel.query().closest_point(body_id, {60,60,2});
+auto pair = kernel.topology().query().closest_points(body_id, *remote.value);
+auto sources = kernel.topology().query().source_faces_of_body(body_id);
+auto mesh = kernel.convert().brep_to_mesh(body_id, TessellationOptions{});
+if (!mass.value || !boundary_mass.value || !section.value || !nearest.value ||
+    !nearest.value->nearest_boundary || !pair.value || !sources.value || !mesh.value) return;
+// 独立参考：V=24，A=52，C=(1,1.5,2)，水平截面积=6；
+// 最近边界=(2,3,2)，远端盒双侧见证=(2,3,4)/(50,50,50)，
+// 体间距离=sqrt(48²+47²+46²)，外点到最近边界距离=sqrt(58²+57²)。
+// 来源句柄可通过 has_face 核对，见证 FaceId/ShellId 应属于各自实体；
+// inspect_mesh 可核对三角形/连通分量及非法索引，不能只比较 bbox。
+```
+
+五类路径及凹形/孔 OBJ 三角形独立积分均已随调度器全量 **16/16、164.60 s** 执行通过；上述片段是同一公开调用合同的示例，本轮未单独编译片段。revolve 查询对应采样弦面、thicken 为真实平面 Face 单侧正厚度；原生解析体实体截面/距离仍拒绝，metadata 显示代理和 Rep bbox 辅助分类/距离不能替代此闭环。逐项文件/断言和参考见 [验收 §1.5](../quality/AxiomKernel_测试与验收方案.md#15-cycle-0078--s3-consistency-门禁与逐项证据)，API 合同见 [§7.3.1](AxiomKernel_详细模块接口清单.md#731-stage-3-表示来源与-eval-一致性合同cycle-0078--s3-consistency)。
 
 ## 13. 事务与版本样例
 

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -41,9 +42,94 @@ bool topology_write_breakdown_equal(const axiom::TopologyCommitWriteBreakdown& a
            a.coedge_pcurve_clears == b.coedge_pcurve_clears;
 }
 
+bool stage3_discarded_body_runtime_regression() {
+    axiom::Kernel kernel;
+    auto& topo=kernel.topology().query();
+    auto& eval=kernel.eval_graph();
+    const axiom::ProfileRef profile{"runtime_consistency",{{0,0,0},{2,0,0},{2,3,0},{0,3,0}}};
+    const auto source=kernel.sweeps().extrude(profile,{0,0,1},4);
+    if (!source.value) return false;
+    const auto source_mesh=kernel.convert().brep_to_mesh(*source.value,{});
+    const auto shells=topo.shells_of_body(*source.value);
+    const auto faces=topo.faces_of_body(*source.value);
+    const auto baseline=kernel.runtime_store_counts();
+    if (!source_mesh.value || !shells.value || shells.value->empty() || !faces.value || !baseline.value) return false;
+    for (int exit_path=0; exit_path<3; ++exit_path) {
+        axiom::TopologyCancellationSource cancellation;
+        auto txn=kernel.topology().begin_transaction(cancellation.token());
+        const auto savepoint=txn.create_savepoint();
+        const auto created=txn.create_body(*shells.value);
+        if (!savepoint.value || !created.value) return false;
+        const auto sources=topo.source_bodies_of_body(*created.value);
+        const auto mesh=kernel.convert().brep_to_mesh(*created.value,{});
+        const auto node=eval.register_node(axiom::NodeKind::Analysis,"body:"+std::to_string(created.value->value));
+        const auto consumer=eval.register_node(axiom::NodeKind::Analysis,"runtime:discarded_consumer");
+        if (!sources.value || sources.value->empty() || sources.value->front()!=*source.value ||
+            !mesh.value || !node.value || !consumer.value ||
+            eval.add_dependency(*consumer.value,*node.value).status!=axiom::StatusCode::Ok ||
+            eval.recompute(*consumer.value).status!=axiom::StatusCode::Ok) return false;
+        if (exit_path==0) {
+            if (txn.rollback_to_savepoint(*savepoint.value).status!=axiom::StatusCode::Ok ||
+                txn.rollback().status!=axiom::StatusCode::Ok) return false;
+        } else if (exit_path==1) {
+            if (txn.rollback().status!=axiom::StatusCode::Ok) return false;
+        } else {
+            if (!cancellation.request_cancellation() || txn.poll_cancellation().status!=axiom::StatusCode::OperationFailed) return false;
+        }
+        const auto body_exists=topo.has_body(*created.value);
+        const auto bindings=eval.body_binding_bodies();
+        const auto after=kernel.runtime_store_counts();
+        const auto maps=kernel.eval_graph_store_maps_consistent();
+        const auto invariants=kernel.core_runtime_invariants_hold();
+        if (!body_exists.value || *body_exists.value || kernel.convert().inspect_mesh(*mesh.value).value ||
+            !bindings.value || std::find(bindings.value->begin(),bindings.value->end(),*created.value)!=bindings.value->end() ||
+            eval.is_invalid(*node.value).value!=std::optional<bool>{true} ||
+            eval.is_invalid(*consumer.value).value!=std::optional<bool>{true} ||
+            !after.value || after.value->mesh_records!=baseline.value->mesh_records ||
+            after.value->tessellation_cache_entries!=baseline.value->tessellation_cache_entries ||
+            after.value->face_tessellation_cache_entries!=baseline.value->face_tessellation_cache_entries ||
+            !maps.value || !*maps.value || !invariants.value || !*invariants.value ||
+            kernel.convert().brep_to_mesh(*source.value,{}).value!=source_mesh.value ||
+            topo.faces_of_body(*source.value).value!=faces.value ||
+            kernel.validate().validate_all(*source.value,axiom::ValidationMode::Strict).status!=axiom::StatusCode::Ok) return false;
+    }
+    // Permanent deletion drops runtime associations at commit, while the shared
+    // source shell and its provenance remain reachable and valid.
+    axiom::BodyId committed_body{};
+    {
+        auto txn=kernel.topology().begin_transaction();
+        const auto created=txn.create_body(*shells.value);
+        if (!created.value || txn.commit().status!=axiom::StatusCode::Ok) return false;
+        committed_body=*created.value;
+    }
+    const auto mesh=kernel.convert().brep_to_mesh(committed_body,{});
+    const auto node=eval.register_node(axiom::NodeKind::Analysis,"body:"+std::to_string(committed_body.value));
+    if (!mesh.value || !node.value) return false;
+    {
+        auto txn=kernel.topology().begin_transaction();
+        if (txn.delete_body(committed_body).status!=axiom::StatusCode::Ok ||
+            txn.commit().status!=axiom::StatusCode::Ok) return false;
+    }
+    const auto remaining=eval.body_binding_bodies();
+    const auto stores=kernel.runtime_store_counts();
+    const auto metrics=kernel.eval_graph_metrics();
+    return remaining.value && std::find(remaining.value->begin(),remaining.value->end(),committed_body)==remaining.value->end() &&
+        !kernel.convert().inspect_mesh(*mesh.value).value && stores.value && metrics.value &&
+        stores.value->mesh_records==baseline.value->mesh_records &&
+        stores.value->tessellation_cache_entries==baseline.value->tessellation_cache_entries &&
+        stores.value->face_tessellation_cache_entries==baseline.value->face_tessellation_cache_entries &&
+        metrics.value->invalidation_bridge.for_body_entries>0 &&
+        metrics.value->invalidation_bridge.downstream_invalidation_steps>0 &&
+        kernel.core_runtime_invariants_hold().value==std::optional<bool>{true};
+}
+
 }  // namespace
 
 int main() {
+    if (!stage3_discarded_body_runtime_regression()) {
+        std::cerr << "Stage 3 discarded-body runtime consistency regression failed\n";
+        return 1;
+    }
     axiom::Kernel kernel;
     if (kernel.set_enable_diagnostics(true).status != axiom::StatusCode::Ok) {
         std::cerr << "failed to enable diagnostics\n";

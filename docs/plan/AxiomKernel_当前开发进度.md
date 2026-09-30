@@ -1,18 +1,24 @@
 # AxiomKernel 当前开发进度
 
-> **cycle-0077 / S3-MODELING（代码全量门禁通过，ready_for_acceptance）**：核验既有 extrude/revolve/sweep/loft 主路径，补齐真实平面直边 Face thicken，读取当前定向外/内环与裁剪边、沿单位支撑法向单侧生成独立 owned 三角闭壳。支持矩形/凹形/分离非嵌套孔、平移倾斜、独立环绕向/正反法向及反向裁剪共边；曲面/曲边/代理面拒绝，失败无 bbox 或占位回退。公开签名不变、未新增错误码。五类公开拓扑/表示/全质量/Strict、诊断四阶段、活动事务不污染、编辑拒绝旧质量与回滚重试回归已通过调度器实际 CTest。
+> **cycle-0078 / S3-CONSISTENCY（代码全量门禁通过，ready_for_acceptance）**：唯一退出任务为基础零件建模→验证→截面/距离/质量→表示/来源/Eval 一致性。缓存包含体身份与当前 owned 边界并核对 source_body；full/local/shell 面片完整三角化和组装后原子发布，owned 失败不分配网格 ID、不遗留部分缓存，不回退 bbox/创建参数。平面凹形/孔面按真实区域三角化；native primitive 编辑撤销创建参数资格，回滚恢复。面/PCurve/面壳体编辑与恢复传播 Eval dirty，移除体清理网格/缓存/体绑定，保留源体及共享壳。无公开签名或错误码常量新增，仅补 API 合同注释。
 
-> **实际门禁**：[cycle-0077-gates.log](../../.axiom-agent/logs/cycle-0077-gates.log) 记录一轮独立配置/完整构建（测试/示例开启、并发 4）成功，全量 CTest **16/16、0 失败、153.89 s**；必需 Ops/Heal **126.52 s**、Topology **0.13 s**，关联 Query/Eval **0.95 s**、representation/IO **9.79 s**、性能基线 **1.60 s**。无 repair 报告；开发阶段“尚未执行”已由实际结果取代。仍有 BoundaryEdge/Issue 初始化与未使用参数告警；日志未记录独立 Strict warnings 门禁、文档检查或提交成功。Strict 拓扑断言通过不等于无编译告警。本轮只同步 docs Markdown，未重建测试、提交/推送或写自动台账/`.axiom-agent/`。
+> **cycle-0078 实际门禁**：[日志](../../.axiom-agent/logs/cycle-0078-gates.log) 记录一轮独立配置（测试/示例开启）、并发 4 完整构建成功，CTest **16/16、0 失败、164.60 s**；四个必需回归 Ops/Heal **137.40 s**、Query/Eval **0.95 s**、representation/IO **9.44 s**、runtime invariant **0.02 s**，保留 Topology **0.23 s**、性能 **1.74 s**。开发报告“未执行”已由实际结果取代，无 repair；仍有初始化/未使用参数告警，未记录独立 Strict warnings、调度器文档检查或提交成功。本轮仅编辑 docs Markdown，未重建测试、提交/推送或写自动台账/`.axiom-agent/`。
 
-> **状态与证据边界**：当前唯一任务 `stage_task_id=S3-MODELING`、`stage_outcome=ready_for_acceptance`，按三条验收要求排列的 [stage_evidence](../quality/AxiomKernel_测试与验收方案.md#14-cycle-0077--s3-modeling-门禁与逐项证据)、[五类主路径矩阵](../api/AxiomKernel_详细模块接口清单.md#811-stage-3-五类建模主路径cycle-0077--s3-modeling) 及质量/查询矩阵已同步。真实平面 thicken 已补齐主路径缺口，历史代理记录仍拒绝；棱柱及共面侧壁 loft 夹具在浮点容差内精确，revolve 为采样弦面多面体。正式已验收仅在调度器完整门禁、文档检查及提交成功后记录；FR-OPS-001 / FR-QUERY-001 与 Stage 3 仍进行中。通用解析/曲边闭壳积分、相交多壳、全局嵌入证明与后续阶段未扩展，内部零壳查询未声称验收。
+> **当前状态与边界**：`stage_task_id=S3-CONSISTENCY`、`stage_outcome=ready_for_acceptance`，三条 [stage_evidence](../quality/AxiomKernel_测试与验收方案.md#15-cycle-0078--s3-consistency-门禁与逐项证据) 按验收条目排列，文件/断言、独立参考和限制均可核对；[一致性合同](../api/AxiomKernel_详细模块接口清单.md#731-stage-3-表示来源与-eval-一致性合同cycle-0078--s3-consistency)、查询/质量/五类建模矩阵及样例已同步。revolve 是采样多面体，thicken 为平面直边单侧正厚度；Eval recompute 只管理图，不自动执行质量/表示算法；旧 MeshId 为快照，历史边界缓存可保留，不承诺 ID 回收。旧 metadata 显示 bbox 代理/Rep bbox 辅助查询仍保留，不构成 owned 或物理查询资格。正式已验收须调度器完整门禁、文档检查及提交成功；Stage 3 / FR-OPS-001 / FR-QUERY-001 仍进行中，不扩展后续阶段。
+
+> **cycle-0077 / S3-MODELING（历史代码全量门禁）**：核验既有 extrude/revolve/sweep/loft 主路径，补齐真实平面直边 Face thicken，读取当前定向外/内环与裁剪边、沿单位支撑法向单侧生成独立 owned 三角闭壳。支持矩形/凹形/分离非嵌套孔、平移倾斜、独立环绕向/正反法向及反向裁剪共边；曲面/曲边/代理面拒绝，失败无 bbox 或占位回退。公开签名不变、未新增错误码。五类公开拓扑/表示/全质量/Strict、诊断四阶段、活动事务不污染、编辑拒绝旧质量与回滚重试回归已通过调度器实际 CTest。
+
+> **cycle-0077 实际门禁（历史）**：[cycle-0077-gates.log](../../.axiom-agent/logs/cycle-0077-gates.log) 记录一轮独立配置/完整构建（测试/示例开启、并发 4）成功，全量 CTest **16/16、0 失败、153.89 s**；必需 Ops/Heal **126.52 s**、Topology **0.13 s**，关联 Query/Eval **0.95 s**、representation/IO **9.79 s**、性能基线 **1.60 s**。无 repair 报告；开发阶段“尚未执行”已由实际结果取代。仍有 BoundaryEdge/Issue 初始化与未使用参数告警；日志未记录独立 Strict warnings 门禁、文档检查或提交成功。Strict 拓扑断言通过不等于无编译告警。本轮只同步 docs Markdown，未重建测试、提交/推送或写自动台账/`.axiom-agent/`。
+
+> **cycle-0077 证据边界（历史）**：历史报告 `stage_task_id=S3-MODELING`、`stage_outcome=ready_for_acceptance`，按三条验收要求排列的 [stage_evidence](../quality/AxiomKernel_测试与验收方案.md#14-cycle-0077--s3-modeling-门禁与逐项证据)、[五类主路径矩阵](../api/AxiomKernel_详细模块接口清单.md#811-stage-3-五类建模主路径cycle-0077--s3-modeling) 及质量/查询矩阵已同步。真实平面 thicken 已补齐主路径缺口，历史代理记录仍拒绝；棱柱及共面侧壁 loft 夹具在浮点容差内精确，revolve 为采样弦面多面体。正式已验收仅在调度器完整门禁、文档检查及提交成功后记录；FR-OPS-001 / FR-QUERY-001 与 Stage 3 仍进行中。通用解析/曲边闭壳积分、相交多壳、全局嵌入证明与后续阶段未扩展，内部零壳查询未声称验收。
 
 > **cycle-0076 / S3-MASS（历史代码门禁）**：统一当前拓扑与未编辑原生 sphere/cylinder/cone/torus 解析质量资格，删除 bbox、Boolean/Modified 来源与 Sweep 创建缓存质量恢复；成功拓扑/PCurve 编辑撤销解析资格，保存点/回滚恢复，metadata/mesh 派生不继承，代理面重组仍拒绝。独立全属性参考、旋转采样误差、编辑/多壳材料空腔和拒绝合同通过完整 CTest **16/16、0 失败、147.97 s**（Query **0.95 s**、Ops **120.75 s**、Rep **9.68 s**）；历史证据见验收 §1.3。该批当时的 thicken 拒绝夹具已在 cycle-0077 改验真实质量/最近点，当前任务以 §5.2.1 为准，不推断历史文档检查或提交成功。
 
-> **cycle-0075 / S3-QUERY（历史代码门禁）**：repair 后调度器完整构建成功，全量 **16/16 通过、0 失败、148.44 s**，支持矩阵与四条证据见 [测试与验收 §1.2](../quality/AxiomKernel_测试与验收方案.md#12-cycle-0075--s3-query-门禁与逐项证据)。首次 14/16（141.18 s）后修复负向旋转侧壁绕向、非等边楔体支撑和空列表建体拒绝夹具。当前唯一退出任务已切换为 S3-MODELING；历史门禁不用于推断未记录的文档检查/提交成功或阶段完成。
+> **cycle-0075 / S3-QUERY（历史代码门禁）**：repair 后调度器完整构建成功，全量 **16/16 通过、0 失败、148.44 s**，支持矩阵与四条证据见 [测试与验收 §1.2](../quality/AxiomKernel_测试与验收方案.md#12-cycle-0075--s3-query-门禁与逐项证据)。首次 14/16（141.18 s）后修复负向旋转侧壁绕向、非等边楔体支撑和空列表建体拒绝夹具。当前唯一退出任务已切换为 S3-CONSISTENCY；历史门禁不用于推断未记录的文档检查/提交成功或阶段完成。
 
 > **cycle-0074 升级前检查点（FR-OPS-001 / FR-QUERY-001，已通过完整门禁）**：本批四个功能包为 `ExtrusionLawStation/extrude_with_law`、多面体 `locate_point/clip_segment`、`SweepScaleStation/sweep_with_scale_law`、`SweepLawStation/sweep_with_law`。实际 diff 增补公开类型、共享物化/质量前置检查与 Ops/Query 回归，未新增错误码。调度器以测试、示例开启配置 `build-agent`，`cmake --build /workspaces/axiom/build-agent --parallel 4` 完整构建成功；`ctest --test-dir /workspaces/axiom/build-agent --output-on-failure --no-tests=error` **16/16 通过、0 失败、总耗时 134.05 s**。其中 Ops/Heal **106.39 s**（低于现有 120 s 限制）、Query/Eval **0.37 s**、IO workflow **13.95 s**、representation/IO **9.97 s**、Geo **0.55 s**、Topo **0.14 s**、HEAL **0.06 s**、性能基线 **1.75 s**。见 [cycle-0074 门禁日志](../../.axiom-agent/logs/cycle-0074-gates.log)。日志记录一轮完整构建/CTest，无本批 repair 或文档检查结果；仍有 `BoundaryEdge/Issue` 缺失成员初始化及未使用参数告警，不是无告警或严格告警门禁通过的声明。本轮仅同步文档，未重新构建测试、未提交或推送，未修改自动开发进度台账或 `.axiom-agent/`。
 
-> **cycle-0074 支持范围与状态（历史检查点）**：三个截面律入口支持凸/凹简单轮廓及分离非嵌套孔的分段正比例、扭转停顿/反向，保留关键站和真实中间 bbox/多面体质量；每步比例变化 ≤ 较小端的 25%、扭角 ≤ 7.5°、联合采样 ≤ 4096 区间、累计绝对扭角 ≤ 一周。扫掠以既有采样弦长为自变量；周期末比例为 1，联合律末角为 0 或 ±2π（1e-10 rad 容差），首末焊接无端盖；曲线接触最多 2000000 宽相候选。实体查询支持无自交的嵌入平面直边双边流形闭壳、空腔和材料岛，提供真实最近边界与有限线段材料/共面/相切区间；不按位置容差膨胀材料，预算只覆盖质量/壳关系前置检查之后的新三角形计算。采样多面体、曲面/曲边闭壳拒绝、无壳自身全局自交证明和无大规模加速等限制保留，详见 §3.3 与接口清单。四包及第 60/61/62/65 包的既有回归均已通过本次完整门禁，功能报告中的“未编译/待验收/继续缓冲再验收”为开发阶段旧状态。FR-OPS-001 / FR-QUERY-001 均保持进行中；当前主线为 Stage 3，该批按原范围闭合；cycle-0075 S3-QUERY 为历史代码门禁；当前唯一任务 cycle-0077 S3-MODELING，状态见本文顶部。
+> **cycle-0074 支持范围与状态（历史检查点）**：三个截面律入口支持凸/凹简单轮廓及分离非嵌套孔的分段正比例、扭转停顿/反向，保留关键站和真实中间 bbox/多面体质量；每步比例变化 ≤ 较小端的 25%、扭角 ≤ 7.5°、联合采样 ≤ 4096 区间、累计绝对扭角 ≤ 一周。扫掠以既有采样弦长为自变量；周期末比例为 1，联合律末角为 0 或 ±2π（1e-10 rad 容差），首末焊接无端盖；曲线接触最多 2000000 宽相候选。实体查询支持无自交的嵌入平面直边双边流形闭壳、空腔和材料岛，提供真实最近边界与有限线段材料/共面/相切区间；不按位置容差膨胀材料，预算只覆盖质量/壳关系前置检查之后的新三角形计算。采样多面体、曲面/曲边闭壳拒绝、无壳自身全局自交证明和无大规模加速等限制保留，详见 §3.3 与接口清单。四包及第 60/61/62/65 包的既有回归均已通过本次完整门禁，功能报告中的“未编译/待验收/继续缓冲再验收”为开发阶段旧状态。FR-OPS-001 / FR-QUERY-001 均保持进行中；当前主线为 Stage 3，该批按原范围闭合；cycle-0075 S3-QUERY 为历史代码门禁；当前唯一任务 cycle-0078 S3-CONSISTENCY，状态见本文顶部。
 
 > **cycle-0073 批次（FR-DIAG-001 / NFR-DIA-001 / FR-OPS-001，已通过完整门禁）**：HEAL 验证、修复、后验验证、trim 重建及批量修复失败统一携带 `heal.*` 阶段、实体与有限数值证据；单项后验失败回收派生体/物化对象，trim 失败恢复原 PCurve 绑定，批量后项失败回滚此前全部派生对象及 Eval 失效状态。IO 的 STEP/AXMJSON/IGES/BREP/OBJ/STL/glTF/3MF 与 auto 主格式失败补齐 `io.*` 与有限数值证据，STEP/AXMJSON 接入共享后验验证/修复管线，复制 `io.post_import.*` 证据且不改源诊断；STEP/AXMJSON/auto 批量实际失败恢复 Body/Mesh/拓扑/几何、链接、缓存、Eval 失效及 `next_id`，支持原位重试。候选/严格现有文件导入和目录/条件导出传播真实失败，AXMJSON/IGES/BREP 导出补齐最终流检查。`SweepService::extrude_twisted` 支持显式平面凸/凹及非嵌套分离孔、任意朝向、方向缩放/反向、正负部分角/整周及零角，物化真实三角闭壳与质量属性。首次全量 CTest **15/16 通过、1 失败、106.79 s**，Ops 在 `twisted_convex` 的拓扑/质量/Strict 检查失败；repair 仅交替扭转侧壁站间剖分对角线，消除固定对角线累积的一阶有向体积偏差，未放宽断言/性能阈值或增加角站。调度器独立完整构建（`build-agent --parallel 4`）后，`ctest --test-dir /workspaces/axiom/build-agent --output-on-failure --no-tests=error` 最终 **16/16 通过、0 失败、126.44 s**（Ops 98.84 s、IO workflow 13.45 s、HEAL 0.06 s、representation/IO 10.46 s、性能基线 1.68 s）。证据见 [cycle-0073 门禁日志](../../.axiom-agent/logs/cycle-0073-gates.log)；既有第 60/61/62/65 包随本次全量回归通过，无待验收项。首次构建仍有 BoundaryEdge/Issue 聚合成员初始化与未使用参数告警，不是无告警构建；日志未记录本批文档检查结果。本轮仅同步文档，未重跑构建或测试。
 
@@ -66,7 +72,7 @@
 
 `Stage 1 已达成；Stage 2 可测基线已达成；当前主线为 Stage 3：基础建模与查询分析（进行中）`
 
-cycle-0075/0076 的查询/质量矩阵与全量回归保留；当前唯一任务 cycle-0077 S3-MODELING 已补齐真实平面 thicken 和五类主路径逐项证据，通过全量 16/16（153.89 s），为 `ready_for_acceptance`。正式任务验收及 Stage 3 完整退出仍须由调度器按门禁、文档检查和提交结果确认，阶段保持进行中。
+cycle-0075 / S3-QUERY、cycle-0076 / S3-MASS 和 cycle-0077 / S3-MODELING 的历史矩阵与全量回归保留；当前唯一退出任务为 cycle-0078 / S3-CONSISTENCY，五类建模→Strict→查询→表示/来源/Eval 一致性闭环已通过独立完整构建和全量 CTest **16/16、0 失败、164.60 s**，`stage_outcome=ready_for_acceptance`。三条逐项证据及正式验收条件见 [§5.2.1](#521-stage-3-当前退出任务)；独立 Strict warnings 门禁未记录，正式任务验收及 Stage 3 完整退出仍由调度器按完整门禁、文档检查和提交结果确认，阶段保持进行中。
 
 ### 1.1 仓库事实入口（本轮与代码/构建对齐）
 
@@ -434,7 +440,9 @@ cycle-0075/0076 的查询/质量矩阵与全量回归保留；当前唯一任务
 
 ### 需求 7.7 查询与分析（Query/Eval/Rep）
 
-- **cycle-0077 / S3-MODELING（当前唯一任务，代码全量门禁通过）**：五类主路径公开拓扑/表示/全部质量/Strict、活动事务失败不污染及回滚重试通过；真实平面 Face thicken 截面/最近边界可用，曲面编辑拒绝旧质量并可回滚恢复。完整 16/16、153.89 s，逐项证据见验收 §1.4；正式状态见 §5.2.1。
+- **cycle-0078 / S3-CONSISTENCY（当前唯一任务，代码全量门禁通过）**：五类建模→Strict→截面/最近点/距离/质量→full/local/shell 表示闭环，来源/实体/Eval 绑定、缓存身份和 owned 原子失败、成功提交及失败恢复、保存点/取消/移除体运行时清理回归通过；完整 16/16、164.60 s，逐项证据见验收 §1.5，正式状态见 §5.2.1。
+
+- **cycle-0077 / S3-MODELING（历史代码全量门禁）**：五类主路径公开拓扑/表示/全部质量/Strict、活动事务失败不污染及回滚重试通过；真实平面 Face thicken 截面/最近边界可用，曲面编辑拒绝旧质量并可回滚恢复。完整 16/16、153.89 s，逐项证据见验收 §1.4；正式状态见 §5.2.1。
 
 - **FR-QUERY-001 cycle-0076 / S3-MASS（历史代码门禁）**：统一当前拓扑与未编辑原生解析质量资格，删除全部 bbox/来源/创建缓存恢复；独立全属性参考、旋转采样误差、保存点/回滚、多壳材料/空腔/岛、代理/metadata 拒绝及稳定阶段/无部分值由必需 Query/Eval、Ops/Heal、representation/IO 回归覆盖。完整 CTest 16/16、147.97 s，三条证据见测试与验收 §1.3；正式状态见 §5.2.1。真实平面 thicken 已在 cycle-0077 补齐，通用曲面/曲边积分仍未交付。
 
@@ -585,12 +593,12 @@ cycle-0075/0076 的查询/质量矩阵与全量回归保留；当前唯一任务
 
 说明：为降低本文档膨胀，本节内容已同步拆分到 `docs/plan/AxiomKernel_近期迭代与Backlog.md`；本文仍保留事实上下文与历史兼容入口。
 
-阶段口径：`Stage 3：基础建模与查询分析（进行中）`。cycle-0074 为升级前检查点；cycle-0077 唯一退出任务 S3-MODELING 的代码全量门禁已通过，三条证据及五类主路径/质量/查询矩阵已同步，阶段任务状态见 §5.2.1；完整退出标准以主路线图 §4.4 为准。本节区分 **本迭代可交付**、**最近已闭合批次** 与 **全项目长期树**，避免与 §6 历史清单重复。
+阶段口径：`Stage 3：基础建模与查询分析（进行中）`。cycle-0074 为升级前检查点；cycle-0078 唯一退出任务 S3-CONSISTENCY 的代码全量门禁已通过，三条一致性证据、API 合同/样例及五类主路径/质量/查询矩阵已同步，阶段任务状态见 §5.2.1；完整退出标准以主路线图 §4.4 为准。本节区分 **本迭代可交付**、**最近已闭合批次** 与 **全项目长期树**，避免与 §6 历史清单重复。
 
 ### 5.1 Sprint 焦点（当前迭代 3～5 条，可验收）
 
-1. **Stage 3 / S3-MODELING**：cycle-0077 五类真实主路径及平面 Face thicken 已通过全量 CTest；当前 ready_for_acceptance，完成调度器文档检查及提交后记录正式验收。
-   **DoD**：三条要求对应文件/断言、独立参考及限制可核对；必需 Ops/Heal、Topology 与关联 Query/Eval 已实际通过。明确精确棱柱与采样 revolve、公开拓扑/owned 表示/质量、诊断阶段及活动事务回滚重试；不扩展无关变体或后续阶段。
+1. **Stage 3 / S3-CONSISTENCY**：cycle-0078 基础零件建模与查询/表示/来源/Eval 一致性已通过全量 CTest，当前 ready_for_acceptance，调度器文档检查及提交成功后记录正式验收。
+   **DoD**：三条要求逐条覆盖测试文件/断言、独立参考及限制；必需 Ops/Heal、Query/Eval、representation/IO、runtime invariant 和保留 Topology 已实际通过。明确当前边界缓存/source_body、owned 无 fallback/原子失败、primitive 编辑资格、Eval dirty 与恢复/删除清理，不扩展无关变体或后续阶段。下列长期候选不构成本批执行任务。
 2. **diag + heal/io**：在 cycle-0073 已通过的重量级模块门禁之上，扩展普通文本/目录辅助接口与更广泛失败注入语料，明确后验报告与文件一致性边界。
    **DoD**：新增范围的阶段/实体/有限数值证据可审计；保留 `axiom_diagnostics_test` / `axiom_heal_test` / `axiom_io_workflow_test` 现有门禁与回滚回归。
 3. **geo**：在 cycle-0072 解析无界面与高阶有理控制网证书之上，补通用无限派生面、旋转/扫掠专用局部界、极端退化曲面和大模型批量性能证书。
@@ -606,7 +614,7 @@ cycle-0075/0076 的查询/质量矩阵与全量回归保留；当前唯一任务
 
 | 优先级 | 状态 | 模块 | 交付物（摘要） | 建议 `ctest` | 依赖 |
 |--------|------|------|----------------|--------------|------|
-| P0 | 代码全量门禁通过（cycle-0077；正式状态见 §5.2.1） | topo/ops/query/rep | S3-MODELING：五类真实主路径/Strict，平面直边 Face thicken、公开拓扑/owned 表示/全质量、结构化诊断与事务/回滚重试 | `axiom_ops_heal_test`、`axiom_topology_test`、`axiom_query_eval_test` | geo/topo |
+| P0 | 代码全量门禁通过（cycle-0078；正式状态见 §5.2.1） | topo/ops/query/rep/eval/core | S3-CONSISTENCY：五类建模与查询/表示闭环，来源及实体有效、当前缓存身份、owned 原子失败与提交/回滚/Eval/删除清理一致性 | `axiom_ops_heal_test`、`axiom_query_eval_test`、`axiom_representation_io_test`、`axiom_kernel_runtime_invariant_test`；保留 `axiom_topology_test` | geo/topo |
 | P0 | 已闭合（门禁） | core/io | 门面 IO 能力与 `IOService` 一致 | `axiom_smoke_test` | — |
 | P0～P1 | 已闭合（首批） | diag/ops/io/heal | 工作流 `Issue.stage` + JSON 导出可聚合；Heal 独立门禁 | `axiom_diagnostics_test`、`axiom_boolean_workflow_test`、`axiom_heal_test`、`axiom_ops_heal_test` | core |
 | P1 | 已闭合（本阶段回归） | math | 退化/尺度谓词与容差策略回归（`orient*_effective`、`max_local`/`min_local`、`resolve_*_for_scale` 非有限尺度、大坐标谓词/点等） | `axiom_math_services_test` | core |
@@ -626,11 +634,11 @@ cycle-0075/0076 的查询/质量矩阵与全量回归保留；当前唯一任务
 
 | stage_task_id | stage_outcome | 代码门禁 | stage_evidence | 正式验收条件 |
 |---|---|---|---|---|
-| S3-MODELING | ready_for_acceptance | cycle-0077 完整构建成功，全量 16/16、0 失败、153.89 s；必需 Ops 126.52 s / Topology 0.13 s；关联 Query 0.95 s | [测试与验收 §1.4 三条逐项证据](../quality/AxiomKernel_测试与验收方案.md#14-cycle-0077--s3-modeling-门禁与逐项证据)；[API 五类主路径矩阵](../api/AxiomKernel_详细模块接口清单.md#811-stage-3-五类建模主路径cycle-0077--s3-modeling) | 代码全量门禁通过、文档已同步；日志未记录独立 Strict warnings、文档检查或提交成功；正式验收仍须调度器确认，本轮不提交 |
+| S3-CONSISTENCY | ready_for_acceptance | cycle-0078 完整构建成功，全量 16/16、0 失败、164.60 s；必需 Ops 137.40 s / Query 0.95 s / Rep 9.44 s / Runtime 0.02 s；保留 Topology 0.23 s | [测试与验收 §1.5 三条逐项证据](../quality/AxiomKernel_测试与验收方案.md#15-cycle-0078--s3-consistency-门禁与逐项证据)；[API 一致性合同](../api/AxiomKernel_详细模块接口清单.md#731-stage-3-表示来源与-eval-一致性合同cycle-0078--s3-consistency)；历史五类/查询/质量矩阵保留 | 代码全量门禁通过、文档已同步；日志未记录独立 Strict warnings、文档门禁或提交成功；调度器完成这些条件后记已验收，本轮不提交 |
 
-本批唯一阶段任务为 S3-MODELING，优先于历史 remaining、需求权重和新增变体。S3-QUERY / S3-MASS 保留历史矩阵与证据，不再作为当前待执行任务。五类主路径均有真实 owned 拓扑、公开查询/表示/全质量/Strict 与结构化拒绝/回滚重试证据；平面 Face thicken 补齐缺口，不再安排重复代码验收。曲面/曲边 thicken、通用质量积分、相交多壳、全局嵌入证明及后续阶段不进入本批。Stage 3 / FR-QUERY-001 / FR-OPS-001 保持进行中。
+本批唯一阶段任务为 S3-CONSISTENCY，优先于历史 remaining、需求权重和新增变体。S3-QUERY / S3-MASS / S3-MODELING 的历史矩阵与门禁保留，不再作为当前待执行任务；其正式文档门禁/提交状态不由本批日志反推。三条一致性验收已由四个必需回归及全量 CTest 覆盖，不再安排重复代码验收。曲面/曲边 thicken、通用质量积分、相交多壳、全局嵌入证明和后续阶段不进入本批。Stage 3 / FR-QUERY-001 / FR-OPS-001 保持进行中。
 
-本轮仅同步文档，静态检查结果见测试与验收 §1.4；本地文档检查不代替调度器文档门禁或提交成功。
+本轮仅同步文档，本地静态检查不代替调度器文档门禁或提交成功；门禁事实及证据见测试与验收 §1.5。
 
 ### 5.3 最近已关闭的功能批次（与 §6 互证；以下为已落地摘要）
 
@@ -646,7 +654,7 @@ cycle-0075/0076 的查询/质量矩阵与全量回归保留；当前唯一任务
 
 ### 5.4 下一未闭合批次（建议按表 5.2 顺序推进）
 
-1. S3-MODELING 的代码全量门禁、五类主路径矩阵、三条逐项验收证据及文档同步已完成；调度器文档检查及提交成功后记录正式验收，状态以 §5.2.1 为准。
+1. S3-CONSISTENCY 的代码全量门禁、一致性合同/样例、支持矩阵、三条逐项验收证据及文档同步已完成；调度器文档检查及提交成功后记录正式验收，状态以 §5.2.1 为准。
 2. 平面直边 Face thicken 已补齐真实主路径，Stage 3 整体退出仍由调度器按主路线图 §4.4 确认，不自动进入后续阶段。解析建模、任意截面匹配或曲面/曲边闭壳质量与空间定位等为剩余候选，不属于本批扩展范围。
 3. HEAL 自交/流形性/容差冲突的验证与可回放修复。  
 4. IO：标准 IGES/STEP 实体交换或通用 3MF 读写的下一里程碑（与产品路线一致后择一）。  
