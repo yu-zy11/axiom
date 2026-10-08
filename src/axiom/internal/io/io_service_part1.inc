@@ -11,20 +11,32 @@ Result<BodyId> IOService::import_step(std::string_view path, const ImportOptions
         return fail_before_import(StatusCode::InvalidInput,
                                   "STEP 导入失败：输入路径为空", "io.import.step.input");
     }
-    if (!std::filesystem::exists(path)) {
+    std::error_code step_path_error;
+    if (!std::filesystem::exists(path, step_path_error) || step_path_error) {
         return fail_before_import(StatusCode::OperationFailed,
-                                  "STEP 导入失败：输入文件不存在", "io.import.step.path");
+                                  "STEP 导入失败：输入文件不存在或路径不可访问", "io.import.step.path");
     }
 
     constexpr std::size_t kStepIgesProbeMaxBytes = static_cast<std::size_t>(64) * 1024 * 1024;
-    std::error_code step_path_error;
-    const bool is_regular_step_file = std::filesystem::is_regular_file(path, step_path_error);
-    const auto file_text = is_regular_step_file
-                               ? read_regular_file_bytes_limited(path, kStepIgesProbeMaxBytes)
-                               : std::optional<std::string> {};
+    step_path_error.clear();
+    if (!std::filesystem::is_regular_file(path, step_path_error) || step_path_error) {
+        return fail_before_import(StatusCode::OperationFailed,
+                                  "STEP 导入失败：输入路径不是可读取的普通文件", "io.import.step.open");
+    }
+    step_path_error.clear();
+    const auto file_size = std::filesystem::file_size(path, step_path_error);
+    if (step_path_error || file_size > kStepIgesProbeMaxBytes) {
+        return fail_before_import(StatusCode::OperationFailed,
+                                  "STEP 导入失败：输入读取不完整或超过 64 MiB 限额", "io.import.step.read");
+    }
+    const auto file_text = read_regular_file_bytes_limited(path, kStepIgesProbeMaxBytes);
     if (!file_text.has_value()) {
         return fail_before_import(StatusCode::OperationFailed,
                                   "STEP 导入失败：无法打开输入文件", "io.import.step.open");
+    }
+    if (file_text->size() != file_size) {
+        return fail_before_import(StatusCode::OperationFailed,
+                                  "STEP 导入失败：读取字节数与文件大小不一致", "io.import.step.read");
     }
     if (step_file_requires_full_standard_importer(std::string_view(*file_text))) {
         std::vector<Issue> issues;
@@ -49,7 +61,20 @@ Result<BodyId> IOService::import_step(std::string_view path, const ImportOptions
                                     state_->create_diagnostic("STEP 标准实体交换未实现", std::move(issues)));
     }
 
-    const auto body_id = BodyId {state_->allocate_id()};
+    // Empty or foreign text must not silently materialize a default unit body.
+    // Historical partial metadata files (including repairable inverted bounds)
+    // remain supported; this is a metadata container, not standard entity exchange.
+    const auto first = file_text->find_first_not_of(" \t\r\n");
+    const auto last = file_text->find_last_not_of(" \t\r\n");
+    if (first == std::string::npos ||
+        file_text->compare(first, 13, "ISO-10303-21;") != 0 ||
+        last < 17 || file_text->compare(last - 16, 17, "END-ISO-10303-21;") != 0 ||
+        file_text->find("HEADER;") == std::string::npos ||
+        file_text->find("ENDSEC;") == std::string::npos) {
+        return exact_brep_import_failure(
+            *state_, StatusCode::OperationFailed, diag_codes::kIoCorruptFile,
+            "STEP 导入失败：缺少 Axiom 子集文件边界", "STEP 导入失败", "io.import.step.parse");
+    }
     detail::BodyRecord record;
     record.kind = detail::BodyKind::Imported;
     record.rep_kind = RepKind::ExactBRep;
@@ -57,17 +82,31 @@ Result<BodyId> IOService::import_step(std::string_view path, const ImportOptions
     record.bbox = detail::make_bbox({0.0, 0.0, 0.0}, {1.0, 1.0, 1.0});
 
     std::istringstream in(*file_text);
-    parse_axiom_interchange_metadata_lines(in, record);
-
+    if (const auto parse_error = parse_axiom_interchange_metadata_lines(in, record)) {
+        return exact_brep_import_failure(
+            *state_, StatusCode::OperationFailed, diag_codes::kIoCorruptFile,
+            *parse_error, "STEP 导入失败", "io.import.step.parse");
+    }
+    if (validate_exact_brep_body_record(record) == ExactBrepRecordValidationFailure::NonFinite) {
+        return exact_brep_import_failure(
+            *state_, StatusCode::InvalidInput, diag_codes::kValNonFiniteGeometry,
+            "STEP 导入失败：几何记录包含 NaN 或 Inf", "STEP 导入失败", "io.import.step.validation");
+    }
+    IOImportBatchRollback rollback {*state_};
+    const auto body_id = BodyId {state_->allocate_id()};
     state_->bodies.emplace(body_id.value, record);
 
     std::vector<Issue> issues;
     std::vector<Warning> warnings;
-    const auto result_body_id = run_post_import_validation_pipeline(
+    const auto post_import = run_post_import_validation_pipeline(
         state_, body_id, options, std::string("STEP"), issues, warnings);
 
-    auto result = ok_result(result_body_id, state_->create_diagnostic("已导入STEP模型", std::move(issues)));
+    if (post_import.status != StatusCode::Ok || !post_import.value.has_value()) {
+        return post_import;
+    }
+    auto result = ok_result(*post_import.value, state_->create_diagnostic("已导入STEP模型", std::move(issues)));
     result.warnings = std::move(warnings);
+    rollback.commit();
     return result;
 }
 
@@ -98,7 +137,8 @@ Result<void> IOService::export_step(BodyId body_id, std::string_view path, const
             {{"path_length", static_cast<Scalar>(path.size()), "byte"}});
     }
 
-    std::ofstream out {std::string(path)};
+    IOExportFile output_file {path};
+    auto& out = output_file.out;
     if (!out) {
         return io_failed_void(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
@@ -137,8 +177,7 @@ Result<void> IOService::export_step(BodyId body_id, std::string_view path, const
     out << "/* body " << body_id.value << " */\n";
     out << "ENDSEC;\n";
     out << "END-ISO-10303-21;\n";
-    out.flush();
-    out.close();
+    output_file.finish();
     if (!out) {
         return io_failed_void(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
@@ -147,6 +186,10 @@ Result<void> IOService::export_step(BodyId body_id, std::string_view path, const
             {{"metadata_enabled", options.embed_metadata ? 1.0 : 0.0, "bool"}});
     }
 
+    const auto published = output_file.publish(*state_, body_id, "step");
+    if (published.status != StatusCode::Ok) {
+        return published;
+    }
     return ok_void(state_->create_diagnostic("已导出STEP模型"));
 }
 
@@ -211,16 +254,21 @@ Result<BodyId> IOService::import_axmjson(std::string_view path, const ImportOpti
         return std::move(*validation_failure);
     }
 
+    IOImportBatchRollback rollback {*state_};
     const auto body_id = BodyId {state_->allocate_id()};
     state_->bodies.emplace(body_id.value, record);
 
     std::vector<Issue> issues;
     std::vector<Warning> warnings;
-    const auto result_body_id = run_post_import_validation_pipeline(
+    const auto post_import = run_post_import_validation_pipeline(
         state_, body_id, options, std::string("AXMJSON"), issues, warnings);
 
-    auto result = ok_result(result_body_id, state_->create_diagnostic("已导入AXMJSON模型", std::move(issues)));
+    if (post_import.status != StatusCode::Ok || !post_import.value.has_value()) {
+        return post_import;
+    }
+    auto result = ok_result(*post_import.value, state_->create_diagnostic("已导入AXMJSON模型", std::move(issues)));
     result.warnings = std::move(warnings);
+    rollback.commit();
     return result;
 }
 
@@ -237,22 +285,33 @@ Result<BodyId> IOService::import_stl(std::string_view path, const ImportOptions&
         return fail_before_import(StatusCode::InvalidInput, diag_codes::kIoImportFailure,
                                   "STL 导入失败：输入路径为空", "io.import.stl.input");
     }
-    if (!std::filesystem::exists(path)) {
-        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
-                                  "STL 导入失败：输入文件不存在", "io.import.stl.path");
-    }
     std::error_code file_type_error;
+    if (!std::filesystem::exists(path, file_type_error) || file_type_error) {
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                  "STL 导入失败：输入文件不存在或路径不可访问", "io.import.stl.path");
+    }
+    file_type_error.clear();
     if (!std::filesystem::is_regular_file(path, file_type_error) || file_type_error) {
         return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
                                   "STL 导入失败：输入路径不是可读取的普通文件", "io.import.stl.open");
+    }
+    constexpr std::uintmax_t kStlMaxBytes = static_cast<std::uintmax_t>(64) * 1024 * 1024;
+    file_type_error.clear();
+    const auto file_size = std::filesystem::file_size(path, file_type_error);
+    if (file_type_error || file_size > kStlMaxBytes) {
+        return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
+                                  "STL 导入失败：输入读取不完整或超过 64 MiB 限额", "io.import.stl.read");
     }
     std::ifstream in {std::string(path), std::ios::binary};
     if (!in) {
         return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
                                   "STL 导入失败：无法打开输入文件", "io.import.stl.open");
     }
-    std::vector<std::uint8_t> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    if (in.bad()) {
+    std::vector<std::uint8_t> data(static_cast<std::size_t>(file_size));
+    in.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(data.size()));
+    const auto bytes_read = static_cast<std::size_t>(in.gcount());
+    const auto trailing_byte = in.peek();
+    if (in.bad() || bytes_read != data.size() || trailing_byte != std::char_traits<char>::eof()) {
         return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
                                   "STL 导入失败：读取输入文件失败", "io.import.stl.read");
     }
@@ -270,11 +329,29 @@ Result<BodyId> IOService::import_stl(std::string_view path, const ImportOptions&
         return fail_before_import(StatusCode::InvalidInput, diag_codes::kIoImportFailure,
                                   "STL 导入失败：三角形索引越界", "io.import.stl.validation");
     }
+    if (std::any_of(mesh.vertices.begin(), mesh.vertices.end(), [](const Point3& point) {
+            return !std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z);
+        })) {
+        return fail_before_import(StatusCode::InvalidInput, diag_codes::kValNonFiniteGeometry,
+                                  "STL 导入失败：网格坐标包含 NaN 或 Inf", "io.import.stl.validation");
+    }
+    for (std::size_t i = 0; i < mesh.indices.size(); i += 3) {
+        const auto& a = mesh.vertices[static_cast<std::size_t>(mesh.indices[i])];
+        const auto& b = mesh.vertices[static_cast<std::size_t>(mesh.indices[i + 1])];
+        const auto& c = mesh.vertices[static_cast<std::size_t>(mesh.indices[i + 2])];
+        const auto cross = detail::cross(detail::subtract(b, a), detail::subtract(c, a));
+        const Scalar area_squared = cross.x * cross.x + cross.y * cross.y + cross.z * cross.z;
+        if (!std::isfinite(area_squared)) {
+            return fail_before_import(StatusCode::InvalidInput, diag_codes::kValNonFiniteGeometry,
+                                      "STL 导入失败：三角形面积计算超出有限数值范围", "io.import.stl.validation");
+        }
+    }
     if (detail::has_degenerate_triangles(mesh.vertices, mesh.indices)) {
         return fail_before_import(StatusCode::DegenerateGeometry, diag_codes::kValDegenerateGeometry,
                                   "STL 导入失败：存在退化三角形", "io.import.stl.validation");
     }
 
+    IOImportBatchRollback rollback {*state_};
     const auto body_id = BodyId {state_->allocate_id()};
     detail::BodyRecord record;
     record.kind = detail::BodyKind::Imported;
@@ -288,9 +365,13 @@ Result<BodyId> IOService::import_stl(std::string_view path, const ImportOptions&
 
     std::vector<Issue> issues;
     std::vector<Warning> warnings;
-    const auto result_body_id = run_post_import_validation_pipeline(state_, body_id, options, std::string("STL"), issues, warnings);
-    auto result = ok_result(result_body_id, state_->create_diagnostic("已导入STL模型", std::move(issues)));
+    const auto post_import = run_post_import_validation_pipeline(state_, body_id, options, std::string("STL"), issues, warnings);
+    if (post_import.status != StatusCode::Ok || !post_import.value.has_value()) {
+        return post_import;
+    }
+    auto result = ok_result(*post_import.value, state_->create_diagnostic("已导入STL模型", std::move(issues)));
     result.warnings = std::move(warnings);
+    rollback.commit();
     return result;
 }
 
@@ -345,6 +426,7 @@ Result<BodyId> IOService::import_gltf(std::string_view path, const ImportOptions
                                   "glTF 导入失败：存在退化三角形", "io.import.gltf.validation");
     }
 
+    IOImportBatchRollback rollback {*state_};
     const auto body_id = BodyId {state_->allocate_id()};
     detail::BodyRecord record;
     record.kind = detail::BodyKind::Imported;
@@ -358,9 +440,13 @@ Result<BodyId> IOService::import_gltf(std::string_view path, const ImportOptions
 
     std::vector<Issue> issues;
     std::vector<Warning> warnings;
-    const auto result_body_id = run_post_import_validation_pipeline(state_, body_id, options, std::string("glTF"), issues, warnings);
-    auto result = ok_result(result_body_id, state_->create_diagnostic("已导入glTF模型", std::move(issues)));
+    const auto post_import = run_post_import_validation_pipeline(state_, body_id, options, std::string("glTF"), issues, warnings);
+    if (post_import.status != StatusCode::Ok || !post_import.value.has_value()) {
+        return post_import;
+    }
+    auto result = ok_result(*post_import.value, state_->create_diagnostic("已导入glTF模型", std::move(issues)));
     result.warnings = std::move(warnings);
+    rollback.commit();
     return result;
 }
 
@@ -445,14 +531,19 @@ Result<BodyId> IOService::import_iges(std::string_view path, const ImportOptions
         return std::move(*validation_failure);
     }
 
+    IOImportBatchRollback rollback {*state_};
     const auto body_id = BodyId {state_->allocate_id()};
     state_->bodies.emplace(body_id.value, record);
 
     std::vector<Issue> issues;
     std::vector<Warning> warnings;
-    const auto result_body_id = run_post_import_validation_pipeline(state_, body_id, options, std::string("IGES"), issues, warnings);
-    auto result = ok_result(result_body_id, state_->create_diagnostic("已导入IGES模型", std::move(issues)));
+    const auto post_import = run_post_import_validation_pipeline(state_, body_id, options, std::string("IGES"), issues, warnings);
+    if (post_import.status != StatusCode::Ok || !post_import.value.has_value()) {
+        return post_import;
+    }
+    auto result = ok_result(*post_import.value, state_->create_diagnostic("已导入IGES模型", std::move(issues)));
     result.warnings = std::move(warnings);
+    rollback.commit();
     return result;
 }
 
@@ -523,14 +614,19 @@ Result<BodyId> IOService::import_brep(std::string_view path, const ImportOptions
         return std::move(*validation_failure);
     }
 
+    IOImportBatchRollback rollback {*state_};
     const auto body_id = BodyId {state_->allocate_id()};
     state_->bodies.emplace(body_id.value, record);
 
     std::vector<Issue> issues;
     std::vector<Warning> warnings;
-    const auto result_body_id = run_post_import_validation_pipeline(state_, body_id, options, std::string("BREP"), issues, warnings);
-    auto result = ok_result(result_body_id, state_->create_diagnostic("已导入BREP模型", std::move(issues)));
+    const auto post_import = run_post_import_validation_pipeline(state_, body_id, options, std::string("BREP"), issues, warnings);
+    if (post_import.status != StatusCode::Ok || !post_import.value.has_value()) {
+        return post_import;
+    }
+    auto result = ok_result(*post_import.value, state_->create_diagnostic("已导入BREP模型", std::move(issues)));
     result.warnings = std::move(warnings);
+    rollback.commit();
     return result;
 }
 
@@ -576,6 +672,7 @@ Result<BodyId> IOService::import_obj(std::string_view path, const ImportOptions&
     mesh.tessellation_strategy = "io_import_obj";
     mesh.bbox = detail::mesh_bbox_from_vertices(mesh.vertices);
 
+    IOImportBatchRollback rollback {*state_};
     const auto body_id = BodyId {state_->allocate_id()};
     detail::BodyRecord record;
     record.kind = detail::BodyKind::Imported;
@@ -589,9 +686,13 @@ Result<BodyId> IOService::import_obj(std::string_view path, const ImportOptions&
 
     std::vector<Issue> issues;
     std::vector<Warning> warnings;
-    const auto result_body_id = run_post_import_validation_pipeline(state_, body_id, options, std::string("OBJ"), issues, warnings);
-    auto result = ok_result(result_body_id, state_->create_diagnostic("已导入OBJ模型", std::move(issues)));
+    const auto post_import = run_post_import_validation_pipeline(state_, body_id, options, std::string("OBJ"), issues, warnings);
+    if (post_import.status != StatusCode::Ok || !post_import.value.has_value()) {
+        return post_import;
+    }
+    auto result = ok_result(*post_import.value, state_->create_diagnostic("已导入OBJ模型", std::move(issues)));
     result.warnings = std::move(warnings);
+    rollback.commit();
     return result;
 }
 
@@ -665,6 +766,7 @@ Result<BodyId> IOService::import_3mf(std::string_view path, const ImportOptions&
     mesh.tessellation_strategy = "io_import_3mf";
     mesh.bbox = detail::mesh_bbox_from_vertices(mesh.vertices);
 
+    IOImportBatchRollback rollback {*state_};
     const auto body_id = BodyId {state_->allocate_id()};
     detail::BodyRecord record;
     record.kind = detail::BodyKind::Imported;
@@ -678,9 +780,13 @@ Result<BodyId> IOService::import_3mf(std::string_view path, const ImportOptions&
 
     std::vector<Issue> issues;
     std::vector<Warning> warnings;
-    const auto result_body_id = run_post_import_validation_pipeline(state_, body_id, options, std::string("3MF"), issues, warnings);
-    auto result = ok_result(result_body_id, state_->create_diagnostic("已导入3MF模型", std::move(issues)));
+    const auto post_import = run_post_import_validation_pipeline(state_, body_id, options, std::string("3MF"), issues, warnings);
+    if (post_import.status != StatusCode::Ok || !post_import.value.has_value()) {
+        return post_import;
+    }
+    auto result = ok_result(*post_import.value, state_->create_diagnostic("已导入3MF模型", std::move(issues)));
     result.warnings = std::move(warnings);
+    rollback.commit();
     return result;
 }
 
@@ -701,7 +807,8 @@ Result<void> IOService::export_axmjson(BodyId body_id, std::string_view path, co
             {body_id.value}, "io.export.axmjson.path",
             {{"path_length", static_cast<Scalar>(path.size()), "byte"}});
     }
-    std::ofstream out {std::string(path)};
+    IOExportFile output_file {path};
+    auto& out = output_file.out;
     if (!out) {
         return io_failed_void(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
@@ -712,14 +819,17 @@ Result<void> IOService::export_axmjson(BodyId body_id, std::string_view path, co
     const auto body_it = state_->bodies.find(body_id.value);
     const auto& body = body_it->second;
     write_axmjson_payload(out, body, options, "AXMJSON");
-    out.flush();
-    out.close();
+    output_file.finish();
     if (!out) {
         return io_failed_void(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
             "AXMJSON 导出失败：写入输出文件失败", "AXMJSON 导出失败",
             {body_id.value}, "io.export.axmjson.write",
             {{"metadata_enabled", options.embed_metadata ? 1.0 : 0.0, "bool"}});
+    }
+    const auto published = output_file.publish(*state_, body_id, "axmjson");
+    if (published.status != StatusCode::Ok) {
+        return published;
     }
     return ok_void(state_->create_diagnostic("已导出AXMJSON模型"));
 }
@@ -747,7 +857,8 @@ Result<void> IOService::export_iges(BodyId body_id, std::string_view path, const
             "IGES 导出路径校验失败", "IGES 导出失败", {body_id.value},
             "io.export.iges.path");
     }
-    std::ofstream out {std::string(path)};
+    IOExportFile output_file {path};
+    auto& out = output_file.out;
     if (!out) {
         return io_failed_void(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
@@ -773,14 +884,17 @@ Result<void> IOService::export_iges(BodyId body_id, std::string_view path, const
     }
     out << "S 1\n";
     out << "TERMINATE\n";
-    out.flush();
-    out.close();
+    output_file.finish();
     if (!out) {
         return io_failed_void(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
             "IGES 导出失败：写入输出文件失败", "IGES 导出失败",
             {body_id.value}, "io.export.iges.write",
             {{"metadata_enabled", options.embed_metadata ? 1.0 : 0.0, "bool"}});
+    }
+    const auto published = output_file.publish(*state_, body_id, "iges");
+    if (published.status != StatusCode::Ok) {
+        return published;
     }
     return ok_void(state_->create_diagnostic("已导出IGES模型"));
 }
@@ -808,7 +922,8 @@ Result<void> IOService::export_brep(BodyId body_id, std::string_view path, const
             "BREP 导出路径校验失败", "BREP 导出失败", {body_id.value},
             "io.export.brep.path");
     }
-    std::ofstream out {std::string(path)};
+    IOExportFile output_file {path};
+    auto& out = output_file.out;
     if (!out) {
         return io_failed_void(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
@@ -819,14 +934,17 @@ Result<void> IOService::export_brep(BodyId body_id, std::string_view path, const
     const auto& body = body_it->second;
     out << "# AXIOM_BREP_INTERCHANGE v1\n";
     write_axmjson_payload(out, body, options, "AXIOM_BREP");
-    out.flush();
-    out.close();
+    output_file.finish();
     if (!out) {
         return io_failed_void(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
             "BREP 导出失败：写入输出文件失败", "BREP 导出失败",
             {body_id.value}, "io.export.brep.write",
             {{"metadata_enabled", options.embed_metadata ? 1.0 : 0.0, "bool"}});
+    }
+    const auto published = output_file.publish(*state_, body_id, "brep");
+    if (published.status != StatusCode::Ok) {
+        return published;
     }
     return ok_void(state_->create_diagnostic("已导出BREP模型"));
 }
@@ -880,7 +998,8 @@ Result<void> IOService::export_obj(BodyId body_id, std::string_view path, const 
              {"index_count", static_cast<Scalar>(mesh.indices.size()), "count"}});
     }
 
-    std::ofstream out {std::string(path)};
+    IOExportFile output_file {path};
+    auto& out = output_file.out;
     if (!out) {
         return io_failed_void(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
@@ -889,7 +1008,6 @@ Result<void> IOService::export_obj(BodyId body_id, std::string_view path, const 
     }
     out << "# AxiomKernel OBJ\n";
     out << "o axiom_body_" << body_id.value << "\n";
-    out << std::setprecision(17);
     for (const auto& v : mesh.vertices) {
         out << "v " << v.x << " " << v.y << " " << v.z << "\n";
     }
@@ -899,8 +1017,7 @@ Result<void> IOService::export_obj(BodyId body_id, std::string_view path, const 
         const auto c = static_cast<std::size_t>(mesh.indices[i + 2]) + 1;
         out << "f " << a << " " << b << " " << c << "\n";
     }
-    out.flush();
-    out.close();
+    output_file.finish();
     if (!out) {
         return io_failed_void(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
@@ -912,6 +1029,10 @@ Result<void> IOService::export_obj(BodyId body_id, std::string_view path, const 
     const auto sidecar = mesh_export_write_validation_sidecar(*state_, convert, *mesh_id.value, path, options);
     if (sidecar.status != StatusCode::Ok) {
         return bind_mesh_export_failure(*state_, sidecar, body_id, "io.export.obj.sidecar");
+    }
+    const auto published = output_file.publish(*state_, body_id, "obj");
+    if (published.status != StatusCode::Ok) {
+        return published;
     }
     rollback.completed = true;
     return merge_mesh_export_sidecar_summary(*state_, sidecar, "已导出OBJ模型");
@@ -989,7 +1110,8 @@ Result<void> IOService::export_3mf(BodyId body_id, std::string_view path, const 
         {"3D/3dmodel.model", std::move(model_bytes)},
     };
     const std::vector<std::uint8_t> zip_bytes = build_zip_store_archive(pack);
-    std::ofstream out {std::string(path), std::ios::binary};
+    IOExportFile output_file {path, std::ios::binary};
+    auto& out = output_file.out;
     if (!out) {
         return io_failed_void(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
@@ -998,8 +1120,7 @@ Result<void> IOService::export_3mf(BodyId body_id, std::string_view path, const 
     }
     out.write(reinterpret_cast<const char*>(zip_bytes.data()),
               static_cast<std::streamsize>(zip_bytes.size()));
-    out.flush();
-    out.close();
+    output_file.finish();
     if (!out) {
         return io_failed_void(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
@@ -1010,6 +1131,10 @@ Result<void> IOService::export_3mf(BodyId body_id, std::string_view path, const 
     const auto sidecar = mesh_export_write_validation_sidecar(*state_, convert, *mesh_id.value, path, options);
     if (sidecar.status != StatusCode::Ok) {
         return bind_mesh_export_failure(*state_, sidecar, body_id, "io.export.3mf.sidecar");
+    }
+    const auto published = output_file.publish(*state_, body_id, "3mf");
+    if (published.status != StatusCode::Ok) {
+        return published;
     }
     rollback.completed = true;
     return merge_mesh_export_sidecar_summary(*state_, sidecar, "已导出3MF模型");
@@ -1110,7 +1235,8 @@ Result<void> IOService::export_gltf(BodyId body_id, std::string_view path, const
 
     const auto uri = std::string("data:application/octet-stream;base64,") + base64_encode(buffer);
 
-    std::ofstream out {std::string(path)};
+    IOExportFile output_file {path};
+    auto& out = output_file.out;
     if (!out) {
         return io_failed_void(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
@@ -1141,8 +1267,7 @@ Result<void> IOService::export_gltf(BodyId body_id, std::string_view path, const
     out << "]";
     out << "}";
 
-    out.flush();
-    out.close();
+    output_file.finish();
     if (!out) {
         return io_failed_void(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
@@ -1155,6 +1280,10 @@ Result<void> IOService::export_gltf(BodyId body_id, std::string_view path, const
     const auto sidecar = mesh_export_write_validation_sidecar(*state_, convert, *mesh_id.value, path, options);
     if (sidecar.status != StatusCode::Ok) {
         return bind_mesh_export_failure(*state_, sidecar, body_id, "io.export.gltf.sidecar");
+    }
+    const auto published = output_file.publish(*state_, body_id, "gltf");
+    if (published.status != StatusCode::Ok) {
+        return published;
     }
     rollback.completed = true;
     return merge_mesh_export_sidecar_summary(*state_, sidecar, "已导出glTF模型");
@@ -1209,7 +1338,8 @@ Result<void> IOService::export_stl(BodyId body_id, std::string_view path, const 
              {"index_count", static_cast<Scalar>(mesh.indices.size()), "count"}});
     }
 
-    std::ofstream out {std::string(path)};
+    IOExportFile output_file {path};
+    auto& out = output_file.out;
     if (!out) {
         return io_failed_void(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
@@ -1239,8 +1369,7 @@ Result<void> IOService::export_stl(BodyId body_id, std::string_view path, const 
     }
     out << "endsolid axiom\n";
 
-    out.flush();
-    out.close();
+    output_file.finish();
     if (!out) {
         return io_failed_void(
             *state_, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
@@ -1251,6 +1380,10 @@ Result<void> IOService::export_stl(BodyId body_id, std::string_view path, const 
     const auto sidecar = mesh_export_write_validation_sidecar(*state_, convert, *mesh_id.value, path, options);
     if (sidecar.status != StatusCode::Ok) {
         return bind_mesh_export_failure(*state_, sidecar, body_id, "io.export.stl.sidecar");
+    }
+    const auto published = output_file.publish(*state_, body_id, "stl");
+    if (published.status != StatusCode::Ok) {
+        return published;
     }
     rollback.completed = true;
     return merge_mesh_export_sidecar_summary(*state_, sidecar, "已导出STL模型");

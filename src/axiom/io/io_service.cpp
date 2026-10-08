@@ -1,5 +1,6 @@
 #include "axiom/io/io_service.h"
 
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <cstring>
@@ -16,6 +17,7 @@
 #include <unordered_map>
 #include <iomanip>
 #include <limits>
+#include <locale>
 
 #include "axiom/heal/heal_services.h"
 #include "axiom/rep/representation_conversion_service.h"
@@ -43,7 +45,7 @@ void erase_io_allocations_since(Map& records, std::uint64_t first_id) {
     }
 }
 
-// Batch imports can invoke validation and auto-repair, so their transaction
+// Single and batch imports invoke validation and auto-repair; their transaction
 // boundary covers every model store and derived cache touched by that pipeline.
 class IOImportBatchRollback {
 public:
@@ -139,6 +141,109 @@ Result<void> wrap_io_failed_void(
             std::move(summary), std::move(related_entities), stage,
             std::move(evidence)));
 }
+
+// Reserve an exclusive sibling directory rather than guessing an unused filename.
+// The payload stays on the destination filesystem, and only a checked, closed
+// stream may replace the destination. A failed export never truncates that file.
+class IOExportFile {
+public:
+    explicit IOExportFile(std::string_view path, std::ios::openmode mode = std::ios::out)
+        : destination_(std::string(path)) {
+        std::error_code ec;
+        const auto status = std::filesystem::status(destination_, ec);
+        if (!ec && std::filesystem::is_directory(status)) {
+            out.setstate(std::ios::failbit);
+            return;
+        }
+        special_target_ = !ec && std::filesystem::exists(status) &&
+                          !std::filesystem::is_regular_file(status);
+        if (special_target_) {
+            // Leave a closed stream in its initial state so the serializer and
+            // finish() report a write failure without touching a device node.
+            return;
+        }
+        const auto parent = destination_.parent_path();
+        static std::atomic<std::uint64_t> sequence {0};
+        for (unsigned attempt = 0; attempt < 32; ++attempt) {
+            const auto candidate = parent / (".axiom_export_tmp_" +
+                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "_" +
+                std::to_string(sequence.fetch_add(1, std::memory_order_relaxed)));
+            ec.clear();
+            if (std::filesystem::create_directory(candidate, ec)) {
+                temporary_directory_ = candidate;
+                temporary_file_ = candidate / "payload";
+                out.open(temporary_file_, mode | std::ios::out | std::ios::trunc);
+                out.imbue(std::locale::classic());
+                out << std::setprecision(std::numeric_limits<Scalar>::max_digits10);
+                return;
+            }
+            if (ec) {
+                break;
+            }
+        }
+        out.setstate(std::ios::failbit);
+    }
+
+    IOExportFile(const IOExportFile&) = delete;
+    IOExportFile& operator=(const IOExportFile&) = delete;
+
+    ~IOExportFile() {
+        if (out.is_open()) {
+            out.close();
+        }
+        if (!temporary_directory_.empty()) {
+            std::error_code ec;
+            std::filesystem::remove(temporary_file_, ec);
+            ec.clear();
+            std::filesystem::remove(temporary_directory_, ec);
+        }
+    }
+
+    void finish() {
+        out.flush();
+        out.close();
+        // Devices and symlinks resolving to devices are never replaced. Keep the
+        // historical write-stage failure, including /dev/full regression inputs.
+        if (special_target_) {
+            out.setstate(std::ios::failbit);
+        }
+    }
+
+    Result<void> publish(detail::KernelState& state, BodyId body_id, std::string_view format) {
+        std::error_code ec;
+        const auto current_status = std::filesystem::status(destination_, ec);
+        if (ec == std::errc::no_such_file_or_directory) {
+            ec.clear();
+        }
+        if (!ec && std::filesystem::exists(current_status) &&
+            !std::filesystem::is_regular_file(current_status)) {
+            ec = std::make_error_code(std::errc::operation_not_permitted);
+        }
+        if (!ec) {
+            if (out && !out.is_open()) {
+                std::filesystem::rename(temporary_file_, destination_, ec);
+            } else {
+                ec = std::make_error_code(std::errc::io_error);
+            }
+        }
+        if (ec) {
+            return io_failed_void(
+                state, StatusCode::OperationFailed, diag_codes::kIoExportFailure,
+                "导出失败：无法发布完整输出文件", "导出失败", {body_id.value},
+                "io.export." + std::string(format) + ".publish",
+                {{"filesystem_error", static_cast<Scalar>(ec.value()), "code"}});
+        }
+        return ok_void({});
+    }
+
+    std::ofstream out;
+
+private:
+    std::filesystem::path destination_;
+    std::filesystem::path temporary_directory_;
+    std::filesystem::path temporary_file_;
+    bool special_target_ {false};
+};
 
 // Only meshes and tessellation caches are written by export conversion. Keep
 // existing embedded/cached meshes; discard this call's allocations on failure.

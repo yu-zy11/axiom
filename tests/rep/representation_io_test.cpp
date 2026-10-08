@@ -1,9 +1,11 @@
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <locale>
 #include <sstream>
 #include <vector>
 
@@ -214,9 +216,93 @@ bool stage3_representation_consistency_regression() {
     return true;
 }
 
+
+// A fixed closed tetrahedron distinguishes actual triangles from its 2x3x4
+// bbox: volume is 4, not 24. Integrate emitted OBJ facets independently, using
+// long double moments and the analytic native-model-unit reference.
+bool stage5_stl_geometry_reference_regression() {
+    const auto data=std::filesystem::path(__FILE__).parent_path().parent_path()/"data"/"io";
+    const auto root=std::filesystem::temp_directory_path()/
+        ("axiom_s5_stl_reference_"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directory(root);
+    axiom::Kernel kernel;
+    axiom::ImportOptions options;
+    options.auto_repair=true;
+    const auto source=kernel.io().import_stl((data/"s5_io_precision_tetra.stl").string(),options);
+    const auto stl=root/"roundtrip.stl";
+    if (!source.value || source.status!=axiom::StatusCode::Ok ||
+        kernel.io().export_stl(*source.value,stl.string(),{}).status!=axiom::StatusCode::Ok) return false;
+    const auto reread=kernel.io().import_stl(stl.string(),options);
+    if (!reread.value || reread.status!=axiom::StatusCode::Ok) return false;
+    for (const auto body : {*source.value,*reread.value}) {
+        if (kernel.validate().validate_all(body,axiom::ValidationMode::Standard).status!=axiom::StatusCode::Ok)
+            return false;
+        const auto output=root/(std::to_string(body.value)+".obj");
+        if (kernel.io().export_obj(body,output.string(),{}).status!=axiom::StatusCode::Ok) return false;
+        std::ifstream input {output};
+        input.imbue(std::locale::classic());
+        std::vector<axiom::Point3> vertices;
+        long double volume=0,area=0;
+        std::array<long double,3> moment{};
+        std::size_t triangles=0;
+        std::string line;
+        while (std::getline(input,line)) {
+            std::istringstream record {line};
+            record.imbue(std::locale::classic());
+            std::string kind;
+            record>>kind;
+            if (kind=="v") {
+                axiom::Point3 point{};
+                if (!(record>>point.x>>point.y>>point.z)) return false;
+                vertices.push_back(point);
+            } else if (kind=="f") {
+                std::array<std::size_t,3> ids{};
+                if (!(record>>ids[0]>>ids[1]>>ids[2]) ||
+                    std::any_of(ids.begin(),ids.end(),[&](const auto id) {return id==0 || id>vertices.size();}))
+                    return false;
+                const auto& p=vertices[ids[0]-1];
+                const auto& q=vertices[ids[1]-1];
+                const auto& r=vertices[ids[2]-1];
+                const long double cx=static_cast<long double>(q.y)*r.z-static_cast<long double>(q.z)*r.y;
+                const long double cy=static_cast<long double>(q.z)*r.x-static_cast<long double>(q.x)*r.z;
+                const long double cz=static_cast<long double>(q.x)*r.y-static_cast<long double>(q.y)*r.x;
+                const long double tetra=(p.x*cx+p.y*cy+p.z*cz)/6;
+                volume+=tetra;
+                moment[0]+=tetra*(p.x+q.x+r.x)/4;
+                moment[1]+=tetra*(p.y+q.y+r.y)/4;
+                moment[2]+=tetra*(p.z+q.z+r.z)/4;
+                const long double ux=q.x-p.x,uy=q.y-p.y,uz=q.z-p.z;
+                const long double vx=r.x-p.x,vy=r.y-p.y,vz=r.z-p.z;
+                const long double nx=uy*vz-uz*vy,ny=uz*vx-ux*vz,nz=ux*vy-uy*vx;
+                area+=std::sqrt(nx*nx+ny*ny+nz*nz)/2;
+                ++triangles;
+            }
+        }
+        const auto close=[](long double actual,long double expected) {return std::abs(actual-expected)<=1e-12L;};
+        const auto mesh=kernel.convert().brep_to_mesh(body,{});
+        const auto kind=kernel.representation().kind_of_body(body);
+        const auto shells=kernel.topology().query().shell_count_of_body(body);
+        if (triangles!=4 || vertices.size()!=12 || !close(volume,4) || !close(area,13+std::sqrt(244.0L)/2) ||
+            !close(moment[0]/volume,0.12345678901234566L+0.5L) ||
+            !close(moment[1]/volume,-1.2345678901234567L+0.75L) ||
+            !close(moment[2]/volume,3.456789012345679L+1) || !mesh.value || !kind.value ||
+            *kind.value!=axiom::RepKind::MeshRep || !shells.value || *shells.value!=0) return false;
+        const auto inspection=kernel.convert().inspect_mesh(*mesh.value);
+        if (!inspection.value || inspection.value->triangle_count!=4 || inspection.value->has_degenerate_triangles ||
+            inspection.value->has_out_of_range_indices || inspection.value->tessellation_strategy!="io_import_stl")
+            return false;
+    }
+    std::filesystem::remove_all(root);
+    return true;
+}
+
 }  // namespace
 
 int main() {
+    if (!stage5_stl_geometry_reference_regression()) {
+        std::cerr << "Stage 5 STL actual geometry independent reference regression failed\n";
+        return 1;
+    }
     if (!stage3_representation_consistency_regression()) {
         std::cerr << "Stage 3 representation consistency regression failed\n";
         return 1;

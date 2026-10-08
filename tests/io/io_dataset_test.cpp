@@ -1,11 +1,164 @@
+#include <array>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <locale>
+#include <optional>
+#include <sstream>
 #include <string>
+#include <vector>
 
 #include "axiom/diag/error_codes.h"
 #include "axiom/sdk/kernel.h"
+
+namespace {
+
+class CommaDecimal : public std::numpunct<char> {
+    char do_decimal_point() const override { return ','; }
+};
+
+class GlobalLocaleGuard {
+public:
+    explicit GlobalLocaleGuard(const std::locale& value) : previous_(std::locale::global(value)) {}
+    ~GlobalLocaleGuard() { std::locale::global(previous_); }
+private:
+    std::locale previous_;
+};
+
+// These files exchange native model-unit coordinates. Their STEP/IGES entity
+// hints describe Axiom metadata only; they do not contain standard BRep faces.
+bool check_stage5_fixed_precision_corpus(const std::filesystem::path& data_dir) {
+    using Importer = axiom::Result<axiom::BodyId> (axiom::IOService::*)(
+        std::string_view, const axiom::ImportOptions&);
+    using Exporter = axiom::Result<void> (axiom::IOService::*)(
+        axiom::BodyId, std::string_view, const axiom::ExportOptions&);
+    struct Format { const char* name; Importer read; Exporter write; };
+    const Format formats[] = {
+        {"step", &axiom::IOService::import_step, &axiom::IOService::export_step},
+        {"iges", &axiom::IOService::import_iges, &axiom::IOService::export_iges},
+        {"brep", &axiom::IOService::import_brep, &axiom::IOService::export_brep},
+    };
+    const std::array<double, 3> origin {123456.123456789,-1.2345678901234567,3.456789012345679};
+    const std::array<double, 3> params {2.345678901234568,3.456789012345679,4.567890123456789};
+    const std::array<double, 6> bounds {origin[0],origin[1],origin[2],
+        origin[0]+params[0],origin[1]+params[1],origin[2]+params[2]};
+    const auto root = std::filesystem::temp_directory_path() /
+        ("axiom_s5_io_precision_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directory(root);
+    for (const auto& format : formats) {
+        axiom::Kernel kernel;
+        axiom::ImportOptions options;
+        options.auto_repair = true;
+        const auto path = data_dir / (std::string("s5_io_precision_subset.")+format.name);
+        const auto imported = (kernel.io().*format.read)(path.string(), options);
+        if (!imported.value || imported.status != axiom::StatusCode::Ok) return false;
+        const auto check_record = [&](axiom::BodyId body) {
+            const auto kind = kernel.representation().kind_of_body(body);
+            const auto shells = kernel.topology().query().shell_count_of_body(body);
+            const auto bbox = kernel.representation().bbox_of_body(body);
+            if (!kind.value || *kind.value != axiom::RepKind::ExactBRep || !shells.value || *shells.value != 0 ||
+                !bbox.value || kernel.validate().validate_all(body,axiom::ValidationMode::Standard).status !=
+                    axiom::StatusCode::Ok) return false;
+            const std::array<double,6> actual {bbox.value->min.x,bbox.value->min.y,bbox.value->min.z,
+                bbox.value->max.x,bbox.value->max.y,bbox.value->max.z};
+            return actual == bounds;
+        };
+        if (!check_record(*imported.value)) return false;
+        if (std::string(format.name)=="iges") {
+            std::ifstream original {path};
+            std::string text {std::istreambuf_iterator<char>(original),std::istreambuf_iterator<char>()};
+            const auto label=text.find("AXIOM_LABEL ");
+            const auto end=text.find('\n',label);
+            if (label==std::string::npos || end==std::string::npos) return false;
+            text.replace(label,end-label,"AXIOM_LABEL 1H 2H 3H 4H "+std::string(100,'x'));
+            text+="AXIOM_STEP_SCHEMA "+std::string(100,'y')+"\n";
+            const auto variant=root/"valid_hollerith_label.iges";
+            { std::ofstream write {variant}; write<<text; }
+            const auto relabelled=kernel.io().import_iges(variant.string(),options);
+            if (!relabelled.value || relabelled.status!=axiom::StatusCode::Ok || !check_record(*relabelled.value))
+                return false;
+        }
+        const auto output = root / (std::string("roundtrip.")+format.name);
+        {
+            GlobalLocaleGuard locale {std::locale(std::locale::classic(),new CommaDecimal)};
+            if ((kernel.io().*format.write)(*imported.value,output.string(),{}).status != axiom::StatusCode::Ok)
+                return false;
+        }
+        // Parse serialized coordinates independently from the production parser.
+        std::ifstream input {output};
+        const std::string text {std::istreambuf_iterator<char>(input),std::istreambuf_iterator<char>()};
+        if (std::string(format.name) == "brep") {
+            const std::array<const char*,12> keys {"origin_x","origin_y","origin_z","param_a","param_b","param_c",
+                "bbox_min_x","bbox_min_y","bbox_min_z","bbox_max_x","bbox_max_y","bbox_max_z"};
+            const std::array<double,12> expected {origin[0],origin[1],origin[2],params[0],params[1],params[2],
+                bounds[0],bounds[1],bounds[2],bounds[3],bounds[4],bounds[5]};
+            for (std::size_t i=0; i<keys.size(); ++i) {
+                const auto start=text.find(std::string("\"")+keys[i]+"\"");
+                const auto colon=text.find(':',start);
+                if (start==std::string::npos || colon==std::string::npos) return false;
+                std::istringstream number {text.substr(colon+1)};
+                number.imbue(std::locale::classic());
+                double actual=0;
+                if (!(number>>actual) || actual!=expected[i]) return false;
+            }
+        } else {
+            const std::array<const char*,3> names {"AXIOM_ORIGIN","AXIOM_PARAMS","AXIOM_BBOX"};
+            for (std::size_t field=0;field<names.size();++field) {
+                const auto start=text.find(names[field]);
+                if (start==std::string::npos) return false;
+                std::istringstream numbers {text.substr(start+std::string(names[field]).size())};
+                numbers.imbue(std::locale::classic());
+                const auto count=field==2 ? bounds.size() : origin.size();
+                for (std::size_t i=0;i<count;++i) {
+                    double actual=0;
+                    const double expected=field==0 ? origin[i] : field==1 ? params[i] : bounds[i];
+                    if (!(numbers>>actual) || actual!=expected) return false;
+                }
+            }
+        }
+        const auto reread=(kernel.io().*format.read)(output.string(),options);
+        if (!reread.value || reread.status!=axiom::StatusCode::Ok || !check_record(*reread.value)) return false;
+    }
+    axiom::Kernel kernel;
+    const auto tetra=kernel.io().import_stl((data_dir/"s5_io_precision_tetra.stl").string(),{});
+    if (!tetra.value || tetra.status!=axiom::StatusCode::Ok) return false;
+    const auto output=root/"roundtrip.stl";
+    {
+        GlobalLocaleGuard locale {std::locale(std::locale::classic(),new CommaDecimal)};
+        if (kernel.io().export_stl(*tetra.value,output.string(),{}).status!=axiom::StatusCode::Ok) return false;
+    }
+    // ASCII vertex records preserve all twelve facet coordinates exactly. STL
+    // stores triangle geometry; it carries neither SI units nor BRep shells.
+    const auto read_vertices=[](const std::filesystem::path& path) {
+        std::ifstream input {path};
+        input.imbue(std::locale::classic());
+        std::vector<double> values;
+        std::string token;
+        while (input>>token) if (token=="vertex") {
+            std::array<double,3> point{};
+            if (!(input>>point[0]>>point[1]>>point[2])) return std::vector<double>{};
+            values.insert(values.end(),point.begin(),point.end());
+        }
+        return values;
+    };
+    const auto source=read_vertices(data_dir/"s5_io_precision_tetra.stl");
+    if (source.size()!=36 || read_vertices(output)!=source) return false;
+    const auto reread=kernel.io().import_stl(output.string(),{});
+    for (const auto body : {tetra.value,reread.value}) {
+        if (!body) return false;
+        const auto kind=kernel.representation().kind_of_body(*body);
+        const auto mesh=kernel.convert().brep_to_mesh(*body,{});
+        if (!kind.value || *kind.value!=axiom::RepKind::MeshRep || !mesh.value ||
+            kernel.convert().mesh_triangle_count(*mesh.value).value!=std::optional<std::uint64_t>{4} ||
+            kernel.validate().validate_all(*body,axiom::ValidationMode::Standard).status!=axiom::StatusCode::Ok)
+            return false;
+    }
+    std::filesystem::remove_all(root);
+    return true;
+}
+
+}  // namespace
 
 int main(int argc, char** argv) {
     if (argc < 2) {
@@ -16,6 +169,11 @@ int main(int argc, char** argv) {
     if (!std::filesystem::is_directory(data_dir)) {
         std::cerr << "data directory missing: " << data_dir.string() << "\n";
         return 2;
+    }
+
+    if (!check_stage5_fixed_precision_corpus(data_dir)) {
+        std::cerr << "Stage 5 fixed corpus precision/support matrix regression failed\n";
+        return 1;
     }
 
     axiom::Kernel kernel;

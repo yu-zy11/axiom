@@ -38,9 +38,10 @@ bool extract_json_number(const std::string& content, std::string_view key, Scala
 std::string lower_copy(std::string value);
 std::string base64_encode(std::span<const std::uint8_t> data);
 void append_padding_4(std::vector<std::uint8_t>& out);
-void parse_axiom_interchange_metadata_lines(std::istream& in, detail::BodyRecord& record);
+/// STEP 元数据子集：保留历史部分字段支持，但拒绝已识别字段的损坏数值或类型。
+std::optional<std::string> parse_axiom_interchange_metadata_lines(std::istream& in, detail::BodyRecord& record);
 /// Strict parser used by IGES metadata-subset import before a BodyId is allocated.
-/// Unlike the legacy STEP metadata reader, malformed recognized AXIOM_* fields are rejected.
+/// Malformed recognized AXIOM_* fields are rejected, as in the STEP subset reader.
 std::optional<std::string> parse_iges_subset_body_record(std::string_view content,
                                                          detail::BodyRecord& record);
 std::string strip_leading_hash_lines(const std::string& in);
@@ -137,7 +138,7 @@ DiagnosticId merge_batch_path_transform_failure_diagnostic(detail::KernelState& 
 bool normalize_user_export_extension(std::string_view ext, std::string& out_dotless_lower);
 /// 将无点扩展名 token（小写）映射到与 `detect_format` / `export_auto` 一致的格式 id。
 bool export_format_from_extension_token(std::string_view token, std::string& out_format_id);
-BodyId run_post_import_validation_pipeline(const std::shared_ptr<detail::KernelState>& state, BodyId body_id,
+Result<BodyId> run_post_import_validation_pipeline(const std::shared_ptr<detail::KernelState>& state, BodyId body_id,
                                              const ImportOptions& options, const std::string& format_cn,
                                              std::vector<Issue>& issues, std::vector<Warning>& warnings);
 

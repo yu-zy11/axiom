@@ -14,6 +14,10 @@
 
 扫描器为 **启发式物理层** 解析（括号/引号内分号处理等），不替代 SCHEMA 校验与完整 AP 语义。
 
+### cycle-0085 / S5-IO 默认路径事实
+
+当前 CMake **未定义或启用** `AXM_ENABLE_STEP_IGES_BRIDGE`，默认行为等同未启用桥接；不是实际执行了 `-DBRIDGE=OFF`。本轮无外部依赖，里程碑 1～4 的 ON 路线 DoD 不适用。默认子集及标准拒绝回归随调度器完整 **16/16、0 失败、227.56 s** 通过，[三条证据](../quality/AxiomKernel_测试与验收方案.md#112-cycle-0085--s5-io-门禁与逐项证据)与 [API 支持矩阵](../api/AxiomKernel_详细模块接口清单.md#1111-stage-5-受限-io-主链路cycle-0085--s5-io)区分零 owned shells 的元数据与实际 STL 三角网格。标准实体混入 Axiom 标记仍优先拒绝，合法 IGES Hollerith 长标签回归保留；扫描是启发式物理检测。STEP/IGES/BREP/STL 64 MiB 预读预算、严格 STEP/STL 损坏拒绝和八格式单主文件发布均已落地，不证明单位转换、标准全实体交换或跨文件事务。
+
 ## 2. 里程碑 1：外部内核集成骨架（CMake + 可选编译）
 
 - 增加 **`AXM_ENABLE_STEP_IGES_BRIDGE`**（默认 `OFF`）或分列 STEP / IGES 开关。
@@ -35,7 +39,7 @@
 ## 5. 里程碑 4：与 Heal / 事务 / 诊断闭环
 
 - 导入失败阶段 `io.import.step` / `io.import.iges` 细分；`related_entities` 绑定路径与可选 `BodyId`。
-- 大文件内存与 **64MB 探测上限** 策略与产品一致（流式或 mmap）。
+- 大文件内存与 **64 MiB（67108864 字节）预读上限** 策略与产品一致（流式或 mmap）。
 
 ## 6. 建议决策点（需产品/架构拍板）
 

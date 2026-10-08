@@ -5,6 +5,7 @@
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <map>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -19,6 +20,7 @@
 #include "axiom/internal/core/kernel_state.h"
 #include "axiom/internal/core/topology_materialization.h"
 #include "axiom/internal/math/math_internal_utils.h"
+#include "axiom/internal/rep/representation_internal_utils.h"
 
 namespace axiom {
 

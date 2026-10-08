@@ -734,6 +734,10 @@ if (empty.status == StatusCode::Ok && empty.value && !empty.value->output)
 
 在已打开的拓扑writer内调用成功非空重建会登记服务分配，不增加显式write_operation_count，输出参与保存点/完整rollback；失败恢复新增对象、geometry/cache/Eval而保留diagnostic/递增ID，输入Eval保持有效。保存点只清其后输出，完整rollback防delete后的旧快照复活，回滚后可重试；合法累计遥测不回退。[支持矩阵及V/A/S参考](AxiomKernel_详细模块接口清单.md#823-stage-4-真实实体重建支持矩阵cycle-0082--s4-rebuild)保留边点Union拒绝、真实薄层/Safe失败、曲面曲边/ExactCritical不认证、Strict至少六面/近似网格自交及人工节点截面数值拒绝限制。
 
+cycle-0083 / S4-EXIT 沿用上述公开签名和调用片段，新增执行证据见 [验收 §1.10](../quality/AxiomKernel_测试与验收方案.md#110-cycle-0083--s4-exit-门禁与逐项证据) 与 [退出矩阵 §8.2.4](AxiomKernel_详细模块接口清单.md#824-stage-4-退出支持矩阵cycle-0083--s4-exit)。workflow 中先 `brep_to_mesh(output,{})`，再 `inspect_mesh` 核对 owned 标签/策略、索引/退化与计数，随后 `export_obj(output,path,{})` 并独立解析三角形积分 V/A（long double 累计，误差 ≤1e-7），再次转换应命中同 MeshId。偏移盒 U/D/I 各总计两轮，V/A/S 为 15/42/7、7/24/3、1/6/1；分离并 11/37/4、包含空腔 7.875/25.5/3.75 也经过该表示核对。孔/凹U独立公式在prep既有回归，未新增同样OBJ覆盖。片段仍为应用示意，未单独编译。
+
+失败可用外层 diagnostic_id 查询、按 `Issue.stage` / code 检索并 JSON 导出，七阶段证据见字典 §7.5；本批新检索覆盖重建/验证/修复。暖缓存/Eval/writer/rollback隔离为公开摘要，非完整几何序列化；合法累计遥测保留。平面边界三角化不认证通用曲面采样，兼容run与run_rebuilt范围应分开使用；现有性能基线只测兼容run/查询，run_rebuilt工业性能未认证。调度器本批CTest 16/16、194.58 s通过，最终文档门禁及提交尚未记录，Stage4/FR-BOOL-001仍进行中。
+
 ## 8. 修改操作样例
 
 ## 8.1 偏置
@@ -935,6 +939,41 @@ opts.embed_metadata = true;
 auto exported = kernel.io().export_step(body_id, "/data/out.step", opts);
 ```
 
+### 11.2.1 S5-IO 四格式受限往返与失败处理
+
+`part.step` 必须是 Axiom 元数据子集；标准 STEP 实体仍返回 NotImplemented。IGES/BREP 同样只支持各自 Axiom 子集，STL 为实际三角网格；本例坐标保留模型单位，不执行标准单位转换。以下为调用片段，未单独编译；验证依据是调度器运行的固定数据及 workflow/representation 回归，见 [验收 §1.12](../quality/AxiomKernel_测试与验收方案.md#112-cycle-0085--s5-io-门禁与逐项证据)。
+
+```cpp
+ImportOptions import_opts;
+import_opts.run_validation = true;
+import_opts.auto_repair = true;
+import_opts.repair_mode = RepairMode::Safe;
+ExportOptions export_opts;
+export_opts.embed_metadata = true;
+export_opts.compatibility_mode = false;
+// 对 step/iges/brep/stl 分别提供对应输入与输出路径。
+auto imported = kernel.io().import_auto(input_path, import_opts);
+if (imported.status != StatusCode::Ok || !imported.value) {
+  handle_error(imported); // io.import.* / io.post_import.*；无本次模型残留。
+  return;
+}
+auto exported = kernel.io().export_auto(*imported.value, output_path, export_opts);
+if (exported.status != StatusCode::Ok) {
+  auto report = kernel.diagnostics().get(exported.diagnostic_id);
+  handle_query_error(report); // open/write/sidecar/publish；原主文件受保护。
+  return;
+}
+auto reimported = kernel.io().import_auto(output_path, import_opts);
+if (reimported.status != StatusCode::Ok || !reimported.value) {
+  handle_error(reimported);
+  return;
+}
+auto valid = kernel.validate().validate_all(*reimported.value, ValidationMode::Standard);
+use_if_valid(valid);
+```
+
+四格式读取预算为 64 MiB，超限在 `.read` 失败，STEP 严格容器/字段与 STL 闭合/非有限/溢出拒绝均可由 diagnostic_id 检索。固定三元数据文件证明参数/坐标精确 double 往返及零 owned shells；固定 STL 实际积分 V=4（非 bbox 的24）、面积/质心误差≤1e-12，详见 API §11.1.1。导出文本使用 classic locale/max_digits10，但 glTF float32 等格式能力不因此扩大。四网格格式开启 `write_mesh_validation_report` 时先成功写侧车再发布主文件；侧车可能保留，侧车/主文件及全批不承诺跨文件事务、掉电持久性或并发目录修改安全。发布失败有 `.publish` 合同，但该失败分支未单独注入回归。
+
 ### 精确 B-Rep 文本子集的失败诊断
 
 ```cpp
@@ -952,20 +991,27 @@ if (!imported.value) {
 }
 ```
 
-AXMJSON、Axiom IGES 元数据子集与 Axiom BREP JSON 子集均限 64 MiB，且在分配 `BodyId` 前完成文件、结构、格式、有限数值、包围盒和轴校验。失败不写 Body/Mesh store，修复原文件后可原位重试。AXMJSON 兼容早期仅身份与 bbox 字段的文件，但扩展几何字段一旦出现就必须成组完整。标准 IGES DE 实体仍返回 `NotImplemented`，不会被当成 Axiom 子集物化。
+STEP/STL（cycle-0085）及 AXMJSON、Axiom IGES 元数据子集与 Axiom BREP JSON 子集均限 64 MiB，且在分配 `BodyId` 前完成文件、结构、格式、有限数值、包围盒和轴校验。失败不写 Body/Mesh store，修复原文件后可原位重试。AXMJSON 兼容早期仅身份与 bbox 字段的文件，但扩展几何字段一旦出现就必须成组完整。标准 IGES DE 实体仍返回 `NotImplemented`，不会被当成 Axiom 子集物化。
 
 ## 11.3 导入后修复
 
 ```cpp
-auto imported = kernel.io().import_step(path, opts);
-if (imported.status == StatusCode::Ok) {
-  auto valid = kernel.validate().validate_all(*imported.value, ValidationMode::Standard);
-  if (valid.status != StatusCode::Ok) {
-    auto repaired = kernel.repair().auto_repair(*imported.value, RepairMode::Safe);
-    use_if_valid(repaired);
-  }
+ImportOptions repair_opts;
+repair_opts.run_validation = true;
+repair_opts.auto_repair = true;
+repair_opts.repair_mode = RepairMode::Safe;
+auto imported = kernel.io().import_step(path, repair_opts);
+if (imported.status != StatusCode::Ok || !imported.value) {
+  // io.post_import.validation/repair/post_validate；本次模型/cache/Eval/next_id 已回滚。
+  handle_error(imported);
+  return;
 }
+// 返回原验证合格体或已修复且再验证合格的输出。
+auto strict = kernel.validate().validate_all(*imported.value, ValidationMode::Strict);
+use_if_valid(strict);
 ```
+
+若需保留缺陷体作人工预检，应显式 `run_validation=false` 后调用 `auto_repair(body, ReportOnly/SuggestOnly)`。观察返回原体，外层 Result 可 Ok，但 `OpReport::status` 是实际 Standard 预检状态；模型/Eval/cache 不改，诊断可增加。修改型 `auto_repair` 的新真实规则只在 Standard 失败时进入，限至少六唯一面的平面直边单壳外环，linear 必须位于配置 min_local/max_local；孔洞/曲面/多壳/代理面明确拒绝。Strict 后验成功输出 Generic + ExactBRep，有限 PCurve 支持公开 UV/质量/截面。默认 STEP/IGES/BREP 仍是 Axiom 元数据子集，样例不代表标准全实体交换。
 
 ### 批量导入失败、后验诊断与原位重试
 
@@ -988,7 +1034,7 @@ if (!imported_batch.value) {
 }
 ```
 
-`import_many_step` 和 `import_many_auto` 具有相同模型存储原子性；单项实际失败触发整批回滚，诊断证据仍保留。STEP/AXMJSON 的后验验证、自动修复及修复后复验问题复制为 `io.post_import.validation/repair/post_validate`，保留有限数值证据且不改源 HEAL 报告。导入后验证或修复问题可能随成功导入报告返回，`Ok` 本身不保证有效体，须读取诊断或显式验证。批量导出不回滚已写文件，普通文本/目录辅助接口尚未纳入本批证据门禁。
+`import_many_step` 和 `import_many_auto` 具有相同模型存储原子性；单项实际失败触发整批回滚，诊断证据仍保留。八个具体格式入口的后验验证、自动修复及修复后复验 Error/Fatal 阶段映射为 `io.post_import.validation/repair/post_validate`，保留有限数值证据且不改源 HEAL 报告。`run_validation=true` 的未修复验证失败或修复/再验证失败返回失败且无 value，单项也回滚本次模型/缓存统计/Eval/next_id；ReportOnly/SuggestOnly 不升级为修改策略。`false` 显式跳过闭环，不承诺有效。批量导出不回滚已成功前项或已写侧车；cycle-0085 八主格式的失败项主文件受单文件发布保护，普通文本/目录辅助接口尚未纳入本批证据门禁。
 
 ### HEAL 修复失败与批量原子性
 
@@ -1003,7 +1049,7 @@ if (!repaired_batch.value) {
 }
 ```
 
-单项修改型修复后验失败会回收本次物化对象；`repair_many_auto/remove_small_edges/remove_small_faces/merge_near_coplanar_faces` 均不泄漏半成功结果。`repair_face_trim_pcurves(face_id, RepairMode::Safe)` 支持 Plane/Cylinder/Sphere，重建或后验失败恢复原 coedge PCurve 绑定并回收新增 PCurve。失败报告使用 `heal.*` 阶段、实体与有限数值证据，不扩大现有修复规则或曲面支持范围。HEAL 回滚不恢复 `next_id`，重试不保证复用被回收对象的 ID；批量子项根因保留在原诊断，返回的批量报告记录失败目标与回滚上下文。
+单项修改型修复后验失败会回收本次物化对象；`repair_many_auto/remove_small_edges/remove_small_faces/merge_near_coplanar_faces` 均不泄漏半成功结果。`repair_face_trim_pcurves(face_id, RepairMode::Safe)` 支持 Plane/Cylinder/Sphere，重建或后验失败恢复原 coedge PCurve 绑定并回收新增 PCurve。失败报告使用 `heal.*` 阶段、实体与有限数值证据，不扩大现有修复规则或曲面支持范围。HEAL 回滚不恢复 `next_id`，重试不保证复用被回收对象的 ID；`repair_many_auto` 返回报告复制失败子项 issue 并保留其非空阶段及批量 rollback 上下文；其余三个批量入口仍在原诊断保留子项根因。
 
 ## 12. 三角化样例
 

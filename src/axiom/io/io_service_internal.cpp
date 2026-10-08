@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <charconv>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -11,7 +12,9 @@
 #include <iomanip>
 #include <iterator>
 #include <limits>
+#include <locale>
 #include <regex>
+#include <span>
 #include <sstream>
 #include <system_error>
 
@@ -231,19 +234,6 @@ std::string strip_c_style_block_comments(std::string_view in) {
     return out;
 }
 
-bool step_text_is_axiom_interchange_subset(std::string_view text) {
-    if (text.find("AXIOM_") != std::string_view::npos) {
-        return true;
-    }
-    if (text.find("('AxiomKernel export')") != std::string_view::npos) {
-        return true;
-    }
-    if (text.find("'AxiomKernel export'") != std::string_view::npos) {
-        return true;
-    }
-    return false;
-}
-
 bool step_data_section_has_express_instance_entities(std::string_view text) {
     const std::size_t data_pos = find_ci_substr(text, "DATA;");
     if (data_pos == std::string_view::npos) {
@@ -258,19 +248,6 @@ bool step_data_section_has_express_instance_entities(std::string_view text) {
     const std::string stripped = strip_c_style_block_comments(data_chunk);
     static const std::regex kInstance(R"(#[0-9]+\s*=\s*[A-Za-z_][A-Za-z0-9_]*\s*[\(;])");
     return std::regex_search(stripped, kInstance);
-}
-
-bool iges_text_is_axiom_interchange_subset(std::string_view text) {
-    if (text.find("AXIOM_") != std::string_view::npos) {
-        return true;
-    }
-    if (text.find("1HAXIOM") != std::string_view::npos) {
-        return true;
-    }
-    if (text.find("AxiomKernel IGES metadata") != std::string_view::npos) {
-        return true;
-    }
-    return false;
 }
 
 bool iges_text_looks_like_standard_fixed_deck(std::string_view text) {
@@ -289,7 +266,15 @@ bool iges_text_looks_like_standard_fixed_deck(std::string_view text) {
         while (!line.empty() && std::isspace(static_cast<unsigned char>(line.back())) != 0) {
             line.remove_suffix(1);
         }
-        if (line.size() == 80) {
+        const auto first = line.find_first_not_of(" \t");
+        if (first != std::string_view::npos && line.substr(first).rfind("AXIOM_", 0) == 0) {
+            line_start = i + 1;
+            continue;
+        }
+        if (line.size() == 80 && std::string_view("SGDPT").find(line[72]) != std::string_view::npos &&
+            std::all_of(line.begin() + 73, line.end(), [](char ch) {
+                return std::isdigit(static_cast<unsigned char>(ch)) != 0 || ch == ' ';
+            })) {
             ++lines_len80;
         }
         for (std::size_t k = 0; k + 1 < line.size(); ++k) {
@@ -325,10 +310,18 @@ std::optional<std::string> read_regular_file_bytes_limited(std::string_view path
     if (!in) {
         return std::nullopt;
     }
-    std::string out;
-    out.resize(max_bytes);
-    in.read(out.data(), static_cast<std::streamsize>(max_bytes));
-    out.resize(static_cast<std::size_t>(in.gcount()));
+    std::error_code ec;
+    const auto file_size = std::filesystem::file_size(path, ec);
+    if (ec || file_size > max_bytes) {
+        return std::nullopt;
+    }
+    std::string out(static_cast<std::size_t>(file_size), '\0');
+    in.read(out.data(), static_cast<std::streamsize>(out.size()));
+    const auto bytes_read = static_cast<std::size_t>(in.gcount());
+    const auto trailing_byte = in.peek();
+    if (in.bad() || bytes_read != out.size() || trailing_byte != std::char_traits<char>::eof()) {
+        return std::nullopt;
+    }
     return out;
 }
 
@@ -339,14 +332,14 @@ bool step_file_requires_full_standard_importer(std::string_view file_text) {
     if (!step_data_section_has_express_instance_entities(file_text)) {
         return false;
     }
-    return !step_text_is_axiom_interchange_subset(file_text);
+    return true;
 }
 
 bool iges_file_requires_full_standard_importer(std::string_view file_text) {
     if (!iges_text_looks_like_standard_fixed_deck(file_text)) {
         return false;
     }
-    return !iges_text_is_axiom_interchange_subset(file_text);
+    return true;
 }
 
 std::string_view body_kind_name(detail::BodyKind kind) {
@@ -383,33 +376,53 @@ detail::BodyKind parse_body_kind(std::string_view value) {
     return detail::BodyKind::Generic;
 }
 
-bool parse_bbox_line(std::string_view line, BoundingBox& bbox) {
+namespace {
+
+bool parse_interchange_numbers(std::string_view line, std::string_view expected_prefix,
+                               std::span<Scalar> values) {
     std::istringstream input {std::string(line)};
-    std::string prefix;
-    Point3 min {};
-    Point3 max {};
-    input >> prefix >> min.x >> min.y >> min.z >> max.x >> max.y >> max.z;
-    if (!input || prefix != "AXIOM_BBOX") {
+    input.imbue(std::locale::classic());
+    std::string token;
+    if (!(input >> token) || token != expected_prefix) {
         return false;
     }
-    bbox = detail::make_bbox(min, max);
+    for (auto& value : values) {
+        if (!(input >> token)) {
+            return false;
+        }
+        std::string_view number {token};
+        if (!number.empty() && number.front() == '+') {
+            number.remove_prefix(1);
+        }
+        const auto parsed = std::from_chars(number.data(), number.data() + number.size(), value);
+        if (parsed.ec != std::errc {} || parsed.ptr != number.data() + number.size()) {
+            return false;
+        }
+    }
+    return !(input >> token);
+}
+
+}  // namespace
+
+bool parse_bbox_line(std::string_view line, BoundingBox& bbox) {
+    Scalar values[6] {};
+    if (!parse_interchange_numbers(line, "AXIOM_BBOX", values)) {
+        return false;
+    }
+    bbox = detail::make_bbox({values[0], values[1], values[2]},
+                             {values[3], values[4], values[5]});
     return true;
 }
 
 bool parse_triplet_line(std::string_view line, std::string_view expected_prefix,
                         Scalar& x, Scalar& y, Scalar& z) {
-    std::istringstream input {std::string(line)};
-    std::string prefix;
-    Scalar tx {};
-    Scalar ty {};
-    Scalar tz {};
-    input >> prefix >> tx >> ty >> tz;
-    if (!input || prefix != expected_prefix) {
+    Scalar values[3] {};
+    if (!parse_interchange_numbers(line, expected_prefix, values)) {
         return false;
     }
-    x = tx;
-    y = ty;
-    z = tz;
+    x = values[0];
+    y = values[1];
+    z = values[2];
     return true;
 }
 
@@ -561,48 +574,63 @@ void trim_ascii_inplace(std::string& s) {
 }
 }  // namespace
 
-void parse_axiom_interchange_metadata_lines(std::istream& in, detail::BodyRecord& record) {
+std::optional<std::string> parse_axiom_interchange_metadata_lines(
+    std::istream& in, detail::BodyRecord& record) {
     std::string line;
     while (std::getline(in, line)) {
         line = trim_comment(std::move(line));
-        if (line.rfind("AXIOM_LABEL ", 0) == 0) {
-            record.label = line.substr(std::string("AXIOM_LABEL ").size());
-            trim_ascii_inplace(record.label);
+        trim_ascii_inplace(line);
+        if (line.rfind("AXIOM_", 0) != 0) {
             continue;
         }
-        if (line.rfind("AXIOM_BODY_KIND ", 0) == 0) {
-            record.kind = parse_body_kind(line.substr(std::string("AXIOM_BODY_KIND ").size()));
-            continue;
-        }
-        if (line.rfind("AXIOM_STEP_SCHEMA ", 0) == 0) {
-            record.io_step_file_schema = line.substr(std::string("AXIOM_STEP_SCHEMA ").size());
-            trim_ascii_inplace(record.io_step_file_schema);
-            continue;
-        }
-        if (line.rfind("AXIOM_STEP_ENTITY ", 0) == 0) {
-            record.io_step_entity_name = line.substr(std::string("AXIOM_STEP_ENTITY ").size());
-            trim_ascii_inplace(record.io_step_entity_name);
-            continue;
-        }
-        if (line.rfind("AXIOM_IGES_ENTITY ", 0) == 0) {
-            record.io_iges_entity_hint = line.substr(std::string("AXIOM_IGES_ENTITY ").size());
-            trim_ascii_inplace(record.io_iges_entity_hint);
-            continue;
-        }
-        if (parse_triplet_line(line, "AXIOM_ORIGIN", record.origin.x, record.origin.y, record.origin.z)) {
-            continue;
-        }
-        if (parse_triplet_line(line, "AXIOM_AXIS", record.axis.x, record.axis.y, record.axis.z)) {
-            continue;
-        }
-        if (parse_triplet_line(line, "AXIOM_PARAMS", record.a, record.b, record.c)) {
-            continue;
-        }
-        BoundingBox parsed {};
-        if (parse_bbox_line(line, parsed)) {
-            record.bbox = parsed;
+        std::istringstream fields {line};
+        fields.imbue(std::locale::classic());
+        std::string key;
+        fields >> key;
+        std::string value;
+        std::getline(fields, value);
+        trim_ascii_inplace(value);
+        if (key == "AXIOM_LABEL") {
+            record.label = std::move(value);
+        } else if (key == "AXIOM_BODY_KIND") {
+            const auto kind = parse_body_kind(value);
+            if (body_kind_name(kind) != value) {
+                return "STEP 导入失败：AXIOM_BODY_KIND 值不受支持";
+            }
+            record.kind = kind;
+        } else if (key == "AXIOM_STEP_SCHEMA" || key == "AXIOM_STEP_ENTITY" ||
+                   key == "AXIOM_IGES_ENTITY") {
+            if (value.empty()) {
+                return "STEP 导入失败：" + key + " 字段为空";
+            }
+            if (key == "AXIOM_STEP_SCHEMA") {
+                record.io_step_file_schema = std::move(value);
+            } else if (key == "AXIOM_STEP_ENTITY") {
+                record.io_step_entity_name = std::move(value);
+            } else {
+                record.io_iges_entity_hint = std::move(value);
+            }
+        } else if (key == "AXIOM_ORIGIN") {
+            if (!parse_triplet_line(line, key, record.origin.x, record.origin.y, record.origin.z)) {
+                return "STEP 导入失败：AXIOM_ORIGIN 字段无效";
+            }
+        } else if (key == "AXIOM_AXIS") {
+            if (!parse_triplet_line(line, key, record.axis.x, record.axis.y, record.axis.z)) {
+                return "STEP 导入失败：AXIOM_AXIS 字段无效";
+            }
+        } else if (key == "AXIOM_PARAMS") {
+            if (!parse_triplet_line(line, key, record.a, record.b, record.c)) {
+                return "STEP 导入失败：AXIOM_PARAMS 字段无效";
+            }
+        } else if (key == "AXIOM_BBOX") {
+            if (!parse_bbox_line(line, record.bbox)) {
+                return "STEP 导入失败：AXIOM_BBOX 字段无效";
+            }
+        } else {
+            return "STEP 导入失败：不支持的元数据字段 " + key;
         }
     }
+    return std::nullopt;
 }
 
 std::optional<std::string> parse_iges_subset_body_record(std::string_view content,
@@ -1081,7 +1109,8 @@ std::optional<std::string> parse_obj_text_to_mesh(std::string_view text, detail:
 
 std::string build_3mf_model_xml_from_mesh(const detail::MeshRecord& mesh) {
     std::ostringstream xml;
-    xml << std::setprecision(17);
+    xml.imbue(std::locale::classic());
+    xml << std::setprecision(std::numeric_limits<Scalar>::max_digits10);
     xml << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
     xml << "<model unit=\"millimeter\" xml:lang=\"en-US\" "
            "xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\">\n";
@@ -1237,53 +1266,40 @@ bool stl_ascii_parse(std::string_view text, detail::MeshRecord& mesh) {
     mesh.vertices.clear();
     mesh.indices.clear();
     std::istringstream in {std::string(text)};
+    in.imbue(std::locale::classic());
     std::string token;
-    in >> token;
-    if (lower_copy(token) != "solid") {
+    if (!(in >> token) || lower_copy(token) != "solid") {
         return false;
     }
     std::string rest_line;
     std::getline(in, rest_line);
     while (in >> token) {
         if (lower_copy(token) == "endsolid") {
-            break;
+            // The optional solid name occupies the remainder of this line;
+            // further records or another solid are outside this single-mesh subset.
+            std::getline(in, rest_line);
+            return !mesh.vertices.empty() && !(in >> token);
         }
-        if (lower_copy(token) != "facet") {
+        if (lower_copy(token) != "facet" || !(in >> token) || lower_copy(token) != "normal") {
             return false;
         }
-        in >> token;
-        if (lower_copy(token) != "normal") {
-            return false;
-        }
-        double nx {};
-        double ny {};
-        double nz {};
-        in >> nx >> ny >> nz;
-        (void)nx;
-        (void)ny;
-        (void)nz;
-        in >> token;
-        if (lower_copy(token) != "outer") {
-            return false;
-        }
-        in >> token;
-        if (lower_copy(token) != "loop") {
+        Scalar nx {};
+        Scalar ny {};
+        Scalar nz {};
+        if (!(in >> nx >> ny >> nz) || !std::isfinite(nx) || !std::isfinite(ny) || !std::isfinite(nz) ||
+            !(in >> token) || lower_copy(token) != "outer" ||
+            !(in >> token) || lower_copy(token) != "loop") {
             return false;
         }
         Point3 v[3] {};
         for (int i = 0; i < 3; ++i) {
-            in >> token;
-            if (lower_copy(token) != "vertex") {
+            if (!(in >> token) || lower_copy(token) != "vertex" ||
+                !(in >> v[i].x >> v[i].y >> v[i].z)) {
                 return false;
             }
-            in >> v[i].x >> v[i].y >> v[i].z;
         }
-        in >> token;
-        if (lower_copy(token) != "endloop") {
-            return false;
-        }
-        in >> token;
-        if (lower_copy(token) != "endfacet") {
+        if (!(in >> token) || lower_copy(token) != "endloop" ||
+            !(in >> token) || lower_copy(token) != "endfacet") {
             return false;
         }
         const Index base = static_cast<Index>(mesh.vertices.size());
@@ -1294,7 +1310,8 @@ bool stl_ascii_parse(std::string_view text, detail::MeshRecord& mesh) {
         mesh.indices.push_back(base + 1);
         mesh.indices.push_back(base + 2);
     }
-    return !mesh.vertices.empty();
+    // A complete facet followed by EOF is still a truncated STL container.
+    return false;
 }
 
 bool stl_binary_parse(const std::vector<std::uint8_t>& data, detail::MeshRecord& mesh) {
@@ -1740,79 +1757,98 @@ void append_issues_from_import_diag(
     }
 }
 
-BodyId run_post_import_validation_pipeline(const std::shared_ptr<detail::KernelState>& state, BodyId body_id,
-                                           const ImportOptions& options, const std::string& format_cn,
-                                           std::vector<Issue>& issues, std::vector<Warning>& warnings) {
-    BodyId result_body_id = body_id;
+Result<BodyId> run_post_import_validation_pipeline(
+    const std::shared_ptr<detail::KernelState>& state, BodyId body_id,
+    const ImportOptions& options, const std::string& format_cn,
+    std::vector<Issue>& issues, std::vector<Warning>& warnings) {
     if (!options.run_validation) {
-        return result_body_id;
+        return ok_result(body_id);
     }
-    auto validation_issue = detail::make_info_issue(diag_codes::kIoPostImportValidation, format_cn + " 导入后已触发自动验证");
+    auto validation_issue = detail::make_info_issue(
+        diag_codes::kIoPostImportValidation, format_cn + " 导入后已触发自动验证");
     validation_issue.related_entities = {body_id.value};
     validation_issue.stage = "io.post_import.validation";
     issues.push_back(std::move(validation_issue));
 
+    // The importer owns the allocation rollback. Keep rejected diagnostics, but
+    // never return an unresolved body as a successful import.
+    const auto reject = [&](StatusCode status, std::string_view stage,
+                             BodyId rejected_body, std::string message) {
+        auto issue = detail::make_error_issue(diag_codes::kIoImportFailure,
+                                              std::move(message));
+        issue.stage = stage;
+        issue.related_entities = {body_id.value};
+        if (rejected_body != body_id) {
+            issue.related_entities.push_back(rejected_body.value);
+        }
+        issue.numeric_evidence = complete_io_failure_evidence(
+            status, issue.related_entities.size(),
+            {{"validation_mode", static_cast<Scalar>(ValidationMode::Standard), "enum"},
+             {"repair_mode", static_cast<Scalar>(options.repair_mode), "enum"},
+             {"rollback_applied", 1.0, "bool"}});
+        issues.push_back(std::move(issue));
+        auto result = error_result<BodyId>(
+            status, state->create_diagnostic(format_cn + " 导入后验证/修复失败", issues));
+        result.warnings = warnings;
+        return result;
+    };
+
     ValidationService validation {state};
-    const auto validation_result = validation.validate_all(result_body_id, ValidationMode::Standard);
-    if (validation_result.status != StatusCode::Ok) {
-        append_issues_from_import_diag(
-            state.get(), issues, warnings, validation_result.diagnostic_id,
-            {result_body_id.value}, validation_result.status,
-            "io.post_import.validation",
-            {{"validation_mode", static_cast<Scalar>(ValidationMode::Standard), "enum"}});
-        if (validation_result.diagnostic_id.value == 0) {
-            const auto message = format_cn + " 导入后自动验证失败";
-            auto fallback_issue = detail::make_warning_issue(diag_codes::kIoImportFailure, message);
-            fallback_issue.related_entities = {result_body_id.value};
-            fallback_issue.stage = "io.post_import.validation";
-            fallback_issue.numeric_evidence = complete_io_failure_evidence(
-                validation_result.status, fallback_issue.related_entities.size(),
-                {{"validation_mode", static_cast<Scalar>(ValidationMode::Standard), "enum"}});
-            issues.push_back(std::move(fallback_issue));
-            warnings.push_back(Warning {std::string(diag_codes::kIoImportFailure), message});
-        }
-
-        if (options.auto_repair) {
-            const auto repair_mode =
-                options.repair_mode == RepairMode::ReportOnly ? RepairMode::Safe : options.repair_mode;
-            auto repair_mode_issue = detail::make_info_issue(
-                diag_codes::kIoPostImportRepairMode,
-                format_cn + " 导入后自动修复策略已启用: mode=" + std::to_string(static_cast<int>(repair_mode)));
-            repair_mode_issue.related_entities = {result_body_id.value};
-            repair_mode_issue.stage = "io.post_import.repair_mode";
-            issues.push_back(std::move(repair_mode_issue));
-
-            RepairService repair {state};
-            const auto repair_result = repair.auto_repair(result_body_id, repair_mode);
-            if (repair_result.status == StatusCode::Ok && repair_result.value.has_value()) {
-                result_body_id = repair_result.value->output;
-                append_issues_from_import_diag(
-                    state.get(), issues, warnings,
-                    repair_result.value->diagnostic_id,
-                    {body_id.value, result_body_id.value}, repair_result.status,
-                    "io.post_import.repair",
-                    {{"repair_mode", static_cast<Scalar>(repair_mode), "enum"}});
-
-                const auto repaired_validation = validation.validate_all(result_body_id, ValidationMode::Standard);
-                if (repaired_validation.status != StatusCode::Ok) {
-                    append_issues_from_import_diag(
-                        state.get(), issues, warnings,
-                        repaired_validation.diagnostic_id,
-                        {result_body_id.value}, repaired_validation.status,
-                        "io.post_import.post_validate",
-                        {{"validation_mode", static_cast<Scalar>(ValidationMode::Standard), "enum"},
-                         {"repair_mode", static_cast<Scalar>(repair_mode), "enum"}});
-                }
-            } else {
-                append_issues_from_import_diag(
-                    state.get(), issues, warnings, repair_result.diagnostic_id,
-                    {body_id.value}, repair_result.status,
-                    "io.post_import.repair",
-                    {{"repair_mode", static_cast<Scalar>(repair_mode), "enum"}});
-            }
-        }
+    const auto initial = validation.validate_all(body_id, ValidationMode::Standard);
+    if (initial.status == StatusCode::Ok) {
+        return ok_result(body_id);
     }
-    return result_body_id;
+    append_issues_from_import_diag(
+        state.get(), issues, warnings, initial.diagnostic_id,
+        {body_id.value}, initial.status, "io.post_import.validation",
+        {{"validation_mode", static_cast<Scalar>(ValidationMode::Standard), "enum"}});
+    if (!options.auto_repair || options.repair_mode == RepairMode::ReportOnly ||
+        options.repair_mode == RepairMode::SuggestOnly) {
+        return reject(initial.status, "io.post_import.validation", body_id,
+                      format_cn + " 导入后验证失败：未启用修改型修复，已撤销本次导入");
+    }
+
+    auto repair_mode_issue = detail::make_info_issue(
+        diag_codes::kIoPostImportRepairMode,
+        format_cn + " 导入后自动修复策略已启用: mode=" +
+            std::to_string(static_cast<int>(options.repair_mode)));
+    repair_mode_issue.related_entities = {body_id.value};
+    repair_mode_issue.stage = "io.post_import.repair_mode";
+    repair_mode_issue.numeric_evidence = {
+        {"repair_mode", static_cast<Scalar>(options.repair_mode), "enum"}};
+    issues.push_back(std::move(repair_mode_issue));
+
+    RepairService repair {state};
+    const auto repaired = repair.auto_repair(body_id, options.repair_mode);
+    append_issues_from_import_diag(
+        state.get(), issues, warnings, repaired.diagnostic_id,
+        {body_id.value}, repaired.status, "io.post_import.repair",
+        {{"repair_mode", static_cast<Scalar>(options.repair_mode), "enum"}});
+    if (repaired.status != StatusCode::Ok || !repaired.value.has_value()) {
+        const auto status = repaired.status == StatusCode::Ok
+                                ? StatusCode::OperationFailed : repaired.status;
+        return reject(status, "io.post_import.repair", body_id,
+                      format_cn + " 导入后修复失败，已撤销本次导入及派生模型");
+    }
+    const auto output = repaired.value->output;
+    const auto post = validation.validate_all(output, ValidationMode::Standard);
+    if (post.status != StatusCode::Ok) {
+        append_issues_from_import_diag(
+            state.get(), issues, warnings, post.diagnostic_id,
+            {output.value}, post.status, "io.post_import.post_validate",
+            {{"validation_mode", static_cast<Scalar>(ValidationMode::Standard), "enum"},
+             {"repair_mode", static_cast<Scalar>(options.repair_mode), "enum"}});
+        return reject(post.status, "io.post_import.post_validate", output,
+                      format_cn + " 导入后再验证失败，已撤销本次导入及派生模型");
+    }
+    auto post_issue = detail::make_info_issue(
+        diag_codes::kHealRepairValidated, format_cn + " 导入后修复结果已通过再验证");
+    post_issue.related_entities = {body_id.value, output.value};
+    post_issue.stage = "io.post_import.post_validate";
+    post_issue.numeric_evidence = {
+        {"validation_mode", static_cast<Scalar>(ValidationMode::Standard), "enum"}};
+    issues.push_back(std::move(post_issue));
+    return ok_result(output);
 }
 
 }  // namespace io_internal

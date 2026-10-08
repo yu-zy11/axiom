@@ -351,6 +351,14 @@ cycle-0081 / S4-SPLIT-CLASSIFY 新增只读切分与实体分类入口；E-0004 
 
 固定数值/失败/事务证据已随最终全量16/16（184.89s）执行，见 [验收§1.9](../quality/AxiomKernel_测试与验收方案.md#19-cycle-0082--s4-rebuild-门禁与逐项证据)；平面直边double、奇偶材料、Safe限制与查询数值拒绝见 [API§8.2.3](../api/AxiomKernel_详细模块接口清单.md#823-stage-4-真实实体重建支持矩阵cycle-0082--s4-rebuild)。这不认证兼容run全部后续行为或全局壳嵌入。
 
+### cycle-0083 / S4-EXIT 诊断验收补充
+
+本批无生产/API/错误码或诊断码变更，上表及求交/切分/分类阶段合同冻结。七阶段候选 `bool.prep.candidates`、求交 `bool.intersect`、切分 `bool.split`、分类 `bool.classify`、重建 `bool.rebuild`、验证 `bool.validate`、修复 `bool.repair` 均有固定失败的稳定码、非零 diagnostic_id、阶段检索及 JSON 证据。workflow::check_real_rebuild_isolation 新增 `find_by_issue_stage/find_by_issue_code` 命中失败ID（重建/验证/修复，另保留先行求交），check_split_classification_isolation 已有阶段/码双索引；prep::check_planar_preparation_failure_isolation 直接断言阶段索引及报告/JSON的code，不声称每条prep失败新增双索引或已注入全部生产根因。
+
+prep隔离新增两输入网格暖缓存、固定CurveId域及四点无缓存point_at_parameter与cached eval对照（1e-12）、支撑面三点/边长/面归属摘要，10项store、6项tessellation统计、5项bridge、真实Eval依赖/有效性/重算不变；成功及失败保留活动writer与写次数，rollback删除临时顶点/体后无writer重试逐段端点1e-12一致。删除未绑定open_body只允许for_body_entries合法+1；既有rebuilt服务体回滚+2/两体+4单独核对，合法累计遥测不回退。摘要仍非完整原始顶点/几何序列化。兼容bool.intersect.trim的E-0001/E-0012/E-0013结构化传播、全部读取成功后才物化已在基线，不是本批新修复或兼容run全流程认证。
+
+本批调度器完整构建成功，CTest **16/16、0失败、194.58 s**；逐项证据与限制见 [验收 §1.10](../quality/AxiomKernel_测试与验收方案.md#110-cycle-0083--s4-exit-门禁与逐项证据)。Stage 4 / FR-BOOL-001 仍进行中，最终文档门禁及调度器提交成功后才正式验收。
+
 ## 7.6 `BLEND` 圆角倒角错误码
 
 | 错误码 | 严重级别 | 含义 |
@@ -411,7 +419,7 @@ cycle-0081 / S4-SPLIT-CLASSIFY 新增只读切分与实体分类入口；E-0004 
 | `AXM-VAL-E-0010` | Error | 检测到非有限几何；第 70 批精确 B-Rep 文本子集导入绑定 `io.import.<format>.validation` |
 
 `validate_geometry` 的失败阶段包括 `input`、`bbox`、`references`、`surface_domain`、`curve_domain`、
-`vertices_finite`、`near_duplicate_vertices`、`edges`、`face_area` 与 `face_normal`，统一使用
+`vertices_finite`、`near_duplicate_vertices`、`edges`、`face_area`、`face_normal` 与 `mesh`，统一使用
 `heal.validate_geometry.` 前缀，便于按阶段聚合。
 
 ## 7.11 `IO` 数据交换模块错误码
@@ -422,13 +430,29 @@ cycle-0081 / S4-SPLIT-CLASSIFY 新增只读切分与实体分类入口；E-0004 
 | `AXM-IO-E-0002` | Error | 文件格式无法识别 |
 | `AXM-IO-E-0003` | Error | 文件内容损坏；第 70 批 AXMJSON/Axiom IGES 元数据/Axiom BREP JSON 子集的截断结构、缺失必需字段、错误 `format`、不支持的 `body_kind` 或缺失 BREP 文件头均绑定 `io.import.<format>.parse` |
 | `AXM-IO-E-0004` | Error | 导入失败；STEP 早期失败绑定 `io.import.step.input/path/open`；OBJ 物化前失败绑定 `io.import.obj.input/path/open/parse`；STL、glTF 与 3MF 物化前失败分别绑定 `io.import.stl.*`、`io.import.gltf.*`、`io.import.3mf.*` 的 `input/path/open/read/parse/validation` 阶段。第 70 批为 AXMJSON/Axiom IGES 元数据/Axiom BREP JSON 子集补齐 `io.import.<format>.input/path/open/read`：非普通文件在读取前拒绝，超过 64 MiB 或短读归入 `.read`。OBJ/STL/glTF/3MF 退化三角形复用 `AXM-VAL-E-0002` 与各自的 `.validation` 阶段。3MF 非有限顶点在 `.validation` 阶段复用本码，非法数值及索引溢出在 `.parse` 阶段复用本码；物化前无模型实体，cycle-0073 起显式关联零实体令牌。 |
-| `AXM-IO-E-0005` | Error | 导出失败 |
+| `AXM-IO-E-0005` | Error | 导出失败；cycle-0085 八主格式新增 `io.export.<format>.publish`（rename 发布失败，OperationFailed），并保留 input/path/open/write 等阶段 |
 | `AXM-IO-E-0006` | Error | 严格网格导出 QA 失败（越界索引、退化三角形或检查不可用；`Issue.stage=io.export.mesh_strict_qa`，关联输入 Body） |
 | `AXM-IO-E-0007` | Warning | 导入后存在未映射属性 |
 | `AXM-IO-E-0008` | Warning | 导出采用兼容模式降级 |
 | `AXM-IO-E-0009` | Error | 导出目标目录不可写（`kIoExportPathNotWritable`，默认 `Issue.stage=io.export.path`；STEP/OBJ/STL/glTF/3MF 导出使用各自 `io.export.<format>.path`） |
 | `AXM-IO-E-0010` | Error | 检测到标准 STEP 物理文件 DATA 段含 EXPRESS 实例，非 Axiom 子集；完整交换未实现（`kIoStepStandardEntitiesUnsupported`，`Issue.stage=io.import.step`） |
 | `AXM-IO-E-0011` | Error | 检测到典型 IGES 卡片/DE 流，非 Axiom 子集；完整交换未实现（`kIgesStandardEntitiesUnsupported`，`Issue.stage=io.import.iges`） |
+
+### cycle-0085 / S5-IO 读取、解析、验证与发布阶段
+
+公开码常量不变，复用现有码；以下新增/增强失败路径随完整 16/16 门禁纳入受限 IO 合同：
+
+| 根因 | 稳定码及阶段 |
+|---|---|
+| STEP/IGES/BREP/STL 文件超 64 MiB 或读取失败 | `AXM-IO-E-0004 / io.import.<format>.read`；在物化前拒绝，关联零实体令牌 |
+| STEP 空/随机/损坏容器、截断字段或非法数值文本 | `AXM-IO-E-0003 / io.import.step.parse` |
+| STEP 非有限几何 | `AXM-VAL-E-0010 / io.import.step.validation` |
+| STL 缺 endsolid、闭合后垃圾等不完整容器 | `AXM-IO-E-0004 / io.import.stl.parse` |
+| STL binary 非有限坐标、面积计算溢出 | `AXM-VAL-E-0010 / io.import.stl.validation` |
+| 标准 STEP/IGES（即使混入 Axiom 标记） | `NotImplemented / AXM-IO-E-0010/0011`，阶段 `io.import.step/iges`；摘要 `AXM-IO-D-0016/0017`；扫描不物化标准实体 |
+| 八主格式 rename 发布失败 | `OperationFailed / AXM-IO-E-0005 / io.export.<format>.publish`；有限 `filesystem_error`、Body 与阶段证据；实现支持，未单独注入回归 |
+
+导入失败无 value，不污染模型/缓存/统计/Eval/next_id；合法输入可重试。导出临时文件关闭及请求侧车成功后才发布主文件，失败保护已有主文件并清理临时 payload、回滚本次三角化状态；侧车本身及跨文件/全批事务限制保留。此合同限 IO 八主格式，不更改 DiagnosticService 或其他辅助导出的设备失败限制。真实测试、参考和范围见 [验收 §1.12](../quality/AxiomKernel_测试与验收方案.md#112-cycle-0085--s5-io-门禁与逐项证据)。
 
 ### cycle-0073 HEAL/IO 重量级失败证据合同（已通过门禁）
 
@@ -439,14 +463,34 @@ cycle-0081 / S4-SPLIT-CLASSIFY 新增只读切分与实体分类入口；E-0004 
 | HEAL 验证 | `heal.validate_geometry.*`、`heal.validate_topology.*`、`heal.validate_self_intersection.*`、`heal.validate_tolerance.*` 及聚合验证；关联 Body/Shell/问题子实体 | 有限状态、实体数量及分支模式/计数/几何量，不扩大验证算法范围 |
 | HEAL 修复 | `heal.sew_faces/remove_small_edges/remove_small_faces/merge_near_coplanar_faces/auto_repair.*`；后验失败为相应 `.post_validate` | 失败回收本次派生体与物化对象，保留原模型和失败证据 |
 | Trim 重建 | `heal.repair_trim.input/surface/loop/rebuild/post_validate`；关联 Face/Surface/Loop 等 | Plane/Cylinder/Sphere；重建或复验失败恢复原 PCurve 绑定、删除新增 PCurve |
-| 批量修复 | `heal.repair_many_*.input/rollback`，关联失败子项目标；回滚记录 `completed_item_count/requested_item_count/rollback_applied`；`repair_many_auto` 另附 `allocated_object_count`（分配 ID 增量） | 任一子项失败回滚此前全部派生对象和 Eval 失效状态；子项根因保留在原诊断，批量报告不合并全部子项 issue；不恢复 `next_id` |
+| 批量修复 | `heal.repair_many_*.input/rollback`，关联失败子项目标；回滚记录 `completed_item_count/requested_item_count/rollback_applied`；`repair_many_auto` 另附 `allocated_object_count`（分配 ID 增量） | 任一子项失败回滚此前全部派生对象和 Eval 失效状态；`repair_many_auto` 复制失败子项 issue 并保留非空子阶段，其他三个入口仅在原诊断保留根因；不恢复 `next_id` |
 | 主格式 IO 与 auto | `io.import.<format>.*`、`io.export.<format>.*`、auto 路由阶段；有限状态、实体数量及分支路径/计数证据 | STEP/AXMJSON/IGES/BREP/OBJ/STL/glTF/3MF；导出关联输入 Body，预物化文件失败显式使用 `[0]` 令牌 |
-| 导入后验管线 | `io.post_import.validation/repair/post_validate`；复制 HEAL 问题，附验证/修复模式 | STEP/AXMJSON 接入共享管线；失败 issue 可随 `Ok` 导入结果返回，调用者须读取报告或显式验证 |
+| 导入后验管线 | `io.post_import.validation/repair/post_validate`；复制 HEAL 问题，附验证/修复模式 | cycle-0084 起八格式具体入口共享闭环：未修复的验证失败或修复/再验证失败返回非 Ok、无 value，撤销本次模型/cache/Eval/next_id；Error/Fatal 阶段映射为外层 IO 阶段，原 HEAL 诊断保留 |
 | 批量导入/导出 | `io.batch_import/io.batch_export`；保留根因及 `failed_item_index`（从零开始）、`completed_item_count`、`path_length`（byte） | STEP/AXMJSON/auto 批量导入实际失败恢复模型/网格/拓扑/几何、链接、缓存、Eval 失效及 `next_id`；批量导出不承诺文件回滚 |
 
 失败数值证据至少含 `status_code`（enum）与 `related_entity_count`（count）。空名称或非有限测量值被过滤；过滤数量非零时记录有限的 `non_finite_evidence_omitted`（count），避免将 NaN/Inf 冒充有效证据。零实体令牌说明尚无模型对象或无有效目标，不可用于句柄查询。候选导入、严格现有文件导入、目录导出及条件导出传播真实失败；AXMJSON/IGES/BREP 导出补齐 `input/path/open/write` 与最终流检查。
 
-`axiom_heal_test`、`axiom_io_workflow_test` 用 `issue_code_prefix="AXM-"` 与 `stage_prefix="heal."/"io."` 审计 Error 及以上 issue，并覆盖 JSON 数值证据、源报告不污染和回滚重试；cycle-0073 修复后完整 CTest **16/16 通过**。普通文本/目录工具等非主格式辅助接口尚未纳入该重量级包。标准 STEP/IGES 实体交换限制不变，IGES 仍按 `NotImplemented / AXM-IO-E-0011` 拒绝；设备或侧车写入失败不保证恢复目标文件。
+`axiom_heal_test`、`axiom_io_workflow_test` 用 `issue_code_prefix="AXM-"` 与 `stage_prefix="heal."/"io."` 审计 Error 及以上 issue，并覆盖 JSON 数值证据、源报告不污染和回滚重试；cycle-0073 修复后完整 CTest **16/16 通过**。普通文本/目录工具等非主格式辅助接口尚未纳入该重量级包。标准 STEP/IGES 实体交换限制不变，IGES 仍按 `NotImplemented / AXM-IO-E-0011` 拒绝；cycle-0085 起八主格式保护旧主文件，侧车自身/跨文件及批量文件仍无事务保证。
+
+### cycle-0084 / S5-HEAL 阶段与失败原子性（复用既有码）
+
+公开签名和 `error_codes.h` 常量未新增或改号；下列流程标签属于 `Issue.stage`。新真实规则只在 Standard 预验证失败的 owned ExactBRep 上进入，限单壳、至少六唯一面、真实平面直边外环，无孔洞/曲面/多壳/代理面。固定缺陷与失败注入随最终完整 **16/16、214.19 s** 通过，见 [验收 §1.11](../quality/AxiomKernel_测试与验收方案.md#111-cycle-0084--s5-heal-门禁与逐项证据)。
+
+| 场景 | 稳定状态 / 既有码 | 阶段与证据 |
+|---|---|---|
+| 无效 Heal 目标 | `InvalidInput / AXM-HEAL-E-0006` | `heal.auto_repair.input` |
+| 新真实平面修复失败 | `OperationFailed / AXM-HEAL-E-0006` | `heal.auto_repair.planar.input/extract/weld/orient/rebuild/post_validate`，关联源体/壳/问题实体与有限数值；配置非法或非单壳为 input，不支持几何/五面为 extract，固定 1.01linear 间隙为 orient |
+| 分配后 Strict 失败 | 同上，并保留后验子问题既有码 | `heal.auto_repair.planar.post_validate`；`allocated_object_count>0`、`rollback_applied=1`；复制后验 issue 且保留非空真实子阶段 |
+| 真实修复成功 | Info `AXM-HEAL-D-0005` | `heal.auto_repair.planar.post_validate`；linear、焊接/清理/重定向计数、signed_volume 与 `maximum_vertex_displacement` |
+| 批量自动修复失败 | 子项状态 + `AXM-HEAL-E-0006` | `heal.repair_many_auto.rollback` 加子项真实阶段，记录完成/请求/分配计数及 rollback；源诊断不改 |
+| IO 导入后失败 | 传播验证/修复状态，追加 `AXM-IO-E-0004` | `io.post_import.validation/repair/post_validate`，复制根因码/实体/有限证据；Error/Fatal 阶段映射到 IO 外层，原 Heal 子阶段仍在原诊断 |
+| 显式 Aggressive 历史单位盒兼容 | Warning `AXM-HEAL-W-0001` | `heal.auto_repair.metadata_bbox`，`synthetic_bbox=1`；不是源几何真实修复 |
+| MeshRep 无所属合法网格、越界或退化 | `DegenerateGeometry / AXM-VAL-E-0004` | `heal.validate_geometry.mesh`；关联 Body/Mesh 与顶点/索引计数 |
+| MeshRep 非有限顶点或面积计算溢出 | `DegenerateGeometry / AXM-VAL-E-0010` | 同上；允许合法二维平面网格，但此检查不证明闭合/自交 |
+
+`auto_repair` 的 ReportOnly/SuggestOnly 仅 Standard 预检，外层 Result 可 Ok，`OpReport::status` 保留真实预检状态且 output 为原体；模型、Eval、缓存/统计不改，诊断可以新增。此语义不泛化其他旧修复入口。IO `run_validation=true` 且观察策略遇到无效体，在 validation 阶段原子拒绝，不升级 Safe；`run_validation=false` 跳过验证及自动修复。
+
+配置 linear 必须有限正值且在有限正值 min_local/max_local 内；焊接拒绝多候选和链式漂移。真实派生结果 Strict 成功才保留。Heal 单项/批量失败恢复模型、反向索引、几何求值/三角化缓存及统计和 Eval；批量后项失败回收前项输出及失效，保留诊断但不承诺恢复 `next_id`，允许 ID 空档。IO 八具体格式入口单项及既有批量回滚另恢复 `next_id`，可原位重试；失败诊断继续保留。cycle-0085 八主格式保护失败项主文件，但侧车/全批无跨文件事务。默认 STEP/IGES/BREP 仍限 Axiom 元数据子集，不证明完整标准交换或工业通用修复。
 
 ## 7.12 `TES` 三角化错误码
 
@@ -545,9 +589,9 @@ cycle-0081 / S4-SPLIT-CLASSIFY 新增只读切分与实体分类入口；E-0004 
 
 `DiagnosticService::export_grouped_by_stage_txt/json` 的空路径、文件打开及最终写入/关闭失败复用 `AXM-IO-E-0005`；空路径在打开文件前拒绝，失败不修改参与聚合的源报告，底层设备写入失败不保证恢复目标文件。回归入口：`axiom_diagnostics_test`。
 
-`IOService::export_obj/export_stl/export_gltf/export_3mf` 的失败阶段为 `io.export.<format>.input/path/convert/mesh/open/write/sidecar`，并关联输入 Body（无效 ID 也保留）。输入、网格数据、打开与最终写入/关闭失败复用 `AXM-IO-E-0005`，路径与转换/侧车失败保留下层错误码；严格 QA 继续使用 `AXM-IO-E-0006 / io.export.mesh_strict_qa`。失败回滚本次新增网格、实体 ID、体/面三角化缓存及统计，保留诊断；输入/转换/校验失败保护已有文件，设备写入失败不保证恢复文件，侧车失败可能保留完整主文件。策略和回归见 [IO 导出策略矩阵](../quality/AxiomKernel_IO_导出策略矩阵.md)；第 64 包已纳入第 68 批全量门禁。
+`IOService::export_obj/export_stl/export_gltf/export_3mf` 失败阶段为 `io.export.<format>.input/path/convert/mesh/open/write/sidecar/publish`，关联输入 Body（无效 ID 也保留）。输入、网格数据、打开、写入/关闭及发布失败复用 `AXM-IO-E-0005`；路径、转换/侧车保留下层码；严格 QA 使用 `AXM-IO-E-0006 / io.export.mesh_strict_qa`。cycle-0085 同目录独占临时 payload 检查关闭，侧车成功后 rename 发布；失败清理临时目录、保护旧主文件，回滚本次 mesh/体面缓存/统计/next_id，保留诊断。侧车出口仍为 REP，侧车自身及全批无跨文件事务；不承诺掉电持久性或并发目录修改安全。[IO 矩阵](../quality/AxiomKernel_IO_导出策略矩阵.md)及[验收 §1.12](../quality/AxiomKernel_测试与验收方案.md#112-cycle-0085--s5-io-门禁与逐项证据)记录完整门禁与直接分支测试范围。
 
-`IOService::export_step` 的失败继续复用 `AXM-IO-E-0005`，并关联输入 Body：无效 Body/空路径为 `io.export.step.input`，父目录不存在或不可写为 `io.export.step.path`，打开失败为 `io.export.step.open`，最终写入或关闭失败为 `io.export.step.write`。输入/路径失败不创建目标文件，所有失败不修改模型；底层设备写入失败不保证恢复目标文件。回归入口：`axiom_io_workflow_test`。
+`IOService::export_step/export_axmjson/export_iges/export_brep` 复用 `AXM-IO-E-0005`，关联输入 Body，使用各自 `io.export.<format>.input/path/open/write/publish`（路径根因可保留下层码）。临时文件打开、写入/刷新/关闭后才 rename 发布；publish 失败为 OperationFailed，含有限 `filesystem_error`。失败保护旧主文件、清理临时目录，不改变输入模型。STEP/IGES/BREP 的目录 open、设备 write、旧目标保护与成功覆盖重试由 `axiom_io_workflow_test` 断言；publish 失败语义由实现静态核对，未有独立 rename 失败注入，不宣称该分支直接回归通过。
 
 与 **`AXM-BOOL-E-*` 错误码**绑定的布尔早期失败路径会在 `Issue.stage` 中写入可聚合阶段标签（与 `export_report_json` 一致）：`bool.input`（输入体或布尔运算类型无效，`AXM-BOOL-E-0001`）、`bool.abort.intersect`（交集在包围盒层面不相交，`AXM-BOOL-E-0003`）、`bool.abort.classify`（如减运算右包左无法表达空结果，`AXM-BOOL-E-0005`）。上述早期失败即使设置 `BooleanOptions::diagnostics=false`，也保留单条 Error Issue、阶段标签与 `[lhs, rhs]`（包括无效输入值），只省略候选阶段/统计信息；成功时关闭诊断的行为不变。启用布尔诊断时，返回的预处理告警 `AXM-BOOL-W-0001/W-0002` 同步写入报告，保留原文案和 Warning 级别，并绑定 `bool.prep` 与 `[lhs, rhs, output]` 实体 ID，可按阶段检索及导出 JSON；这些告警不表示精确布尔能力。Strict 残留告警见 `bool.validate.residual`（`AXM-BOOL-W-0003`）。
 

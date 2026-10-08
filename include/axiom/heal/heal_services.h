@@ -17,6 +17,7 @@ public:
   explicit ValidationService(std::shared_ptr<detail::KernelState> state);
 
   /// HEAL 验证失败均返回带 `heal.*` 阶段、关联实体与有限数值证据的诊断，可直接纳入 `audit_evidence` 门禁。
+  /// MeshRep 按实际所属网格的有限顶点、合法索引和非退化三角形验证，允许二维平面网格；不作闭合或自交证明。
   Result<void> validate_geometry(BodyId body_id, ValidationMode mode) const;
   Result<void> validate_topology(BodyId body_id, ValidationMode mode) const;
   /// 专项：owned B-Rep 壳的边级闭合/流形（两侧各一拓扑面；Standard/Fast 即检；Strict 额外壳内重复面与不连通）。
@@ -88,6 +89,11 @@ public:
   Result<OpReport> merge_near_coplanar_faces(BodyId body_id,
                                              Scalar angle_tolerance,
                                              RepairMode mode);
+  /// ReportOnly/SuggestOnly 仅预检并返回原体，不改变模型、Eval或缓存。
+  /// Standard 失败的 owned ExactBRep：仅修至少六面的单壳平面直边外环（无内环）。
+  /// 用配置 linear（须在 min_local/max_local 内）焊接端点、去连续零长节点和重复面引用、统一面方向；
+  /// 不跨壳/曲面/孔洞修复，派生结果须通过 Strict。失败回收模型/缓存并保留阶段诊断，原体可重试。
+  /// 无 owned 拓扑的非法 bbox 在 Safe 下拒绝；Aggressive 的历史元数据单位盒恢复仅属兼容策略。
   Result<OpReport> auto_repair(BodyId body_id, RepairMode mode);
   Result<Scalar> estimate_adaptive_linear_threshold(BodyId body_id,
                                                     Scalar input,

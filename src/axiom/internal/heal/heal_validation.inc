@@ -17,13 +17,59 @@ Result<void> ValidationService::validate_geometry(BodyId body_id, ValidationMode
                                 {{"bbox_valid_flag", body.bbox.is_valid ? 1.0 : 0.0, "bool"},
                                  {"validation_mode", static_cast<Scalar>(mode), "enum"}});
     }
-    if (!has_valid_bbox(body) || min_extent(body.bbox) <= 0.0) {
+    // Triangle meshes may describe a valid planar patch. Positive 3D volume is
+    // a B-Rep body condition; MeshRep validity comes from its actual triangles.
+    if (!has_valid_bbox(body) || (body.rep_kind != RepKind::MeshRep && min_extent(body.bbox) <= 0.0)) {
         return heal_failed_void(*state_, StatusCode::DegenerateGeometry, diag_codes::kValDegenerateGeometry,
                                 "几何验证失败：目标实体包围盒退化或无效", "几何验证失败", {body_id.value},
                                 "heal.validate_geometry.bbox",
                                 {{"bbox_valid_flag", body.bbox.is_valid ? 1.0 : 0.0, "bool"},
                                  {"minimum_extent", body.bbox.is_valid ? min_extent(body.bbox) : 0.0,
                                   "model_unit"}});
+    }
+    if (body.rep_kind == RepKind::MeshRep) {
+        std::size_t owned_mesh_count = 0;
+        for (const auto& [mesh_value, mesh] : state_->meshes) {
+            if (mesh.source_body != body_id) continue;
+            ++owned_mesh_count;
+            const auto reject_mesh = [&](StatusCode status, std::string_view code,
+                                           std::string message) {
+                return heal_failed_void(
+                    *state_, status, code, std::move(message), "网格几何验证失败",
+                    {body_id.value, mesh_value}, "heal.validate_geometry.mesh",
+                    {{"vertex_count", static_cast<Scalar>(mesh.vertices.size()), "count"},
+                     {"index_count", static_cast<Scalar>(mesh.indices.size()), "count"},
+                     {"validation_mode", static_cast<Scalar>(mode), "enum"}});
+            };
+            if (!std::all_of(mesh.vertices.begin(), mesh.vertices.end(), point3_components_finite)) {
+                return reject_mesh(StatusCode::DegenerateGeometry, diag_codes::kValNonFiniteGeometry,
+                                   "网格几何验证失败：顶点坐标不是有限值");
+            }
+            if (mesh.vertices.empty() || mesh.indices.empty() ||
+                detail::has_out_of_range_indices(mesh.vertices, mesh.indices) ||
+                detail::has_degenerate_triangles(mesh.vertices, mesh.indices)) {
+                return reject_mesh(StatusCode::DegenerateGeometry, diag_codes::kValDegenerateGeometry,
+                                   "网格几何验证失败：缺少有效三角形、索引越界或三角形退化");
+            }
+            for (std::size_t i = 0; i < mesh.indices.size(); i += 3) {
+                const auto a = mesh.vertices[mesh.indices[i]];
+                const auto b = mesh.vertices[mesh.indices[i + 1]];
+                const auto c = mesh.vertices[mesh.indices[i + 2]];
+                const auto cross = detail::cross(detail::subtract(b, a), detail::subtract(c, a));
+                if (!std::isfinite(std::hypot(cross.x, cross.y, cross.z))) {
+                    return reject_mesh(StatusCode::DegenerateGeometry, diag_codes::kValNonFiniteGeometry,
+                                       "网格几何验证失败：三角形面积计算溢出");
+                }
+            }
+        }
+        if (owned_mesh_count == 0) {
+            return heal_failed_void(
+                *state_, StatusCode::DegenerateGeometry, diag_codes::kValDegenerateGeometry,
+                "网格几何验证失败：目标体没有所属网格", "网格几何验证失败",
+                {body_id.value}, "heal.validate_geometry.mesh",
+                {{"owned_mesh_count", 0.0, "count"},
+                 {"validation_mode", static_cast<Scalar>(mode), "enum"}});
+        }
     }
     // owned B-Rep：句柄完整性（全模式），与 Strict 参数域/退化项解耦，便于 Standard 工作流尽早发现悬空引用。
     if (body.rep_kind == RepKind::ExactBRep && !body.shells.empty() &&

@@ -333,8 +333,10 @@ struct KernelConfig {
 };
 
 struct ImportOptions {
+  /// true：未修复的导入后验证失败即导入失败，模型/缓存/Eval回滚；false：显式跳过验证和自动修复。
   bool run_validation{true};
   bool auto_repair{false};
+  /// ReportOnly/SuggestOnly 不修改模型，不自动升级为 Safe。
   RepairMode repair_mode{RepairMode::Safe};
 };
 

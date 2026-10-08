@@ -19,9 +19,18 @@ public:
   explicit IOService(std::shared_ptr<detail::KernelState> state);
 
   /// 重量级导入及导入后验证/修复失败均带 `io.*` 阶段、问题实体令牌和有限数值证据，可直接纳入 `audit_evidence` 门禁。
+  /// 所有导入入口在 run_validation=true 时，未修复的验证失败返回失败并回收本次模型、派生对象及缓存/Eval变化。
+  /// ReportOnly/SuggestOnly 不升级为修改型策略；run_validation=false 显式跳过该闭环。
+  /// 默认 STEP/IGES/BREP 仍为 Axiom 元数据子集，不支持标准文件的完整缺陷拓扑交换。
+  /// 子集与 STL 保留模型坐标数值，不解析或转换标准文件单位；STL 只交换三角网格。
+  /// 检测到 STEP/IGES 标准实体形态时优先拒绝，Axiom 标记不能赋予标准实体交换能力。
+  /// STEP/IGES/BREP/STL 输入超过 64 MiB 在 `io.import.<format>.read` 阶段拒绝。
   Result<BodyId> import_step(std::string_view path,
                              const ImportOptions &options);
   /// 重量级导出失败均带 `io.export.*` 阶段、目标 Body（预物化失败使用零实体令牌）及有限数值证据。
+  /// 格式导出先写同目录临时文件，完成写入及请求的网格侧车后才发布主文件；
+  /// 失败保留已有主文件，清理本次临时文件。发布失败阶段为 `io.export.<format>.publish`。
+  /// 主文件与侧车、批量项目之间不承诺跨文件事务，也不承诺掉电持久性。
   Result<void> export_step(BodyId body_id, std::string_view path,
                            const ExportOptions &options);
   Result<void> export_gltf(BodyId body_id, std::string_view path,
@@ -103,6 +112,7 @@ public:
   import_many_auto(std::span<const std::string> paths,
                    const ImportOptions &options);
   /// 批量失败报告保留子项根因，并增加 `io.batch_export` 项索引、Body 与数值上下文。
+  /// 每项主文件独立发布；后项失败不会撤回已经成功发布的前项文件。
   Result<void> export_many_auto(std::span<const BodyId> body_ids,
                                 std::span<const std::string> paths,
                                 const ExportOptions &options);
