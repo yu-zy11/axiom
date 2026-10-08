@@ -49,6 +49,17 @@ workflow 动态最小失败语料包括四格式 64 MiB+1 sparse 文件、STEP �
 
 cycle-0085 性能基线 **2.00 s** 仅为既有 CTest 墙钟，默认150次/4000 ms及30 s超时未修改；无新增IO专用总耗时/P95/内存基准，不将精确语料回归视为工业交换性能认证。
 
+### 3.2 cycle-0087 / S5-EXIT 固定闭环
+
+本批继续使用§3.1固定输入；受仅docs Markdown编辑约束，`tests/data/io/README.md`保持不变。`tests/io/io_dataset_test.cpp::check_stage5_fixed_precision_corpus` 已随本批 **16/16、0失败、196.58 s** 通过（dataset **0.55 s**），完整逐项证据见[验收§1.14](AxiomKernel_测试与验收方案.md#114-cycle-0087--s5-exit-门禁与逐项证据)。
+
+- 三个高精度元数据文件：显式Standard/ReportOnly保原体零shell，原Box转换/质量拒绝；Safe合成Modified bbox边界可显示但质量拒绝，导出12字段独立double精确比较，再导入零shell/bbox_proxy。此路径不证明标准BRep修复/交换或源体分析资格。
+- 固定STL：源/派生/再导入各Strict、实际4三角/零owned shells，Safe新BodyId/新MeshId完整快照并保源MeshId；逐坐标精确比较、各文件独立ASCII积分V=4、A=13+sqrt(244)/2、C=origin+(0.5,0.75,1)，绝对误差≤1e-12，bbox V=24不作几何参考。MeshRep内部后验为Standard；固定Strict及积分不认证任意网格流形/实体服务质量。
+- 失败语料：clear_mesh_store后缺网格两次失败，保哨兵mesh/统计/Eval并合法再导入重试；angular=0复制实际mesh后后验失败，allocated_object_count≥2/rollback_applied=1，源mesh/坐标及独立积分保留。Heal允许ID空档，IO外层恢复next_id，不承诺缺失输入能自行恢复。
+- 既有 `s5_heal_box_subset.step` / `s5_heal_invalid_subset.step` 在workflow中显式owned物化及缺陷注入，真实Safe/Strict独立V24/A52/截面6同批通过；文件自身仍是元数据，不能解释为标准STEP缺陷实体恢复。
+
+性能基线 **1.92 s** 仅为既有CTest墙钟，默认150次/4000 ms及30 s超时未改；日志无内部elapsed_ms/环境覆盖/P95/内存测量。本轮只读取调度器结果，未重跑性能或引入新的工业性能认证。64 MiB/模型单位/float32/单文件发布/多文件非事务及无直接publish故障注入限制仍见§3.1和IO策略矩阵。
+
 ## 4. 核心指标
 
 建议记录：

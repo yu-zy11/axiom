@@ -18,6 +18,12 @@
 
 当前 CMake **未定义或启用** `AXM_ENABLE_STEP_IGES_BRIDGE`，默认行为等同未启用桥接；不是实际执行了 `-DBRIDGE=OFF`。本轮无外部依赖，里程碑 1～4 的 ON 路线 DoD 不适用。默认子集及标准拒绝回归随调度器完整 **16/16、0 失败、227.56 s** 通过，[三条证据](../quality/AxiomKernel_测试与验收方案.md#112-cycle-0085--s5-io-门禁与逐项证据)与 [API 支持矩阵](../api/AxiomKernel_详细模块接口清单.md#1111-stage-5-受限-io-主链路cycle-0085--s5-io)区分零 owned shells 的元数据与实际 STL 三角网格。标准实体混入 Axiom 标记仍优先拒绝，合法 IGES Hollerith 长标签回归保留；扫描是启发式物理检测。STEP/IGES/BREP/STL 64 MiB 预读预算、严格 STEP/STL 损坏拒绝和八格式单主文件发布均已落地，不证明单位转换、标准全实体交换或跨文件事务。
 
+### cycle-0087 / S5-EXIT 默认路径集成边界
+
+当前唯一退出任务S5-EXIT，调度器完整构建及CTest **16/16、0失败、196.58 s**，四必需workflow/dataset/heal/representation_io **13.05/0.55/0.78/14.32 s**，见[两条验收证据](../quality/AxiomKernel_测试与验收方案.md#114-cycle-0087--s5-exit-门禁与逐项证据)与[支持矩阵](../api/AxiomKernel_详细模块接口清单.md#1112-stage-5-集成退出支持矩阵cycle-0087--s5-exit)。原Box元数据零owned shells，直接转换/质量拒绝；Safe显式合成Modified bbox边界仅显示，导出再导入仍零壳/bbox_proxy且质量拒绝。固定真实owned修复夹具由测试显式物化/注入，不是文件标准实体恢复；STL完整网格快照及独立V4/A/质心参考不证明工业BRep保真。
+
+CMake仍未定义或启用标准桥接，未实际执行BRIDGE=OFF，里程碑1～4 ON路线不适用。默认子集/标准实体拒绝、模型单位/无标准单位转换、64 MiB和单主文件发布限制不变。代码门禁通过、文档本轮同步；最终文档门禁及提交未记录，Stage5进行中，不正式退出或追认历史验收。
+
 ## 2. 里程碑 1：外部内核集成骨架（CMake + 可选编译）
 
 - 增加 **`AXM_ENABLE_STEP_IGES_BRIDGE`**（默认 `OFF`）或分列 STEP / IGES 开关。

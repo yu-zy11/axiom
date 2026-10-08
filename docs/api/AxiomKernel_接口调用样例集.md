@@ -974,6 +974,62 @@ use_if_valid(valid);
 
 四格式读取预算为 64 MiB，超限在 `.read` 失败，STEP 严格容器/字段与 STL 闭合/非有限/溢出拒绝均可由 diagnostic_id 检索。固定三元数据文件证明参数/坐标精确 double 往返及零 owned shells；固定 STL 实际积分 V=4（非 bbox 的24）、面积/质心误差≤1e-12，详见 API §11.1.1。导出文本使用 classic locale/max_digits10，但 glTF float32 等格式能力不因此扩大。四网格格式开启 `write_mesh_validation_report` 时先成功写侧车再发布主文件；侧车可能保留，侧车/主文件及全批不承诺跨文件事务、掉电持久性或并发目录修改安全。发布失败有 `.publish` 合同，但该失败分支未单独注入回归。
 
+### 11.2.2 S5-EXIT 显式 STL 修复、三角化与往返
+
+以下调用片段未单独编译；固定 `s5_io_precision_tetra.stl` 的实际验收来自[本批§1.14](../quality/AxiomKernel_测试与验收方案.md#114-cycle-0087--s5-exit-门禁与逐项证据)，四必需回归随完整16/16、196.58 s通过。须分别检查外层Result和OpReport状态。
+
+```cpp
+ImportOptions opts;
+opts.run_validation = true;
+auto source = kernel.io().import_stl(input_path, opts);
+if (source.status != StatusCode::Ok || !source.value) {
+  handle_error(source);
+  return;
+}
+auto before = kernel.validate().validate_all(*source.value, ValidationMode::Strict);
+if (before.status != StatusCode::Ok) {
+  handle_error(before);
+  return;
+}
+auto repaired = kernel.repair().auto_repair(*source.value, RepairMode::Safe);
+if (repaired.status != StatusCode::Ok || !repaired.value ||
+    repaired.value->status != StatusCode::Ok) {
+  auto report = kernel.diagnostics().get(repaired.diagnostic_id);
+  handle_query_error(report);
+  return;
+}
+BodyId output = repaired.value->output;
+// MeshRep 内部后验是 Standard；这里额外显式检查 Strict。
+auto strict = kernel.validate().validate_all(output, ValidationMode::Strict);
+if (strict.status != StatusCode::Ok) {
+  handle_error(strict);
+  return;
+}
+auto mesh = kernel.convert().brep_to_mesh(output, {});
+if (mesh.status != StatusCode::Ok || !mesh.value) {
+  handle_error(mesh);
+  return;
+}
+auto exported = kernel.io().export_stl(output, output_path, {});
+if (exported.status != StatusCode::Ok) {
+  handle_error(exported);
+  return;
+}
+auto reimported = kernel.io().import_stl(output_path, opts);
+if (reimported.status != StatusCode::Ok || !reimported.value) {
+  handle_error(reimported);
+  return;
+}
+auto final_valid = kernel.validate().validate_all(*reimported.value, ValidationMode::Strict);
+use_if_valid(final_valid);
+```
+
+Safe派生新BodyId/新MeshId完整实际网格快照，源MeshId及坐标保留；该合同仅适用auto_repair，不泛化所有修复入口。固定源/派生/再导入均4三角、零owned shells；独立ASCII解析积分V=4、A=13+sqrt(244)/2、C=固定原点+(0.5,0.75,1)，误差≤1e-12，bbox体积24不是分析参考。Strict及固定积分不证明任意mesh流形/自交或实体质量服务资格。
+
+STEP/IGES/BREP须按[API§11.1.2](AxiomKernel_详细模块接口清单.md#1112-stage-5-集成退出支持矩阵cycle-0087--s5-exit)区分：原Box元数据Standard/ReportOnly可通过但零owned shells，直接三角化 `rep.tessellation.topology` 拒绝、质量 `query.mass_properties.empty_gate` 拒绝；显式Safe合成Modified bbox边界可owned_topo_welded显示，导出再导入仍零壳/bbox_proxy，两者质量support_gate拒绝。不能把上述STL片段的成功预期直接套用到原metadata或标准实体。
+
+缺mesh与复制后angular=0修复失败无value，`heal.auto_repair.post_validate` 保留HEAL-E-0006及VAL-E-0004/0003根因；回收派生体/mesh、恢复缓存统计/Eval、源快照保持。独立Heal允许ID空档，IO导入外层另恢复next_id。模型单位/64 MiB、float32限制、单主文件发布/侧车及批量非事务、无直接publish注入合同沿用§11.2.1；本例不是标准BRep交换或通用分析认证。
+
 ### 精确 B-Rep 文本子集的失败诊断
 
 ```cpp

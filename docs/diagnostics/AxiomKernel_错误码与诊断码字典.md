@@ -492,6 +492,23 @@ prep隔离新增两输入网格暖缓存、固定CurveId域及四点无缓存poi
 
 配置 linear 必须有限正值且在有限正值 min_local/max_local 内；焊接拒绝多候选和链式漂移。真实派生结果 Strict 成功才保留。Heal 单项/批量失败恢复模型、反向索引、几何求值/三角化缓存及统计和 Eval；批量后项失败回收前项输出及失效，保留诊断但不承诺恢复 `next_id`，允许 ID 空档。IO 八具体格式入口单项及既有批量回滚另恢复 `next_id`，可原位重试；失败诊断继续保留。cycle-0085 八主格式保护失败项主文件，但侧车/全批无跨文件事务。默认 STEP/IGES/BREP 仍限 Axiom 元数据子集，不证明完整标准交换或工业通用修复。
 
+### cycle-0087 / S5-EXIT 快照修复与资格拒绝（复用既有码）
+
+公开签名与常量不变；本批完整16/16、196.58 s及两条证据见[验收§1.14](../quality/AxiomKernel_测试与验收方案.md#114-cycle-0087--s5-exit-门禁与逐项证据)。MeshRep `auto_repair` 复制完整实际MeshRecord到新体/新mesh，源快照保留；内部后验为Standard，固定STL回归另显式Strict通过。
+
+| 场景 | 稳定码 / 阶段及证据 |
+|---|---|
+| MeshRep修复后验成功 | Info `AXM-HEAL-D-0005 / heal.auto_repair.post_validate` |
+| 缺所属网格修复失败 | `OperationFailed / AXM-HEAL-E-0006 / heal.auto_repair.post_validate`，无value；复制根因 `AXM-VAL-E-0004` |
+| 实际mesh复制后angular=0失败 | 同一HEAL码/阶段，根因 `AXM-VAL-E-0003`；`allocated_object_count>=2`、`rollback_applied=1` |
+| 原Box元数据零owned shells三角化 | `AXM-TES-E-0001 / rep.tessellation.topology`，无mesh结果；ExactBRep/Box标签不授予原生边界资格 |
+| 同体质量查询 | `InvalidTopology / AXM-TOPO-E-0005 / query.mass_properties.empty_gate` |
+| Safe合成Modified bbox边界与再导入代理质量 | `NotImplemented / AXM-CORE-E-0004 / query.mass_properties.support_gate`，无质量结果；显示成功不授予分析资格 |
+
+原始MeshRep几何验证仍在 `heal.validate_geometry.mesh`；本兼容自动修复分支复制Error/Fatal到修复报告时映射为 `heal.auto_repair.post_validate`，原验证报告保留，不能泛称全部分支保留原子阶段。owned真实平面修复的 `.planar.*` 合同不变。缺网格重复失败及复制后失败回归保持对象/mesh/缓存/六项统计/Eval、源MeshId及坐标；Heal回收派生对象但不恢复next_id，允许ID空档并保留诊断。IO外层导入事务另恢复next_id，继续使用 `io.post_import.validation/repair/post_validate` 并复制根因/追加IO-E-0004。
+
+四格式读取预算/标准拒绝、八格式单主文件发布及失败保护沿用§7.11；侧车/全批无跨文件事务，无掉电/并发目录安全认证，publish失败仍无直接注入回归。以上是受限固定证据，非工业全实体交换/任意mesh质量或通用修复认证。
+
 ## 7.12 `TES` 三角化错误码
 
 | 错误码 | 严重级别 | 含义 |

@@ -34,6 +34,8 @@ cycle-0085 调度器完整构建成功，CTest **16/16、0 失败、227.56 s**�
 
 cycle-0086 repair 后最终完整 CTest **16/16、0 失败、200.26 s**，IO workflow **13.34 s**、representation_io **15.40 s** 通过；新增关闭可选验证时 glTF NaN/Inf 拒绝及 IDs/mesh/cache 原子性，保留严格/兼容 QA 与旧文件保护，见 [验收 §1.13](AxiomKernel_测试与验收方案.md#113-cycle-0086--s5-tessellation-门禁与逐项证据)。已有 MeshRep 嵌入转换返回同一 MeshId，QA 由 IO 执行；新生成网格的发布前有限/退化校验不抢占这些既有诊断。
 
+cycle-0087 / S5-EXIT 当前集成代码门禁：完整构建成功，CTest **16/16、0失败、196.58 s**；四必需io_workflow/io_dataset/heal/representation_io **13.05/0.55/0.78/14.32 s**。固定STL显式Strict→Safe完整新体/新mesh快照→Strict/三角化→导出再导入，源mesh保留，独立ASCII积分V4、A=13+sqrt(244)/2、质心误差≤1e-12。metadata原Box零owned shells直接转换拒绝；Safe合成Modified边界owned_topo_welded仅显示，派生再导入零壳/bbox_proxy，质量拒绝。缺mesh及复制后angular=0后验失败恢复模型/cache/统计/Eval；独立Heal允许ID空档，IO外层另恢复next_id。两条证据与支持域见[验收§1.14](AxiomKernel_测试与验收方案.md#114-cycle-0087--s5-exit-门禁与逐项证据)。内部MeshRep后验为Standard，固定回归额外Strict；不授予通用实体质量或标准交换资格。本轮未重跑测试，最终文档门禁及提交未记录，不能正式已验收；§6发布及多文件限制保持。
+
 ## 5. 刻意不覆盖（避免误解）
 
 - 标准 **STEP/AP203/AP214 全实体**、**通用工业 3MF/OBJ** 读写不在本矩阵承诺范围内；当前为 **Axiom 子集 + 渐进鲁棒性**。
