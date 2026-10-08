@@ -1,4 +1,6 @@
 {
+  "auto_advance_stage": true,
+  "stage_catalog": "automation/agent_stage_plans.json",
   "stage_plan": {
   "stage": 3,
   "roadmap": "docs/plan/AxiomKernel_主开发计划与阶段路线图.md",
@@ -137,6 +139,7 @@
     ["FR-PLUGIN-001", "FR-HYBRID-001", "NFR-PERF-001", "NFR-COMP-001", "NFR-OBS-001", "NFR-SEC-001"]
   ],
   "module_tests": {
+    "Performance": ["axiom_perf_baseline_test"],
     "Core": ["axiom_kernel_runtime_invariant_test", "axiom_smoke_test"],
     "Math": ["axiom_math_services_test"],
     "Geo": ["axiom_geometry_test"],

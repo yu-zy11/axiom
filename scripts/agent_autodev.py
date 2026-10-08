@@ -43,6 +43,7 @@ SUCCESS_STATUSES = {"completed_slice", "project_complete"}
 PROTECTED_AUTOMATION_FILES = {
     ".gitignore",
     "automation/agent_autodev.json",
+    "automation/agent_stage_plans.json",
     "scripts/agent_autodev.py",
     "tests/tooling/agent_autodev_test.py",
 }
@@ -233,41 +234,71 @@ def load_config(path: Path) -> dict[str, Any]:
         raise RunnerError("batch_enabled must be a boolean")
     plan = config.get("stage_plan")
     if plan is not None:
-        if not config["batch_enabled"]:
-            raise RunnerError("stage_plan requires batch_enabled")
-        if (not isinstance(plan, dict) or type(plan.get("stage")) is not int
-                or not 0 <= plan["stage"] <= 8 or not isinstance(plan.get("tasks"), list)
-                or not plan["tasks"]):
-            raise RunnerError("stage_plan requires a stage (0..8) and non-empty tasks")
-        roadmap = plan.get("roadmap", "")
-        if (not isinstance(roadmap, str) or Path(roadmap).is_absolute()
-                or ".." in Path(roadmap).parts or not roadmap.startswith("docs/")
-                or not (ROOT / roadmap).is_file()):
-            raise RunnerError("stage_plan roadmap must be an existing repository document")
-        available_tests = {name for names in config["module_tests"].values() for name in names}
-        seen = set()
-        for task in plan["tasks"]:
-            if (not isinstance(task, dict) or not isinstance(task.get("id"), str)
-                    or not re.fullmatch(r"S[0-8]-[A-Z][A-Z0-9-]*", task["id"])
-                    or not task["id"].startswith(f"S{plan['stage']}-") or task["id"] in seen
-                    or task.get("requirement_id") not in known_ids
-                    or not isinstance(task.get("goal"), str) or not task["goal"].strip()
-                    or task.get("kind", "implementation") not in {"implementation", "acceptance"}):
-                raise RunnerError("invalid or duplicate stage task")
-            for field in ("acceptance", "tests"):
-                values = task.get(field)
-                if (not isinstance(values, list) or not values
-                        or not all(isinstance(v, str) and v.strip() for v in values)):
-                    raise RunnerError(f"stage task {task['id']} requires non-empty {field}")
-            dependencies = task.get("depends_on", [])
-            if (not isinstance(dependencies, list)
-                    or not all(isinstance(v, str) and v in seen for v in dependencies)
-                    or len(dependencies) != len(set(dependencies))):
-                raise RunnerError("stage dependencies must refer to earlier tasks")
-            if set(task["tests"]) - available_tests:
-                raise RunnerError(f"stage task {task['id']} names unknown tests")
-            seen.add(task["id"])
+        validate_stage_plan(plan, config, known_ids)
+    config.setdefault("auto_advance_stage", False)
+    if type(config["auto_advance_stage"]) is not bool:
+        raise RunnerError("auto_advance_stage must be a boolean")
+    catalog = config.get("stage_catalog")
+    config["_stage_plans"] = {}
+    if catalog is not None:
+        if (not isinstance(catalog, str) or Path(catalog).is_absolute()
+                or not catalog.startswith("automation/") or ".." in Path(catalog).parts
+                or not (ROOT / catalog).resolve().is_relative_to(ROOT.resolve())
+                or not (ROOT / catalog).is_file()):
+            raise RunnerError("stage_catalog must be an existing repository automation file")
+        plans = json.loads((ROOT / catalog).read_text(encoding="utf-8"))
+        if not isinstance(plans, list) or not plans or plan is None:
+            raise RunnerError("stage_catalog requires stage_plan and a non-empty plan array")
+        previous = plan["stage"]
+        for future_plan in plans:
+            validate_stage_plan(future_plan, config, known_ids)
+            if future_plan["stage"] != previous + 1 or future_plan["roadmap"] != plan["roadmap"]:
+                raise RunnerError("stage_catalog must follow stage_plan consecutively with the same roadmap")
+            config["_stage_plans"][future_plan["stage"]] = future_plan
+            previous = future_plan["stage"]
+    if config["auto_advance_stage"] and (plan is None or (plan["stage"] < 8 and catalog is None)):
+        raise RunnerError("auto_advance_stage requires stage_plan and stage_catalog")
     return config
+
+
+def validate_stage_plan(plan: dict[str, Any], config: dict[str, Any], known_ids: set[str]) -> None:
+    if not config["batch_enabled"]:
+        raise RunnerError("stage_plan requires batch_enabled")
+    if (not isinstance(plan, dict) or type(plan.get("stage")) is not int
+            or not 0 <= plan["stage"] <= 8 or not isinstance(plan.get("tasks"), list)
+            or not plan["tasks"]):
+        raise RunnerError("stage_plan requires a stage (0..8) and non-empty tasks")
+    roadmap = plan.get("roadmap", "")
+    if (not isinstance(roadmap, str) or Path(roadmap).is_absolute()
+            or ".." in Path(roadmap).parts or not roadmap.startswith("docs/")
+            or not (ROOT / roadmap).is_file()):
+        raise RunnerError("stage_plan roadmap must be an existing repository document")
+    available_tests = {name for names in config["module_tests"].values() for name in names}
+    roadmap_text = (ROOT / roadmap).read_text(encoding="utf-8")
+    if not re.search(rf"(?m)^## [^\n]*`Stage {plan['stage']}`[^\n]*$", roadmap_text):
+        raise RunnerError(f"roadmap has no Stage {plan['stage']} section")
+    seen = set()
+    for task in plan["tasks"]:
+        if (not isinstance(task, dict) or not isinstance(task.get("id"), str)
+                or not re.fullmatch(r"S[0-8]-[A-Z][A-Z0-9-]*", task["id"])
+                or not task["id"].startswith(f"S{plan['stage']}-") or task["id"] in seen
+                or task.get("requirement_id") not in known_ids
+                or not isinstance(task.get("goal"), str) or not task["goal"].strip()
+                or task.get("kind", "implementation") not in {"implementation", "acceptance"}):
+            raise RunnerError("invalid or duplicate stage task")
+        for field in ("acceptance", "tests"):
+            values = task.get(field)
+            if (not isinstance(values, list) or not values
+                    or not all(isinstance(v, str) and v.strip() for v in values)):
+                raise RunnerError(f"stage task {task['id']} requires non-empty {field}")
+        dependencies = task.get("depends_on", [])
+        if (not isinstance(dependencies, list)
+                or not all(isinstance(v, str) and v in seen for v in dependencies)
+                or len(dependencies) != len(set(dependencies))):
+            raise RunnerError("stage dependencies must refer to earlier tasks")
+        if set(task["tests"]) - available_tests:
+            raise RunnerError(f"stage task {task['id']} names unknown tests")
+        seen.add(task["id"])
 
 
 def read_requirements(path: Path = TRACEABILITY) -> list[Requirement]:
@@ -645,7 +676,8 @@ def stage_task(state: dict[str, Any], config: dict[str, Any]) -> dict[str, Any] 
     for task in plan["tasks"]:
         record = records.get(task["id"], {})
         dependencies = task.get("depends_on", [])
-        if (record.get("task_fingerprint") == stage_fingerprint(task)
+        if (isinstance(record.get("commit"), str) and record["commit"].strip()
+                and record.get("task_fingerprint") == stage_fingerprint(task)
                 and all(dep in accepted for dep in dependencies)
                 and record.get("dependencies", {}) == {dep: records[dep]["commit"] for dep in dependencies}):
             accepted.add(task["id"])
@@ -656,6 +688,49 @@ def stage_task(state: dict[str, Any], config: dict[str, Any]) -> dict[str, Any] 
             raise RunnerError(f"stage task dependencies not accepted: {task['id']}")
         return task
     return None
+
+
+def restore_active_stage(config: dict[str, Any], state: dict[str, Any]) -> None:
+    """Restore the scheduler's stage without rewriting the user configuration."""
+    initial = config.get("stage_plan")
+    active = state.get("active_stage")
+    if active is None:
+        return
+    if initial is None or type(active) is not int or not initial["stage"] <= active <= 8:
+        raise RunnerError("saved active_stage is incompatible with stage_plan")
+    plans = {initial["stage"]: initial, **config.get("_stage_plans", {})}
+    for stage in range(initial["stage"], active):
+        if stage not in plans or stage_task(state, dict(config, stage_plan=plans[stage])) is not None:
+            raise RunnerError(f"previous Stage {stage} is not accepted; active_stage cannot skip it")
+    if active not in plans:
+        raise RunnerError(f"saved Stage {active} is missing from stage_catalog")
+    config["stage_plan"] = copy.deepcopy(plans[active])
+
+
+def advance_stage(config: dict[str, Any], state: dict[str, Any], *, dry_run: bool) -> bool:
+    """Switch at a committed stage boundary; preview never writes a checkpoint."""
+    plan = config.get("stage_plan")
+    if (not config.get("auto_advance_stage") or not plan or state.get("pending")
+            or stage_task(state, config) is not None):
+        return False
+    next_plan = config.get("_stage_plans", {}).get(plan["stage"] + 1)
+    if next_plan is None:
+        return False
+    if not dry_run:
+        updated = copy.deepcopy(state)
+        updated["active_stage"] = next_plan["stage"]
+        updated.setdefault("stage_transitions", []).append(dict(
+            from_stage=plan["stage"], to_stage=next_plan["stage"], timestamp=int(time.time()),
+            from_plan_fingerprint=stage_fingerprint(plan),
+            to_plan_fingerprint=stage_fingerprint(next_plan),
+            commits={task["id"]: state["stage_tasks"][str(plan["stage"])][task["id"]]["commit"]
+                     for task in plan["tasks"]}))
+        save_state(updated)
+        state.update(updated)
+    config["stage_plan"] = copy.deepcopy(next_plan)
+    print(f"Stage {plan['stage']} exit tasks accepted; "
+          f"{'preview' if dry_run else 'configured'} Stage {next_plan['stage']}")
+    return True
 
 
 def stage_fingerprint(value: dict[str, Any]) -> str:
@@ -786,6 +861,7 @@ tests 只记录实际执行命令；开发阶段保持空数组。无需自行�
 def run_batches(args: argparse.Namespace, config: dict[str, Any], state: dict[str, Any],
                 deadline: float | None) -> int:
     """Buffer packages, validate once, then document and commit the entire batch."""
+    restore_active_stage(config, state)
     accepted = 0
     while args.max_cycles == 0 or accepted < args.max_cycles:
         if deadline is not None and time.monotonic() >= deadline:
@@ -796,8 +872,13 @@ def run_batches(args: argparse.Namespace, config: dict[str, Any], state: dict[st
         if not batch:
             target = batch_target(state, {"reports": []}, config)
             if target is None:
+                if advance_stage(config, state, dry_run=args.dry_run):
+                    continue
                 if config.get("stage_plan"):
-                    print(f"Stage {config['stage_plan']['stage']} exit tasks accepted; stopped at stage boundary")
+                    stage = config['stage_plan']['stage']
+                    reason = ("final configured stage reached; project completion requires separate evidence"
+                              if config.get("auto_advance_stage") else "stopped at stage boundary")
+                    print(f"Stage {stage} exit tasks accepted; {reason}")
                 return 0
             batch = dict(batch_version=1, head=checked_output(["git", "rev-parse", "HEAD"]),
                          phase="develop", reports=[], requirement_id=target.requirement_id,

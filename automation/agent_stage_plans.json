@@ -1,0 +1,376 @@
+[
+  {
+    "stage": 4,
+    "roadmap": "docs/plan/AxiomKernel_主开发计划与阶段路线图.md",
+    "tasks": [
+      {
+        "id": "S4-INTERSECTION",
+        "requirement_id": "FR-BOOL-001",
+        "goal": "冻结第一代工业布尔支持范围与参考模型集，打通真实候选对和几何求交；按当前代码补缺口，不以 bbox 交叠代替几何求交。",
+        "acceptance": [
+          "定义支持体类、容差和精确/采样边界；固定非轴对齐、凹形、孔洞、分离、包含、相切/共面模型及独立参考；不支持输入结构化拒绝。",
+          "候选对覆盖真实 face/edge，求交输出可供切分的几何与拓扑关联；独立几何参考证明无 bbox 伪交点且无漏交。",
+          "退化、数值/预算失败可通过稳定错误码、diagnostic_id 和 Issue.stage 定位到候选对/求交；失败不污染输入与活动事务。"
+        ],
+        "tests": [
+          "axiom_boolean_prep_test",
+          "axiom_boolean_workflow_test"
+        ],
+        "depends_on": [],
+        "kind": "implementation"
+      },
+      {
+        "id": "S4-SPLIT-CLASSIFY",
+        "requirement_id": "FR-BOOL-001",
+        "goal": "将真实交线接入切分与实体内外分类，保留 face/edge 关联和共面/相切语义。",
+        "acceptance": [
+          "交线真实切分受支持面与边，裁剪环/方向/邻接一致，覆盖非轴对齐和凹/孔模型；不得用 bbox 面替代切分结果。",
+          "分类使用实体几何边界，覆盖内外、共面、相切、包含与小间隙；对边界不确定性明确拒绝或有可验证回退。",
+          "切分/分类失败各有稳定诊断阶段，失败及回滚无拓扑、表示、来源与 Eval 污染。"
+        ],
+        "tests": [
+          "axiom_boolean_prep_test",
+          "axiom_boolean_workflow_test",
+          "axiom_topology_test"
+        ],
+        "depends_on": [
+          "S4-INTERSECTION"
+        ],
+        "kind": "implementation"
+      },
+      {
+        "id": "S4-REBUILD",
+        "requirement_id": "FR-BOOL-001",
+        "goal": "完成受支持模型并/差/交的真实重建、验证及可选修复闭环。",
+        "acceptance": [
+          "并/差/交从切分与分类结果重建真实实体；公开面/边/壳及来源可查询，成功结果通过 Strict 验证。",
+          "体积/面积或独立截面参考锁定分离、包含、相切、共面及孔洞模型结果；空交集/完全减除有一致语义且无 bbox/mesh 冒充精确布尔。",
+          "重建/验证/可选修复失败可定位阶段，输入保持有效，活动事务失败无半成功泄漏，回滚后可重试。"
+        ],
+        "tests": [
+          "axiom_boolean_workflow_test",
+          "axiom_ops_heal_test",
+          "axiom_heal_test",
+          "axiom_query_eval_test"
+        ],
+        "depends_on": [
+          "S4-SPLIT-CLASSIFY"
+        ],
+        "kind": "implementation"
+      },
+      {
+        "id": "S4-EXIT",
+        "requirement_id": "FR-BOOL-001",
+        "goal": "验收第一代工业模型集的布尔稳定性与全链路诊断，收口 Stage 4 支持矩阵。",
+        "acceptance": [
+          "固定模型集上的并/差/交及建模→布尔→Strict→查询/表示闭环有独立参考和可重复回归；支持体类、精确/采样及限制逐项列明。",
+          "候选对/求交/切分/分类/重建/验证/修复失败均有可检索与 JSON 可导出的阶段诊断；失败/提交/回滚保持跨模块一致。",
+          "完整构建/CTest、性能基线与文档检查通过，退出证据对应主路线图 §4.5；未支持工业能力保留限制。"
+        ],
+        "tests": [
+          "axiom_boolean_workflow_test",
+          "axiom_boolean_prep_test",
+          "axiom_query_eval_test",
+          "axiom_representation_io_test",
+          "axiom_kernel_runtime_invariant_test"
+        ],
+        "depends_on": [
+          "S4-REBUILD"
+        ],
+        "kind": "acceptance"
+      }
+    ]
+  },
+  {
+    "stage": 5,
+    "roadmap": "docs/plan/AxiomKernel_主开发计划与阶段路线图.md",
+    "tasks": [
+      {
+        "id": "S5-HEAL",
+        "requirement_id": "FR-HEAL-001",
+        "goal": "完善导入模型验证→修复→再验证的第一代闭环，保持修复可解释与事务一致。",
+        "acceptance": [
+          "固定缺陷数据覆盖间隙/方向/重复或退化拓扑，修复前后缺陷与几何偏差有独立预期，成功结果通过验证。",
+          "修复策略与容差边界明确，不可修复输入返回稳定阶段诊断；失败/回滚不污染原模型且能重试。"
+        ],
+        "tests": [
+          "axiom_heal_test",
+          "axiom_ops_heal_test",
+          "axiom_io_workflow_test"
+        ],
+        "depends_on": [],
+        "kind": "implementation"
+      },
+      {
+        "id": "S5-IO",
+        "requirement_id": "FR-IO-001",
+        "goal": "按标准交换实施路线完善 STEP/IGES/BREP/STL 导入导出主链路，区分默认子集和可选桥接支持。",
+        "acceptance": [
+          "固定各格式数据覆盖导入→验证/修复→导出→再导入，按支持矩阵核对实际几何/拓扑、单位与误差；不将文件容器或代理 bbox 当作标准实体交换。",
+          "已启用标准交换路线时执行 STEP/IGES 专文对应里程碑 DoD；默认 BRIDGE=OFF 的子集与标准拒绝回归保持完整，不强制引入外部桥接。",
+          "损坏/不支持数据、读写失败与预算失败有 IO 阶段诊断，模型修改可回滚，导出失败不留下被宣称成功的部分文件。"
+        ],
+        "tests": [
+          "axiom_io_workflow_test",
+          "axiom_io_dataset_test",
+          "axiom_representation_io_test"
+        ],
+        "depends_on": [
+          "S5-HEAL"
+        ],
+        "kind": "implementation"
+      },
+      {
+        "id": "S5-TESSELLATION",
+        "requirement_id": "FR-REP-001",
+        "goal": "完善显示和分析所需的真实边界三角化及转换一致性。",
+        "acceptance": [
+          "受支持曲面/裁剪面、凹面/孔洞三角化与真实边界一致，明确误差、法向、退化及不支持范围。",
+          "几何偏差与面积/体积由独立参考核对，缓存/编辑/回滚正确，转换失败无部分结果及 bbox 物理回退。"
+        ],
+        "tests": [
+          "axiom_representation_io_test",
+          "axiom_geometry_test",
+          "axiom_query_eval_test"
+        ],
+        "depends_on": [
+          "S5-IO"
+        ],
+        "kind": "implementation"
+      },
+      {
+        "id": "S5-EXIT",
+        "requirement_id": "FR-IO-001",
+        "goal": "集成验收导入验证修复、交换往返与三角化显示/分析支持。",
+        "acceptance": [
+          "固定输入数据集完成导入→验证→修复→三角化→导出/再导入闭环；几何参考、拓扑有效性与错误码预期可复现。",
+          "完整构建/CTest 和文档检查通过，按主路线图 §4.6 同步格式/桥接/三角化支持矩阵、误差及限制。"
+        ],
+        "tests": [
+          "axiom_io_workflow_test",
+          "axiom_io_dataset_test",
+          "axiom_heal_test",
+          "axiom_representation_io_test"
+        ],
+        "depends_on": [
+          "S5-TESSELLATION"
+        ],
+        "kind": "acceptance"
+      }
+    ]
+  },
+  {
+    "stage": 6,
+    "roadmap": "docs/plan/AxiomKernel_主开发计划与阶段路线图.md",
+    "tasks": [
+      {
+        "id": "S6-BLEND",
+        "requirement_id": "FR-BLEND-001",
+        "goal": "完善常见机械零件的圆角/倒角真实拓扑主路径及支持边界。",
+        "acceptance": [
+          "常规机械夹具的圆角/倒角产生真实几何与拓扑，公开查询及 Strict 验证通过，半径/距离由独立参考核对。",
+          "相交/退化/不支持边明确诊断，失败与活动事务回滚无污染。"
+        ],
+        "tests": [
+          "axiom_ops_heal_test",
+          "axiom_topology_test",
+          "axiom_query_eval_test"
+        ],
+        "depends_on": [],
+        "kind": "implementation"
+      },
+      {
+        "id": "S6-OFFSET-SHELL",
+        "requirement_id": "FR-MOD-001",
+        "goal": "增强偏置/抽壳并保持厚度与实际边界一致。",
+        "acceptance": [
+          "至少一个常见机械零件偏置/抽壳工作流有真实内外边界及厚度独立参考，成功结果通过 Strict。",
+          "自交、厚度过大或不支持曲面有阶段诊断，失败不泄漏部分模型，回滚后拓扑/表示/来源一致。"
+        ],
+        "tests": [
+          "axiom_ops_heal_test",
+          "axiom_heal_test",
+          "axiom_representation_io_test"
+        ],
+        "depends_on": [
+          "S6-BLEND"
+        ],
+        "kind": "implementation"
+      },
+      {
+        "id": "S6-DIRECT-EDIT",
+        "requirement_id": "FR-MOD-001",
+        "goal": "补齐常规机械建模的替换面/移动面/删除补面等直接编辑支持主路径。",
+        "acceptance": [
+          "冻结已支持编辑类型，至少一条真实直接编辑主路径完成编辑→验证→查询；几何变化与独立参考一致。",
+          "编辑后表示/来源/Eval 与当前拓扑一致，不支持与失败有结构化诊断，事务回滚恢复原结果。"
+        ],
+        "tests": [
+          "axiom_ops_heal_test",
+          "axiom_topology_test",
+          "axiom_query_eval_test",
+          "axiom_kernel_runtime_invariant_test"
+        ],
+        "depends_on": [
+          "S6-OFFSET-SHELL"
+        ],
+        "kind": "implementation"
+      },
+      {
+        "id": "S6-EXIT",
+        "requirement_id": "FR-MOD-001",
+        "goal": "验收含圆角/倒角、偏置/抽壳和直接编辑的常见机械工作流。",
+        "acceptance": [
+          "固定机械夹具覆盖建模→高级特征/编辑→Strict→查询/表示闭环，具有独立尺寸/质量参考及失败回滚回归。",
+          "完整构建/CTest、性能基线和文档检查通过，按主路线图 §4.7 记录支持边界与退出证据。"
+        ],
+        "tests": [
+          "axiom_ops_heal_test",
+          "axiom_query_eval_test",
+          "axiom_representation_io_test",
+          "axiom_kernel_runtime_invariant_test"
+        ],
+        "depends_on": [
+          "S6-DIRECT-EDIT"
+        ],
+        "kind": "acceptance"
+      }
+    ]
+  },
+  {
+    "stage": 7,
+    "roadmap": "docs/plan/AxiomKernel_主开发计划与阶段路线图.md",
+    "tasks": [
+      {
+        "id": "S7-EVAL",
+        "requirement_id": "FR-EVAL-001",
+        "goal": "让 EvalGraph 接入真实建模重算，形成可验证的局部失效与增量更新。",
+        "acceptance": [
+          "固定依赖模型的局部修改触发真实算法重算，受影响结果与独立全量重建一致，不以图状态变更冒充算法执行。",
+          "未受影响节点不重算，计数可核对；失败/取消/回滚恢复拓扑、表示、来源和 Eval 一致状态。"
+        ],
+        "tests": [
+          "axiom_query_eval_test",
+          "axiom_ops_heal_test",
+          "axiom_kernel_runtime_invariant_test"
+        ],
+        "depends_on": [],
+        "kind": "implementation"
+      },
+      {
+        "id": "S7-CACHE-PERF",
+        "requirement_id": "NFR-PERF-001",
+        "goal": "建立增量更新与缓存命中性能证据，优化已测热点。",
+        "acceptance": [
+          "缓存身份/版本/失效与真实模型一致，命中/未命中/回滚结果等价，诊断和指标可导出。",
+          "固定数据、构建类型、硬件与迭代，记录局部更新和全量重建耗时、内存、命中率；局部修改明显更快且结果一致，不降低既有性能门槛。"
+        ],
+        "tests": [
+          "axiom_perf_baseline_test",
+          "axiom_query_eval_test",
+          "axiom_kernel_runtime_invariant_test"
+        ],
+        "depends_on": [
+          "S7-EVAL"
+        ],
+        "kind": "implementation"
+      },
+      {
+        "id": "S7-EXIT",
+        "requirement_id": "FR-EVAL-001",
+        "goal": "按实测数据验收局部修改优于全量重建的 Stage 7 退出要求。",
+        "acceptance": [
+          "固定模型和测量方法的局部/全量对照可复现，记录源码/配置、时间与缓存指标，正确性回归与性能证据一致。",
+          "完整构建/CTest、性能基线与文档检查通过，按主路线图 §4.8 同步增量更新支持范围及限制。"
+        ],
+        "tests": [
+          "axiom_perf_baseline_test",
+          "axiom_query_eval_test",
+          "axiom_kernel_runtime_invariant_test"
+        ],
+        "depends_on": [
+          "S7-CACHE-PERF"
+        ],
+        "kind": "acceptance"
+      }
+    ]
+  },
+  {
+    "stage": 8,
+    "roadmap": "docs/plan/AxiomKernel_主开发计划与阶段路线图.md",
+    "tasks": [
+      {
+        "id": "S8-HYBRID",
+        "requirement_id": "FR-HYBRID-001",
+        "goal": "深化 MeshRep/ImplicitRep 与真实几何/拓扑的混合表示工作流。",
+        "acceptance": [
+          "固定扫描或生成式模型完成混合表示操作/转换→验证→查询，几何误差和拓扑语义由独立参考核对。",
+          "近似/精确边界、预算和不支持范围明确，转换失败无部分结果，编辑/回滚/缓存一致。"
+        ],
+        "tests": [
+          "axiom_representation_io_test",
+          "axiom_query_eval_test",
+          "axiom_io_dataset_test"
+        ],
+        "depends_on": [],
+        "kind": "implementation"
+      },
+      {
+        "id": "S8-PLUGIN-SECURITY",
+        "requirement_id": "NFR-SEC-001",
+        "goal": "按 DEC-PLUGIN-001 建立可测的插件安全主路径与诚实边界。",
+        "acceptance": [
+          "至少一条进程外 host+受限 IPC 或拒载主路径可诊断；同进程白名单/可选完整性策略与配置一致，不宣称进程内隔离。",
+          "插件只通过公开 API，加载/权限/协议失败有稳定诊断及无污染回归；SBOM 与依赖/许可证扫描策略可追溯。"
+        ],
+        "tests": [
+          "axiom_plugin_sdk_test",
+          "axiom_diagnostics_test",
+          "axiom_kernel_runtime_invariant_test"
+        ],
+        "depends_on": [
+          "S8-HYBRID"
+        ],
+        "kind": "implementation"
+      },
+      {
+        "id": "S8-SDK-REMOTE",
+        "requirement_id": "FR-PLUGIN-001",
+        "goal": "完善公开 SDK、Python/服务化与远程调用的代表性链路。",
+        "acceptance": [
+          "至少一个公开 SDK/插件及 Python 或远程调用示例完成建模/转换→验证→诊断查询闭环，远程结果保持本地 Result/Report 语义。",
+          "公开接口无私有布局依赖，能力发现、版本/不支持与调用失败有回归，diagnostic_id 可查询且输入修改事务一致。"
+        ],
+        "tests": [
+          "axiom_plugin_sdk_test",
+          "axiom_smoke_test",
+          "axiom_diagnostics_test"
+        ],
+        "depends_on": [
+          "S8-PLUGIN-SECURITY"
+        ],
+        "kind": "implementation"
+      },
+      {
+        "id": "S8-EXIT",
+        "requirement_id": "FR-HYBRID-001",
+        "goal": "验收现代扫描/生成式/服务场景与插件安全边界，记录路线图终点。",
+        "acceptance": [
+          "代表性混合表示与插件/远程工作流有自动化证据，精度、能力发现、安全边界和进程外/拒载诊断可核对。",
+          "完整构建/CTest、性能基线和文档检查通过，按主路线图 §4.9 收口；Stage 8 验收不替代全 FR/NFR、发布与长期目标完成证据。"
+        ],
+        "tests": [
+          "axiom_representation_io_test",
+          "axiom_plugin_sdk_test",
+          "axiom_diagnostics_test",
+          "axiom_kernel_runtime_invariant_test",
+          "axiom_perf_baseline_test"
+        ],
+        "depends_on": [
+          "S8-SDK-REMOTE"
+        ],
+        "kind": "acceptance"
+      }
+    ]
+  }
+]

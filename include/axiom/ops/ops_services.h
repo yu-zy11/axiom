@@ -213,10 +213,88 @@ class BooleanService {
 public:
     explicit BooleanService(std::shared_ptr<detail::KernelState> state);
 
+    /// Compatibility workflow retains historical bbox/proxy material semantics.
+    /// Use run_rebuilt for real planar solid reconstruction and explicit emptiness.
     Result<OpReport> run(BooleanOp op, BodyId lhs, BodyId rhs, const BooleanOptions& options);
+    /// Reconstruct Union/Subtract/Intersect from actual planar face fragments
+    /// and solid classifications. Returns owned ExactBRep faces, shared edges
+    /// and connected shells with source provenance; successful nonempty outputs
+    /// pass validate_all(Strict). Empty material succeeds with output == nullopt.
+    /// Uses prepare_split_classification's embedded-shell, precision and budget
+    /// contract, with an internal coplanar region subdivision path. Resolved
+    /// coincident faces and face contacts use two-sided material classifications;
+    /// shared regions are emitted once with both source faces. Curved boundaries,
+    /// unresolved tolerance bands and non-manifold contacts are rejected.
+    /// No bounding-box or mesh material substitute is used. The public read-only
+    /// preparation entry points retain their explicit coplanar rejection.
+    /// Each source shell must be connected and wound out of the parity material;
+    /// unresolved two-sided orientation probes (including thin/nearby shells)
+    /// fail conservatively. Node synchronization caps twenty million comparisons
+    /// and at most twelve ring entries per preparation.max_fragments.
+    /// The existing Strict validator also rejects result shells with fewer than
+    /// six faces; no validation gate is bypassed for a reconstructed Boolean.
+    /// Optional Safe repair cancels same-oriented coplanar fragment seams and
+    /// synchronously removes only roundoff-level collinear subdivisions. It
+    /// preserves material corners, outer/hole boundaries and combined sources,
+    /// then repeats Strict validation and shell-region checks. Unresolved true
+    /// short features remain failures; no validation gate is relaxed. Failures
+    /// identify preparation, bool.rebuild, bool.validate or bool.repair, restore
+    /// model/Eval/cache state, and preserve the caller's active writer. Successful
+    /// derived outputs do not invalidate inputs and participate in caller rollback.
+    /// The report marks repaired only after this boundary-preserving repair
+    /// succeeds; auto_repair alone does not mark an already-valid result.
+    Result<BooleanRebuildReport> run_rebuilt(
+        BooleanOp op, BodyId lhs, BodyId rhs,
+        const BooleanRebuildOptions& options = {});
+    /// Read-only geometric preparation for closed, oriented planar ExactBRep
+    /// bodies (boxes, wedges and polygon prisms, including concavity/holes).
+    /// Every face/edge is checked; proxy, curved, open or malformed inputs are
+    /// rejected. Linear tolerance bounds boundary snapping; angular tolerance
+    /// rejects unresolved near-parallel planes. ExactCritical is unsupported.
+    /// Input shells must be embedded; local boundary checks do not certify
+    /// global shell self-intersection or material containment among shells.
+    /// Tolerances must be finite and positive, linear within min_local/max_local,
+    /// angular < 1 radian. Coordinate roundoff must resolve the linear tolerance.
+    /// The solved line and its distances to every face vertex must also resolve
+    /// that tolerance before trimming; unresolved pairs fail even if remote.
+    /// FastFloat/AdaptiveCertified use analytic double arithmetic with residual
+    /// checks, not exact predicates or a continuous curved-surface certificate.
+    /// Coplanar candidate faces are rejected explicitly, including tangencies
+    /// requiring a 2-D overlap solver. Transverse point contacts are returned.
+    /// Limits cap Cartesian face comparisons, per-face edges (at most 256),
+    /// and output segments. Empty intersections succeed, including containment.
+    /// Results own coordinates plus source face/edge IDs for subsequent split;
+    /// no model objects, eval changes or transaction writes are made, on success
+    /// or failure. Failures always have a diagnostic and bool.prep.candidates
+    /// or bool.intersect stage. This does not certify run()'s rebuilt solid.
+    Result<BooleanIntersectionPreparation> prepare_intersections(
+        BodyId lhs, BodyId rhs, const BooleanIntersectionOptions& options = {}) const;
+    /// Read-only planar split/classification preparation under the same input
+    /// contract as prepare_intersections. Real intersection lines subdivide
+    /// trimmed faces (including concavities/holes) and source edge intervals.
+    /// Single-ring face winding must agree with its support plane normal, as
+    /// required by the existing planar preparation gate.
+    /// Triangulation may introduce extra subdivision edges; these are identified
+    /// by zero source-edge IDs. Returns provenance and geometric adjacency,
+    /// never a bbox substitute or a rebuilt Boolean solid. Coplanar candidates
+    /// and unresolved numerical/boundary cases fail explicitly. All failures
+    /// have a diagnostic stage; no model, Eval or transaction writes occur.
+    Result<BooleanSplitClassificationPreparation> prepare_split_classification(
+        BodyId lhs, BodyId rhs, const BooleanSplitClassificationOptions& options = {}) const;
+    /// Classify finite points against the real closed planar body boundary.
+    /// Uses the intersection preparation's embedded-shell precondition and
+    /// parity material convention (nested odd-depth shells are cavities).
+    /// Boundary points retain their source faces; unresolved near-boundary or
+    /// ray degeneracy cases fail with bool.classify instead of guessing.
+    Result<std::vector<BooleanPointClassification>> classify_points(
+        BodyId body, std::span<const Point3> points,
+        const BooleanIntersectionOptions& options = {}) const;
     Result<void> export_boolean_prep_stats(BodyId lhs, BodyId rhs, std::string_view path) const;
 
 private:
+    Result<BooleanSplitClassificationPreparation> prepare_split_classification_impl(
+        BodyId lhs, BodyId rhs, const BooleanSplitClassificationOptions& options,
+        bool resolve_coplanar) const;
     std::shared_ptr<detail::KernelState> state_;
 };
 

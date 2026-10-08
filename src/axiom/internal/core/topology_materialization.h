@@ -1365,7 +1365,8 @@ inline void polyhedral_mass_properties_from_triangles(const std::vector<Point3>&
 // Validate a simple polygon and clip ears in a local plane frame. The output
 // retains input winding and vertex indices; no kernel objects are allocated.
 inline bool triangulate_extrude_profile(std::span<const Point3> poly, const Vec3& normal,
-                                        std::vector<std::array<int, 3>>& triangles) {
+                                        std::vector<std::array<int, 3>>& triangles,
+                                        bool retain_collinear_boundary_nodes = false) {
     triangles.clear();
     if (poly.size() < 3 || poly.size() > static_cast<std::size_t>(std::numeric_limits<int>::max() / 4)) {
         return false;
@@ -1392,7 +1393,15 @@ inline bool triangulate_extrude_profile(std::span<const Point3> poly, const Vec3
     };
     const int n = static_cast<int>(poly.size());
     for (int i = 0; i < n; ++i) {
-        if (std::abs(turn(i, (i + 1) % n, (i + 2) % n)) <= area_tol) return false;
+        if (std::abs(turn(i, (i + 1) % n, (i + 2) % n)) <= area_tol) {
+            // Owned faces may subdivide a straight boundary edge. Retain these
+            // nodes in the triangulation; source profile validation stays strict.
+            const auto& a = points[i];
+            const auto& b = points[(i + 1) % n];
+            const auto& c = points[(i + 2) % n];
+            if (!retain_collinear_boundary_nodes ||
+                (b[0]-a[0])*(c[0]-b[0]) + (b[1]-a[1])*(c[1]-b[1]) <= 0) return false;
+        }
         for (int j = i + 1; j < n; ++j) {
             if (std::hypot(points[i][0] - points[j][0], points[i][1] - points[j][1]) <= length_tol) {
                 return false;
@@ -1461,7 +1470,8 @@ inline bool triangulate_extrude_region(const std::vector<Point3>& outer,
                                        const Vec3& normal, Scalar plane_tol,
                                        std::vector<Point3>& points,
                                        std::vector<std::pair<int, int>>& boundary,
-                                       std::vector<std::array<int, 3>>& triangles) {
+                                       std::vector<std::array<int, 3>>& triangles,
+                                       bool retain_collinear_boundary_nodes = false) {
     points.clear();
     boundary.clear();
     triangles.clear();
@@ -1479,7 +1489,8 @@ inline bool triangulate_extrude_region(const std::vector<Point3>& outer,
         const auto length = norm(raw);
         std::vector<std::array<int, 3>> unused;
         if (!std::isfinite(length) || length <= 1e-14 ||
-            !triangulate_extrude_profile(polygon, scale(raw, 1.0 / length), unused)) return false;
+            !triangulate_extrude_profile(polygon, scale(raw, 1.0 / length), unused,
+                                         retain_collinear_boundary_nodes)) return false;
         // Outer CCW, holes CW in the common frame: material lies to the left.
         if ((dot(raw, normal) > 0) != (r == 0)) std::reverse(polygon.begin(), polygon.end());
         std::vector<int> ring;

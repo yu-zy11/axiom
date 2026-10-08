@@ -56,6 +56,8 @@ target_include_directories(axiom_rep PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 add_library(axiom_ops STATIC
     src/axiom/ops/ops_services.cpp
     src/axiom/ops/ops_service_internal.cpp
+    src/axiom/ops/boolean_split_classify.cpp
+    src/axiom/ops/boolean_rebuild.cpp
 )
 target_link_libraries(axiom_ops PUBLIC axiom_core axiom_math axiom_geo axiom_topo axiom_rep axiom_diag)
 target_include_directories(axiom_ops PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)

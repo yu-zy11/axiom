@@ -382,6 +382,186 @@ class StageSchedulingTest(unittest.TestCase):
         self.assertNotIn("-R", suites[0])
 
 
+class StageAdvancementTest(unittest.TestCase):
+    def setUp(self):
+        self.config = agent_autodev.load_config(agent_autodev.DEFAULT_CONFIG)
+        self.state = dict(successful_cycles=79, consecutive_failures=0, history=[])
+
+    def accept_plan(self, plan):
+        records = self.state.setdefault("stage_tasks", {}).setdefault(str(plan["stage"]), {})
+        for task in plan["tasks"]:
+            records[task["id"]] = dict(
+                commit=f"commit-{task['id']}", task_fingerprint=agent_autodev.stage_fingerprint(task),
+                dependencies={dep: records[dep]["commit"] for dep in task.get("depends_on", [])})
+
+    def test_boundary_selects_boolean_plan_and_persists_restart_state(self):
+        self.accept_plan(self.config["stage_plan"])
+        original_records = copy.deepcopy(self.state["stage_tasks"])
+        with patch.object(agent_autodev, "save_state") as save:
+            self.assertTrue(agent_autodev.advance_stage(self.config, self.state, dry_run=False))
+        save.assert_called_once()
+        self.assertEqual(self.state["active_stage"], 4)
+        transition = self.state["stage_transitions"][0]
+        self.assertEqual((transition["from_stage"], transition["to_stage"]), (3, 4))
+        self.assertEqual(len(transition["commits"]), 5)
+        self.assertEqual(self.state["stage_tasks"], original_records)
+        restarted = agent_autodev.load_config(agent_autodev.DEFAULT_CONFIG)
+        agent_autodev.restore_active_stage(restarted, self.state)
+        self.assertEqual(agent_autodev.stage_task(self.state, restarted)["id"], "S4-INTERSECTION")
+        self.assertEqual(agent_autodev.select_target(agent_autodev.read_requirements(), self.state,
+                                                     restarted).requirement_id, "FR-BOOL-001")
+
+    def test_unaccepted_progress_or_pending_batch_never_advances(self):
+        for case in ("unfinished", "pending", "no_commit"):
+            with self.subTest(case=case):
+                state = copy.deepcopy(self.state)
+                if case != "unfinished":
+                    self.accept_plan(self.config["stage_plan"])
+                    state = copy.deepcopy(self.state)
+                    if case == "pending":
+                        state["pending"] = {"phase": "docs", "stage": 3}
+                    else:
+                        state["stage_tasks"]["3"]["S3-EXIT"]["commit"] = ""
+                with patch.object(agent_autodev, "save_state") as save:
+                    self.assertFalse(agent_autodev.advance_stage(self.config, state, dry_run=False))
+                save.assert_not_called()
+                self.assertEqual(self.config["stage_plan"]["stage"], 3)
+
+    def test_disabled_auto_advance_preserves_current_stage(self):
+        self.accept_plan(self.config["stage_plan"])
+        self.config["auto_advance_stage"] = False
+        with patch.object(agent_autodev, "save_state") as save:
+            self.assertFalse(agent_autodev.advance_stage(self.config, self.state, dry_run=False))
+        save.assert_not_called()
+
+    def test_dry_run_previews_next_task_without_any_mutation_or_agent_call(self):
+        self.accept_plan(self.config["stage_plan"])
+        before = copy.deepcopy(self.state)
+        args = argparse.Namespace(max_cycles=0, dry_run=True)
+        with patch.object(agent_autodev, "save_state") as save, \
+                patch.object(agent_autodev, "run") as invoke, \
+                patch.object(agent_autodev, "checked_output", return_value="head"), \
+                patch.object(agent_autodev, "workspace_snapshot", return_value={}), \
+                patch("builtins.print") as output:
+            self.assertEqual(agent_autodev.run_batches(args, self.config, self.state, None), 0)
+        save.assert_not_called()
+        invoke.assert_not_called()
+        self.assertEqual(self.state, before)
+        self.assertIn("S4-INTERSECTION", output.call_args.args[0])
+        self.assertIn("布尔与验证器第一代", output.call_args.args[0])
+
+    def test_deadline_at_boundary_stops_without_advancing(self):
+        self.accept_plan(self.config["stage_plan"])
+        before = copy.deepcopy(self.state)
+        args = argparse.Namespace(max_cycles=0, dry_run=False)
+        with patch.object(agent_autodev.time, "monotonic", return_value=10), \
+                patch.object(agent_autodev, "save_state") as save, \
+                patch.object(agent_autodev, "run") as invoke:
+            self.assertEqual(agent_autodev.run_batches(args, self.config, self.state, 5), 0)
+        save.assert_not_called()
+        invoke.assert_not_called()
+        self.assertEqual(self.state, before)
+        self.assertEqual(self.config["stage_plan"]["stage"], 3)
+
+    def test_restart_restores_pending_next_stage_and_keeps_fingerprint_guard(self):
+        self.accept_plan(self.config["stage_plan"])
+        self.state["active_stage"] = 4
+        plan = self.config["_stage_plans"][4]
+        self.state["pending"] = dict(batch_version=1, stage=4, stage_task_id="S4-INTERSECTION",
+            stage_plan_fingerprint="changed", requirement_id="FR-BOOL-001", phase="docs")
+        args = argparse.Namespace(max_cycles=0, dry_run=False)
+        with patch.object(agent_autodev, "save_state") as save, \
+                patch.object(agent_autodev, "run") as invoke:
+            with self.assertRaisesRegex(agent_autodev.RunnerError, "original stage plan"):
+                agent_autodev.run_batches(args, self.config, self.state, None)
+        save.assert_not_called()
+        invoke.assert_not_called()
+        self.assertEqual(self.config["stage_plan"], plan)
+        self.assertEqual(self.state["pending"]["phase"], "docs")
+
+    def test_transition_write_failure_does_not_change_live_stage_or_state(self):
+        self.accept_plan(self.config["stage_plan"])
+        before = copy.deepcopy(self.state)
+        with patch.object(agent_autodev, "save_state", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                agent_autodev.advance_stage(self.config, self.state, dry_run=False)
+        self.assertEqual(self.state, before)
+        self.assertEqual(self.config["stage_plan"]["stage"], 3)
+
+    def test_restored_stage_cannot_skip_changed_or_missing_previous_acceptance(self):
+        self.accept_plan(self.config["stage_plan"])
+        self.state["active_stage"] = 4
+        for change in ("changed", "missing", "empty_commit"):
+            state = copy.deepcopy(self.state)
+            records = state["stage_tasks"]["3"]
+            if change == "changed":
+                records["S3-MASS"]["task_fingerprint"] = "changed"
+            elif change == "missing":
+                records.pop("S3-MASS")
+            else:
+                records["S3-MASS"]["commit"] = ""
+            with self.subTest(change=change), self.assertRaisesRegex(agent_autodev.RunnerError,
+                                                                    "previous Stage 3"):
+                agent_autodev.restore_active_stage(self.config, state)
+        for stage in (True, 2, 9, "4"):
+            with self.subTest(stage=stage), self.assertRaises(agent_autodev.RunnerError):
+                agent_autodev.restore_active_stage(self.config, dict(active_stage=stage))
+
+    def test_all_stages_advance_in_order_and_final_stage_stops(self):
+        with patch.object(agent_autodev, "save_state") as save:
+            for expected in range(4, 9):
+                self.accept_plan(self.config["stage_plan"])
+                self.assertTrue(agent_autodev.advance_stage(self.config, self.state, dry_run=False))
+                self.assertEqual(self.state["active_stage"], expected)
+            self.accept_plan(self.config["stage_plan"])
+            self.assertFalse(agent_autodev.advance_stage(self.config, self.state, dry_run=False))
+        self.assertEqual(save.call_count, 5)
+        restarted = agent_autodev.load_config(agent_autodev.DEFAULT_CONFIG)
+        agent_autodev.restore_active_stage(restarted, self.state)
+        self.assertEqual(restarted["stage_plan"]["stage"], 8)
+        self.assertIsNone(agent_autodev.stage_task(self.state, restarted))
+        self.assertNotIn("project_complete", self.state)
+
+    def test_catalog_rejects_gaps_duplicates_unknown_tests_and_bad_paths(self):
+        plans = list(self.config["_stage_plans"].values())
+        malformed = [[], plans[1:], [plans[0], plans[0]]]
+        wrong_tests = copy.deepcopy(plans)
+        wrong_tests[0]["tasks"][0]["tests"] = ["unknown_test"]
+        malformed.append(wrong_tests)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "automation").mkdir()
+            (root / "docs/plan").mkdir(parents=True)
+            roadmap = self.config["stage_plan"]["roadmap"]
+            (root / roadmap).write_text((agent_autodev.ROOT / roadmap).read_text())
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps(self.config))
+            with patch.object(agent_autodev, "ROOT", root), \
+                    patch.object(agent_autodev, "read_requirements", return_value=agent_autodev.read_requirements()):
+                for value in malformed:
+                    (root / self.config["stage_catalog"]).write_text(json.dumps(value))
+                    with self.subTest(plans=value), self.assertRaises(agent_autodev.RunnerError):
+                        agent_autodev.load_config(config_path)
+                for value in ("../catalog.json", "/tmp/catalog.json", "docs/catalog.json"):
+                    config_path.write_text(json.dumps(dict(self.config, stage_catalog=value)))
+                    with self.subTest(path=value), self.assertRaises(agent_autodev.RunnerError):
+                        agent_autodev.load_config(config_path)
+
+    def test_legacy_config_without_catalog_still_stops_at_stage_boundary(self):
+        config = copy.deepcopy(self.config)
+        for key in ("auto_advance_stage", "stage_catalog", "_stage_plans"):
+            config.pop(key, None)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps(config))
+            config = agent_autodev.load_config(path)
+        self.assertFalse(config["auto_advance_stage"])
+        self.accept_plan(config["stage_plan"])
+        with patch.object(agent_autodev, "save_state") as save:
+            self.assertFalse(agent_autodev.advance_stage(config, self.state, dry_run=False))
+        save.assert_not_called()
+
+
 class RepairLoopTest(unittest.TestCase):
     def run_loop(self, *, failures=(), reports=None, limit=0, commit_fail=False,
                  resume=False, mismatch=False, resume_gates=False,
@@ -538,9 +718,10 @@ class RepairLoopTest(unittest.TestCase):
 class BatchLoopTest(unittest.TestCase):
     def run_batch(self, *, lines=450, docs_fail=False, docs_code_edit=False,
                   gate_fail=False, commit_fail=False, stop_phase=None, pending=None,
-                  dry_run=False, stage_mode=False, stage_outcomes=None, tests_only=False, no_commit=False):
+                  dry_run=False, stage_mode=False, stage_outcomes=None, tests_only=False, no_commit=False,
+                  max_cycles=1):
         config = agent_autodev.load_config(agent_autodev.DEFAULT_CONFIG)
-        ids = ["FR-GEO-001", "FR-OPS-001", "FR-QUERY-001"]
+        ids = ["FR-GEO-001", "FR-OPS-001", "FR-QUERY-001", "FR-BOOL-001"]
         if stage_mode:
             config["stage_plan"]["tasks"] = config["stage_plan"]["tasks"][:1]
             config["stage_plan"]["tasks"][0]["acceptance"] = ["independent reference"]
@@ -554,7 +735,7 @@ class BatchLoopTest(unittest.TestCase):
         state = dict(successful_cycles=0, consecutive_failures=0, history=[], requirement_cycles={})
         if pending:
             state["pending"] = copy.deepcopy(pending)
-        args = argparse.Namespace(max_cycles=1, no_commit=no_commit, dry_run=dry_run,
+        args = argparse.Namespace(max_cycles=max_cycles, no_commit=no_commit, dry_run=dry_run,
                                   config=agent_autodev.DEFAULT_CONFIG, agent_command=None,
                                   allow_dirty=False, resume_failed=pending is not None,
                                   stop_after_seconds=5 if stop_phase else 0)
@@ -584,8 +765,10 @@ class BatchLoopTest(unittest.TestCase):
             if stage_mode:
                 outcome = (stage_outcomes or {}).get((state["pending"]["phase"], counts[state["pending"]["phase"]]),
                                                      "ready_for_acceptance")
-                value.update(stage_task_id="S3-QUERY", stage_outcome=outcome,
-                             stage_evidence=["independent reference regression"])
+                task = next(t for t in config["stage_plan"]["tasks"]
+                            if t["id"] == state["pending"]["stage_task_id"])
+                value.update(stage_task_id=task["id"], stage_outcome=outcome,
+                             stage_evidence=["independent reference regression"] * len(task["acceptance"]))
             return value
 
         def gates(*a, **kw):
@@ -699,6 +882,20 @@ class BatchLoopTest(unittest.TestCase):
         self.assertEqual(events, [])
         self.assertEqual(snapshots, [])
         self.assertNotIn("pending", state)
+
+    def test_continuous_loop_crosses_committed_boundary_and_respects_batch_limit(self):
+        result, state, events, prompts, _, snapshots = self.run_batch(stage_mode=True, max_cycles=2)
+        self.assertEqual(result, 0)
+        self.assertEqual(state["successful_cycles"], 2)
+        self.assertEqual([r["stage"] for r in state["history"]], [3, 4])
+        self.assertEqual(state["active_stage"], 4)
+        self.assertEqual(state["stage_transitions"][0]["commits"], {"S3-QUERY": "commit"})
+        self.assertIn("S4-INTERSECTION", state["stage_tasks"]["4"])
+        self.assertEqual(events.count("gates"), 2)
+        self.assertTrue(any("布尔与验证器第一代" in prompt for prompt in prompts))
+        first_transition = next(s for s in snapshots if s.get("active_stage") == 4)
+        self.assertIn("S3-QUERY", first_transition["stage_tasks"]["3"])
+        self.assertNotIn("pending", first_transition)
 
     def test_stage_ready_package_validates_without_line_or_package_quota(self):
         _, state, events, _, _, snapshots = self.run_batch(stage_mode=True, lines=5)

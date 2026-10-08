@@ -57,6 +57,7 @@ struct TopologySavepointSnapshot {
   std::uint64_t coedge_pcurve_binds{};
   std::uint64_t coedge_pcurve_clears{};
   std::uint64_t write_operations{};
+  std::size_t service_allocation_range_count{};
 };
 
 struct TopologyTransactionState {

@@ -545,6 +545,8 @@ if (strict.status != StatusCode::Ok || !mass.value || !section.value) return 1;
 
 ## 7. 布尔操作样例
 
+第一代求交边界见 [§7.5](#75-只读平面几何求交准备cycle-0080--s4-intersection)，只读切分与实体分类见 [§7.6](#76-只读真实切分与实体分类cycle-0081--s4-split-classify)。§7.1～7.4 展示兼容 run 调用形态；圆柱代理与自动修复不构成连续曲面布尔或重建实体正确性认证。
+
 ## 7.1 差集
 
 ```cpp
@@ -603,6 +605,134 @@ if (check.status != StatusCode::Ok) {
   handle_optional_repair(repaired);
 }
 ```
+
+## 7.5 只读平面几何求交准备（cycle-0080 / S4-INTERSECTION）
+
+```cpp
+using namespace axiom;
+auto a = kernel.primitives().box({0,0,0}, 2, 2, 2);
+auto b = kernel.primitives().box({1,1,1}, 2, 2, 2);
+if (!a.value || !b.value) return;
+
+BooleanIntersectionOptions options;  // 默认线/角容差 1e-6，独立于全局策略
+options.tolerance = kernel.tolerance().global_policy();  // 沿用全局策略时显式复制
+// 预算限制全部面比较及输出；此夹具 36 次面比较，6 个候选，6 条交段。
+options.max_face_pairs = 36;
+options.max_segments = 6;
+options.max_edges_per_face = 256;
+auto prepared = kernel.booleans().prepare_intersections(*a.value, *b.value, options);
+if (prepared.status != StatusCode::Ok || !prepared.value) {
+  auto report = kernel.diagnostics().get(prepared.diagnostic_id);
+  if (report.value) {
+    for (const auto& issue : report.value->issues) {
+      // issue.code / issue.stage / related_entities / numeric_evidence
+      // bool.prep.candidates 或 bool.intersect；没有可用的部分交段。
+      show_issue(issue);
+    }
+  }
+  return;
+}
+for (const auto& segment : prepared.value->segments) {
+  // segment.begin/end 为坐标；lhs_face/rhs_face 是输入真实面 ID。
+  // point_contact 表示点接触。begin_hits/end_hits 关联真实边：
+  // hit.edge_fraction 沿 edge 的 v0 -> v1，不随 coedge 反转。
+  consume_intersection_for_later_split(segment);
+}
+```
+
+本样例片段未单独编译；实际执行证据来自对应回归与调度器门禁日志。`show_issue` 与 `consume_intersection_for_later_split` 是应用侧示意函数。prepare 不分配模型对象或写事务，成功后也不在内核交线存储中新增集合。该重叠盒的六条单位边来自一坐标=2、另一坐标=1、第三坐标∈[1,2] 的解析参考；固定回归逐条检查覆盖、源边集合和比例。分离/包含的边界空交成功，不能由此推断布尔实体的体积或材料分类。
+
+共面面接触/相同体返回 NotImplemented/E-0014/bool.intersect；曲面/曲边/代理及 ExactCritical 返回 E-0011/bool.prep.candidates；预算耗尽 E-0012，数值不可分辨 E-0013。所有失败可查 diagnostic_id。候选 bbox 只是筛选；斜楔与位于 x+y>2 的盒即使候选非空也必须零交段。凹形/孔洞的完整 16 区间、RxRz 旋转及相切参考见 [固定参考模型集](AxiomKernel_详细模块接口清单.md#固定参考模型集与独立结果)；三条证据和真实门禁见 [验收 §1.7](../quality/AxiomKernel_测试与验收方案.md#17-cycle-0080--s4-intersection-门禁与逐项证据)。
+
+兼容 run 已按真实面边界裁剪；读取短边、超 256 边或大坐标失败在 bool.intersect.trim 结构化返回，所有局部读取完成后才物化交线与结果体。Generic 单面壳的 run 失败夹具不属于 prepare 的闭壳支持认证。有限平面只读切分/分类见 §7.6；精确谓词认证、布尔实体重建、二维共面区域求交、连续曲面/曲边求交和全局壳嵌入证明仍未认证。
+
+## 7.6 只读真实切分与实体分类（cycle-0081 / S4-SPLIT-CLASSIFY）
+
+```cpp
+using namespace axiom;
+auto a = kernel.primitives().box({0,0,0}, 2, 2, 2);
+auto b = kernel.primitives().box({1,1,1}, 2, 2, 2);
+if (!a.value || !b.value) return;
+
+BooleanSplitClassificationOptions options;  // 使用默认累计工作与片数预算
+options.intersection.tolerance = kernel.tolerance().global_policy();
+auto prepared = kernel.booleans().prepare_split_classification(*a.value, *b.value, options);
+if (prepared.status != StatusCode::Ok || !prepared.value) {
+  auto report = kernel.diagnostics().get(prepared.diagnostic_id);
+  if (report.value) for (const auto& issue : report.value->issues) show_issue(issue);
+  return;  // 失败没有部分切分/分类结果
+}
+for (const auto& fragment : prepared.value->fragments) {
+  // source_body/source_face 是输入实体；vertices 为真实三角分片。
+  // source_edges=0 为内部细分边；非零边参数沿原 v0->v1，可递减。
+  // intersection_segments / adjacent_fragments 为本结果内的索引。
+  consume_face_fragment(fragment);
+}
+for (const auto& edge : prepared.value->edge_fragments) {
+  // begin_fraction < end_fraction，沿源边 v0->v1，保留原 incident faces。
+  consume_edge_fragment(edge);
+}
+std::array<Point3, 3> points{{{0.5,0.5,0.5}, {3,0.5,0.5}, {0,1,1}}};
+auto classified = kernel.booleans().classify_points(*a.value, points, options.intersection);
+if (classified.status != StatusCode::Ok || !classified.value) {
+  auto report = kernel.diagnostics().get(classified.diagnostic_id);
+  if (report.value) for (const auto& issue : report.value->issues) show_issue(issue);
+  return;
+}
+// 与 points 顺序一致：Inside、Outside、Boundary；最后一项含真实 boundary_faces。
+consume_point_classifications(*classified.value);
+```
+
+`show_issue` 与 `consume_*` 是应用侧示意函数，本样例未单独编译；执行证据来自 [回归与最终门禁 §1.8](../quality/AxiomKernel_测试与验收方案.md#18-cycle-0081--s4-split-classify-门禁与逐项证据)。默认容差独立于全局设置，上例显式复制；参考预期基于默认 1e-6 策略。不要照搬 §7.5 的 36 次面比较预算，split 后续累计边界读取/细分/邻接/分类另需工作预算。max_fragments 限 face+edge 总片数，max_segments 也限独立分类输入点数。
+
+盒总面积各24、对方内部面积各3；结果供后续实体重建使用，不新建模型、交线集合或写事务。分类使用实际裁剪边界和至少两条一致有效射线。真实舍入尺度边界返回 Boundary；5e-7 近边界不确定点返回 E-0013/bool.classify。非共面相切已回归；共面候选/面接触/相同体仍由 bool.intersect/E-0014 保守拒绝。稳定切分失败为 bool.split/E-0004，预算为 E-0012；先行求交阶段原样传播。全部支持范围、来源和邻接语义见 [API §8.2.2](AxiomKernel_详细模块接口清单.md#822-stage-4-第一代切分与实体分类支持矩阵cycle-0081--s4-split-classify)。兼容run仍含bbox实体语义，本只读prepare不提供实体重建或二维共面；受限真实重建另见§7.7，曲面/曲边及全局嵌入仍未认证。
+
+## 7.7 真实并/差/交、空材料与可选Safe（cycle-0082 / S4-REBUILD）
+
+```cpp
+using namespace axiom;
+auto a = kernel.primitives().box({0,0,0}, 2, 2, 2);
+auto b = kernel.primitives().box({1,1,1}, 2, 2, 2);
+if (a.status != StatusCode::Ok || !a.value ||
+    b.status != StatusCode::Ok || !b.value) return;
+BooleanRebuildOptions options;
+options.preparation.intersection.tolerance = kernel.tolerance().global_policy();
+options.auto_repair = true;  // 仅对明确人工分片几何缺陷尝试受限Safe
+
+auto result = kernel.booleans().run_rebuilt(BooleanOp::Union, *a.value, *b.value, options);
+if (result.status != StatusCode::Ok || !result.value) {
+  auto diagnostic = kernel.diagnostics().get(result.diagnostic_id);
+  if (diagnostic.value)
+    for (const auto& issue : diagnostic.value->issues) show_issue(issue);
+  return;
+}
+if (!result.value->output) {
+  consume_empty_material();  // 空交/完全减除为成功，无BodyId可查询
+  return;
+}
+const BodyId output = *result.value->output;
+auto faces = kernel.topology().query().faces_of_body(output);
+auto edges = kernel.topology().query().edges_of_body(output);
+auto shells = kernel.topology().query().shells_of_body(output);
+auto sources = kernel.topology().query().source_bodies_of_body(output);
+auto mass = kernel.topology().query().body_mass_properties(output);
+auto strict = kernel.validate().validate_all(output, ValidationMode::Strict);
+if (!faces.value || !edges.value || !shells.value || !sources.value || !mass.value ||
+    strict.status != StatusCode::Ok) return;
+// 本固定并集V=15、A=42；auto_repair不代表repaired必为true。
+consume_rebuilt(output, result.value->repaired, *mass.value);
+
+// 完全减除：同ID只生成一侧并去重来源，成功空材料。
+auto empty = kernel.booleans().run_rebuilt(BooleanOp::Subtract, *a.value, *a.value);
+if (empty.status == StatusCode::Ok && empty.value && !empty.value->output)
+  consume_empty_material();
+```
+
+`show_issue/consume_*`为应用示意函数，片段未单独编译；执行证据来自workflow/heal/ops_heal/query_eval/prep实际回归及 [最终门禁§1.9](../quality/AxiomKernel_测试与验收方案.md#19-cycle-0082--s4-rebuild-门禁与逐项证据)。诊断在外层Result，必须分别检查Result.value与报告output。只接受U/D/I，Split拒绝。公开面/壳/体来源可查，边经faces_of_edge→source_faces_of_face间接追溯；同形/同ID/共面共享区域来源去重且保留双方信息。
+
+真实内部共面及面相切支持不改变§7.5/§7.6公开prep共面拒绝，兼容run保留历史bbox代理语义。成功非空输出已经Strict及真实壳材料关系认证；受限Safe保持真外/孔环和角点，不调用bbox代理修复或放宽Strict。固定Safe夹具准备1e-6、服务Strict1e-3：Union auto=false以bool.validate失败，auto=true成功repaired=true；Subtract直接Strict成功repaired=false。若设置服务容差，使用现有ToleranceService API，准备选项本身不改变服务Strict容差。
+
+在已打开的拓扑writer内调用成功非空重建会登记服务分配，不增加显式write_operation_count，输出参与保存点/完整rollback；失败恢复新增对象、geometry/cache/Eval而保留diagnostic/递增ID，输入Eval保持有效。保存点只清其后输出，完整rollback防delete后的旧快照复活，回滚后可重试；合法累计遥测不回退。[支持矩阵及V/A/S参考](AxiomKernel_详细模块接口清单.md#823-stage-4-真实实体重建支持矩阵cycle-0082--s4-rebuild)保留边点Union拒绝、真实薄层/Safe失败、曲面曲边/ExactCritical不认证、Strict至少六面/近似网格自交及人工节点截面数值拒绝限制。
 
 ## 8. 修改操作样例
 

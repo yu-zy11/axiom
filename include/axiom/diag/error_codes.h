@@ -55,8 +55,16 @@ inline constexpr std::string_view kTopoFaceCrossLoopCurveEndpointTouch = "AXM-TO
 
 inline constexpr std::string_view kBoolInvalidInput = "AXM-BOOL-E-0001";
 inline constexpr std::string_view kBoolIntersectionFailure = "AXM-BOOL-E-0003";
+/// A real intersection constraint could not be split into consistent face pieces.
+inline constexpr std::string_view kBoolSplitFailure = "AXM-BOOL-E-0004";
 inline constexpr std::string_view kBoolClassificationFailure = "AXM-BOOL-E-0005";
 inline constexpr std::string_view kBoolRebuildFailure = "AXM-BOOL-E-0006";
+inline constexpr std::string_view kBoolUnsupportedInput = "AXM-BOOL-E-0011";
+/// Read-only Boolean preparation/classification exceeded a declared work/output limit.
+inline constexpr std::string_view kBoolPreparationBudgetExceeded = "AXM-BOOL-E-0012";
+inline constexpr std::string_view kBoolNumericalFailure = "AXM-BOOL-E-0013";
+/// Candidate planes are coplanar within tolerance; a 2-D overlap solver is required.
+inline constexpr std::string_view kBoolCoplanarUnsupported = "AXM-BOOL-E-0014";
 inline constexpr std::string_view kBoolNearDegenerateWarning = "AXM-BOOL-W-0001";
 inline constexpr std::string_view kBoolPrepNoCandidateWarning = "AXM-BOOL-W-0002";
 /// 布尔管线结束后 Strict 仍失败（含已尝试 auto_repair）：标记工业闭环缺口，便于审计与后续 Heal。

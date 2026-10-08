@@ -1423,12 +1423,12 @@ MeshRecord tessellate_face_planar_mesh(const KernelState& state, FaceId face_id,
     std::vector<std::array<int, 3>> triangles;
     if (rings.size() == 1) {
         mesh.vertices = rings.front();
-        if (!triangulate_extrude_profile(mesh.vertices, n, triangles)) return {};
+        if (!triangulate_extrude_profile(mesh.vertices, n, triangles, true)) return {};
     } else {
         std::vector<std::pair<int, int>> boundary;
         const std::vector<std::vector<Point3>> holes(rings.begin() + 1, rings.end());
         if (!triangulate_extrude_region(rings.front(), holes, n, tolerance,
-                                       mesh.vertices, boundary, triangles)) return {};
+                                       mesh.vertices, boundary, triangles, true)) return {};
     }
     mesh.bbox = mesh_bbox_from_vertices(mesh.vertices);
     if (options.compute_normals) mesh.normals.assign(mesh.vertices.size(), n);

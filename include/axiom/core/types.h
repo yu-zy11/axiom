@@ -1,7 +1,9 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -545,6 +547,120 @@ struct BooleanOptions {
   TolerancePolicy tolerance{};
   bool diagnostics{true};
   bool auto_repair{false};
+};
+
+/// First-generation intersection preparation: analytic planes with bounded,
+/// straight polygon boundaries only. No curve/surface sampling is performed.
+struct BooleanIntersectionOptions {
+  TolerancePolicy tolerance{};
+  /// Also caps cumulative geometric work in split/classification preparation
+  /// and classify_points (boundary reads, subdivision and point/face checks).
+  std::size_t max_face_pairs{2000000};
+  /// Also caps classify_points input size.
+  std::size_t max_segments{100000};
+  std::size_t max_edges_per_face{256};
+};
+
+struct BooleanFaceCandidate {
+  FaceId lhs_face{};
+  FaceId rhs_face{};
+  std::vector<EdgeId> lhs_edges;
+  std::vector<EdgeId> rhs_edges;
+};
+
+struct BooleanBoundaryHit {
+  FaceId face{};
+  EdgeId edge{};
+  /// Fraction along the edge's v0 -> v1 chord, independent of coedge reversal.
+  Scalar edge_fraction{};
+};
+
+struct BooleanIntersectionSegment {
+  FaceId lhs_face{};
+  FaceId rhs_face{};
+  Point3 begin{};
+  Point3 end{};
+  std::vector<BooleanBoundaryHit> begin_hits;
+  std::vector<BooleanBoundaryHit> end_hits;
+  bool point_contact{false};
+};
+
+struct BooleanIntersectionPreparation {
+  std::vector<BooleanFaceCandidate> candidates;
+  std::vector<BooleanIntersectionSegment> segments;
+};
+
+enum class BooleanPointLocation { Outside, Inside, Boundary };
+
+struct BooleanPointClassification {
+  BooleanPointLocation location{BooleanPointLocation::Outside};
+  /// Actual trimmed faces containing a resolved boundary point.
+  std::vector<FaceId> boundary_faces;
+};
+
+struct BooleanSplitClassificationOptions {
+  BooleanIntersectionOptions intersection{};
+  /// Caps the combined number of returned face and edge fragments.
+  std::size_t max_fragments{100000};
+};
+
+/// Owned, read-only triangular subdivision of a source face. No topology IDs
+/// are allocated. Winding follows the source outer loop. The centroid is
+/// classified against the opposite body, using its actual trimmed boundary.
+struct BooleanFaceFragment {
+  BodyId source_body{};
+  FaceId source_face{};
+  std::array<Point3, 3> vertices{};
+  /// A zero ID denotes an interior subdivision edge. Fractions follow v0->v1.
+  std::array<EdgeId, 3> source_edges{};
+  std::array<Scalar, 3> source_edge_begin{};
+  std::array<Scalar, 3> source_edge_end{};
+  /// Indices in preparation.intersection.segments touching this fragment.
+  std::vector<std::size_t> intersection_segments;
+  /// Indices in preparation.fragments on the same source body sharing a whole
+  /// subdivision edge, including adjacent source faces.
+  std::vector<std::size_t> adjacent_fragments;
+  BooleanPointClassification classification{};
+};
+
+struct BooleanEdgeFragment {
+  BodyId source_body{};
+  EdgeId source_edge{};
+  Point3 begin{};
+  Point3 end{};
+  Scalar begin_fraction{};
+  Scalar end_fraction{1.0};
+  /// Original incident source faces, independent of extra triangulation cuts.
+  std::vector<FaceId> adjacent_faces;
+};
+
+struct BooleanSplitClassificationPreparation {
+  BooleanIntersectionPreparation intersection;
+  std::vector<BooleanFaceFragment> fragments;
+  std::vector<BooleanEdgeFragment> edge_fragments;
+};
+
+/// Real planar BRep reconstruction with trimmed coplanar region subdivision.
+/// Unresolved tolerance bands and non-manifold contacts are rejected.
+struct BooleanRebuildOptions {
+  BooleanSplitClassificationOptions preparation{};
+  /// On failed Strict validation, try boundary-preserving planar seam repair:
+  /// cancel same-oriented coplanar fragment seams and remove only roundoff-level
+  /// collinear subdivisions shared consistently by all incident faces. Material
+  /// corners and outer/hole geometry are preserved; no tolerance-sized feature
+  /// removal, bounding-box replacement or validation relaxation is allowed.
+  bool auto_repair{false};
+};
+
+struct BooleanRebuildReport {
+  /// Empty material (empty intersection or complete subtraction) is a successful
+  /// nullopt. No placeholder body or lower-dimensional contact body is created.
+  std::optional<BodyId> output;
+  std::size_t selected_fragments{};
+  std::size_t output_faces{};
+  /// True only after an initially failed Strict result has undergone certified
+  /// planar boundary-preserving repair and passed Strict and shell-region checks.
+  bool repaired{false};
 };
 
 struct OpReport {

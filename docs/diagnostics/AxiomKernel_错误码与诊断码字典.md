@@ -267,22 +267,89 @@
 
 | 错误码 | 严重级别 | 含义 |
 |---|---|---|
-| `AXM-BOOL-E-0001` | Error | 输入实体或布尔运算类型无效；预处理统计导出输入无效或路径为空 |
+| `AXM-BOOL-E-0001` | Error | 输入实体或布尔运算类型无效；预处理统计导出输入无效或路径为空；求交准备参数/拓扑/退化边失败及兼容 run 真实边界读取拒绝 |
 | `AXM-BOOL-E-0002` | Error | 候选相交对生成失败 |
 | `AXM-BOOL-E-0003` | Error | 曲面求交失败 |
-| `AXM-BOOL-E-0004` | Error | 交线切分失败 |
+| `AXM-BOOL-E-0004` | Error | `kBoolSplitFailure`（cycle-0081 新增常量，复用已有编号）：真实面三角化、交线约束切分、完整交段覆盖或整边邻接一致性失败；bool.split，InvalidTopology 或 NumericalInstability |
 | `AXM-BOOL-E-0005` | Error | 区域分类失败 |
-| `AXM-BOOL-E-0006` | Error | 拓扑重建失败 |
+| `AXM-BOOL-E-0006` | Error | `kBoolRebuildFailure`：真实选片/源壳方向/共享边或顶点面扇重建失败（bool.rebuild）、非空Strict/壳材料验证失败（bool.validate）、受限Safe资格/保持边界或二次认证失败（bool.repair）；status保留实际根因 |
 | `AXM-BOOL-E-0007` | Warning | 检测到近共面退化情形 |
 | `AXM-BOOL-E-0008` | Warning | 检测到近切触退化情形 |
 | `AXM-BOOL-E-0009` | Error | 自动修复后仍不合法 |
 | `AXM-BOOL-E-0010` | Error | 运算结果为空且不符合预期 |
+| `AXM-BOOL-E-0011` | Error | `kBoolUnsupportedInput`：求交/切分准备及实体点分类不支持的表示/曲面/曲边/代理输入、无真实壳或 ExactCritical；NotImplemented |
+| `AXM-BOOL-E-0012` | Error | `kBoolPreparationBudgetExceeded`：合法面比较、每面边数、交段输出、累计切分/读取/邻接/分类工作、面+边片合计或点数量预算耗尽；cycle-0082另含内部共面裁剪/去重/探针、重建节点/环/面扇与Safe工作；OperationFailed；兼容 run 读取每面超过 256 边亦复用 |
+| `AXM-BOOL-E-0013` | Error | `kBoolNumericalFailure`：坐标、近平行平面、解析交线或端点无法可靠分辨；实体分类边界容差带未解析、射线分歧或不足两条有效射线；NumericalInstability；cycle-0082另含近共面间隙/短非零交段（bool.intersect）及两侧材料探针不可靠（bool.rebuild）；兼容 run 真实边界数值拒绝复用 |
+| `AXM-BOOL-E-0014` | Error | `kBoolCoplanarUnsupported`：公开只读prepare的共面候选（含共面接触/相同体）拒绝；NotImplemented；run_rebuilt内部受限共面支持不使用此码一概拒绝 |
+
+cycle-0080 / S4-INTERSECTION 已通过调度器最终完整 CTest（16/16）；新增 E-0011..E-0014 定义见 `include/axiom/diag/error_codes.h`，不新增诊断码。无交段的 prepare 成功，不使用 E-0010 把分离/包含当错误。
+
+| 入口 / 根因 | status / 错误码 | Issue.stage |
+|---|---|---|
+| prepare 无效句柄、非法容差/预算 | InvalidInput / E-0001 | `bool.prep.candidates` |
+| prepare 开壳/损坏环边、短边≤线容差 | InvalidTopology 或 DegenerateGeometry / E-0001 | `bool.prep.candidates` |
+| prepare 曲面/曲边/代理/表示不支持或 ExactCritical | NotImplemented / E-0011 | `bool.prep.candidates` |
+| prepare 面比较 / 每面边预算耗尽 | OperationFailed / E-0012 | `bool.prep.candidates` |
+| prepare 坐标舍入不可分辨 | NumericalInstability / E-0013 | `bool.prep.candidates` |
+| prepare 交段输出预算耗尽 | OperationFailed / E-0012 | `bool.intersect` |
+| prepare 近平行、远交线舍入/残差不可分辨或端点关联失败 | NumericalInstability / E-0013 | `bool.intersect` |
+| prepare 共面候选 | NotImplemented / E-0014 | `bool.intersect` |
+| 兼容 run 真实面边界读取不支持/损坏/退化、超 256 边或数值失稳 | NotImplemented / E-0011，InvalidTopology 或 DegenerateGeometry / E-0001，OperationFailed / E-0012，NumericalInstability / E-0013 | `bool.intersect.trim` |
+
+上表 E-* 均为 AXM-BOOL-E-*。prepare 失败无部分 Result.value，始终有非零可查询 diagnostic_id、输入体/已知 face 上下文及有限 numeric_evidence（无效非有限选项不原样写入证据）；可用 find_by_issue_stage 检索和 export_report_json 导出。兼容 run 裁剪读取失败即使成功诊断选项关闭也返回失败诊断，在模型物化/Eval 失效前传播，禁止 continue 静默吞错。成功诊断 D-0008 的 `bool.intersect.trim` 描述真实面域裁剪，不能视为后续实体重建认证。
+
+只读 prepare 成功/失败以及已回归的 run 局部读取拒绝保持输入、存储、Eval bridge 与活动事务不变，允许新增诊断；run 全部后续重建/修复事务行为不在本包认证。[支持矩阵](../api/AxiomKernel_详细模块接口清单.md#821-stage-4-第一代求交准备支持矩阵cycle-0080--s4-intersection) 与 [三条阶段证据](../quality/AxiomKernel_测试与验收方案.md#17-cycle-0080--s4-intersection-门禁与逐项证据) 列明参考与限制。
+
+
+cycle-0081 / S4-SPLIT-CLASSIFY 新增只读切分与实体分类入口；E-0004 字典编号早已存在，本批新增其常量，不新增 D 诊断码。沿用先行求交的 bool.prep.candidates/bool.intersect 并原样传播失败；新 Error Issue 阶段如下，E-* 均指 AXM-BOOL-E-*：
+
+| 入口 / 根因 | status / 错误码 | Issue.stage |
+|---|---|---|
+| split max_fragments 非法（不在 1..100000） | InvalidInput / E-0001 | `bool.split` |
+| split 真实单环/带孔面三角化失败 | InvalidTopology / E-0004 | `bool.split` |
+| split 不可分辨分片、交段覆盖缺口/遗漏、相切点未成为顶点、整边邻接不唯一 | NumericalInstability / E-0004 | `bool.split` |
+| split 细分/同步/交段验证/邻接/源边工作或 face+edge 合计片数耗尽 | OperationFailed / E-0012 | `bool.split` |
+| classify_points 或 split 分类读取无效 BodyId、非有限点、非法容差/预算、闭壳关联或绕向失败 | InvalidInput、InvalidTopology 或 DegenerateGeometry / E-0001 | `bool.classify` |
+| 分类输入不支持（曲面/曲边/代理/表示/无壳/ExactCritical） | NotImplemented / E-0011 | `bool.classify` |
+| 分类边界读取、点/面查询累计工作或点数量超预算 | OperationFailed / E-0012 | `bool.classify` |
+| 分类坐标/距离不可分辨、未解析近边界容差带、有效射线分歧或不足两条 | NumericalInstability / E-0013 | `bool.classify` |
+| split 先行输入/求交拒绝（含共面 E-0014） | 沿用上表先行求交 status / code | `bool.prep.candidates` 或 `bool.intersect` |
+
+新入口不使用旧 E-0005，不能仅由“分类失败”文案推断该码。每次失败无部分 value，有非零 diagnostic_id、Error severity、相关输入 BodyId（切分另含已知 source FaceId）及有限 numeric_evidence；非有限容差值以0和 finite 标志表达，不直接作为 JSON 数值证据。支持 find_by_issue_stage、错误码检索与 export_report_json。实际 Boundary 仅命中舍入尺度内真实裁剪边界并保留 FaceId；未解析容差带使用 E-0013 明确拒绝。
+
+切分/覆盖/邻接及分类全部局部验证完成后才返回；成功/失败均无拓扑、表示、来源、Eval、cache 或事务写入，失败仅增加诊断。`check_split_classification_isolation` 在无/活动 writer 下核对存储、拓扑环序/边端点 ID、来源、表示、face/body bbox、真实面积/边长、PCurveId（合法0）及完整绑定时UV、Eval五指标、缓存六指标、writer/写次数/sentinel，继续写入及 rollback 后核对 Strict 与原状态。摘要不是逐顶点直接坐标或全部几何编码，部分 PCurve 绑定面未获固定快照认证。最终调度器 CTest **16/16、0 失败、173.96 s**；[支持矩阵 §8.2.2](../api/AxiomKernel_详细模块接口清单.md#822-stage-4-第一代切分与实体分类支持矩阵cycle-0081--s4-split-classify) 与 [三条证据 §1.8](../quality/AxiomKernel_测试与验收方案.md#18-cycle-0081--s4-split-classify-门禁与逐项证据) 保留 double/嵌入前置及兼容 run 后续重建未认证限制。
+
 
 推荐文案示例：
 
 - `布尔求交阶段失败：无法稳定生成相交曲线`
 - `布尔分类阶段失败：局部区域 inside/outside 不确定`
 - `布尔重建阶段失败：输出壳体未封闭`
+
+### cycle-0082 / S4-REBUILD 阶段与失败原子性
+
+本批未新增错误码或诊断码常量；真实重建复用E-0006/E-0012/E-0013及D-0013..0018，旧run早期bool.abort.intersect/classify与占位告警仍仅指兼容入口。以下E-*均为AXM-BOOL-E-*：
+
+| run_rebuilt根因 | status / code | Issue.stage |
+|---|---|---|
+| Split或非法运算类型 | InvalidInput / E-0001 | bool.rebuild |
+| 先行候选、求交、切分、分类拒绝 | 保留原status/code | bool.prep.candidates / bool.intersect / bool.split / bool.classify |
+| 近共面间隙、短于线容差的非零交段 | NumericalInstability / E-0013 | bool.intersect |
+| 共面区域工作预算耗尽 | OperationFailed / E-0012 | bool.intersect或bool.split（按实际失败位置） |
+| 材料方向/两侧探针无法解析 | NumericalInstability / E-0013，或源壳方向不一致 E-0006，保留实际status | bool.rebuild |
+| 四侧边、边点Union、跨壳点触、同连通壳夹点或面扇不唯一 | InvalidTopology / E-0006 | bool.rebuild |
+| 重建节点、环、探针/邻接预算耗尽 | OperationFailed / E-0012 | bool.rebuild |
+| auto_repair=false，Strict或body_shell_regions拒绝 | 底层status / E-0006 | bool.validate |
+| 不具Safe资格、边界保持失败或二次Strict/壳材料验证失败 | NotImplemented或实际根因status / E-0006 | bool.repair |
+| Safe工作预算耗尽 | OperationFailed / E-0012 | bool.repair |
+
+失败保留底层cause issues，追加BOOL根因issue与lhs/rhs、operation、model_unchanged=1等有限numeric_evidence，非零diagnostic_id可按阶段检索及JSON导出，无部分Result.value。共享边/顶点流形认证在分配前拒绝；非空结果须Strict及真实壳材料关系验证。Safe仅对明确人工分片几何缺陷尝试，先撤销首次失败物化，再保持真实外/孔环、角点及来源重新物化并认证；普通trim/domain、自交、真实薄层或材料关系失败不获泛化修复。
+
+失败回收新增拓扑/几何/网格，恢复曲线/曲面求值与三角化缓存及统计、Eval失效/bridge/telemetry；诊断与递增ID保留，不承诺重试复用ID。成功仅在最终认证后登记活动writer服务allocation范围，不增加显式write_operation_count或使输入Eval失效。完整rollback先恢复旧快照再清服务分配，防成功输出delete后复活；保存点rollback保留此前分配前缀并清除其后输出及支撑几何/cache。合法回滚累计遥测不回退，固定回归bridge.for_body_entries逐体+2、两体+4，其余字段保持；输入摘要非完整几何序列化。
+
+节点同步比较上限20000000、环节点上限max_fragments×12。准备阶段工作量证据包括consumed_work/source_cells/sync_points/sync_index_nodes/work_after_split/work_after_sync/work_after_coverage；真实面BVH仅用于准备分片分类，数值安全guard证明不足时全脸扫描，公开classify_points与重建双侧探针预算不变。E0012是累计实际工作拒绝，不能把候选计数或索引节点数误当完整消耗，也未提高预算/性能阈值。
+
+固定数值/失败/事务证据已随最终全量16/16（184.89s）执行，见 [验收§1.9](../quality/AxiomKernel_测试与验收方案.md#19-cycle-0082--s4-rebuild-门禁与逐项证据)；平面直边double、奇偶材料、Safe限制与查询数值拒绝见 [API§8.2.3](../api/AxiomKernel_详细模块接口清单.md#823-stage-4-真实实体重建支持矩阵cycle-0082--s4-rebuild)。这不认证兼容run全部后续行为或全局壳嵌入。
 
 ## 7.6 `BLEND` 圆角倒角错误码
 
@@ -467,12 +534,12 @@
 | `AXM-BOOL-D-0010` | 布尔切分/imprint 已应用（占位：沿对角线切分矩形面，`kBoolImprintApplied`） |
 | `AXM-BOOL-D-0011` | 布尔切分/imprint 已应用（按交线段切分矩形面，`kBoolImprintSegmentApplied`） |
 | `AXM-BOOL-D-0012` | 布尔分类阶段完成（占位：分类统计，`kBoolClassificationCompleted`） |
-| `AXM-BOOL-D-0013` | 布尔重建阶段完成（占位：Strict 校验摘要，`kBoolRebuildCompleted`） |
-| `AXM-BOOL-D-0014` | 布尔切分阶段开始（imprint/split/trim 入口，`kBoolStageSplit`） |
-| `AXM-BOOL-D-0015` | 布尔分类阶段开始（cell/face classification 入口，`kBoolStageClassify`） |
-| `AXM-BOOL-D-0016` | 布尔重建阶段开始（shell rebuild/stitch/merge 入口，`kBoolStageRebuild`） |
-| `AXM-BOOL-D-0017` | 布尔验证阶段开始（Strict/Standard validation 入口，`kBoolStageValidate`） |
-| `AXM-BOOL-D-0018` | 布尔修复阶段开始（auto_repair/heal 入口，`kBoolStageRepair`） |
+| `AXM-BOOL-D-0013` | 布尔重建完成（兼容run为占位Strict摘要；run_rebuilt空材料成功为bool.rebuild，不分配体；`kBoolRebuildCompleted`） |
+| `AXM-BOOL-D-0014` | 布尔切分阶段（兼容run为开始；run_rebuilt非空成功为真实切分完成，`kBoolStageSplit`） |
+| `AXM-BOOL-D-0015` | 布尔分类阶段（兼容run为开始；run_rebuilt非空成功为真实分类完成，`kBoolStageClassify`） |
+| `AXM-BOOL-D-0016` | 布尔重建阶段（兼容run为开始；run_rebuilt非空成功为owned真实壳重建完成，`kBoolStageRebuild`） |
+| `AXM-BOOL-D-0017` | 布尔验证阶段（兼容run为开始；run_rebuilt非空成功为Strict通过，`kBoolStageValidate`） |
+| `AXM-BOOL-D-0018` | 布尔修复阶段（兼容run为开始；run_rebuilt仅实际Safe成功为bool.repair信息，`kBoolStageRepair`） |
 
 `BooleanService::export_boolean_prep_stats` 失败均携带 `[lhs, rhs]`（保留无效 ID）：参数失败为 `InvalidInput` / `AXM-BOOL-E-0001` / `bool.prep.export.input`；文件打开失败为 `OperationFailed` / `AXM-IO-E-0005` / `bool.prep.export.open`（修正此前误用的 BOOL 输入码）；写入或关闭失败为 `OperationFailed` / `AXM-IO-E-0005` / `bool.prep.export.write`。参数校验先于文件打开，失败不创建或截断目标；所有失败不修改模型，底层写入失败不保证目标文件恢复。回归入口：`axiom_boolean_prep_test`，Linux 使用 `/dev/full` 覆盖缓冲写入失败。
 

@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -13,6 +14,267 @@
 #include "axiom/sdk/kernel.h"
 
 namespace {
+
+// Validate a reconstructed cavity as two genuine, oppositely oriented closed
+// boundaries. This exercises Strict's cross-shell checks and trim validation.
+bool rebuilt_cavity_validation_regression() {
+    axiom::Kernel kernel;
+    const auto outer = kernel.primitives().box({0,0,0},2,2,2);
+    const auto inner = kernel.primitives().box({0.25,0.25,0.25},0.5,0.5,0.5);
+    if (!outer.value || !inner.value) return false;
+    const auto result = kernel.booleans().run_rebuilt(axiom::BooleanOp::Subtract,*outer.value,*inner.value);
+    if (!result.value || !result.value->output) return false;
+    const auto output = *result.value->output;
+    const auto query = kernel.topology().query();
+    const auto regions = query.body_shell_regions(output);
+    if (!regions.value || regions.value->size() != 2 ||
+        kernel.validate().validate_all(output,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok ||
+        kernel.validate().validate_self_intersection_all_shells(output,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok ||
+        kernel.topology().validate().validate_body_trim_consistency(output).status != axiom::StatusCode::Ok)
+        return false;
+    std::size_t material_shells = 0, void_shells = 0;
+    for (const auto& region : *regions.value) {
+        const auto mass = query.shell_mass_properties(region.shell);
+        if (!mass.value) return false;
+        if (region.role == axiom::BodyShellRole::Material) {
+            if (region.nesting_depth != 0 || region.parent_shell || std::abs(mass.value->volume-8) > 1e-7) return false;
+            ++material_shells;
+        } else {
+            if (region.nesting_depth != 1 || !region.parent_shell || std::abs(mass.value->volume-0.125) > 1e-7) return false;
+            ++void_shells;
+        }
+    }
+    if (material_shells != 1 || void_shells != 1 ||
+        kernel.validate().validate_all(*outer.value,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok ||
+        kernel.validate().validate_all(*inner.value,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok)
+        return false;
+    const auto tunnel = kernel.primitives().box({0.25,0.25,0},0.5,0.5,2);
+    const auto touching = kernel.primitives().box({2,0,0},2,2,2);
+    if (!tunnel.value || !touching.value) return false;
+    for (const bool through_hole : {false,true}) {
+        const auto rebuilt = kernel.booleans().run_rebuilt(
+            through_hole ? axiom::BooleanOp::Subtract : axiom::BooleanOp::Union,
+            *outer.value,through_hole ? *tunnel.value : *touching.value);
+        if (!rebuilt.value || !rebuilt.value->output) return false;
+        const auto body = *rebuilt.value->output;
+        const auto material = query.body_shell_regions(body);
+        const auto mass = query.body_mass_properties(body);
+        const auto section = query.section(body,{{0,0,1},{0,0,1}});
+        const auto hole_point = query.locate_point(body,{0.5,0.5,1});
+        // The tunnel is one genus-one shell, not a nested void shell. Its
+        // rectangular section has S=3.75 and P=10, giving V=7.5,A=27.5.
+        if (!material.value || material.value->size() != 1 ||
+            material.value->front().role != axiom::BodyShellRole::Material ||
+            material.value->front().nesting_depth != 0 || material.value->front().parent_shell ||
+            !mass.value || std::abs(mass.value->volume-(through_hole ? 7.5 : 16)) > 1e-7 ||
+            std::abs(mass.value->area-(through_hole ? 27.5 : 40)) > 1e-7 ||
+            !section.value || std::abs(section.value->area-(through_hole ? 3.75 : 8)) > 1e-7 ||
+            !hole_point.value || hole_point.value->location != (through_hole ? axiom::BodyPointLocation::Outside
+                                                                          : axiom::BodyPointLocation::Inside) ||
+            kernel.validate().validate_all(body,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok ||
+            kernel.validate().validate_self_intersection_all_shells(body,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok ||
+            kernel.topology().validate().validate_body_trim_consistency(body).status != axiom::StatusCode::Ok)
+            return false;
+    }
+    return true;
+}
+
+// Safe must preserve a genuine hole when joining coplanar subdivisions.
+// An independent holed-prism section/perimeter oracle and signed public-ring
+// integrals prevent a successful repair from silently replacing its boundary.
+bool rebuilt_safe_hole_validation_regression() {
+    axiom::Kernel kernel;
+    axiom::DiagnosticId last_diagnostic {};
+    const auto fail = [&](int line) {
+        std::cerr << "Safe rebuilt hole line=" << line << "\n";
+        const auto diagnostic = kernel.diagnostics().get(last_diagnostic);
+        if (diagnostic.value) for (const auto& issue : diagnostic.value->issues)
+            std::cerr << issue.stage << " " << issue.code << " " << issue.message << "\n";
+        return false;
+    };
+
+    axiom::ProfileRef profile;
+    profile.label = "s4-safe-repair-hole-boundary";
+    profile.polygon_xyz = {{0,0,0},{4,0,0},{4,4,0},{0,4,0}};
+    profile.holes_xyz = {{{1,1,0},{3,1,0},{3,3,0},{1,3,0}}};
+    constexpr double overlap = 2e-4;
+    const auto holed = kernel.sweeps().extrude(profile,{0,0,1},2);
+    const auto extension = kernel.primitives().box({4-overlap,0,0},2,4,2);
+    if (!holed.value || !extension.value || kernel.set_linear_tolerance(1e-3).status != axiom::StatusCode::Ok)
+        return fail(__LINE__);
+    axiom::BooleanRebuildOptions options;
+    options.preparation.intersection.tolerance.linear = 1e-6;
+    const auto direct = kernel.booleans().run_rebuilt(axiom::BooleanOp::Union,*holed.value,*extension.value,options);
+    last_diagnostic = direct.diagnostic_id;
+    const auto rejected = kernel.diagnostics().get(direct.diagnostic_id);
+    if (direct.status == axiom::StatusCode::Ok || direct.value || !rejected.value ||
+        std::none_of(rejected.value->issues.begin(),rejected.value->issues.end(),[](const auto& issue) {
+            return issue.code == axiom::diag_codes::kBoolRebuildFailure && issue.stage == "bool.validate";
+        }) || std::none_of(rejected.value->issues.begin(),rejected.value->issues.end(),[](const auto& issue) {
+            if (issue.severity != axiom::IssueSeverity::Error) return false;
+            if (issue.code == axiom::diag_codes::kValNearDuplicateVertices &&
+                issue.stage == "heal.validate_geometry.near_duplicate_vertices") return true;
+            if (issue.code == axiom::diag_codes::kValDegenerateGeometry &&
+                (issue.stage == "heal.validate_geometry.edges" ||
+                 issue.stage == "heal.validate_geometry.face_area")) return true;
+            if (issue.stage != "heal.validate_topology.trim_consistency" ||
+                (issue.code != axiom::diag_codes::kTopoFaceOuterLoopInvalid &&
+                 issue.code != axiom::diag_codes::kTopoFaceInnerLoopInvalid)) return false;
+            std::optional<double> area, threshold;
+            for (const auto& evidence : issue.numeric_evidence) {
+                if (evidence.name == "uv_loop_area") area = evidence.value;
+                if (evidence.name == "uv_loop_area_threshold") threshold = evidence.value;
+            }
+            return area && threshold && std::isfinite(*area) && std::isfinite(*threshold) &&
+                std::abs(*area) > 0 && *threshold > 0 && std::abs(*area) <= *threshold;
+        })) return fail(__LINE__);
+    options.auto_repair = true;
+    const auto repaired = kernel.booleans().run_rebuilt(axiom::BooleanOp::Union,*holed.value,*extension.value,options);
+    last_diagnostic = repaired.diagnostic_id;
+    if (!repaired.value || !repaired.value->output || !repaired.value->repaired) return fail(__LINE__);
+    const auto output = *repaired.value->output;
+    const auto query = kernel.topology().query();
+    const auto regions = query.body_shell_regions(output);
+    const auto mass = query.body_mass_properties(output);
+    axiom::BodySpatialQueryOptions query_options;
+    query_options.position_tolerance = 1e-6;
+    const auto section = query.section(output,{{0,0,1},{0,0,1}},query_options);
+    const auto void_point = query.locate_point(output,{2,2,1},query_options);
+    const auto seam_point = query.locate_point(output,{4-overlap/2,2,1},query_options);
+    const auto faces = query.faces_of_body(output);
+    const auto source_bodies = query.source_bodies_of_body(output);
+    // Outer (6-overlap)*4 minus a 2*2 hole gives S=20-4d.
+    // Total perimeter=2*(10-d)+8, V=2S, A=2S+2P.
+    if (!regions.value || regions.value->size() != 1 || regions.value->front().role != axiom::BodyShellRole::Material ||
+        !mass.value || std::abs(mass.value->volume-(40-8*overlap)) > 1e-7 ||
+        std::abs(mass.value->area-(96-12*overlap)) > 1e-7 || !section.value ||
+        std::abs(section.value->area-(20-4*overlap)) > 1e-7 || !void_point.value ||
+        void_point.value->location != axiom::BodyPointLocation::Outside || !seam_point.value ||
+        seam_point.value->location != axiom::BodyPointLocation::Inside || !faces.value ||
+        !source_bodies.value || std::find(source_bodies.value->begin(),source_bodies.value->end(),*holed.value) == source_bodies.value->end() ||
+        std::find(source_bodies.value->begin(),source_bodies.value->end(),*extension.value) == source_bodies.value->end() ||
+        kernel.validate().validate_all(output,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok ||
+        kernel.validate().validate_self_intersection_all_shells(output,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok ||
+        kernel.topology().validate().validate_body_trim_consistency(output).status != axiom::StatusCode::Ok)
+        return fail(__LINE__);
+    std::size_t cap_holes = 0;
+    double integrated_volume = 0, integrated_area = 0;
+    for (const auto face : *faces.value) {
+        const auto loops = query.loops_of_face(face);
+        const auto surface = query.surface_of_face(face);
+        const auto sources = query.source_faces_of_face(face);
+        if (!loops.value || loops.value->empty() || !surface.value || !sources.value || sources.value->empty()) return fail(__LINE__);
+        if (loops.value->size() > 1) {
+            if (loops.value->size() != 2) return fail(__LINE__);
+            ++cap_holes;
+        }
+        axiom::Vec3 outer_normal;
+        for (std::size_t ring = 0; ring < loops.value->size(); ++ring) {
+            const auto uv = query.face_loop_uv_polyline(face,(*loops.value)[ring]);
+            if (!uv.value || uv.value->size() < 3) return fail(__LINE__);
+            std::vector<axiom::Point3> points;
+            for (const auto p : *uv.value) {
+                const auto world = kernel.surface_service().eval(*surface.value,p.x,p.y,0);
+                if (!world.value) return fail(__LINE__);
+                points.push_back(world.value->point);
+            }
+            const auto p = points.front();
+            axiom::Vec3 area_vector;
+            for (std::size_t i = 1; i+1 < points.size(); ++i) {
+                const auto q = points[i], r = points[i+1];
+                area_vector.x += ((q.y-p.y)*(r.z-p.z)-(q.z-p.z)*(r.y-p.y))/2;
+                area_vector.y += ((q.z-p.z)*(r.x-p.x)-(q.x-p.x)*(r.z-p.z))/2;
+                area_vector.z += ((q.x-p.x)*(r.y-p.y)-(q.y-p.y)*(r.x-p.x))/2;
+                integrated_volume += (p.x*(q.y*r.z-q.z*r.y)+p.y*(q.z*r.x-q.x*r.z)+p.z*(q.x*r.y-q.y*r.x))/6;
+            }
+            if (ring == 0) {
+                const double norm = std::hypot(area_vector.x,area_vector.y,area_vector.z);
+                if (!(norm > 0)) return fail(__LINE__);
+                outer_normal = {area_vector.x/norm,area_vector.y/norm,area_vector.z/norm};
+            }
+            integrated_area += area_vector.x*outer_normal.x+area_vector.y*outer_normal.y+area_vector.z*outer_normal.z;
+        }
+    }
+    return cap_holes == 2 && std::abs(integrated_volume-(40-8*overlap)) < 1e-7 &&
+        std::abs(integrated_area-(96-12*overlap)) < 1e-7 &&
+        kernel.validate().validate_all(*holed.value,axiom::ValidationMode::Strict).status == axiom::StatusCode::Ok &&
+        kernel.validate().validate_all(*extension.value,axiom::ValidationMode::Strict).status == axiom::StatusCode::Ok;
+}
+
+// Coplanar triangle SAT must use in-plane separation axes. These open
+// two-face fixtures exercise only self-intersection, not closed-shell validity.
+bool coplanar_self_intersection_regression() {
+    for (const bool overlapping : {false,true}) {
+        axiom::Kernel kernel;
+        auto transaction = kernel.topology().begin_transaction();
+        const auto plane = kernel.surfaces().make_plane({0,0,0},{0,0,1});
+        if (!plane.value) return false;
+        const std::array<axiom::Point3,3> first {{{2.0/3,2.0/3,0},{0,2,0},{2,0,0}}};
+        const std::array<axiom::Point3,3> second = overlapping
+            ? std::array<axiom::Point3,3>{{{0.5,0.5,0},{0.5,1.5,0},{1.5,0.5,0}}}
+            : std::array<axiom::Point3,3>{{{1.4,1.4,0},{1,2,0},{2,2,0}}};
+        // The separated pair lies in x+y<=2 versus x+y>=2.8.
+        // For the overlapping pair (.75,.75) is strictly inside both triangles.
+        std::array<axiom::FaceId,2> faces {};
+        for (std::size_t face_index = 0; face_index < 2; ++face_index) {
+            const auto& points = face_index == 0 ? first : second;
+            std::array<axiom::VertexId,3> vertices {};
+            std::array<axiom::CoedgeId,3> coedges {};
+            for (std::size_t i = 0; i < 3; ++i) {
+                const auto vertex = transaction.create_vertex(points[i]);
+                if (!vertex.value) return false;
+                vertices[i] = *vertex.value;
+            }
+            for (std::size_t i = 0; i < 3; ++i) {
+                const auto next = (i+1)%3;
+                const auto curve = kernel.curves().make_line_segment(points[i],points[next]);
+                const auto edge = curve.value ? transaction.create_edge(*curve.value,vertices[i],vertices[next])
+                                             : axiom::Result<axiom::EdgeId>{};
+                const auto coedge = edge.value ? transaction.create_coedge(*edge.value,false)
+                                              : axiom::Result<axiom::CoedgeId>{};
+                if (!coedge.value) return false;
+                coedges[i] = *coedge.value;
+            }
+            const auto loop = transaction.create_loop(coedges);
+            const auto face = loop.value ? transaction.create_face(*plane.value,*loop.value,{})
+                                         : axiom::Result<axiom::FaceId>{};
+            if (!face.value) return false;
+            faces[face_index] = *face.value;
+        }
+        const auto shell = transaction.create_shell(faces);
+        const auto body = shell.value ? transaction.create_body(std::array<axiom::ShellId,1>{*shell.value})
+                                      : axiom::Result<axiom::BodyId>{};
+        if (!body.value || transaction.commit().status != axiom::StatusCode::Ok) return false;
+        const auto mesh = kernel.convert().brep_to_mesh_shell(*body.value,*shell.value,{});
+        if (!mesh.value || kernel.convert().mesh_triangle_count(*mesh.value).value !=
+            std::optional<std::uint64_t>{2}) return false;
+        const auto bodies_before = kernel.body_count().value;
+        const auto topology_before = kernel.topology_count().value;
+        for (const bool shell_only : {false,true}) {
+            const auto validation = shell_only
+                ? kernel.validate().validate_self_intersection_shell(*body.value,*shell.value,axiom::ValidationMode::Strict)
+                : kernel.validate().validate_self_intersection(*body.value,axiom::ValidationMode::Strict);
+            const auto diagnostic = kernel.diagnostics().get(validation.diagnostic_id);
+            const char* stage = shell_only ? "heal.validate_self_intersection.shell_mesh"
+                                          : "heal.validate_self_intersection.mesh";
+            const bool rejected = diagnostic.value && std::any_of(diagnostic.value->issues.begin(),
+                diagnostic.value->issues.end(),[&](const auto& issue) {
+                    return issue.code == axiom::diag_codes::kValSelfIntersection && issue.stage == stage &&
+                        issue.severity == axiom::IssueSeverity::Error;
+                });
+            if ((overlapping ? validation.status != axiom::StatusCode::OperationFailed || !rejected
+                             : validation.status != axiom::StatusCode::Ok) ||
+                kernel.body_count().value != bodies_before || kernel.topology_count().value != topology_before) {
+                std::cerr << "coplanar self-intersection overlapping=" << overlapping
+                          << " shell_only=" << shell_only << "\n";
+                if (diagnostic.value) for (const auto& issue : diagnostic.value->issues)
+                    std::cerr << issue.stage << " " << issue.code << " " << issue.message << "\n";
+                return false;
+            }
+        }
+    }
+    return true;
+}
 
 bool has_issue_code(const axiom::DiagnosticReport& report, std::string_view code) {
     for (const auto& issue : report.issues) {
@@ -213,6 +475,18 @@ bool check_heal_failure_evidence_and_rollback() {
 }  // namespace
 
 int main() {
+    if (!coplanar_self_intersection_regression()) {
+        std::cerr << "coplanar mesh separation/overlap regression failed\n";
+        return 1;
+    }
+    if (!rebuilt_safe_hole_validation_regression()) {
+        std::cerr << "Safe rebuilt hole validation failed\n";
+        return 1;
+    }
+    if (!rebuilt_cavity_validation_regression()) {
+        std::cerr << "rebuilt cavity Strict validation regression\n";
+        return 1;
+    }
     if (!check_heal_failure_evidence_and_rollback()) {
         std::cerr << "HEAL failure evidence audit or rollback regression\n";
         return 1;
