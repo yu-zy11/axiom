@@ -151,9 +151,9 @@ Strict warnings 配置 ON；本批重编译 Topo/Rep 的 3 条所涉告警未再
 
 ## 4.5 `Stage 4` 布尔与验证器第一代
 
-**状态：进行中，当前主线；唯一退出任务为cycle-0082 / S4-REBUILD。** cycle-0082 / S4-REBUILD新增run_rebuilt，将真实切分/分类接入并/差/交owned面、共享边及连通壳重建，非空成功须Strict与真实壳材料关系通过；内部共面/面相切、空材料nullopt、受限Safe及writer保存点/rollback闭环有[逐项证据](../quality/AxiomKernel_测试与验收方案.md#19-cycle-0082--s4-rebuild-门禁与逐项证据)与[矩阵/固定V/A/S](../api/AxiomKernel_详细模块接口清单.md#823-stage-4-真实实体重建支持矩阵cycle-0082--s4-rebuild)。最终完整CTest **16/16、0失败、184.89 s**。
+**状态：进行中，当前主线；唯一退出任务为cycle-0083 / S4-EXIT。** cycle-0083 / S4-EXIT冻结生产代码/公开API/既有码，以回归收口固定第一代工业模型集：真实并/差/交owned重建→Strict/来源/查询→owned网格/OBJ独立V/A，偏移盒U/D/I各总计两轮；暖缓存下七阶段诊断、Eval依赖/输入摘要与writer/保存点/rollback重试均有[逐项证据](../quality/AxiomKernel_测试与验收方案.md#110-cycle-0083--s4-exit-门禁与逐项证据)及[退出支持矩阵](../api/AxiomKernel_详细模块接口清单.md#824-stage-4-退出支持矩阵cycle-0083--s4-exit)。本批完整CTest **16/16、0失败、194.58 s**；现有性能基线 **2.03 s**只测兼容run/查询，run_rebuilt工业性能未认证。
 
-三条验收证据按真实owned重建/Strict与来源、独立V/A/截面及空材料、分阶段失败/活动writer/保存点/rollback隔离排列。`stage_outcome=ready_for_acceptance`，正式状态见[当前进度§5.2.1](AxiomKernel_当前开发进度.md#521-stage-4-当前退出任务)，调度器最终文档门禁及提交成功后才记已验收，本轮不提交。必需workflow/ops_heal/heal/query_eval最终3.27/147.51/0.64/1.80s，孔洞prep5.00s。
+`stage_task_id=S4-EXIT`、`stage_outcome=ready_for_acceptance`。三条退出要求依序为固定模型并/差/交及建模→布尔→Strict→查询/表示的独立参考与重复稳定性、候选/求交/切分/分类/重建/验证/修复诊断及失败/提交/回滚一致性、完整构建/CTest/性能与文档检查。五项必需workflow/prep/query_eval/representation_io/runtime通过，耗时4.25/5.63/2.01/10.17/0.04s。正式状态见[当前进度§5.2.1](AxiomKernel_当前开发进度.md#521-stage-4-当前退出任务)，最终文档门禁及调度器提交成功后才记已验收，本轮不提交。cycle-0082重建184.89s保留为历史证据，不替代本批结果。
 
 支持限嵌入平面直边ExactBRep闭壳、double/奇偶材料及可解析外向源壳；内部共面、同形/同ID和面相切有真实参考，公开只读prep仍拒绝共面。边/点Union、未解析薄层/容差带、曲面曲边/ExactCritical拒绝，Safe只修人工共面分片及一致共线节点。保留Strict至少六面及近似网格自交门禁，不证明全局嵌入或精确谓词；人工节点截面可能明确数值拒绝。兼容run仍含bbox代理实体语义，输入隔离是公开几何/拓扑摘要而非完整序列化。 Stage4/FR-BOOL-001继续进行中，不追认0081/0080及Stage3历史提交/验收，不据本包宣布全部工业退出标准完成。
 
@@ -301,9 +301,9 @@ Strict warnings 配置 ON；本批重编译 Topo/Rep 的 3 条所涉告警未再
 
 ## 7. 当前立即执行顺序
 
-以[近期迭代与Backlog](AxiomKernel_近期迭代与Backlog.md)为选取顺序真源：当前唯一退出任务为 **cycle-0082 / S4-REBUILD**，`stage_outcome=ready_for_acceptance`。三条要求按真实重建/Strict及来源、独立V/A/截面与空材料、阶段诊断/失败及rollback隔离排列，均有[最终执行证据](../quality/AxiomKernel_测试与验收方案.md#19-cycle-0082--s4-rebuild-门禁与逐项证据)。repair后调度器完整构建成功、最终 **16/16、0失败、184.89 s**；必需workflow/ops_heal/heal/query_eval **3.27/147.51/0.64/1.80 s**，孔洞prep **5.00 s**。正式状态见[当前进度§5.2.1](AxiomKernel_当前开发进度.md#521-stage-4-当前退出任务)，调度器最终文档门禁及提交成功后才记已验收。本轮不提交，Stage4 / FR-BOOL-001保持进行中，不追认0081/0080或Stage3历史提交/验收。 不得依据历史remaining、需求权重或新增行数追加无关功能；基础层修复仅限直接阻断项，不自行启动后续阶段。
+以[近期迭代与Backlog](AxiomKernel_近期迭代与Backlog.md)为选取顺序真源：当前唯一退出任务为 **cycle-0083 / S4-EXIT**，`stage_task_id=S4-EXIT`、`stage_outcome=ready_for_acceptance`。三条要求按固定模型并/差/交与Strict/查询/owned表示独立参考及重复稳定性、七阶段诊断与失败/提交/回滚一致性、完整构建/CTest/性能与文档收口排列，见[逐项证据](../quality/AxiomKernel_测试与验收方案.md#110-cycle-0083--s4-exit-门禁与逐项证据)。调度器完整配置/并发4构建成功，CTest **16/16、0失败、194.58 s**；五项必需workflow/prep/query_eval/representation_io/runtime **4.25/5.63/2.01/10.17/0.04 s**，性能基线 **2.03 s**。正式状态见[当前进度§5.2.1](AxiomKernel_当前开发进度.md#521-stage-4-当前退出任务)，调度器最终文档门禁及提交成功后才记已验收；本轮不提交，Stage4 / FR-BOOL-001保持进行中，不追认0082/0081/0080或Stage3历史提交/验收。 不得依据历史remaining、需求权重或新增行数追加无关功能；基础层修复仅限直接阻断项，不自行启动后续阶段。
 
-不重复立项已经完成的骨架、公共存储和基础诊断建设。Geo/Topo/Math/Heal 本轮仅服务S4-REBUILD的直接阻断项；完整工业布尔仍待 Stage 4 整阶段证据，标准交换为 Stage 5 后续工作。专题计划中的优先级是专题内部顺序。
+不重复立项已经完成的骨架、公共存储和基础诊断建设。Geo/Topo/Math/Heal 本轮仅服务S4-EXIT的直接阻断项；固定第一代支持域的退出证据已具备，未支持工业能力保留限制，标准交换为 Stage 5 后续工作。专题计划中的优先级是专题内部顺序。
 
 阶段可以有提前实现的子路径；开始阶段工作不等于宣布该阶段完成。只有对应退出标准逐条具有证据，才提升完成状态。
 

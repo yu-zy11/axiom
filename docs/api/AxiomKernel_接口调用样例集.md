@@ -734,6 +734,10 @@ if (empty.status == StatusCode::Ok && empty.value && !empty.value->output)
 
 在已打开的拓扑writer内调用成功非空重建会登记服务分配，不增加显式write_operation_count，输出参与保存点/完整rollback；失败恢复新增对象、geometry/cache/Eval而保留diagnostic/递增ID，输入Eval保持有效。保存点只清其后输出，完整rollback防delete后的旧快照复活，回滚后可重试；合法累计遥测不回退。[支持矩阵及V/A/S参考](AxiomKernel_详细模块接口清单.md#823-stage-4-真实实体重建支持矩阵cycle-0082--s4-rebuild)保留边点Union拒绝、真实薄层/Safe失败、曲面曲边/ExactCritical不认证、Strict至少六面/近似网格自交及人工节点截面数值拒绝限制。
 
+cycle-0083 / S4-EXIT 沿用上述公开签名和调用片段，新增执行证据见 [验收 §1.10](../quality/AxiomKernel_测试与验收方案.md#110-cycle-0083--s4-exit-门禁与逐项证据) 与 [退出矩阵 §8.2.4](AxiomKernel_详细模块接口清单.md#824-stage-4-退出支持矩阵cycle-0083--s4-exit)。workflow 中先 `brep_to_mesh(output,{})`，再 `inspect_mesh` 核对 owned 标签/策略、索引/退化与计数，随后 `export_obj(output,path,{})` 并独立解析三角形积分 V/A（long double 累计，误差 ≤1e-7），再次转换应命中同 MeshId。偏移盒 U/D/I 各总计两轮，V/A/S 为 15/42/7、7/24/3、1/6/1；分离并 11/37/4、包含空腔 7.875/25.5/3.75 也经过该表示核对。孔/凹U独立公式在prep既有回归，未新增同样OBJ覆盖。片段仍为应用示意，未单独编译。
+
+失败可用外层 diagnostic_id 查询、按 `Issue.stage` / code 检索并 JSON 导出，七阶段证据见字典 §7.5；本批新检索覆盖重建/验证/修复。暖缓存/Eval/writer/rollback隔离为公开摘要，非完整几何序列化；合法累计遥测保留。平面边界三角化不认证通用曲面采样，兼容run与run_rebuilt范围应分开使用；现有性能基线只测兼容run/查询，run_rebuilt工业性能未认证。调度器本批CTest 16/16、194.58 s通过，最终文档门禁及提交尚未记录，Stage4/FR-BOOL-001仍进行中。
+
 ## 8. 修改操作样例
 
 ## 8.1 偏置

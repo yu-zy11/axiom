@@ -11,6 +11,12 @@
 - 如何记录性能结果
 - 什么算性能回退
 
+### 1.1 cycle-0083 / S4-EXIT 性能证据边界
+
+[本批门禁](../../.axiom-agent/logs/cycle-0083-gates.log)记录完整配置/并发4构建成功，CTest **16/16、0失败、194.58 s**，其中 `axiom_perf_baseline_test` **2.03 s，通过**。性能源码及CMake本批无改动，默认 `AXM_PERF_ITERATIONS=150`、`AXM_PERF_MAX_MS=4000`、CTest超时30 s不变；日志未记录覆盖环境变量或内部elapsed_ms，2.03 s是CTest墙钟，不是P95/峰值内存或跨环境保证。
+
+实际基线循环构造box/cylinder，调用兼容 `BooleanService::run(Subtract)` 与质量查询；允许既有OperationFailed及代理质量NotImplemented诊断合同，成功代理后另检查原box质量。**该基线不调用run_rebuilt，不认证真实重建的工业性能**。本批偏移盒U/D/I总计两轮及独立OBJ三角V/A是正确性/重复稳定性证据，不是工业压力或性能数据集。固定支持域和剩余限制见 [API退出矩阵](../api/AxiomKernel_详细模块接口清单.md#824-stage-4-退出支持矩阵cycle-0083--s4-exit)，三项验收见 [验收§1.10](AxiomKernel_测试与验收方案.md#110-cycle-0083--s4-exit-门禁与逐项证据)。本轮仅同步文档，未重跑性能测试、提高阈值、减少迭代或清缓存。
+
 ## 2. 性能测试原则
 
 - 优先建立稳定基线

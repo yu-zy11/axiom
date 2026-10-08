@@ -144,6 +144,8 @@ cycle-0081 再按 `Issue.stage` 展示“真实交线切分”（bool.split）�
 
 cycle-0082新增真实run_rebuilt：展示“实体重建”（bool.rebuild）、“Strict验证”（bool.validate）、“保持真实边界的Safe修复”（bool.repair），复用E-0006且保留底层cause、稳定status与JSON证据。内部共面/面相切和同形支持见 [真实支持矩阵](../api/AxiomKernel_详细模块接口清单.md#823-stage-4-真实实体重建支持矩阵cycle-0082--s4-rebuild)；公开只读prepare仍以E-0014拒绝共面。近共面间隙/短非零交段以E-0013/bool.intersect拒绝，边点Union或夹点以E-0006/bool.rebuild拒绝。Safe只消除人工共面内边和一致共线节点，真实短特征或二次认证失败仍明确拒绝，不能提示“打开修复就会成功”。空交/完全减除返回Ok与output=nullopt，不显示为E-0010错误；不创建bbox/mesh替代体。失败恢复模型/Eval/cache，保留诊断与递增ID、活动writer，回滚输出不复活且可重试，合法累计遥测不回退。认证只限固定嵌入平面直边double参考，不表示曲面或全局嵌入证明。
 
+cycle-0083 / S4-EXIT冻结既有码和文案语义，重建/验证/修复固定失败新增按阶段/码索引命中，候选至修复七阶段及JSON证据随完整CTest **16/16、194.58 s**通过，见 [验收§1.10](../quality/AxiomKernel_测试与验收方案.md#110-cycle-0083--s4-exit-门禁与逐项证据)。暖缓存下失败/rollback/重试保持公开输入摘要与Eval依赖有效，合法累计遥测不回退；不能把摘要提示为完整几何备份，也不能把兼容run性能基线提示为真实重建工业性能认证。正式验收仍以调度器最终文档门禁与提交成功为准。
+
 ## 5.5 圆角与倒角错误
 
 | 错误码 | 用户短文案 | 详细说明 | 建议动作 |

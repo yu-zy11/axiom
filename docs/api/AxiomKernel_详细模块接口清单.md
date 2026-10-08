@@ -661,7 +661,7 @@ PCurve 必须为至少两点的折线，按 coedge 方向连续闭合，各点�
 
 详细查询每次消费当前拓扑，只增加诊断与 Topo 只读审计，不写模型/网格/交线存储、曲线/曲面求值缓存、体/面三角化缓存、Eval 失效/重算或事务写计数。编辑失败不得恢复旧拓扑质量或 bbox fallback；rollback 后截面与质量恢复。内部零壳分支约定截面成功空、距离 `DegenerateGeometry / AXM-QUERY-E-0001 / query.distance.empty_gate`，但公共 `create_body({})` 返回 `OperationFailed / AXM-TX-E-0001`，本批仅验证创建拒绝及写计数不变，未构造或验收零壳查询分支。
 
-调度器修复后完整构建及 CTest **16/16 通过、148.44 s**；Query/Eval **0.90 s**、Ops/Heal **121.81 s**、representation/IO **9.87 s**。逐项独立参考与四条验收证据见 [测试与验收方案 §1.2](../quality/AxiomKernel_测试与验收方案.md#12-cycle-0075--s3-query-门禁与逐项证据)，稳定失败码见 [错误码字典](../diagnostics/AxiomKernel_错误码与诊断码字典.md)。该节保留 S3-QUERY 历史代码门禁与支持范围；Stage 3 历史退出任务为 cycle-0079 / S3-EXIT（§6.1.4）；当前唯一任务为 S4-REBUILD（§8.2.3），正式状态见当前进度 §5.2.1，不由历史日志推断文档检查/提交成功。Stage 3 / FR-QUERY-001 保持进行中。
+调度器修复后完整构建及 CTest **16/16 通过、148.44 s**；Query/Eval **0.90 s**、Ops/Heal **121.81 s**、representation/IO **9.87 s**。逐项独立参考与四条验收证据见 [测试与验收方案 §1.2](../quality/AxiomKernel_测试与验收方案.md#12-cycle-0075--s3-query-门禁与逐项证据)，稳定失败码见 [错误码字典](../diagnostics/AxiomKernel_错误码与诊断码字典.md)。该节保留 S3-QUERY 历史代码门禁与支持范围；Stage 3 历史退出任务为 cycle-0079 / S3-EXIT（§6.1.4）；当前唯一任务为 S4-EXIT（§8.2.4），正式状态见当前进度 §5.2.1，不由历史日志推断文档检查/提交成功。Stage 3 / FR-QUERY-001 保持进行中。
 
 本矩阵由 cycle-0078 / S3-CONSISTENCY 继续回归锁定：五类代表建模结果的截面/最近点/距离/质量、owned 表示、有效来源与 Eval 绑定闭环通过；成功提交、失败与回滚的一致性见 [§7.3.1](#731-stage-3-表示来源与-eval-一致性合同cycle-0078--s3-consistency) 和 [验收 §1.5](../quality/AxiomKernel_测试与验收方案.md#15-cycle-0078--s3-consistency-门禁与逐项证据)。全量 16/16、164.60 s；支持体类不扩大，详细查询只读，拓扑修改/恢复自身会传播 Eval dirty。
 
@@ -687,13 +687,13 @@ PCurve 必须为至少两点的折线，按 coedge 方向连续闭合，各点�
 
 所有失败无 `value`，不返回部分体积/面积/重心/惯性。稳定阶段为 `query.mass_properties.support_gate/preflight/empty_gate/numeric`；原生解析溢出/惯性下溢、非有限结果或非正惯性对角项为 `NumericalInstability / AXM-QUERY-E-0003 / numeric`。无效/删除句柄为 `InvalidInput / AXM-CORE-E-0001 / preflight`；其余拓扑根因保留错误码。公共 API 无零壳体夹具，删除最后壳会删除 owner Body，回归核对的是 InvalidInput/preflight，内部 empty_gate 不声称已覆盖。
 
-独立参考、采样误差和三条 `stage_evidence` 见 [测试与验收 §1.3](../quality/AxiomKernel_测试与验收方案.md#13-cycle-0076--s3-mass-门禁与逐项证据)。调度器完整构建成功，全量 CTest **16/16、0 失败、147.97 s**；此为 S3-MASS 历史代码门禁；历史任务 S3-EXIT 的证据见 §6.1.4 与测试与验收 §1.6；当前唯一任务S4-REBUILD见§8.2.3，正式状态见当前进度 §5.2.1。Stage 3 / FR-QUERY-001 继续进行中。
+独立参考、采样误差和三条 `stage_evidence` 见 [测试与验收 §1.3](../quality/AxiomKernel_测试与验收方案.md#13-cycle-0076--s3-mass-门禁与逐项证据)。调度器完整构建成功，全量 CTest **16/16、0 失败、147.97 s**；此为 S3-MASS 历史代码门禁；历史任务 S3-EXIT 的证据见 §6.1.4 与测试与验收 §1.6；当前唯一任务S4-EXIT见§8.2.4，正式状态见当前进度 §5.2.1。Stage 3 / FR-QUERY-001 继续进行中。
 
 本矩阵由 cycle-0078 / S3-CONSISTENCY 继续回归锁定：五类代表建模结果的截面/最近点/距离/质量、owned 表示、有效来源与 Eval 绑定闭环通过；成功提交、失败与回滚的一致性见 [§7.3.1](#731-stage-3-表示来源与-eval-一致性合同cycle-0078--s3-consistency) 和 [验收 §1.5](../quality/AxiomKernel_测试与验收方案.md#15-cycle-0078--s3-consistency-门禁与逐项证据)。全量 16/16、164.60 s；支持体类不扩大，详细查询只读，拓扑修改/恢复自身会传播 Eval dirty。
 
 ### 6.1.4 Stage 3 统一退出支持矩阵（cycle-0079 / S3-EXIT）
 
-此表保留 Stage 3 历史支持合同；当前唯一任务S4-REBUILD见§8.2.3。此表统一 §6.1.2 截面/最近点/距离、§6.1.3 质量、§8.1.1 五类建模与 §7.3.1 表示/来源/Eval 合同，复用既有接口及错误码，不扩展支持域。`stage_task_id=S3-EXIT`、`stage_outcome=ready_for_acceptance`；调度器独立完整构建成功，全量 CTest **16/16、0 失败、163.78 s**。三条验收证据与退出项映射见 [验收 §1.6](../quality/AxiomKernel_测试与验收方案.md#16-cycle-0079--s3-exit-门禁与逐项证据)，正式状态见 [当前进度 §5.2.1](../plan/AxiomKernel_当前开发进度.md#521-stage-4-当前退出任务)。
+此表保留 Stage 3 历史支持合同；当前唯一任务S4-EXIT见§8.2.4。此表统一 §6.1.2 截面/最近点/距离、§6.1.3 质量、§8.1.1 五类建模与 §7.3.1 表示/来源/Eval 合同，复用既有接口及错误码，不扩展支持域。`stage_task_id=S3-EXIT`、`stage_outcome=ready_for_acceptance`；调度器独立完整构建成功，全量 CTest **16/16、0 失败、163.78 s**。三条验收证据与退出项映射见 [验收 §1.6](../quality/AxiomKernel_测试与验收方案.md#16-cycle-0079--s3-exit-门禁与逐项证据)，正式状态见 [当前进度 §5.2.1](../plan/AxiomKernel_当前开发进度.md#521-stage-4-当前退出任务)。
 
 以下 17 行逐一对应 `tests/eval/query_eval_test.cpp::stage3_exit_support_matrix_regression` 中的 Row.label（main 已调用）。V/A/C 分别为体积/面积/质心，S 为水平截面积；单位及世界坐标质心惯性沿用 §6.1.3。距离列同时涵盖 `closest_points`、正反 `min_distance`，最近点涵盖 `closest_point/locate_point`。支持行先通过 Strict；矩阵不以 ExactBRep 标签、bbox 或来源作为物理边界证明。
 
@@ -1073,7 +1073,7 @@ public:
 
 当前退出统一矩阵及 cycle-0079 自动化证据见 [§6.1.4](#614-stage-3-统一退出支持矩阵cycle-0079--s3-exit)；本节保留专项合同与历史门禁。
 
-此节保留 cycle-0077 历史五类路径证据；Stage 3 历史退出任务为 cycle-0079 / S3-EXIT（§6.1.4）；当前唯一任务为 S4-REBUILD（§8.2.3）。公开签名不变，未新增错误码。cycle-0077 核验既有四类路径，并以真实平面直边 Face 加厚补齐第五类；下表只声明可证明子集。
+此节保留 cycle-0077 历史五类路径证据；Stage 3 历史退出任务为 cycle-0079 / S3-EXIT（§6.1.4）；当前唯一任务为 S4-EXIT（§8.2.4）。公开签名不变，未新增错误码。cycle-0077 核验既有四类路径，并以真实平面直边 Face 加厚补齐第五类；下表只声明可证明子集。
 
 | 入口 / 主路径 | 实际拓扑与质量语义 | 本批回归及支持边界 |
 |---|---|---|
@@ -1205,7 +1205,7 @@ struct BooleanIntersectionPreparation {
 
 ### 8.2.2 Stage 4 第一代切分与实体分类支持矩阵（cycle-0081 / S4-SPLIT-CLASSIFY）
 
-本批新增 `BooleanService::prepare_split_classification` 与 `classify_points` 两个只读公开入口，类型在 `include/axiom/core/types.h`，实现为 `src/axiom/ops/boolean_split_classify.cpp`。真实交线接入实际面/边切分，并从实体裁剪边界判定内外；不分配拓扑 ID 或重建实体。`stage_outcome=ready_for_acceptance`，调度器最终完整构建成功、CTest **16/16、0 失败、173.96 s**；按三项要求排列的证据见 [验收 §1.8](../quality/AxiomKernel_测试与验收方案.md#18-cycle-0081--s4-split-classify-门禁与逐项证据)。本节为历史只读准备证据，当前任务 S4-REBUILD 见 §8.2.3；Stage 4 / FR-BOOL-001 仍进行中，正式状态见当前进度 §5.2.1。
+本批新增 `BooleanService::prepare_split_classification` 与 `classify_points` 两个只读公开入口，类型在 `include/axiom/core/types.h`，实现为 `src/axiom/ops/boolean_split_classify.cpp`。真实交线接入实际面/边切分，并从实体裁剪边界判定内外；不分配拓扑 ID 或重建实体。`stage_outcome=ready_for_acceptance`，调度器最终完整构建成功、CTest **16/16、0 失败、173.96 s**；按三项要求排列的证据见 [验收 §1.8](../quality/AxiomKernel_测试与验收方案.md#18-cycle-0081--s4-split-classify-门禁与逐项证据)。本节为历史只读准备证据，当前任务 S4-EXIT 见 §8.2.4；Stage 4 / FR-BOOL-001 仍进行中，正式状态见当前进度 §5.2.1。
 
 ```cpp
 enum class BooleanPointLocation { Outside, Inside, Boundary };
@@ -1271,7 +1271,7 @@ struct BooleanSplitClassificationPreparation {
 
 ### 8.2.3 Stage 4 真实实体重建支持矩阵（cycle-0082 / S4-REBUILD）
 
-`BooleanService::run_rebuilt` 是真实重建入口，仅接受 Union/Subtract/Intersect；Split 返回 InvalidInput。公开只读 `prepare_intersections/prepare_split_classification` 继续按 §8.2.1/§8.2.2 拒绝共面（E-0014），重建内部另启共面区域切分与两侧材料分类。兼容 `run` 保留历史 bbox/proxy 语义，不继承本节认证。实现 `src/axiom/ops/boolean_rebuild.cpp` 已随调度器最终全量 **16/16、0失败、184.89 s** 通过，逐项证据见 [验收 §1.9](../quality/AxiomKernel_测试与验收方案.md#19-cycle-0082--s4-rebuild-门禁与逐项证据)。`stage_outcome=ready_for_acceptance`，Stage 4 / FR-BOOL-001 仍进行中；正式状态见当前进度 §5.2.1。
+`BooleanService::run_rebuilt` 是真实重建入口，仅接受 Union/Subtract/Intersect；Split 返回 InvalidInput。公开只读 `prepare_intersections/prepare_split_classification` 继续按 §8.2.1/§8.2.2 拒绝共面（E-0014），重建内部另启共面区域切分与两侧材料分类。兼容 `run` 保留历史 bbox/proxy 语义，不继承本节认证。实现 `src/axiom/ops/boolean_rebuild.cpp` 已随调度器最终全量 **16/16、0失败、184.89 s** 通过，逐项证据见 [验收 §1.9](../quality/AxiomKernel_测试与验收方案.md#19-cycle-0082--s4-rebuild-门禁与逐项证据)。`stage_outcome=ready_for_acceptance` 为该历史批次报告；当前唯一退出任务 cycle-0083 / S4-EXIT 见 §8.2.4，Stage 4 / FR-BOOL-001 仍进行中；正式状态见当前进度 §5.2.1。
 
 ```cpp
 struct BooleanRebuildOptions {
@@ -1320,6 +1320,23 @@ struct BooleanRebuildReport {
 失败保留原 cause issues 和稳定 bool.rebuild/validate/repair 根因、输入ID、有限数值证据及JSON，先行候选/求交/切分/分类阶段原样传播。服务撤销新增拓扑、几何/网格、曲线/曲面求值与三角化缓存及统计，恢复Eval状态；诊断与递增ID保留。非空成功仅在最终认证后登记活动writer的服务分配区间，不增加显式write_operation_count，不失效输入Eval。保存点回滚保留该点前输出并清除后续分配；完整rollback防止成功输出delete后由旧快照复活，清理支撑几何和cache，允许重试。合法累计遥测不回退；固定回归的bridge.for_body_entries逐体+2、两体+4，其余字段保持。
 
 限制：固定嵌入闭壳与double不等于精确谓词或全局嵌入证明；逐顶点流形认证只锁局部拓扑。保留现有Strict每壳至少六面与近似网格自交门禁，曲面/曲边、ExactCritical、未解析薄层/容差带不认证，Safe只修人工分片拓扑。输入隔离包含公开拓扑/支撑面/UV世界坐标/曲线端点/边长摘要，不是完整几何序列化。prepare分片分类预建真实面BVH，数值安全上界无法证明时退回全脸扫描；公开classify_points与重建两侧探针预算契约不变，未提高预算或性能阈值。
+
+### 8.2.4 Stage 4 退出支持矩阵（cycle-0083 / S4-EXIT）
+
+本批公开 API、生产实现和既有错误码冻结；沿用 §8.2.1～§8.2.3 合同，补固定模型稳定性、独立表示参考与全链路诊断验收。`stage_task_id=S4-EXIT`、`stage_outcome=ready_for_acceptance`；调度器完整配置/并发4构建成功，CTest **16/16、0失败、194.58 s**。五项必需 workflow/prep/query_eval/representation_io/runtime 各 **4.25/5.63/2.01/10.17/0.04 s**，性能基线 **2.03 s**。按退出要求排列的测试/断言/参考/限制见 [验收 §1.10](../quality/AxiomKernel_测试与验收方案.md#110-cycle-0083--s4-exit-门禁与逐项证据)。正式文档门禁与调度器提交尚未记录，Stage 4 / FR-BOOL-001 保持进行中。
+
+| 体类 / 能力 | 固定支持与独立证据 | 限制 / 拒绝 |
+|---|---|---|
+| 平面直边 ExactBRep 闭壳 | 偏移盒 U/D/I 各总计两轮，V/A/S=15/42/7、7/24/3、1/6/1；owned面/共享边/连通壳、来源、Strict、当前质量/截面均检查 | 仅嵌入双边流形、double/奇偶材料与可解析外向源壳；不证明全局嵌入或精确谓词 |
+| 固定分离、包含、同形/同ID、旋转、共面/面接触 | §8.2.3 固定参考保留；分离并 11/37/4、包含空腔 7.875/25.5/3.75 排除 bbox 代理；内部有限共面重建保留双来源 | 公开只读 prep 共面仍 E-0014；边/点 Union 拒绝，边/点差保留/交为空仅限固定参考 |
+| 固定孔/凹U多面体及连续布尔 | prep::check_rebuild_holed_references 独立 V=hS、A=2S+hP 与材料定位；heal/ops_heal/query_eval 的真孔、空腔、Safe与连续布尔回归 | 不把这些 helper 的结果算作本批新增 OBJ 积分；人工节点截面可能 query.section.numeric 明确拒绝、无部分 value |
+| 非空 BooleanResult→owned 网格→OBJ | workflow::check_real_rebuild_references 全部非空固定结果核标签 mesh_from_brep_owned_faces、策略 owned_topo_welded、无越界/退化三角及计数；独立读取 OBJ 三角形，以 long double 累计有向 V/A，误差 ≤1e-7；再次转换命中同 MeshId | 网格为当前平面边界三角化；ExactBRep 标签不表示精确算术，不认证通用曲面/曲边采样；不以 bbox 网格替代真实材料 |
+| 空交/完全减除及低维接触交 | Ok/output=nullopt，不分配空壳或替代体，既有回归同次通过 | 空结果不宣称执行非空 Strict、查询或表示转换 |
+| Safe及writer/保存点/rollback | 仅人工共面分片/一致共线节点修复，保留真边界与来源；最终 Strict/壳关系成功才发布，失败撤销新增物化/cache/Eval；既有提交、局部/完整回滚及重试闭环同次通过 | 不修真实薄层/短特征/未解析容差带；保留 Strict 至少六面及近似网格自交；合法累计遥测不回退 |
+| 候选/求交准备暖缓存隔离 | 固定 CurveId 域、四点无缓存/缓存曲线对照、支撑面采样/边长/归属摘要，10 store/6 tessellation/5 bridge及Eval依赖/有效性/重算不变；writer成功/失败及rollback后无writer重试端点1e-12一致 | 摘要非完整顶点/几何序列化；未绑定open_body删除合法for_body_entries+1，与rebuilt服务体回滚+2/两体+4分别核对 |
+| 曲面/曲边、ExactCritical、精确谓词、全局嵌入与工业性能 | 保留结构化拒绝及诊断；没有新增支持域 | run_rebuilt 不支持通用曲面/曲边或未解析薄层；perf默认150次/4000ms、30s超时只覆盖兼容run/查询，未认证run_rebuilt工业性能 |
+
+七阶段 `bool.prep.candidates / bool.intersect / bool.split / bool.classify / bool.rebuild / bool.validate / bool.repair` 的完整名称、稳定码、检索与 JSON 证据见 [字典 §7.5](../diagnostics/AxiomKernel_错误码与诊断码字典.md#75-bool-布尔模块错误码)。切分/分类及重建/验证/修复固定失败按阶段和码索引检索；prep固定失败按阶段检索且在报告/JSON核码。兼容 `run` 仍保留 bbox/proxy 后续实体语义，原 trim 读取失败传播不代表其全流程获本矩阵认证。
 
 ### 8.3 修改操作接口
 

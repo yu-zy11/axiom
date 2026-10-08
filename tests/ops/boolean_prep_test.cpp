@@ -661,26 +661,78 @@ bool check_planar_preparation_failure_isolation() {
     if (!a.value || !b.value || !touching.value || !sphere.value || !cylinder.value || !unresolved.value || !thin.value)
         return planar_failure(__LINE__);
     if (!near_parallel.value || !oblique_a.value || !oblique_b.value) return planar_failure(__LINE__);
-    auto transaction = kernel.topology().begin_transaction();
-    const auto sentinel = transaction.create_vertex({99,98,97});
-    if (!sentinel.value) return planar_failure(__LINE__);
-    const auto a_faces = kernel.topology().query().faces_of_body(*a.value);
-    if (!a_faces.value || a_faces.value->empty()) return planar_failure(__LINE__);
-    const auto open_shell = transaction.create_shell(std::array{a_faces.value->front()});
-    const auto open_body = open_shell.value ? transaction.create_body(std::array{*open_shell.value})
-                                           : axiom::Result<axiom::BodyId>{};
-    if (!open_body.value) return planar_failure(__LINE__);
-    const auto transaction_writes = transaction.write_operation_count().value;
-    if (!transaction_writes) return planar_failure(__LINE__);
-    const auto counts = [&]() {
-        return std::array{kernel.body_count().value,kernel.geometry_count().value,kernel.topology_count().value,
-                          kernel.intersection_count().value,kernel.eval_node_count().value,kernel.cache_entry_count().value};
+    const auto lhs_node = kernel.eval_graph().register_node(axiom::NodeKind::Geometry,"body:"+std::to_string(a.value->value));
+    const auto rhs_node = kernel.eval_graph().register_node(axiom::NodeKind::Geometry,"body:"+std::to_string(b.value->value));
+    const auto dependent = kernel.eval_graph().register_node(axiom::NodeKind::Analysis,"prep-isolation-analysis");
+    if (!lhs_node.value || !rhs_node.value || !dependent.value ||
+        kernel.eval_graph().add_dependency(*dependent.value,*lhs_node.value).status != axiom::StatusCode::Ok ||
+        kernel.eval_graph().add_dependency(*dependent.value,*rhs_node.value).status != axiom::StatusCode::Ok ||
+        kernel.eval_graph().recompute(*dependent.value).status != axiom::StatusCode::Ok)
+        return planar_failure(__LINE__);
+    const auto recomputes = kernel.eval_graph().total_recompute_count().value;
+    const auto eval_unchanged = [&] {
+        return recomputes && kernel.eval_graph().total_recompute_count().value == recomputes &&
+            !kernel.eval_graph().is_invalid(*lhs_node.value).value.value_or(true) &&
+            !kernel.eval_graph().is_invalid(*rhs_node.value).value.value_or(true) &&
+            !kernel.eval_graph().is_invalid(*dependent.value).value.value_or(true) &&
+            kernel.eval_graph().has_dependency(*dependent.value,*lhs_node.value).value.value_or(false) &&
+            kernel.eval_graph().has_dependency(*dependent.value,*rhs_node.value).value.value_or(false);
     };
-    // Capture public topology relations plus per-face coordinate extrema. This
-    // detects in-place changes that store counts and transaction counters miss.
+    axiom::TessellationOptions tessellation;
+    const auto lhs_mesh = kernel.convert().brep_to_mesh(*a.value,tessellation);
+    const auto rhs_mesh = kernel.convert().brep_to_mesh(*b.value,tessellation);
+    if (!lhs_mesh.value || !rhs_mesh.value) return planar_failure(__LINE__);
+    // Freeze geometry handles before preparation can allocate anything. Public
+    // point samples complement bbox extrema and topology IDs; this remains a
+    // public geometry summary, not a complete vertex/store serialization.
+    const auto input_id_limit = kernel.next_object_id();
+    if (!input_id_limit.value) return planar_failure(__LINE__);
+    std::vector<axiom::CurveId> input_curves;
+    for (std::uint64_t id = 1; id < *input_id_limit.value; ++id) {
+        const auto present = kernel.has_curve_id({id});
+        if (!present.value) return planar_failure(__LINE__);
+        if (*present.value) input_curves.push_back({id});
+    }
+    if (input_curves.empty()) return planar_failure(__LINE__);
+    const auto counts = [&]() {
+        const auto runtime = kernel.runtime_store_counts();
+        if (!runtime.value) return std::array<std::uint64_t,10>{};
+        const auto& r = *runtime.value;
+        return std::array{kernel.body_count().value.value_or(0),kernel.geometry_count().value.value_or(0),
+            kernel.topology_count().value.value_or(0),r.mesh_records,r.tessellation_cache_entries,
+            r.face_tessellation_cache_entries,r.intersection_records,r.curve_eval_cache_entries,
+            r.surface_eval_cache_entries,r.eval_node_records};
+    };
+    const auto cache_statistics = [&] {
+        const auto stats = kernel.tessellation_cache_stats();
+        if (!stats.value) return std::array<std::uint64_t,6>{};
+        const auto& r = *stats.value;
+        return std::array{r.body_cache_hits,r.body_cache_misses,r.body_cache_stale_evictions,
+            r.face_cache_hits,r.face_cache_misses,r.face_cache_stale_evictions};
+    };
+    // Warm support-point caches before capturing the baseline. Include actual
+    // curve coordinates, support frames and straight-edge lengths/owners so a
+    // count-preserving in-place edit cannot hide behind face bbox extrema.
     const auto input_snapshot = [&]() {
         std::pair<std::vector<std::uint64_t>,std::vector<double>> snapshot;
         const auto query = kernel.topology().query();
+        for (const auto curve : input_curves) {
+            const auto domain = kernel.curve_service().domain(curve);
+            if (!domain.value) return decltype(snapshot){};
+            snapshot.first.push_back(curve.value);
+            snapshot.second.insert(snapshot.second.end(),{domain.value->min,domain.value->max});
+            const double low = std::isfinite(domain.value->min) ? domain.value->min : 0;
+            const double high = std::isfinite(domain.value->max) ? domain.value->max : low+1;
+            for (const double parameter : {low,low+(high-low)/3,low+2*(high-low)/3,high}) {
+                const auto cached = kernel.curve_service().eval(curve,parameter,0);
+                const auto point = kernel.curve_service().point_at_parameter(curve,parameter);
+                if (!cached.value || !point.value ||
+                    std::hypot(point.value->x-cached.value->point.x,point.value->y-cached.value->point.y,
+                               point.value->z-cached.value->point.z) > 1e-12) return decltype(snapshot){};
+                const auto p = *point.value;
+                snapshot.second.insert(snapshot.second.end(),{p.x,p.y,p.z});
+            }
+        }
         for (const auto body : {*a.value,*b.value,*touching.value,*sphere.value,*cylinder.value,
                                *unresolved.value,*thin.value,*near_parallel.value,*oblique_a.value,*oblique_b.value}) {
             const auto faces = query.faces_of_body(body);
@@ -698,6 +750,12 @@ bool check_planar_preparation_failure_isolation() {
                 snapshot.first.insert(snapshot.first.end(),{face.value,surface.value->value,loops.value->size()});
                 const auto& box = *bbox.value;
                 snapshot.second.insert(snapshot.second.end(),{box.min.x,box.min.y,box.min.z,box.max.x,box.max.y,box.max.z});
+                for (const auto uv : {axiom::Point2{0,0},axiom::Point2{0.5,0},axiom::Point2{0,0.5}}) {
+                    const auto point = kernel.surface_service().eval(*surface.value,uv.x,uv.y,0);
+                    if (!point.value) return decltype(snapshot){};
+                    const auto p = point.value->point;
+                    snapshot.second.insert(snapshot.second.end(),{p.x,p.y,p.z});
+                }
                 for (const auto loop : *loops.value) {
                     const auto edges = query.edges_of_loop(loop);
                     const auto vertices = query.vertices_of_loop(loop);
@@ -706,8 +764,18 @@ bool check_planar_preparation_failure_isolation() {
                     for (const auto vertex : *vertices.value) snapshot.first.push_back(vertex.value);
                     for (const auto edge : *edges.value) {
                         const auto endpoints = query.vertices_of_edge(edge);
-                        if (!endpoints.value) return decltype(snapshot){};
-                        snapshot.first.insert(snapshot.first.end(),{edge.value,(*endpoints.value)[0].value,(*endpoints.value)[1].value});
+                        const auto owners = query.faces_of_edge(edge);
+                        if (!endpoints.value || !owners.value) return decltype(snapshot){};
+                        snapshot.first.insert(snapshot.first.end(),{edge.value,(*endpoints.value)[0].value,
+                            (*endpoints.value)[1].value,owners.value->size()});
+                        auto sorted_owners = *owners.value;
+                        std::sort(sorted_owners.begin(),sorted_owners.end(),[](auto a,auto b) { return a.value < b.value; });
+                        for (const auto owner : sorted_owners) snapshot.first.push_back(owner.value);
+                        if (body != *sphere.value && body != *cylinder.value) {
+                            const auto length = query.edge_length(edge);
+                            if (!length.value) return decltype(snapshot){};
+                            snapshot.second.push_back(*length.value);
+                        }
                     }
                 }
             }
@@ -724,6 +792,19 @@ bool check_planar_preparation_failure_isolation() {
     const auto input_baseline = input_snapshot();
     if (input_baseline.first.empty()) return planar_failure(__LINE__);
     const auto bridge_baseline = bridge_snapshot();
+    const auto committed_counts = counts();
+    const auto cache_baseline = cache_statistics();
+    auto transaction = kernel.topology().begin_transaction();
+    const auto sentinel = transaction.create_vertex({99,98,97});
+    if (!sentinel.value) return planar_failure(__LINE__);
+    const auto a_faces = kernel.topology().query().faces_of_body(*a.value);
+    if (!a_faces.value || a_faces.value->empty()) return planar_failure(__LINE__);
+    const auto open_shell = transaction.create_shell(std::array{a_faces.value->front()});
+    const auto open_body = open_shell.value ? transaction.create_body(std::array{*open_shell.value})
+                                           : axiom::Result<axiom::BodyId>{};
+    if (!open_body.value) return planar_failure(__LINE__);
+    const auto transaction_writes = transaction.write_operation_count().value;
+    if (!transaction_writes) return planar_failure(__LINE__);
     const auto baseline = counts();
     const auto expect = [&](axiom::BodyId lhs, axiom::BodyId rhs, const axiom::BooleanIntersectionOptions& options,
                              axiom::StatusCode status, std::string_view code, std::string_view stage) {
@@ -734,6 +815,7 @@ bool check_planar_preparation_failure_isolation() {
         if (result.status != status || result.value || !report.value || !active.value || !*active.value ||
             !kept_sentinel.value || !*kept_sentinel.value || baseline != counts() ||
             input_snapshot() != input_baseline || bridge_snapshot() != bridge_baseline ||
+            cache_statistics() != cache_baseline || !eval_unchanged() ||
             transaction.write_operation_count().value != transaction_writes) {
             std::cerr << "expected status=" << static_cast<int>(status) << " code=" << code << " stage=" << stage
                       << " lhs=" << lhs.value << " rhs=" << rhs.value
@@ -821,13 +903,40 @@ bool check_planar_preparation_failure_isolation() {
     const auto success_active = kernel.topology().has_active_write_transaction();
     if (!success.value || success.value->segments.size() != 6 || counts() != baseline ||
         input_snapshot() != input_baseline || bridge_snapshot() != bridge_baseline ||
+        cache_statistics() != cache_baseline || !eval_unchanged() ||
         !success_active.value || !*success_active.value ||
         !transaction.has_created_vertex(*sentinel.value).value.value_or(false) ||
         transaction.write_operation_count().value != transaction_writes) return planar_failure(__LINE__);
     // The caller still owns the writer, and can continue writing and roll back.
     if (!transaction.create_vertex({96,95,94}).value || transaction.rollback().status != axiom::StatusCode::Ok) return planar_failure(__LINE__);
     const auto active = kernel.topology().has_active_write_transaction();
-    return active.value && !*active.value &&
+    auto rollback_bridge = bridge_baseline;
+    // Removing the caller's deliberately open body is one legal bridge entry;
+    // it has no Eval bindings and must not dirty either input's consumers.
+    ++rollback_bridge[0];
+    if (!active.value || *active.value || counts() != committed_counts || input_snapshot() != input_baseline ||
+        bridge_snapshot() != rollback_bridge || cache_statistics() != cache_baseline || !eval_unchanged() ||
+        kernel.topology().query().has_vertex(*sentinel.value).value.value_or(true) ||
+        kernel.topology().query().has_body(*open_body.value).value.value_or(true) ||
+        !kernel.runtime_tessellation_caches_consistent().value.value_or(false)) return planar_failure(__LINE__);
+    // Retrying with no writer must give the same finite segments and leave the
+    // warmed input stores, caches and graph intact after caller rollback.
+    const auto retry = kernel.booleans().prepare_intersections(*a.value,*b.value);
+    if (!retry.value || retry.value->candidates.size() != success.value->candidates.size() ||
+        retry.value->segments.size() != success.value->segments.size()) return planar_failure(__LINE__);
+    for (std::size_t i = 0; i < retry.value->segments.size(); ++i) {
+        const auto& original = success.value->segments[i];
+        const auto& repeated = retry.value->segments[i];
+        if (original.lhs_face != repeated.lhs_face || original.rhs_face != repeated.rhs_face ||
+            original.point_contact != repeated.point_contact ||
+            std::hypot(original.begin.x-repeated.begin.x,original.begin.y-repeated.begin.y,
+                       original.begin.z-repeated.begin.z) > 1e-12 ||
+            std::hypot(original.end.x-repeated.end.x,original.end.y-repeated.end.y,
+                       original.end.z-repeated.end.z) > 1e-12) return planar_failure(__LINE__);
+    }
+    return counts() == committed_counts && input_snapshot() == input_baseline &&
+        bridge_snapshot() == rollback_bridge && cache_statistics() == cache_baseline && eval_unchanged() &&
+        !kernel.topology().has_active_write_transaction().value.value_or(true) &&
         kernel.validate().validate_topology(*a.value,axiom::ValidationMode::Strict).status == axiom::StatusCode::Ok &&
         kernel.validate().validate_topology(*b.value,axiom::ValidationMode::Strict).status == axiom::StatusCode::Ok;
 }

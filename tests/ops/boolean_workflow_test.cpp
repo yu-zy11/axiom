@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
 
 #include "axiom/diag/error_codes.h"
@@ -167,6 +168,74 @@ bool check_real_rebuild_references() {
         }
         if (std::abs(integrated_volume-volume) > 1e-7 || std::abs(integrated_area-area) > 1e-7)
             return fail(reference,__LINE__);
+        // Certify the representation of this owned result as well as its
+        // topology. Read the exported triangles independently: a bbox mesh
+        // would fail the subtraction, separated-shell and cavity references.
+        const auto mesh = kernel.convert().brep_to_mesh(output,{});
+        if (!mesh.value || mesh.status != axiom::StatusCode::Ok) return fail(reference,__LINE__);
+        const auto inspection = kernel.convert().inspect_mesh(*mesh.value);
+        if (!inspection.value || inspection.value->mesh_label != "mesh_from_brep_owned_faces" ||
+            inspection.value->tessellation_strategy != "owned_topo_welded" ||
+            inspection.value->triangle_count == 0 || inspection.value->has_out_of_range_indices ||
+            inspection.value->has_degenerate_triangles) return fail(reference,__LINE__);
+        const auto path = std::filesystem::temp_directory_path()/
+            ("axiom_s4_exit_"+std::string(reference)+"_"+std::to_string(output.value)+".obj");
+        if (kernel.io().export_obj(output,path.string(),{}).status != axiom::StatusCode::Ok) {
+            std::filesystem::remove(path);
+            return fail(reference,__LINE__);
+        }
+        std::ifstream input{path};
+        bool valid_mesh = input.is_open();
+        std::vector<axiom::Point3> mesh_points;
+        std::uint64_t mesh_triangles = 0;
+        long double mesh_volume = 0, mesh_area = 0;
+        std::string line;
+        while (valid_mesh && std::getline(input,line)) {
+            std::istringstream record{line};
+            std::string kind;
+            record >> kind;
+            if (kind == "v") {
+                axiom::Point3 point;
+                if (!(record >> point.x >> point.y >> point.z) ||
+                    !std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z)) {
+                    valid_mesh = false;
+                    break;
+                }
+                mesh_points.push_back(point);
+            } else if (kind == "f") {
+                std::array<std::size_t,3> indices;
+                std::string extra;
+                if (!(record >> indices[0] >> indices[1] >> indices[2]) || (record >> extra) ||
+                    std::any_of(indices.begin(),indices.end(),[&](const auto index) {
+                        return index == 0 || index > mesh_points.size();
+                    })) {
+                    valid_mesh = false;
+                    break;
+                }
+                const auto p = mesh_points[indices[0]-1], q = mesh_points[indices[1]-1],
+                           r = mesh_points[indices[2]-1];
+                const long double ux = q.x-p.x, uy = q.y-p.y, uz = q.z-p.z;
+                const long double vx = r.x-p.x, vy = r.y-p.y, vz = r.z-p.z;
+                const long double nx = uy*vz-uz*vy, ny = uz*vx-ux*vz, nz = ux*vy-uy*vx;
+                mesh_area += std::sqrt(nx*nx+ny*ny+nz*nz)/2;
+                mesh_volume += (p.x*(static_cast<long double>(q.y)*r.z-static_cast<long double>(q.z)*r.y)+
+                                p.y*(static_cast<long double>(q.z)*r.x-static_cast<long double>(q.x)*r.z)+
+                                p.z*(static_cast<long double>(q.x)*r.y-static_cast<long double>(q.y)*r.x))/6;
+                ++mesh_triangles;
+            }
+        }
+        valid_mesh = valid_mesh && input.eof();
+        input.close();
+        std::filesystem::remove(path);
+        if (!valid_mesh || mesh_points.size() != inspection.value->vertex_count ||
+            mesh_triangles != inspection.value->triangle_count ||
+            std::abs(mesh_volume-volume) > 1e-7L || std::abs(mesh_area-area) > 1e-7L ||
+            kernel.convert().brep_to_mesh(output,{}).value != mesh.value) {
+            std::cerr << reference << " mesh volume=" << mesh_volume << '/' << volume
+                      << " area=" << mesh_area << '/' << area
+                      << " triangles=" << mesh_triangles << '/' << inspection.value->triangle_count << "\n";
+            return fail(reference,__LINE__);
+        }
         if (((std::string_view(reference).starts_with("identical-") && lhs != rhs) ||
              (std::string_view(reference).starts_with("coplanar-overlap-") && operation != axiom::BooleanOp::Subtract)) &&
             shared_faces == 0) return fail(reference,__LINE__);
@@ -206,10 +275,13 @@ bool check_real_rebuild_references() {
         !face_touch.value || !edge_touch.value || !point_touch.value) return fail("fixtures",__LINE__);
     using Op = axiom::BooleanOp;
     const axiom::Plane middle {{0,0,1.5},{0,0,1}}, inside {{0,0,0.5},{0,0,1}};
-    if (!check(*a.value,*b.value,Op::Union,15,42,middle,7,1,"offset-box-union") ||
-        !check(*a.value,*b.value,Op::Subtract,7,24,middle,3,1,"offset-box-subtract") ||
-        !check(*a.value,*b.value,Op::Intersect,1,6,middle,1,1,"offset-box-intersect") ||
-        !check(*a.value,*separated.value,Op::Union,11,37,middle,4,2,"separate-union") ||
+    // Repeat all three fixed operations on the same source handles after
+    // warming queries/representation. IDs may differ; material must not drift.
+    for (int repeat = 0; repeat < 2; ++repeat)
+        if (!check(*a.value,*b.value,Op::Union,15,42,middle,7,1,"offset-box-union") ||
+            !check(*a.value,*b.value,Op::Subtract,7,24,middle,3,1,"offset-box-subtract") ||
+            !check(*a.value,*b.value,Op::Intersect,1,6,middle,1,1,"offset-box-intersect")) return false;
+    if (!check(*a.value,*separated.value,Op::Union,11,37,middle,4,2,"separate-union") ||
         !check(*a.value,*separated.value,Op::Subtract,8,24,middle,4,1,"separate-subtract") ||
         !check(*a.value,*separated.value,Op::Intersect,0,0,middle,0,0,"empty-intersection") ||
         !check(*a.value,*inner.value,Op::Union,8,24,inside,4,1,"contained-union") ||
@@ -424,6 +496,12 @@ bool check_real_rebuild_isolation() {
                     std::cerr << issue.stage << " " << issue.code << " " << issue.message << "\n";
                 return false;
             }
+            const auto by_stage = kernel.diagnostics().find_by_issue_stage(stage,1000);
+            const auto by_code = kernel.diagnostics().find_by_issue_code(code,1000);
+            if (!by_stage.value || !by_code.value ||
+                std::find(by_stage.value->begin(),by_stage.value->end(),result.diagnostic_id) == by_stage.value->end() ||
+                std::find(by_code.value->begin(),by_code.value->end(),result.diagnostic_id) == by_code.value->end())
+                return false;
             const auto path = std::filesystem::temp_directory_path()/"axiom_rebuild_failure.json";
             if (kernel.diagnostics().export_report_json(result.diagnostic_id,path.string()).status != axiom::StatusCode::Ok)
                 return false;

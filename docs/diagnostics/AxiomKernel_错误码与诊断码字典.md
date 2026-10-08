@@ -351,6 +351,14 @@ cycle-0081 / S4-SPLIT-CLASSIFY 新增只读切分与实体分类入口；E-0004 
 
 固定数值/失败/事务证据已随最终全量16/16（184.89s）执行，见 [验收§1.9](../quality/AxiomKernel_测试与验收方案.md#19-cycle-0082--s4-rebuild-门禁与逐项证据)；平面直边double、奇偶材料、Safe限制与查询数值拒绝见 [API§8.2.3](../api/AxiomKernel_详细模块接口清单.md#823-stage-4-真实实体重建支持矩阵cycle-0082--s4-rebuild)。这不认证兼容run全部后续行为或全局壳嵌入。
 
+### cycle-0083 / S4-EXIT 诊断验收补充
+
+本批无生产/API/错误码或诊断码变更，上表及求交/切分/分类阶段合同冻结。七阶段候选 `bool.prep.candidates`、求交 `bool.intersect`、切分 `bool.split`、分类 `bool.classify`、重建 `bool.rebuild`、验证 `bool.validate`、修复 `bool.repair` 均有固定失败的稳定码、非零 diagnostic_id、阶段检索及 JSON 证据。workflow::check_real_rebuild_isolation 新增 `find_by_issue_stage/find_by_issue_code` 命中失败ID（重建/验证/修复，另保留先行求交），check_split_classification_isolation 已有阶段/码双索引；prep::check_planar_preparation_failure_isolation 直接断言阶段索引及报告/JSON的code，不声称每条prep失败新增双索引或已注入全部生产根因。
+
+prep隔离新增两输入网格暖缓存、固定CurveId域及四点无缓存point_at_parameter与cached eval对照（1e-12）、支撑面三点/边长/面归属摘要，10项store、6项tessellation统计、5项bridge、真实Eval依赖/有效性/重算不变；成功及失败保留活动writer与写次数，rollback删除临时顶点/体后无writer重试逐段端点1e-12一致。删除未绑定open_body只允许for_body_entries合法+1；既有rebuilt服务体回滚+2/两体+4单独核对，合法累计遥测不回退。摘要仍非完整原始顶点/几何序列化。兼容bool.intersect.trim的E-0001/E-0012/E-0013结构化传播、全部读取成功后才物化已在基线，不是本批新修复或兼容run全流程认证。
+
+本批调度器完整构建成功，CTest **16/16、0失败、194.58 s**；逐项证据与限制见 [验收 §1.10](../quality/AxiomKernel_测试与验收方案.md#110-cycle-0083--s4-exit-门禁与逐项证据)。Stage 4 / FR-BOOL-001 仍进行中，最终文档门禁及调度器提交成功后才正式验收。
+
 ## 7.6 `BLEND` 圆角倒角错误码
 
 | 错误码 | 严重级别 | 含义 |
