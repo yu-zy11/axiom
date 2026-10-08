@@ -69,6 +69,65 @@ bool read_reference_obj(axiom::Kernel& kernel, axiom::BodyId body, ReferenceObj&
     return valid && !mesh.vertices.empty() && !mesh.triangles.empty();
 }
 
+// Read the exported public OBJ, independently integrate its actual triangles,
+// and require the t=0.5 inner coordinates. A bbox proxy cannot pass this oracle.
+bool offset_shell_representation_regression() {
+    axiom::Kernel kernel;
+    const auto stock=kernel.primitives().box({0,0,0},4,5,6);
+    if (!stock.value) return false;
+    const auto faces=kernel.topology().query().faces_of_body(*stock.value);
+    if (!faces.value) return false;
+    axiom::FaceId top {};
+    for (const auto face : *faces.value) {
+        const auto bbox=kernel.topology().query().bbox_of_face(face);
+        if (bbox.value && std::abs(bbox.value->min.z-6)<1e-9 && std::abs(bbox.value->max.z-6)<1e-9) top=face;
+    }
+    if (!top.value) return false;
+    for (const bool open : {false,true}) {
+        const std::vector<axiom::FaceId> removed=open ? std::vector<axiom::FaceId>{top} : std::vector<axiom::FaceId>{};
+        const auto result=kernel.modify().shell_body(*stock.value,removed,.5);
+        if (!result.value) return false;
+        const auto body=result.value->output;
+        const auto converted=kernel.convert().brep_to_mesh(body,{});
+        if (!converted.value) return false;
+        const auto inspection=kernel.convert().inspect_mesh(*converted.value);
+        ReferenceObj mesh;
+        if (!inspection.value || inspection.value->has_degenerate_triangles || inspection.value->has_out_of_range_indices ||
+            inspection.value->tessellation_strategy!="owned_topo_welded" ||
+            inspection.value->connected_components!=(open ? 1u : 2u) || !read_reference_obj(kernel,body,mesh)) return false;
+        long double volume=0, area=0;
+        std::size_t inner_vertices=0;
+        for (const auto& p : mesh.vertices) {
+            const bool inner_x=approx(p.x,.5,1e-9)||approx(p.x,3.5,1e-9);
+            const bool inner_y=approx(p.y,.5,1e-9)||approx(p.y,4.5,1e-9);
+            const bool inner_z=approx(p.z,.5,1e-9)||approx(p.z,open ? 6 : 5.5,1e-9);
+            const bool outer_x=approx(p.x,0,1e-9)||approx(p.x,4,1e-9);
+            const bool outer_y=approx(p.y,0,1e-9)||approx(p.y,5,1e-9);
+            const bool outer_z=approx(p.z,0,1e-9)||approx(p.z,6,1e-9);
+            if (inner_x && inner_y && inner_z) ++inner_vertices;
+            else if (!(outer_x && outer_y && outer_z)) return false;
+        }
+        if (inner_vertices!=8) return false;
+        for (const auto& f : mesh.triangles) {
+            const auto& a=mesh.vertices[f[0]];
+            const auto& b=mesh.vertices[f[1]];
+            const auto& c=mesh.vertices[f[2]];
+            const long double ux=b.x-a.x,uy=b.y-a.y,uz=b.z-a.z;
+            const long double vx=c.x-a.x,vy=c.y-a.y,vz=c.z-a.z;
+            const long double nx=uy*vz-uz*vy,ny=uz*vx-ux*vz,nz=ux*vy-uy*vx;
+            area+=std::sqrt(nx*nx+ny*ny+nz*nz)/2;
+            volume+=(a.x*(static_cast<long double>(b.y)*c.z-static_cast<long double>(b.z)*c.y)+
+                a.y*(static_cast<long double>(b.z)*c.x-static_cast<long double>(b.x)*c.z)+
+                a.z*(static_cast<long double>(b.x)*c.y-static_cast<long double>(b.y)*c.x))/6;
+        }
+        if (std::abs(volume-(open ? 54 : 60))>1e-7L || std::abs(area-(open ? 225 : 242))>1e-7L ||
+            kernel.validate().validate_all(body,axiom::ValidationMode::Strict).status!=axiom::StatusCode::Ok) return false;
+        const auto cached=kernel.convert().brep_to_mesh(body,{});
+        if (cached.value!=converted.value) return false;
+    }
+    return true;
+}
+
 bool stage5_native_boundary_reference_regression() {
     axiom::Kernel kernel;
     const long double pi=std::acos(-1.0L);
@@ -790,6 +849,10 @@ bool stage5_stl_geometry_reference_regression() {
 }  // namespace
 
 int main() {
+    if (!offset_shell_representation_regression()) {
+        std::cerr << "Stage 6 shell actual OBJ/mesh thickness regression failed\n";
+        return 1;
+    }
     if (!stage5_native_boundary_reference_regression()) {
         std::cerr << "Stage 5 native tessellation boundary independent reference regression failed\n";
         return 1;

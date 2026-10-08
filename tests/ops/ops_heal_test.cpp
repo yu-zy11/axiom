@@ -15,6 +15,8 @@
 #include "axiom/diag/error_codes.h"
 #include "axiom/sdk/kernel.h"
 
+bool offset_shell_regression();
+
 namespace {
 
 // Stage 6: inspect actual public topology and independently evaluate the
@@ -5361,6 +5363,7 @@ bool test_stage3_model_query_chain() {
 }  // namespace
 
 int main() {
+    if (!offset_shell_regression()) return 1;
     if (!stage6_blend_geometry_regression()) return 1;
     if (!stage5_repaired_modeling_chain_regression()) {
         std::cerr << "Stage 5 repaired modeling and batch atomicity regression failed\n";

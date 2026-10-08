@@ -742,25 +742,66 @@ cycle-0083 / S4-EXIT 沿用上述公开签名和调用片段，新增执行证�
 
 ## 8.1 偏置
 
+以下片段使用已有 `kernel`，标准头包括 `<vector>`、`<cmath>`、`<cassert>`；创建4×5×6完整轴对齐盒。仅认证当前 owned 六平面矩形闭壳；正距离外扩、负距离内缩，位移须大于有效容差且可在当前坐标精度下表达。
+
 ```cpp
+auto stock = kernel.primitives().box({1,2,3}, 4,5,6);
+if (!stock.value) { handle_error(stock); return; }
 auto offset = kernel.modify().offset_body(
-  body_id,
-  2.0,
+  *stock.value,
+  0.5,
   kernel.tolerance().global_policy()
 );
+if (!offset.value) { handle_error(offset); return; }
+auto offset_strict = kernel.validate().validate_all(
+    offset.value->output, ValidationMode::Strict);
+if (offset_strict.status != StatusCode::Ok) { handle_error(offset_strict); return; }
+// 真实外边界为 [0.5,5.5] × [1.5,7.5] × [2.5,9.5]，尺寸5×6×7。
 ```
 
 ## 8.2 抽壳
 
 ```cpp
-std::vector<FaceId> removed_faces = {face_1};
-
+auto& topo = kernel.topology().query();
+auto faces = topo.faces_of_body(offset.value->output);
+if (!faces.value) { handle_error(faces); return; }
+FaceId top_face {};
+for (auto face : *faces.value) {
+  auto bounds = topo.bbox_of_face(face);
+  if (!bounds.value) { handle_error(bounds); return; }
+  if (std::abs(bounds.value->min.z-9.5) < 1e-9 &&
+      std::abs(bounds.value->max.z-9.5) < 1e-9) top_face = face;
+}
+assert(top_face.value != 0);
+std::vector<FaceId> removed_faces {top_face};
 auto shelled = kernel.modify().shell_body(
-  body_id,
+  offset.value->output,
   removed_faces,
-  2.5
+  0.5
 );
+if (!shelled.value) { handle_error(shelled); return; }
+auto strict = kernel.validate().validate_all(shelled.value->output, ValidationMode::Strict);
+if (strict.status != StatusCode::Ok) { handle_error(strict); return; }
+auto mass = kernel.query().mass_properties(shelled.value->output);
+if (!mass.value) { handle_error(mass); return; }
+assert(std::abs(mass.value->volume-80.0) < 1e-7);
+assert(std::abs(mass.value->area-331.0) < 1e-7);
+
+// 无移除面：原4×5×6盒保持外边界，生成反向内腔双闭壳。
+std::vector<FaceId> no_opening;
+auto cavity = kernel.modify().shell_body(*stock.value, no_opening, 0.5);
+if (!cavity.value) { handle_error(cavity); return; }
+auto cavity_mass = kernel.query().mass_properties(cavity.value->output);
+if (!cavity_mass.value) { handle_error(cavity_mass); return; }
+assert(std::abs(cavity_mass.value->volume-60.0) < 1e-7);
+assert(std::abs(cavity_mass.value->area-242.0) < 1e-7);
 ```
+
+单面开口支持六个方向；实际外5面、内5面与四片口沿构成闭合材料壳，保留壁厚为真实平面间距0.5。偏置后的上开口内腔为4×5×6.5，故 V=210−130=80，A=331；原盒上开口参考为 V=54/A=225。空移除集合生成外6面与反向内6面的双闭壳，内腔为3×4×5，V=120−60=60，A=148+94=242。一般曲面、多开口、异属/重复/不存在移除面、塌缩、容差接触或不可表达厚度拒绝。
+
+源和结果在私有暂存中 Strict 检查；失败无部分结果、live ID/源拓扑来源索引/Eval/暖缓存保持。成功追加独立 `Generic/ExactBRep`，通知输入 Eval 及下游失效；活动事务回滚清理派生几何/拓扑/表示/缓存，保留源暖网格，成功分配 ID 允许空档。可从 diagnostic_id 查看 `modify.offset.* / modify.shell.*` 阶段。ReportOnly 保持厚度已有回归，修改式 Safe 修复保形未认证。
+
+片段未独立编译，本轮未运行测试；执行证据来自已通过调度器完整门禁的 [Ops/Heal/Rep 回归与两条验收证据](../quality/AxiomKernel_测试与验收方案.md#116-cycle-0089--s6-offset-shell-门禁与逐项证据)。独立参考为解析公式/公开 OBJ 积分，无外部工业内核认证；完整支持与限制见 [API §8.3.1](AxiomKernel_详细模块接口清单.md#831-stage-6-真实偏置与抽壳支持矩阵cycle-0089--s6-offset-shell)。
 
 ## 8.3 删除面补面
 

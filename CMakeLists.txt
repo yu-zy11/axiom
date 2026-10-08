@@ -64,7 +64,7 @@ if (AXM_ENABLE_TESTS)
     target_link_libraries(axiom_representation_io_test PRIVATE axiom_kernel)
     add_test(NAME axiom_representation_io_test COMMAND axiom_representation_io_test)
 
-    add_executable(axiom_ops_heal_test tests/ops/ops_heal_test.cpp)
+    add_executable(axiom_ops_heal_test tests/ops/ops_heal_test.cpp tests/ops/offset_shell_test.cpp)
     target_link_libraries(axiom_ops_heal_test PRIVATE axiom_kernel)
     add_test(NAME axiom_ops_heal_test COMMAND axiom_ops_heal_test)
 

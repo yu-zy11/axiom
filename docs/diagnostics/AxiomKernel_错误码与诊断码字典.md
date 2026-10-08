@@ -392,6 +392,30 @@ cycle-0088 为 E-0003..0006 增加公开常量，并将已有字典中的概念�
 | `AXM-MOD-E-0005` | Error | 替换面与目标不兼容 |
 | `AXM-MOD-E-0006` | Error | 删除面补面失败 |
 | `AXM-MOD-E-0007` | Warning | 修改导致小特征被移除 |
+| `AXM-MOD-E-0008` | Error | 抽壳源或真实结果未通过 Strict，结果未发布（既有公开常量，本轮补录） |
+| `AXM-MOD-E-0009` | Error | 当前实际边界或开口选择不在认证支持域 |
+| `AXM-MOD-E-0010` | Error | 距离/厚度、残余边界或坐标分辨率数值退化 |
+| `AXM-MOD-E-0011` | Error | 偏置源或真实结果未通过 Strict，结果未发布 |
+| `AXM-MOD-I-0001` | Info | 真实偏置/抽壳边界通过私有 Strict 后发布 |
+
+cycle-0089 / S6-OFFSET-SHELL 新增 E-0009/0010/0011 与 I-0001 公开常量，复用 E-0001/0002/0003/0008；没有新增 MOD-D 码。支持限当前 owned 轴对齐六平面矩形闭壳及无开口/单面开口抽壳，见 [API §8.3.1](../api/AxiomKernel_详细模块接口清单.md#831-stage-6-真实偏置与抽壳支持矩阵cycle-0089--s6-offset-shell)。
+
+| StatusCode / 稳定码 | Issue.stage | 根因 / 结果 |
+|---|---|---|
+| InvalidInput / E-0001 | `modify.offset.input_gate` | 无效体、非有限/零距离、非法或非有限容差 |
+| InvalidInput / E-0003 | `modify.shell.input_gate` | 无效体、非有限/非正厚度、非法或非有限内核容差 |
+| InvalidInput / E-0003 | `modify.shell.invalid_faces` | 不存在、重复或不属于当前输入体的移除面 |
+| NotImplemented / E-0009 | `modify.offset.support_gate` / `modify.shell.support_gate` | 非认证当前盒边界、一般曲面或多开口，不回退代理 |
+| DegenerateGeometry / E-0010 | `modify.offset.geometry_gate` / `modify.shell.geometry_gate` | 距离/厚度不大于有效容差，退化 bbox、位移舍入或坐标/尺寸溢出 |
+| OperationFailed / E-0002 | `modify.offset.self_intersection` | 认证盒域内负偏置塌缩或接触，不代表一般曲面自交算法 |
+| OperationFailed / E-0003 | `modify.shell.thickness` / `modify.shell.cavity_tolerance` | 内腔塌缩或剩余内腔尺寸不大于容差 |
+| InvalidTopology / E-0011 | `modify.offset.source_validate` / `modify.offset.validate` | 当前源/真实暂存结果未通过 Strict |
+| InvalidTopology / E-0008 | `modify.shell.source_validate` / `modify.shell.validate` | 当前源/真实暂存结果未通过 Strict |
+| Ok / I-0001 | `modify.offset.complete` / `modify.shell.complete` | 独立真实边界发布成功 |
+
+表中 E/I 简写均为 `AXM-MOD-` 前缀。失败 Issue 关联源 BodyId，成功关联源和输出 BodyId；外层及 OpReport 可用 diagnostic_id 查询、按阶段/码检索和 JSON 导出。源当前 owned 边界与结果在私有暂存状态 Strict 核验，历史 body/shell/face 来源只在暂存隔离与恢复，live 源不变。失败无 value、不泄漏部分模型、不消耗 live ID，源拓扑/来源/索引、next_version、事务写数/分配范围、Eval clean/dirty 状态及桥/重算计数、暖缓存保持，诊断允许增加。
+
+成功仅追加新模型与关系，登记活动事务范围，并通知直接输入绑定 Eval 节点及下游失效；不自动重算业务算法。回滚移除派生几何/拓扑/表示/缓存、保留源暖 Mesh 身份，成功已分配 ID 允许空档。[验收 §1.16](../quality/AxiomKernel_测试与验收方案.md#116-cycle-0089--s6-offset-shell-门禁与逐项证据)直接覆盖两种 source_validate 及偏置输出 validate；抽壳输出 validate 属防御合同，不宣称全部根因直接注入。修改式 Safe 修复保形不在本工作流内。
 
 ## 7.8 `QUERY` 查询分析错误码
 

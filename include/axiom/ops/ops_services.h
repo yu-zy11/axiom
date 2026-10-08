@@ -302,7 +302,26 @@ class ModifyService {
 public:
     explicit ModifyService(std::shared_ptr<detail::KernelState> state);
 
+    /// Offset the current owned axis-aligned six-plane rectangular closed boundary.
+    /// A finite nonzero signed distance moves each plane outward (positive) or inward
+    /// (negative), rebuilding independent vertices, edges and faces. The caller's valid
+    /// tolerance policy controls the distance and collapse gates; coordinate rounding
+    /// must preserve the requested plane displacement within that tolerance.
+    /// Unsupported boundaries, self-intersection/collapse and numerical degeneracy
+    /// return staged diagnostics. The source's current owned boundary (excluding
+    /// historical provenance) and the result pass Strict in private staging;
+    /// failures allocate no model IDs and preserve source topology, Eval and warm caches.
+    /// Successful publication invalidates the input body's bound Eval nodes and their
+    /// downstream consumers, and registers the result for active transaction rollback.
     Result<OpReport> offset_body(BodyId body_id, Scalar distance, const TolerancePolicy& tolerance);
+    /// Shell the same rectangular closed input with a finite positive inward thickness.
+    /// No removed faces creates separate outer and inward-oriented cavity boundaries;
+    /// one currently owned face creates an open rectangular housing with a real rim.
+    /// The exterior bounds remain fixed and each retained wall has the requested
+    /// plane-to-plane thickness. Multiple openings and general surfaces are unsupported.
+    /// Thickness/cavity clearance must exceed the kernel tolerance and be representable
+    /// in world coordinates. Source/result Strict validation and failure/transaction
+    /// isolation follow offset_body; no partial body is published on failure.
     Result<OpReport> shell_body(BodyId body_id, std::span<const FaceId> removed_faces, Scalar thickness);
     Result<OpReport> draft_faces(BodyId body_id, std::span<const FaceId> faces, const Vec3& pull_dir, Scalar angle);
     Result<OpReport> replace_face(BodyId body_id, FaceId target, SurfaceId replacement);

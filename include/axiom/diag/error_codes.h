@@ -128,6 +128,14 @@ inline constexpr std::string_view kModReplaceFaceIncompatible = "AXM-MOD-E-0005"
 inline constexpr std::string_view kModDeleteFaceHealFailure = "AXM-MOD-E-0006";
 /// 抽壳等修改已生成结果体，但后验校验未通过并已回滚（结果体未保留）。
 inline constexpr std::string_view kModShellValidateFailed = "AXM-MOD-E-0008";
+/// 当前实际边界不在矩形六平面闭壳域内，或抽壳选择多个开口；不回退到代理边界。
+inline constexpr std::string_view kModUnsupportedGeometry = "AXM-MOD-E-0009";
+/// 距离/厚度或坐标分辨率、残余边界数值退化；结果未发布。
+inline constexpr std::string_view kModDegenerateGeometry = "AXM-MOD-E-0010";
+/// 偏置源/结果 Strict 验证或真实边界物化失败；模型与 ID 保持不变。
+inline constexpr std::string_view kModOffsetValidateFailed = "AXM-MOD-E-0011";
+/// 真实偏置/抽壳内外边界完成，并通过 Strict 验证后发布。
+inline constexpr std::string_view kModCompleted = "AXM-MOD-I-0001";
 
 inline constexpr std::string_view kQueryClosestPointFailure = "AXM-QUERY-E-0001";
 inline constexpr std::string_view kQuerySectionFailure = "AXM-QUERY-E-0002";
