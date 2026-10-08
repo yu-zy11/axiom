@@ -14,9 +14,61 @@ bool approx(double lhs, double rhs, double eps = 1e-6) {
     return std::abs(lhs - rhs) <= eps;
 }
 
+
+bool stage5_bilinear_geometry_reference_regression() {
+    axiom::Kernel kernel;
+    const std::vector<axiom::Point3> poles{{0,0,0},{0,1,0},{1,0,0},{1,1,1}};
+    const auto bezier=kernel.surfaces().make_bezier(poles);
+    axiom::BSplineSurfaceDesc spline_desc;
+    spline_desc.poles=poles;
+    spline_desc.degree_u=1;
+    spline_desc.degree_v=1;
+    const auto spline=kernel.surfaces().make_bspline(spline_desc);
+    axiom::NURBSSurfaceDesc rational_desc;
+    rational_desc.poles=poles;
+    rational_desc.weights={1,1,1,1};
+    rational_desc.degree_u=1;
+    rational_desc.degree_v=1;
+    const auto rational=kernel.surfaces().make_nurbs(rational_desc);
+    if (!bezier.value || !spline.value || !rational.value) return false;
+    for (const auto support : {*bezier.value,*spline.value,*rational.value}) {
+        const auto trim=kernel.surfaces().make_trimmed(support,.2,.8,.2,.8);
+        if (!trim.value) return false;
+        for (const auto id : {support,*trim.value}) for (const auto uv :
+             std::array<axiom::Point2,5>{{{.2,.2},{.8,.2},{.8,.8},{.2,.8},{.35,.65}}}) {
+            const auto sample=kernel.surface_service().eval(id,uv.x,uv.y,2);
+            const double length=std::sqrt(1+uv.x*uv.x+uv.y*uv.y);
+            // The independent definition r=(u,v,uv) gives r_u×r_v=(-v,-u,1).
+            if (!sample.value || !approx(sample.value->point.x,uv.x,1e-10) ||
+                !approx(sample.value->point.y,uv.y,1e-10) || !approx(sample.value->point.z,uv.x*uv.y,1e-10) ||
+                !approx(sample.value->normal.x,-uv.y/length,1e-10) ||
+                !approx(sample.value->normal.y,-uv.x/length,1e-10) ||
+                !approx(sample.value->normal.z,1/length,1e-10)) return false;
+        }
+        const auto clamped=kernel.surface_service().eval(*trim.value,.1,.5,2);
+        if (!clamped.value || !approx(clamped.value->point.x,.2,1e-10) ||
+            !approx(clamped.value->point.y,.5,1e-10) || !approx(clamped.value->point.z,.1,1e-10)) return false;
+        const auto before=kernel.runtime_store_counts();
+        const auto next=kernel.next_object_id();
+        const auto outside=kernel.surface_service().eval(*trim.value,std::numeric_limits<double>::quiet_NaN(),.5,2);
+        const auto after=kernel.runtime_store_counts();
+        if (outside.status==axiom::StatusCode::Ok || outside.value || !before.value || !after.value ||
+            kernel.next_object_id().value!=next.value ||
+            before.value->surface_eval_cache_entries!=after.value->surface_eval_cache_entries ||
+            before.value->mesh_records!=after.value->mesh_records ||
+            before.value->tessellation_cache_entries!=after.value->tessellation_cache_entries ||
+            before.value->face_tessellation_cache_entries!=after.value->face_tessellation_cache_entries) return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 int main() {
+    if (!stage5_bilinear_geometry_reference_regression()) {
+        std::cerr << "Stage 5 bilinear geometry independent normal reference regression failed\n";
+        return 1;
+    }
     axiom::Kernel kernel;
 
     // ---- Stage 2: PCurve minimal support (polyline in UV space) ----

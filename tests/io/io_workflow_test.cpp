@@ -1410,6 +1410,7 @@ int main() {
     const auto malformed_gltf_path = tmp / ("axiom_io_malformed_import_" + uniq + ".gltf");
     const auto degenerate_gltf_path = tmp / ("axiom_io_degenerate_import_" + uniq + ".gltf");
     const auto out_of_range_gltf_path = tmp / ("axiom_io_out_of_range_import_" + uniq + ".gltf");
+    const auto nonfinite_gltf_path = tmp / ("axiom_io_nonfinite_import_" + uniq + ".gltf");
     const auto valid_gltf_path = tmp / ("axiom_io_valid_import_" + uniq + ".gltf");
     const auto write_triangle_gltf = [](const std::filesystem::path& path, std::string_view encoded_buffer) {
         std::ofstream out {path};
@@ -1460,6 +1461,29 @@ int main() {
         std::cerr << "glTF import failure is missing stable root-cause stage evidence\n";
         return 1;
     }
+    axiom::ImportOptions binary_options;
+    binary_options.run_validation = false;
+    const auto nonfinite_next_id = kernel.next_object_id();
+    const auto nonfinite_stores = kernel.runtime_store_counts();
+    // Independent little-endian float32 fixtures: first x is NaN or +Inf;
+    // all remaining positions and the 0,1,2 triangle are valid.
+    for (const auto encoded : {
+            "AADAfwAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAEAAAACAAAA",
+            "AACAfwAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAEAAAACAAAA"}) {
+        write_triangle_gltf(nonfinite_gltf_path, encoded);
+        const auto rejected = kernel.io().import_gltf(nonfinite_gltf_path.string(), binary_options);
+        const auto after = kernel.runtime_store_counts();
+        if (!check_gltf_failure(rejected, axiom::StatusCode::InvalidInput,
+                               axiom::diag_codes::kIoImportFailure, "io.import.gltf.validation") ||
+            !nonfinite_next_id.value || kernel.next_object_id().value != nonfinite_next_id.value ||
+            !nonfinite_stores.value || !after.value ||
+            nonfinite_stores.value->mesh_records != after.value->mesh_records ||
+            nonfinite_stores.value->tessellation_cache_entries != after.value->tessellation_cache_entries ||
+            nonfinite_stores.value->face_tessellation_cache_entries != after.value->face_tessellation_cache_entries) {
+            std::cerr << "glTF nonfinite binary input bypassed validation or polluted conversion state\n";
+            return 1;
+        }
+    }
     const auto gltf_failure_json = tmp / ("axiom_io_gltf_import_failure_" + uniq + ".json");
     const auto exported_gltf_failure = kernel.diagnostics().export_report_json(
         degenerate_gltf.diagnostic_id, gltf_failure_json.string());
@@ -1474,10 +1498,11 @@ int main() {
     std::filesystem::remove(malformed_gltf_path);
     std::filesystem::remove(degenerate_gltf_path);
     std::filesystem::remove(out_of_range_gltf_path);
+    std::filesystem::remove(nonfinite_gltf_path);
     std::filesystem::remove(valid_gltf_path);
     if (exported_gltf_failure.status != axiom::StatusCode::Ok ||
         gltf_failure_json_text.find("\"stage\":\"io.import.gltf.validation\"") == std::string::npos ||
-        !staged_gltf_failures.value || staged_gltf_failures.value->size() != 6 ||
+        !staged_gltf_failures.value || staged_gltf_failures.value->size() != 8 ||
         !body_count_before_gltf_failures.value || !body_count_after_gltf_failures.value ||
         *body_count_before_gltf_failures.value != *body_count_after_gltf_failures.value ||
         !mesh_count_before_gltf_failures.value || !mesh_count_after_gltf_failures.value ||

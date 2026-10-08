@@ -36,17 +36,37 @@ public:
     /// failure returns AXM-TES-E-0001 / rep.tessellation.* without publishing a
     /// partial mesh or replacing the boundary with a bbox/creation-parameter mesh.
     /// Primitive tessellation applies only to unedited native primitives.
-    /// Stage 3 polyhedra require their current planar, straight-edge boundary.
+    /// Owned planar regions support straight-edge concave outlines and holes.
+    /// Owned parameter patches require a certified rectangular boundary on a
+    /// plane, four-pole bilinear tensor surface, or line-segment swept surface
+    /// (including rectangular trims). Tensor splines require degree one, equal
+    /// weights and unit clamped knots. A UV bbox alone does not certify a boundary.
+    /// General curved trimming, higher-order patches and derived surfaces outside
+    /// this subset fail rather than returning an enclosing rectangular mesh.
+    /// Triangle winding follows the owned outer loop; normals follow that winding.
+    /// Owned meshes weld exact positions only. Shading splits and UV seams may
+    /// retain duplicate vertices; this does not certify manifold connectivity.
+    /// Parameter patches cap subdivision at 256 per direction; native circular
+    /// subdivision caps at 4096 and native meshes at one million vertices.
+    /// Requests that cannot meet the budget within these limits fail. These
+    /// restricted checks do not provide general industrial accuracy certification.
     Result<MeshId> brep_to_mesh(BodyId body_id, const TessellationOptions& options);
-    /// 仅对指定壳上的拓扑面做面片三角化并焊接（工业验证：壳级网格/自交分析入口；不含其它壳的面）。
+    /// Tessellate and weld only faces owned by this shell, with the same support
+    /// restrictions as brep_to_mesh; a shell mesh does not certify a closed solid.
     Result<MeshId> brep_to_mesh_shell(BodyId body_id, ShellId shell_id, const TessellationOptions& options);
     // Local re-tessellation: dirty faces are recomputed; all other faces reuse
     // only a cache matching the current boundary. Publication is atomic as above.
     Result<MeshId> brep_to_mesh_local(BodyId body_id, std::span<const FaceId> dirty_faces, const TessellationOptions& options);
-    /// 创建 `MeshRep` 体，并把该网格记录的 `source_body` 指向新体，供后续 `brep_to_mesh` 嵌入返回同一网格。
+    /// Create a MeshRep body and associate the source mesh with it. Repeating
+    /// conversion of a mesh already associated with such a body returns that
+    /// same body, preserving the original body's embedded mesh. A MeshRep whose
+    /// embedded mesh is missing fails conversion instead of producing a bbox proxy.
     Result<BodyId> mesh_to_brep(MeshId mesh_id);
     Result<MeshId> implicit_to_mesh(ImplicitFieldId field_id, const TessellationOptions& options);
+    /// Failure of any member restores all conversion records, cache counters and
+    /// allocation state from this call; the failure diagnostic remains queryable.
     Result<std::vector<MeshId>> brep_to_mesh_batch(std::span<const BodyId> body_ids, const TessellationOptions& options);
+    /// Atomic batch conversion, including each source mesh's body association.
     Result<std::vector<BodyId>> mesh_to_brep_batch(std::span<const MeshId> mesh_ids);
     Result<std::uint64_t> mesh_vertex_count(MeshId mesh_id) const;
     Result<std::uint64_t> mesh_index_count(MeshId mesh_id) const;
@@ -58,6 +78,9 @@ public:
     Result<void> export_mesh_report_json(MeshId mesh_id, std::string_view path) const;
     /// 导出体级/面级三角化缓存计数（JSON），供 CI/回归归档与门禁。
     Result<void> export_tessellation_cache_stats_json(std::string_view path) const;
+    /// Verification uses temporary conversion records and preserves source mesh
+    /// ownership and cache identity. The report does not certify arbitrary BRep
+    /// fidelity: independent boundary/area/volume checks are still required.
     Result<RoundTripReport> verify_brep_mesh_round_trip(BodyId body_id, const TessellationOptions& options);
     Result<RoundTripReport> verify_mesh_brep_round_trip(MeshId mesh_id, const TessellationOptions& options);
     /// 将 `RoundTripReport`（含 `budget` 与 `tessellation_budget_digest`）导出为单行 JSON，供 CI/回归归档。

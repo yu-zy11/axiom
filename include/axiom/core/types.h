@@ -408,16 +408,25 @@ struct ProfileRef {
 };
 
 struct TessellationOptions {
+  /// Absolute geometric deviation in model units; must be finite, positive and
+  /// at most half Scalar's maximum (the derived bbox budget must remain finite).
+  /// Certified bilinear patches use a bound on triangle interiors, not only
+  /// vertex samples. Unsupported geometry or an exhausted mesh budget fails.
   Scalar chordal_error{0.1};
+  /// Angular deviation in degrees; must be finite and positive. Shading normals
+  /// at welded creases also depend on weld_shading_split_angle_deg below.
   Scalar angular_error{5.0};
   bool compute_normals{true};
   /// If true, attempt to generate per-vertex UVs for display/export.
   bool generate_texcoords{false};
   /// 焊接时若法向夹角大于该值则保留折边顶点（不合并索引）；`180` 表示仅按位置/UV 合并（与历史行为一致）。
   Scalar weld_shading_split_angle_deg{180.0};
-  /// 对张量积/派生参数域 patch：用 `SurfaceService`/张量主曲率估计加强细分（与 `chordal_error`/`angular_error` 叠合）。
+  /// Optional curvature refinement input (also part of cache identity). Certified
+  /// bilinear patches can satisfy the budget directly without a curvature query.
   bool use_principal_curvature_refinement{true};
-  /// 对 Bezier/BSpline/NURBS/Revolved/Swept/Offset 的 patch：用双线性单元中点与真实曲面的偏差迭代加密（0 关闭）；上限受实现 cap。
+  /// Optional refinement passes for supported parameter patches; 0 disables the
+  /// optional pass, not boundary validation or the required geometric budget.
+  /// Higher-order/derived patches outside the certified subset are rejected.
   int refine_patch_chordal_max_passes{3};
   /// 与 `generate_texcoords` 联用：输出曲面参数 `(u,v)` 而非归一化 patch `[0,1]`，便于多面拼接时在纹理空间保留 **UV seam**（焊接键含 UV 时不误合并）。
   bool uv_parametric_seam{false};

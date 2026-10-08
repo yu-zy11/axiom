@@ -501,6 +501,24 @@ prep隔离新增两输入网格暖缓存、固定CurveId域及四点无缓存poi
 | `AXM-TES-E-0003` | Warning | 三角化结果未满足目标误差 |
 | `AXM-TES-E-0004` | Warning | 使用近似曲面片替代精确曲面片 |
 
+### cycle-0086 / S5-TESSELLATION 稳定阶段与失败恢复
+
+本批没有新增错误码常量，继续复用 `kTesFailure = AXM-TES-E-0001`。阶段是失败类别，不能据此承诺每种底层根因有独立阶段；当前支持范围见 [API §7.3.2](../api/AxiomKernel_详细模块接口清单.md#732-stage-5-真实边界三角化与转换一致性cycle-0086--s5-tessellation)。
+
+| 失败类别 | Status / code | Issue.stage / 实体 |
+|---|---|---|
+| 真实环/曲线/参数/PCurve/支撑不一致；不支持的参数 patch；面误差不可达或发布前非有限/退化 | OperationFailed / AXM-TES-E-0001 | `rep.tessellation.face`；BodyId、ShellId、FaceId |
+| 原生网格误差/资源预算不可达或原生边界退化 | OperationFailed / AXM-TES-E-0001 | `rep.tessellation.budget`；BodyId |
+| MeshRep 缺嵌入网格；编辑原生解析体只剩代理壳，或 Stage 3 多面体失去平面支撑 | NotImplemented / AXM-TES-E-0001 | `rep.tessellation.support`；BodyId，按路径附 ShellId/FaceId |
+| owned 壳/面缺失或空；建模体缺当前 owned 边界 | OperationFailed / AXM-TES-E-0001 | `rep.tessellation.topology`；BodyId，按路径附 ShellId/FaceId |
+| 组装索引/规模/空结果或焊接后非有限/退化 | OperationFailed / AXM-TES-E-0001 | `rep.tessellation.assembly`；BodyId，按路径附 ShellId/FaceId |
+
+无效句柄/options 仍使用既有 CORE 前置码；`mesh_to_brep` 非有限/退化网格使用 `AXM-VAL-E-0002`，不新增 TES 阶段承诺。参数 patch 的高阶、不等权、非夹持、非矩形/孔裁剪等拒绝使用 `.face`，不能统一写成 `.support`。full/local/shell 失败无 value、无部分网格或缓存，不以 bbox/创建参数代替当前边界。两种 batch 的任一项失败、双向 round-trip 的成功或失败均恢复相应调用的 mesh/body、source_body 绑定、体/面缓存、Geo 曲线/曲面缓存、六项统计及 next_id，保留可查询诊断。重复转换仅对已由 `mesh_to_brep` 建立的 `MeshRep + brep_from_mesh` 关联幂等；round-trip 不证明任意 BRep 保真。
+
+新结果发布前有限/退化校验不替代已有 MeshRep 的 IO 政策：嵌入网格转换直接返回旧身份，严格 QA 仍为 `AXM-IO-E-0006 / io.export.mesh_strict_qa`；兼容模式仍允许既有退化三角形，非法索引/非有限坐标仍拒绝。glTF float32 超范围优先保留 `AXM-IO-E-0005 / io.export.gltf.mesh`，检查先于严格 QA。glTF 二进制 float32 NaN/Inf 即使 `run_validation=false` 仍物化前拒绝，使用 `InvalidInput / AXM-IO-E-0004 / io.import.gltf.validation`，IDs/mesh/cache 不变；关闭可选后验验证不关闭有限输入检查。
+
+真实测试、独立参考和未认证范围见 [验收 §1.13](../quality/AxiomKernel_测试与验收方案.md#113-cycle-0086--s5-tessellation-门禁与逐项证据)。本合同不扩张为侧车/批量文件事务，不认证 metadata/implicit 的物理量或 seam/法向拆分后的流形性。
+
 ## 7.13 `EVAL` 缓存与增量模块错误码
 
 | 错误码 | 严重级别 | 含义 |

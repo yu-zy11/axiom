@@ -147,6 +147,55 @@ Result<MeshId> tessellation_failure(detail::KernelState& state, std::string_view
     return error_result<MeshId>(status, state.create_diagnostic("BRep 转网格失败", {std::move(issue)}));
 }
 
+// Conversion checks use temporary records. Diagnostics survive a failed operation,
+// while model ownership, mesh stores, cache identities, counters and IDs do not.
+struct ConversionSnapshot {
+    detail::KernelState& state;
+    decltype(state.meshes) meshes;
+    decltype(state.bodies) bodies;
+    decltype(state.tessellation_cache) body_cache;
+    decltype(state.face_tessellation_cache) face_cache;
+    decltype(state.curve_eval_cache) curve_cache;
+    decltype(state.surface_eval_cache) surface_cache;
+    TessellationCacheStats stats;
+    std::uint64_t next_id;
+    bool keep{false};
+    explicit ConversionSnapshot(detail::KernelState& s)
+        : state(s), meshes(s.meshes), bodies(s.bodies), body_cache(s.tessellation_cache),
+          face_cache(s.face_tessellation_cache), curve_cache(s.curve_eval_cache),
+          surface_cache(s.surface_eval_cache), stats(s.tessellation_cache_stats), next_id(s.next_id) {}
+    ~ConversionSnapshot() {
+        if (keep) return;
+        state.meshes = std::move(meshes);
+        state.bodies = std::move(bodies);
+        state.tessellation_cache = std::move(body_cache);
+        state.face_tessellation_cache = std::move(face_cache);
+        state.curve_eval_cache = std::move(curve_cache);
+        state.surface_eval_cache = std::move(surface_cache);
+        state.tessellation_cache_stats = stats;
+        state.next_id = next_id;
+    }
+};
+
+bool finite_mesh(const detail::MeshRecord& mesh, bool normals) {
+    if (mesh.vertices.empty() || mesh.indices.empty() || detail::has_degenerate_triangles(mesh.vertices,mesh.indices)) return false;
+    for (const auto& p : mesh.vertices)
+        if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) return false;
+    for (std::size_t i = 0; i < mesh.indices.size(); i += 3) {
+        const auto& a = mesh.vertices[mesh.indices[i]];
+        const auto& b = mesh.vertices[mesh.indices[i+1]];
+        const auto& c = mesh.vertices[mesh.indices[i+2]];
+        const auto area = detail::norm(detail::cross(detail::subtract(b,a),detail::subtract(c,a)));
+        if (!std::isfinite(area) || !(area > 0.0)) return false;
+    }
+    if (normals && mesh.normals.size() != mesh.vertices.size()) return false;
+    for (const auto& n : mesh.normals)
+        if (!std::isfinite(n.x) || !std::isfinite(n.y) || !std::isfinite(n.z) || !(detail::norm(n) > 0.0)) return false;
+    for (const auto& uv : mesh.texcoords)
+        if (!std::isfinite(uv.x) || !std::isfinite(uv.y)) return false;
+    return true;
+}
+
 // All three owned-boundary entry points stage the face meshes before publication.
 // A failed later face cannot leave early-face records, cache keys or IDs behind.
 Result<MeshId> tessellate_owned_shells(detail::KernelState& state, BodyId body_id,
@@ -203,7 +252,7 @@ Result<MeshId> tessellate_owned_shells(detail::KernelState& state, BodyId body_i
             }
             if (!mesh) {
                 auto face_mesh = detail::tessellate_face(state, face_id, options);
-                if (face_mesh.vertices.empty() || face_mesh.indices.empty()) {
+                if (!finite_mesh(face_mesh,options.compute_normals)) {
                     return tessellation_failure(state, "rep.tessellation.face", "owned 面不能按当前支撑和边界三角化",
                                                  {body_id.value, shell_id.value, face_id.value});
                 }
@@ -230,7 +279,11 @@ Result<MeshId> tessellate_owned_shells(detail::KernelState& state, BodyId body_i
     if (assembled.vertices.empty() || assembled.indices.empty()) {
         return tessellation_failure(state, "rep.tessellation.assembly", "owned 面网格组装结果为空", {body_id.value});
     }
-    detail::weld_mesh_vertices(assembled, options);
+    // Preserve every certified boundary position; tolerance welding could move
+    // adjacent sheets farther than a requested chordal budget.
+    detail::weld_mesh_vertices_quantized(assembled,options.compute_normals,0.0,options.weld_shading_split_angle_deg);
+    if (!finite_mesh(assembled,options.compute_normals))
+        return tessellation_failure(state,"rep.tessellation.assembly","焊接后面网格退化或含不有限数据",{body_id.value});
     assembled.bbox = detail::mesh_bbox_from_vertices(assembled.vertices);
     assembled.tessellation_budget_digest = detail::tessellation_budget_digest_json(options);
     assembled.tessellation_strategy = strategy;
@@ -275,9 +328,12 @@ Result<MeshId> RepresentationConversionService::brep_to_mesh(BodyId body_id, con
     if (body.rep_kind == RepKind::MeshRep) {
         for (const auto& entry : state_->meshes) {
             if (entry.second.source_body.value == body_id.value) {
+                // An attached snapshot keeps its identity; callers such as IO
+                // apply their own strict or compatibility inspection contract.
                 return ok_result(MeshId{entry.first}, state_->create_diagnostic("已返回嵌入网格表示"));
             }
         }
+        return tessellation_failure(*state_,"rep.tessellation.support","MeshRep体缺少嵌入网格",{body_id.value},StatusCode::NotImplemented);
     }
     const auto cache_key = detail::tessellation_cache_key(*state_, body_id, options);
     const auto cache_it = state_->tessellation_cache.find(cache_key);
@@ -346,6 +402,8 @@ Result<MeshId> RepresentationConversionService::brep_to_mesh(BodyId body_id, con
             break;
         }
     }
+    if (!finite_mesh(mesh,options.compute_normals))
+        return tessellation_failure(*state_,"rep.tessellation.budget","三角化误差/资源预算不可达或原生边界退化",{body_id.value});
     mesh.tessellation_budget_digest = tess_budget_digest;
     mesh.source_body = body_id;
 
@@ -454,7 +512,7 @@ Result<BodyId> RepresentationConversionService::mesh_to_brep(MeshId mesh_id) {
             *state_, diag_codes::kCoreInvalidHandle,
             "网格转BRep失败：目标网格不存在", "网格转BRep失败");
     }
-    if (it->second.vertices.empty()) {
+    if (it->second.vertices.empty() || it->second.indices.empty()) {
         return detail::invalid_input_result<BodyId>(
             *state_, diag_codes::kCoreParameterOutOfRange,
             "网格转BRep失败：网格顶点为空", "网格转BRep失败");
@@ -474,12 +532,20 @@ Result<BodyId> RepresentationConversionService::mesh_to_brep(MeshId mesh_id) {
             *state_, StatusCode::DegenerateGeometry, diag_codes::kValDegenerateGeometry,
             "网格转BRep失败：网格包含退化三角形", "网格转BRep失败");
     }
+    if (!finite_mesh(it->second,false)) {
+        return detail::failed_result<BodyId>(*state_,StatusCode::DegenerateGeometry,diag_codes::kValDegenerateGeometry,
+                                            "网格转BRep失败：网格含不有限或退化数据","网格转BRep失败");
+    }
+    const auto existing = state_->bodies.find(it->second.source_body.value);
+    if (existing != state_->bodies.end() && existing->second.rep_kind == RepKind::MeshRep &&
+        existing->second.label == "brep_from_mesh")
+        return ok_result(BodyId{existing->first},state_->create_diagnostic("已返回当前网格的BRep表示"));
     const auto body_id = BodyId {state_->allocate_id()};
     detail::BodyRecord record;
     record.kind = detail::BodyKind::Imported;
     record.rep_kind = RepKind::MeshRep;
     record.label = "brep_from_mesh";
-    record.bbox = detail::is_valid_bbox(it->second.bbox) ? it->second.bbox : detail::mesh_bbox_from_vertices(it->second.vertices);
+    record.bbox = detail::mesh_bbox_from_vertices(it->second.vertices);
     state_->bodies.emplace(body_id.value, record);
     // 将网格记录关联到新建的 MeshRep 体：`brep_to_mesh` 可优先返回同一网格，避免占位体误走 bbox 代理路径。
     auto mesh_rec_it = state_->meshes.find(mesh_id.value);
@@ -502,6 +568,9 @@ Result<MeshId> RepresentationConversionService::implicit_to_mesh(ImplicitFieldId
     }
 
     const auto extent = std::max(options.chordal_error, std::numeric_limits<Scalar>::epsilon()) * 10.0;
+    if (!std::isfinite(extent))
+        return detail::invalid_input_result<MeshId>(*state_,diag_codes::kCoreParameterOutOfRange,
+                                                     "隐式体转网格失败：误差参数超出有限坐标范围","隐式体转网格失败");
     const auto id = MeshId {state_->allocate_id()};
     detail::MeshRecord mesh;
     mesh.source_body = BodyId {0};
@@ -528,6 +597,7 @@ Result<std::vector<MeshId>> RepresentationConversionService::brep_to_mesh_batch(
             *state_, diag_codes::kCoreParameterOutOfRange,
             "批量 BRep 转网格失败：输入体集合为空", "批量 BRep 转网格失败");
     }
+    ConversionSnapshot snapshot(*state_);
     std::vector<MeshId> outputs;
     outputs.reserve(body_ids.size());
     for (const auto body_id : body_ids) {
@@ -537,6 +607,7 @@ Result<std::vector<MeshId>> RepresentationConversionService::brep_to_mesh_batch(
         }
         outputs.push_back(*converted.value);
     }
+    snapshot.keep = true;
     return ok_result(std::move(outputs), state_->create_diagnostic("已完成批量 BRep 转网格"));
 }
 
@@ -546,6 +617,7 @@ Result<std::vector<BodyId>> RepresentationConversionService::mesh_to_brep_batch(
             *state_, diag_codes::kCoreParameterOutOfRange,
             "批量网格转BRep失败：输入网格集合为空", "批量网格转BRep失败");
     }
+    ConversionSnapshot snapshot(*state_);
     std::vector<BodyId> outputs;
     outputs.reserve(mesh_ids.size());
     for (const auto mesh_id : mesh_ids) {
@@ -555,6 +627,7 @@ Result<std::vector<BodyId>> RepresentationConversionService::mesh_to_brep_batch(
         }
         outputs.push_back(*converted.value);
     }
+    snapshot.keep = true;
     return ok_result(std::move(outputs), state_->create_diagnostic("已完成批量网格转BRep"));
 }
 
@@ -856,6 +929,7 @@ Result<RoundTripReport> RepresentationConversionService::verify_brep_mesh_round_
             "round-trip 验证失败：三角化误差参数必须为正数", "round-trip 验证失败");
     }
 
+    ConversionSnapshot snapshot(*state_);
     const auto mesh_res = brep_to_mesh(body_id, options);
     if (mesh_res.status != StatusCode::Ok || !mesh_res.value.has_value()) {
         return error_result<RoundTripReport>(mesh_res.status, mesh_res.diagnostic_id);
@@ -1035,6 +1109,7 @@ Result<RoundTripReport> RepresentationConversionService::verify_mesh_brep_round_
             "round-trip 验证失败：三角化误差参数必须为正数", "round-trip 验证失败");
     }
 
+    ConversionSnapshot snapshot(*state_);
     const auto brep_res = mesh_to_brep(mesh_id);
     if (brep_res.status != StatusCode::Ok || !brep_res.value.has_value()) {
         return error_result<RoundTripReport>(brep_res.status, brep_res.diagnostic_id);

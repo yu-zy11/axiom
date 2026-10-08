@@ -6,6 +6,7 @@
 #include <fstream>
 #include <iostream>
 #include <locale>
+#include <limits>
 #include <sstream>
 #include <vector>
 
@@ -25,6 +26,478 @@ bool has_issue_code(const axiom::DiagnosticReport& report, std::string_view code
         }
     }
     return false;
+}
+
+// Public OBJ triangles are the reference data: no private mesh record or
+// production mass integrator participates in the independent calculations.
+struct ReferenceObj {
+    std::vector<axiom::Point3> vertices;
+    std::vector<std::array<std::size_t,3>> triangles;
+};
+
+bool read_reference_obj(axiom::Kernel& kernel, axiom::BodyId body, ReferenceObj& mesh) {
+    const auto path=std::filesystem::temp_directory_path()/
+        ("axiom_s5_boundary_"+std::to_string(body.value)+".obj");
+    if (kernel.io().export_obj(body,path.string(),{}).status!=axiom::StatusCode::Ok) return false;
+    std::ifstream input{path};
+    input.imbue(std::locale::classic());
+    std::string line;
+    bool valid=true;
+    while (std::getline(input,line)) {
+        std::istringstream record{line};
+        record.imbue(std::locale::classic());
+        std::string kind;
+        record >> kind;
+        if (kind=="v") {
+            axiom::Point3 p{};
+            if (!(record >> p.x >> p.y >> p.z) || !std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) {
+                valid=false; break;
+            }
+            mesh.vertices.push_back(p);
+        } else if (kind=="f") {
+            std::array<std::size_t,3> face{};
+            if (!(record >> face[0] >> face[1] >> face[2]) ||
+                std::any_of(face.begin(),face.end(),[&](std::size_t id) { return id==0 || id>mesh.vertices.size(); })) {
+                valid=false; break;
+            }
+            for (auto& id : face) --id;
+            mesh.triangles.push_back(face);
+        }
+    }
+    input.close();
+    std::filesystem::remove(path);
+    return valid && !mesh.vertices.empty() && !mesh.triangles.empty();
+}
+
+bool stage5_native_boundary_reference_regression() {
+    axiom::Kernel kernel;
+    const long double pi=std::acos(-1.0L);
+    const double cone_radius=4*std::tan(static_cast<double>(pi)/6);
+    const std::array bodies{kernel.primitives().sphere({0,0,0},2),
+        kernel.primitives().cylinder({0,0,0},{0,0,1},2,4),
+        kernel.primitives().cone({0,0,0},{0,0,1},static_cast<double>(pi)/6,4),
+        kernel.primitives().torus({0,0,0},{0,0,1},2,.5),kernel.primitives().box({0,0,0},2,3,4)};
+    const std::array<long double,5> expected_volume{32*pi/3,16*pi,
+        pi*cone_radius*cone_radius*4/3,pi*pi,24};
+    const std::array<long double,5> expected_area{16*pi,24*pi,
+        pi*cone_radius*(cone_radius+std::hypot(cone_radius,4)),4*pi*pi,52};
+    for (std::size_t kind=0; kind<bodies.size(); ++kind) {
+        const auto fail=[&](int line) {
+            std::cerr << "Stage 5 native boundary kind=" << kind << " line=" << line << '\n';
+            return false;
+        };
+        if (!bodies[kind].value) return fail(__LINE__);
+        const auto body=*bodies[kind].value;
+        const auto converted=kernel.convert().brep_to_mesh(body,{});
+        if (!converted.value) return fail(__LINE__);
+        const auto report=kernel.convert().inspect_mesh(*converted.value);
+        ReferenceObj mesh;
+        if (!report.value || report.value->has_degenerate_triangles || report.value->has_out_of_range_indices ||
+            !read_reference_obj(kernel,body,mesh)) return fail(__LINE__);
+        long double volume=0, area=0;
+        for (const auto& face : mesh.triangles) {
+            const auto& a=mesh.vertices[face[0]];
+            const auto& b=mesh.vertices[face[1]];
+            const auto& c=mesh.vertices[face[2]];
+            const long double ux=b.x-a.x, uy=b.y-a.y, uz=b.z-a.z;
+            const long double vx=c.x-a.x, vy=c.y-a.y, vz=c.z-a.z;
+            const long double nx=uy*vz-uz*vy, ny=uz*vx-ux*vz, nz=ux*vy-uy*vx;
+            const long double length=std::sqrt(nx*nx+ny*ny+nz*nz);
+            if (!(length>1e-14L)) return fail(__LINE__);
+            area+=length/2;
+            volume+=(a.x*(static_cast<long double>(b.y)*c.z-static_cast<long double>(b.z)*c.y)+
+                a.y*(static_cast<long double>(b.z)*c.x-static_cast<long double>(b.x)*c.z)+
+                a.z*(static_cast<long double>(b.x)*c.y-static_cast<long double>(b.y)*c.x))/6;
+            const long double x=(static_cast<long double>(a.x)+b.x+c.x)/3;
+            const long double y=(static_cast<long double>(a.y)+b.y+c.y)/3;
+            const long double z=(static_cast<long double>(a.z)+b.z+c.z)/3;
+            const long double radial=std::hypot(x,y);
+            long double rx=0, ry=0, rz=0, deviation=0;
+            const bool cap=kind==1 || kind==2;
+            if (kind==4) {
+                if (std::abs(a.x-b.x)<1e-12 && std::abs(a.x-c.x)<1e-12 &&
+                    (std::abs(x)<1e-12 || std::abs(x-2)<1e-12)) rx=x<1 ? -1 : 1;
+                else if (std::abs(a.y-b.y)<1e-12 && std::abs(a.y-c.y)<1e-12 &&
+                    (std::abs(y)<1e-12 || std::abs(y-3)<1e-12)) ry=y<1.5 ? -1 : 1;
+                else if (std::abs(a.z-b.z)<1e-12 && std::abs(a.z-c.z)<1e-12 &&
+                    (std::abs(z)<1e-12 || std::abs(z-4)<1e-12)) rz=z<2 ? -1 : 1;
+                else return fail(__LINE__);
+            } else if (cap && std::abs(a.z-b.z)<1e-12 && std::abs(a.z-c.z)<1e-12) {
+                rz=z<2 ? -1 : 1;
+            } else if (kind==0) {
+                rx=x; ry=y; rz=z;
+                deviation=std::abs(std::sqrt(x*x+y*y+z*z)-2);
+            } else if (kind==1) {
+                rx=x; ry=y;
+                deviation=std::abs(radial-2);
+            } else if (kind==2) {
+                rx=x/radial; ry=y/radial; rz=-cone_radius/4;
+                deviation=std::abs(radial-cone_radius*z/4)/std::sqrt(1+cone_radius*cone_radius/16);
+            } else {
+                rx=(radial-2)*x/radial; ry=(radial-2)*y/radial; rz=z;
+                deviation=std::abs(std::hypot(radial-2,z)-.5L);
+            }
+            const long double normal_length=std::sqrt(rx*rx+ry*ry+rz*rz);
+            if (!(normal_length>0) || (nx*rx+ny*ry+nz*rz)/(length*normal_length)<
+                std::cos(5*pi/180)-1e-9L || deviation>.1L+1e-10L) return fail(__LINE__);
+        }
+        // The signed integral catches inward winding; the analytic formulas
+        // distinguish the physical surface from any bbox replacement geometry.
+        if (!(volume>0) || std::abs(volume-expected_volume[kind])>expected_volume[kind]*.01L ||
+            std::abs(area-expected_area[kind])>expected_area[kind]*.01L) {
+            std::cerr << "native integral volume=" << volume << " expected_volume=" << expected_volume[kind]
+                      << " area=" << area << " expected_area=" << expected_area[kind] << '\n';
+            return fail(__LINE__);
+        }
+        if (kind==4 && (std::abs(volume-24)>1e-10L || std::abs(area-52)>1e-10L)) return fail(__LINE__);
+        if (kind==4) continue;
+        const auto before=kernel.runtime_store_counts();
+        const auto next=kernel.next_object_id();
+        const auto cache=kernel.tessellation_cache_stats();
+        const auto exhausted=kernel.convert().brep_to_mesh(body,{1e-12,1e-6,true});
+        const auto diagnostic=kernel.diagnostics().get(exhausted.diagnostic_id);
+        const auto after=kernel.runtime_store_counts();
+        const auto cache_after=kernel.tessellation_cache_stats();
+        if (exhausted.status==axiom::StatusCode::Ok || exhausted.value || !diagnostic.value ||
+            std::none_of(diagnostic.value->issues.begin(),diagnostic.value->issues.end(),[](const axiom::Issue& issue) {
+                return issue.code==axiom::diag_codes::kTesFailure && issue.stage=="rep.tessellation.budget";
+            }) || !before.value || !after.value || !cache.value || !cache_after.value ||
+            kernel.next_object_id().value!=next.value || before.value->mesh_records!=after.value->mesh_records ||
+            before.value->tessellation_cache_entries!=after.value->tessellation_cache_entries ||
+            before.value->face_tessellation_cache_entries!=after.value->face_tessellation_cache_entries ||
+            cache.value->body_cache_hits!=cache_after.value->body_cache_hits ||
+            cache.value->body_cache_misses!=cache_after.value->body_cache_misses) return fail(__LINE__);
+    }
+    return true;
+}
+
+bool stage5_bilinear_boundary_regression() {
+    axiom::Kernel kernel;
+    const auto fail=[](int line) {
+        std::cerr << "Stage 5 bilinear boundary line=" << line << '\n';
+        return false;
+    };
+    const std::array<axiom::Point3,4> poles{{{0,0,0},{0,1,0},{1,0,0},{1,1,1}}};
+    const auto surface=kernel.surfaces().make_bezier(poles);
+    const auto trimmed=surface.value ? kernel.surfaces().make_trimmed(*surface.value,.2,.8,.2,.8)
+        : axiom::Result<axiom::SurfaceId>{};
+    if (!surface.value || !trimmed.value) return fail(__LINE__);
+    struct Patch { axiom::BodyId body; axiom::FaceId face; axiom::ShellId shell; };
+    const auto make_patch=[&](axiom::SurfaceId support, std::vector<axiom::Point2> uv,
+                              bool pcurves, bool wrong_pcurve=false) {
+        Patch out{};
+        auto tx=kernel.topology().begin_transaction();
+        std::vector<axiom::VertexId> vertices;
+        for (const auto& p : uv) {
+            // z=xy is the independent polynomial definition, not SurfaceService.
+            const auto vertex=tx.create_vertex({p.x,p.y,p.x*p.y});
+            if (!vertex.value) return out;
+            vertices.push_back(*vertex.value);
+        }
+        std::vector<axiom::CoedgeId> coedges;
+        for (std::size_t i=0; i<uv.size(); ++i) {
+            const auto j=(i+1)%uv.size();
+            const auto curve=kernel.curves().make_line_segment({uv[i].x,uv[i].y,uv[i].x*uv[i].y},
+                {uv[j].x,uv[j].y,uv[j].x*uv[j].y});
+            if (!curve.value) return out;
+            const auto edge=tx.create_edge(*curve.value,vertices[i],vertices[j]);
+            if (!edge.value) return out;
+            const auto coedge=tx.create_coedge(*edge.value,false);
+            if (!coedge.value) return out;
+            if (pcurves) {
+                auto start=uv[i];
+                if (wrong_pcurve && i==0) start.x+=.1;
+                const auto pc=kernel.pcurves().make_polyline(std::array{start,uv[j]});
+                if (!pc.value || tx.set_coedge_pcurve(*coedge.value,*pc.value).status!=axiom::StatusCode::Ok) return out;
+            }
+            coedges.push_back(*coedge.value);
+        }
+        const auto loop=tx.create_loop(coedges);
+        if (!loop.value) return out;
+        const auto face=tx.create_face(support,*loop.value,{});
+        if (!face.value) return out;
+        const auto shell=tx.create_shell(std::array{*face.value});
+        if (!shell.value) return out;
+        const auto body=tx.create_body(std::array{*shell.value});
+        if (!body.value || tx.commit().status!=axiom::StatusCode::Ok) return out;
+        return Patch{*body.value,*face.value,*shell.value};
+    };
+    axiom::BSplineSurfaceDesc spline_desc;
+    spline_desc.poles.assign(poles.begin(),poles.end());
+    spline_desc.degree_u=1;
+    spline_desc.degree_v=1;
+    const auto spline=kernel.surfaces().make_bspline(spline_desc);
+    axiom::NURBSSurfaceDesc nurbs_desc;
+    nurbs_desc.poles=spline_desc.poles;
+    nurbs_desc.weights={1,1,1,1};
+    nurbs_desc.degree_u=1;
+    nurbs_desc.degree_v=1;
+    const auto nurbs=kernel.surfaces().make_nurbs(nurbs_desc);
+    nurbs_desc.weights={1,2,1,1};
+    const auto unequal=kernel.surfaces().make_nurbs(nurbs_desc);
+    spline_desc.knots_u={2,2,5,5};
+    const auto custom_domain=kernel.surfaces().make_bspline(spline_desc);
+    // The public factory affine-normalizes {2,2,5,5} to unit-clamped knots.
+    // This distinct vector retains its non-clamped ends after normalization.
+    spline_desc.knots_u={-1,0,1,2};
+    const auto unclamped=kernel.surfaces().make_bspline(spline_desc);
+    std::vector<axiom::Point3> high_order_poles;
+    for (const double u : {0.,.5,1.}) for (const double v : {0.,.5,1.}) high_order_poles.push_back({u,v,u*v});
+    const auto high_order=kernel.surfaces().make_bezier(high_order_poles);
+    if (!spline.value || !nurbs.value || !unequal.value || !custom_domain.value ||
+        !unclamped.value || !high_order.value) return fail(__LINE__);
+    const auto full=make_patch(*surface.value,{{0,0},{1,0},{1,1},{0,1}},false);
+    const auto spline_patch=make_patch(*spline.value,{{0,0},{1,0},{1,1},{0,1}},true);
+    const auto nurbs_patch=make_patch(*nurbs.value,{{0,0},{1,0},{1,1},{0,1}},true);
+    const auto unequal_patch=make_patch(*unequal.value,{{0,0},{1,0},{1,1},{0,1}},true);
+    const auto custom_patch=make_patch(*custom_domain.value,{{0,0},{1,0},{1,1},{0,1}},true);
+    const auto unclamped_patch=make_patch(*unclamped.value,{{0,0},{1,0},{1,1},{0,1}},true);
+    const auto high_order_patch=make_patch(*high_order.value,{{0,0},{1,0},{1,1},{0,1}},true);
+    const auto trim=make_patch(*trimmed.value,{{.2,.2},{.8,.2},{.8,.8},{.2,.8}},true);
+    const auto reversed=make_patch(*surface.value,{{0,1},{1,1},{1,0},{0,0}},true);
+    const auto wrong=make_patch(*surface.value,{{0,0},{1,0},{1,1},{0,1}},true,true);
+    const auto triangle=make_patch(*surface.value,{{0,0},{1,0},{0,1}},true);
+    const std::array<axiom::Point2,3> triangular_uv{{{0,0},{1,0},{0,1}}};
+    const auto polygon_trim=kernel.surfaces().make_trimmed_polygon(*surface.value,0,1,0,1,triangular_uv);
+    const std::array<axiom::Point2,4> outer_uv{{{0,0},{1,0},{1,1},{0,1}}};
+    const auto hole_trim=kernel.surfaces().make_trimmed_polygon_with_holes(*surface.value,0,1,0,1,outer_uv,
+        {{{.3,.3},{.7,.3},{.7,.7},{.3,.7}}});
+    if (!polygon_trim.value || !hole_trim.value) return fail(__LINE__);
+    const auto trimmed_triangle=make_patch(*polygon_trim.value,{{0,0},{1,0},{0,1}},true);
+    const auto trimmed_hole=make_patch(*hole_trim.value,{{0,0},{1,0},{1,1},{0,1}},true);
+    if (full.body.value==0 || trim.body.value==0 || reversed.body.value==0 ||
+        wrong.body.value==0 || triangle.body.value==0 || trimmed_triangle.body.value==0 ||
+        trimmed_hole.body.value==0 || spline_patch.body.value==0 || nurbs_patch.body.value==0 ||
+        unequal_patch.body.value==0 || custom_patch.body.value==0 || unclamped_patch.body.value==0 ||
+        high_order_patch.body.value==0) return fail(__LINE__);
+    const auto check_patch=[&](Patch patch, long double low, long double high, int winding) {
+        const auto converted=kernel.convert().brep_to_mesh(patch.body,{});
+        if (!converted.value || kernel.convert().brep_to_mesh(patch.body,{}).value!=converted.value) return fail(__LINE__);
+        const auto report=kernel.convert().inspect_mesh(*converted.value);
+        ReferenceObj mesh;
+        if (!report.value || report.value->has_degenerate_triangles || report.value->has_out_of_range_indices ||
+            !read_reference_obj(kernel,patch.body,mesh)) return fail(__LINE__);
+        long double area=0, max_deviation=0;
+        for (const auto& p : mesh.vertices)
+            if (p.x<low-1e-9L || p.x>high+1e-9L || p.y<low-1e-9L || p.y>high+1e-9L ||
+                std::abs(static_cast<long double>(p.z)-static_cast<long double>(p.x)*p.y)>1e-9L) return fail(__LINE__);
+        for (const auto& face : mesh.triangles) {
+            const auto& a=mesh.vertices[face[0]];
+            const auto& b=mesh.vertices[face[1]];
+            const auto& c=mesh.vertices[face[2]];
+            const long double ux=b.x-a.x, uy=b.y-a.y, uz=b.z-a.z;
+            const long double vx=c.x-a.x, vy=c.y-a.y, vz=c.z-a.z;
+            const long double nx=uy*vz-uz*vy, ny=uz*vx-ux*vz, nz=ux*vy-uy*vx;
+            const long double length=std::sqrt(nx*nx+ny*ny+nz*nz);
+            if (!(length>1e-14L)) return fail(__LINE__);
+            area+=length/2;
+            const long double x=(static_cast<long double>(a.x)+b.x+c.x)/3;
+            const long double y=(static_cast<long double>(a.y)+b.y+c.y)/3;
+            const long double z=(static_cast<long double>(a.z)+b.z+c.z)/3;
+            max_deviation=std::max(max_deviation,std::abs(z-x*y));
+            for (const auto id : face) {
+                const auto& p=mesh.vertices[id];
+                const long double dot=winding*(-p.y*nx-p.x*ny+nz)/
+                    (length*std::sqrt(1+static_cast<long double>(p.x)*p.x+static_cast<long double>(p.y)*p.y));
+                if (dot<std::cos(5*std::acos(-1.0L)/180)-1e-9L) return fail(__LINE__);
+            }
+        }
+        // Independent composite Simpson integral of sqrt(1+x²+y²); no kernel
+        // quadrature, bbox volume, or production triangle integration is used.
+        constexpr int intervals=64;
+        const long double step=(high-low)/intervals;
+        long double expected=0;
+        for (int i=0; i<=intervals; ++i) for (int j=0; j<=intervals; ++j) {
+            const long double x=low+i*step, y=low+j*step;
+            const int wi=(i==0 || i==intervals) ? 1 : i%2 ? 4 : 2;
+            const int wj=(j==0 || j==intervals) ? 1 : j%2 ? 4 : 2;
+            expected+=wi*wj*std::sqrt(1+x*x+y*y);
+        }
+        expected*=step*step/9;
+        // This is an open display surface, not a certified closed solid.
+        const auto mass=kernel.query().mass_properties(patch.body);
+        if (max_deviation>.1L+1e-10L || std::abs(area-expected)>=.002L || mass.value) {
+            std::cerr << "bilinear patch body=" << patch.body.value << " area=" << area
+                      << " expected_area=" << expected << " deviation=" << max_deviation
+                      << " mass_value=" << mass.value.has_value() << '\n';
+            return fail(__LINE__);
+        }
+        return true;
+    };
+    if (!check_patch(full,0,1,1) || !check_patch(spline_patch,0,1,1) || !check_patch(nurbs_patch,0,1,1) ||
+        !check_patch(custom_patch,0,1,1) || !check_patch(trim,.2,.8,1) ||
+        !check_patch(reversed,0,1,-1)) return fail(__LINE__);
+    const auto fingerprint=[&] {
+        const auto r=kernel.runtime_store_counts();
+        const auto c=kernel.tessellation_cache_stats();
+        if (!r.value || !c.value) return std::array<std::uint64_t,13>{};
+        return std::array{kernel.next_object_id().value.value_or(0),kernel.object_count_total().value.value_or(0),
+            r.value->mesh_records,kernel.body_count().value.value_or(0),r.value->tessellation_cache_entries,
+            r.value->face_tessellation_cache_entries,r.value->surface_eval_cache_entries,
+            c.value->body_cache_hits,c.value->body_cache_misses,c.value->body_cache_stale_evictions,
+            c.value->face_cache_hits,c.value->face_cache_misses,c.value->face_cache_stale_evictions};
+    };
+    const auto rejects=[&](const axiom::Result<axiom::MeshId>& result) {
+        const auto diagnostic=kernel.diagnostics().get(result.diagnostic_id);
+        return result.status!=axiom::StatusCode::Ok && !result.value && diagnostic.value &&
+            std::any_of(diagnostic.value->issues.begin(),diagnostic.value->issues.end(),[](const axiom::Issue& issue) {
+                return issue.code==axiom::diag_codes::kTesFailure && issue.stage=="rep.tessellation.face";
+            });
+    };
+    const std::array unsupported{wrong,triangle,trimmed_triangle,trimmed_hole,unequal_patch,unclamped_patch,high_order_patch};
+    for (std::size_t unsupported_kind=0; unsupported_kind<unsupported.size(); ++unsupported_kind) {
+        const auto patch=unsupported[unsupported_kind];
+        const auto before=fingerprint();
+        for (int operation=0; operation<3; ++operation) {
+            const auto result=operation==0 ? kernel.convert().brep_to_mesh(patch.body,{}) :
+                operation==1 ? kernel.convert().brep_to_mesh_local(patch.body,std::array{patch.face},{}) :
+                               kernel.convert().brep_to_mesh_shell(patch.body,patch.shell,{});
+            const auto after=fingerprint();
+            if (!rejects(result) || after!=before) {
+                std::cerr << "bilinear unsupported kind=" << unsupported_kind
+                          << " body=" << patch.body.value << " face=" << patch.face.value
+                          << " operation=" << operation << " status=" << static_cast<int>(result.status)
+                          << " value=" << result.value.has_value() << '\n';
+                const auto diagnostic=kernel.diagnostics().get(result.diagnostic_id);
+                if (diagnostic.value) for (const auto& issue : diagnostic.value->issues)
+                    std::cerr << issue.stage << ' ' << issue.code << ' ' << issue.message << '\n';
+                for (std::size_t i=0; i<after.size(); ++i)
+                    if (after[i]!=before[i])
+                        std::cerr << "rejection fingerprint index=" << i << " before=" << before[i]
+                                  << " after=" << after[i] << '\n';
+                return fail(__LINE__);
+            }
+        }
+    }
+    const auto original=kernel.convert().brep_to_mesh(full.body,{});
+    if (!original.value) return fail(__LINE__);
+    const auto roundtrip_before=fingerprint();
+    const auto success=kernel.convert().verify_brep_mesh_round_trip(full.body,{});
+    const auto mesh_success=kernel.convert().verify_mesh_brep_round_trip(*original.value,{});
+    if (!success.value || !success.value->passed || !mesh_success.value || !mesh_success.value->passed ||
+        fingerprint()!=roundtrip_before || kernel.convert().brep_to_mesh(full.body,{}).value!=original.value) return fail(__LINE__);
+    const auto before=fingerprint();
+    const auto mesh_batch=kernel.convert().mesh_to_brep_batch(
+        std::array{*original.value,axiom::MeshId{std::numeric_limits<std::uint64_t>::max()}});
+    if (mesh_batch.status==axiom::StatusCode::Ok || mesh_batch.value || fingerprint()!=before) return fail(__LINE__);
+    const auto batch=kernel.convert().brep_to_mesh_batch(std::array{full.body,triangle.body},{.073,11,true});
+    const auto roundtrip=kernel.convert().verify_brep_mesh_round_trip(triangle.body,{});
+    if (batch.status==axiom::StatusCode::Ok || batch.value || roundtrip.status==axiom::StatusCode::Ok ||
+        roundtrip.value || fingerprint()!=before ||
+        !rejects(kernel.convert().brep_to_mesh(full.body,{1e-12,5,true})) || fingerprint()!=before) return fail(__LINE__);
+    for (const auto invalid : {axiom::TessellationOptions{std::numeric_limits<double>::infinity(),5,true},
+                              axiom::TessellationOptions{.1,std::numeric_limits<double>::quiet_NaN(),true}}) {
+        const auto result=kernel.convert().brep_to_mesh(full.body,invalid);
+        const auto diagnostic=kernel.diagnostics().get(result.diagnostic_id);
+        if (result.status!=axiom::StatusCode::InvalidInput || result.value || !diagnostic.value ||
+            !has_issue_code(*diagnostic.value,axiom::diag_codes::kCoreParameterOutOfRange) || fingerprint()!=before) return fail(__LINE__);
+    }
+    const auto embedded=kernel.convert().mesh_to_brep(*original.value);
+    if (!embedded.value) return fail(__LINE__);
+    const auto rebound_before=fingerprint();
+    const auto repeated=kernel.convert().mesh_to_brep(*original.value);
+    const auto duplicates=kernel.convert().mesh_to_brep_batch(std::array{*original.value,*original.value});
+    if (repeated.value!=embedded.value || !duplicates.value || duplicates.value->size()!=2 ||
+        duplicates.value->front()!=*embedded.value || duplicates.value->back()!=*embedded.value ||
+        fingerprint()!=rebound_before || kernel.convert().brep_to_mesh(*embedded.value,{}).value!=original.value) return fail(__LINE__);
+    const auto embedded_report=kernel.convert().inspect_mesh(*original.value);
+    if (!embedded_report.value || embedded_report.value->tessellation_strategy!="owned_topo_welded" ||
+        kernel.query().mass_properties(*embedded.value).value) return fail(__LINE__);
+    // Clearing the public mesh store leaves a MeshRep handle without its actual
+    // boundary. It must remain that representation and fail, never create a bbox.
+    axiom::Kernel orphan_kernel;
+    const auto orphan_source=orphan_kernel.primitives().box({0,0,0},2,3,4);
+    if (!orphan_source.value) return fail(__LINE__);
+    const auto orphan_mesh=orphan_kernel.convert().brep_to_mesh(*orphan_source.value,{});
+    if (!orphan_mesh.value) return fail(__LINE__);
+    const auto orphan_body=orphan_kernel.convert().mesh_to_brep(*orphan_mesh.value);
+    if (!orphan_body.value || orphan_kernel.clear_mesh_store().status!=axiom::StatusCode::Ok) return fail(__LINE__);
+    const auto orphan_before=orphan_kernel.runtime_store_counts();
+    const auto orphan_next=orphan_kernel.next_object_id();
+    const auto orphan_stats=orphan_kernel.tessellation_cache_stats();
+    const auto missing=orphan_kernel.convert().brep_to_mesh(*orphan_body.value,{});
+    const auto missing_diagnostic=orphan_kernel.diagnostics().get(missing.diagnostic_id);
+    const auto orphan_after=orphan_kernel.runtime_store_counts();
+    const auto orphan_stats_after=orphan_kernel.tessellation_cache_stats();
+    const auto orphan_kind=orphan_kernel.representation().kind_of_body(*orphan_body.value);
+    if (missing.status==axiom::StatusCode::Ok || missing.value || !missing_diagnostic.value ||
+        std::none_of(missing_diagnostic.value->issues.begin(),missing_diagnostic.value->issues.end(),[](const axiom::Issue& issue) {
+            return issue.code==axiom::diag_codes::kTesFailure && issue.stage=="rep.tessellation.support";
+        }) || !orphan_before.value || !orphan_after.value || !orphan_stats.value || !orphan_stats_after.value ||
+        !orphan_kind.value || *orphan_kind.value!=axiom::RepKind::MeshRep ||
+        orphan_kernel.next_object_id().value!=orphan_next.value ||
+        orphan_before.value->mesh_records!=orphan_after.value->mesh_records ||
+        orphan_before.value->tessellation_cache_entries!=orphan_after.value->tessellation_cache_entries ||
+        orphan_before.value->face_tessellation_cache_entries!=orphan_after.value->face_tessellation_cache_entries ||
+        orphan_stats.value->body_cache_hits!=orphan_stats_after.value->body_cache_hits ||
+        orphan_stats.value->body_cache_misses!=orphan_stats_after.value->body_cache_misses ||
+        orphan_stats.value->body_cache_stale_evictions!=orphan_stats_after.value->body_cache_stale_evictions ||
+        orphan_stats.value->face_cache_hits!=orphan_stats_after.value->face_cache_hits ||
+        orphan_stats.value->face_cache_misses!=orphan_stats_after.value->face_cache_misses ||
+        orphan_stats.value->face_cache_stale_evictions!=orphan_stats_after.value->face_cache_stale_evictions) return fail(__LINE__);
+    return true;
+}
+
+
+bool stage5_planar_normal_boundary_regression() {
+    axiom::Kernel kernel;
+    if (kernel.set_linear_tolerance(2e-5).status!=axiom::StatusCode::Ok) return false;
+    const auto plane=kernel.surfaces().make_plane({0,0,0},{0,0,1});
+    if (!plane.value) return false;
+    // Each vertex is within 1e-5 of plane Z=0 and below chordal_error/4.
+    // Its short edge exceeds linear tolerance, while the triangle normal is
+    // tilted atan(.2)=11.31 deg. A 30 deg budget succeeds; a 5 deg budget fails.
+    const std::array<axiom::Point3,4> corners{{{0,0,-1e-5},{1,0,-1e-5},{1,1e-4,1e-5},{0,1e-4,1e-5}}};
+    auto tx=kernel.topology().begin_transaction();
+    std::array<axiom::VertexId,4> vertices{};
+    std::array<axiom::CoedgeId,4> coedges{};
+    for (std::size_t i=0; i<corners.size(); ++i) {
+        const auto v=tx.create_vertex(corners[i]);
+        if (!v.value) return false;
+        vertices[i]=*v.value;
+    }
+    for (std::size_t i=0; i<corners.size(); ++i) {
+        const auto j=(i+1)%corners.size();
+        const auto line=kernel.curves().make_line_segment(corners[i],corners[j]);
+        if (!line.value) return false;
+        const auto edge=tx.create_edge(*line.value,vertices[i],vertices[j]);
+        if (!edge.value) return false;
+        const auto coedge=tx.create_coedge(*edge.value,false);
+        if (!coedge.value) return false;
+        coedges[i]=*coedge.value;
+    }
+    const auto loop=tx.create_loop(coedges);
+    if (!loop.value) return false;
+    const auto face=tx.create_face(*plane.value,*loop.value,{});
+    if (!face.value) return false;
+    const auto shell=tx.create_shell(std::array{*face.value});
+    if (!shell.value) return false;
+    const auto body=tx.create_body(std::array{*shell.value});
+    if (!body.value || tx.commit().status!=axiom::StatusCode::Ok) return false;
+    const auto loose=kernel.convert().brep_to_mesh(*body.value,{.1,30,true});
+    if (!loose.value || !kernel.convert().inspect_mesh(*loose.value).value) return false;
+    const auto before=kernel.runtime_store_counts();
+    const auto next=kernel.next_object_id();
+    const auto stats=kernel.tessellation_cache_stats();
+    for (const auto result : {kernel.convert().brep_to_mesh(*body.value,{}),
+                             kernel.convert().brep_to_mesh_local(*body.value,std::array{*face.value},{}),
+                             kernel.convert().brep_to_mesh_shell(*body.value,*shell.value,{})}) {
+        const auto diagnostic=kernel.diagnostics().get(result.diagnostic_id);
+        const auto after=kernel.runtime_store_counts();
+        const auto stats_after=kernel.tessellation_cache_stats();
+        if (result.status==axiom::StatusCode::Ok || result.value || !diagnostic.value ||
+            std::none_of(diagnostic.value->issues.begin(),diagnostic.value->issues.end(),[](const axiom::Issue& issue) {
+                return issue.code==axiom::diag_codes::kTesFailure && issue.stage=="rep.tessellation.face";
+            }) || !before.value || !after.value || !stats.value || !stats_after.value ||
+            kernel.next_object_id().value!=next.value || before.value->mesh_records!=after.value->mesh_records ||
+            before.value->tessellation_cache_entries!=after.value->tessellation_cache_entries ||
+            before.value->face_tessellation_cache_entries!=after.value->face_tessellation_cache_entries ||
+            stats.value->body_cache_hits!=stats_after.value->body_cache_hits ||
+            stats.value->body_cache_misses!=stats_after.value->body_cache_misses ||
+            stats.value->face_cache_hits!=stats_after.value->face_cache_hits ||
+            stats.value->face_cache_misses!=stats_after.value->face_cache_misses) return false;
+    }
+    return true;
 }
 
 bool stage3_representation_consistency_regression() {
@@ -108,6 +581,24 @@ bool stage3_representation_consistency_regression() {
     const auto concave_body=kernel.sweeps().extrude(concave,{0,0,1},2);
     if (!hole_body.value || !concave_body.value || !check_export(*hole_body.value,24,72,{2,2,1}) ||
         !check_export(*concave_body.value,10,34,{1.1,1.1,1})) return false;
+    // Independent point probes on every horizontal cap triangle catch triangles
+    // spanning the removed hole or the L profile's missing upper-right quadrant.
+    for (const auto body : {*hole_body.value,*concave_body.value}) {
+        ReferenceObj actual;
+        if (!read_reference_obj(kernel,body,actual)) return false;
+        for (const auto& triangle : actual.triangles) {
+            const auto& a=actual.vertices[triangle[0]];
+            const auto& b=actual.vertices[triangle[1]];
+            const auto& c=actual.vertices[triangle[2]];
+            if (std::abs(a.z-b.z)>1e-10 || std::abs(a.z-c.z)>1e-10) continue;
+            for (int i=0; i<=4; ++i) for (int j=0; j<=4-i; ++j) {
+                const double x=(i*a.x+j*b.x+(4-i-j)*c.x)/4;
+                const double y=(i*a.y+j*b.y+(4-i-j)*c.y)/4;
+                if (body==*hole_body.value ? (x>1+1e-9 && x<3-1e-9 && y>1+1e-9 && y<3-1e-9)
+                    : (x>1+1e-9 && y>1+1e-9)) return false;
+            }
+        }
+    }
     const axiom::ProfileRef rectangle{"mesh_model_chain",{{0,0,0},{2,0,0},{2,3,0},{0,3,0}}};
     const auto rail=kernel.curves().make_line_segment({0,0,0},{0,0,4});
     const auto swept=rail.value ? kernel.sweeps().sweep(rectangle,*rail.value) : axiom::Result<axiom::BodyId>{};
@@ -299,6 +790,18 @@ bool stage5_stl_geometry_reference_regression() {
 }  // namespace
 
 int main() {
+    if (!stage5_native_boundary_reference_regression()) {
+        std::cerr << "Stage 5 native tessellation boundary independent reference regression failed\n";
+        return 1;
+    }
+    if (!stage5_bilinear_boundary_regression()) {
+        std::cerr << "Stage 5 bilinear tessellation boundary independent reference regression failed\n";
+        return 1;
+    }
+    if (!stage5_planar_normal_boundary_regression()) {
+        std::cerr << "Stage 5 planar normal boundary independent reference regression failed\n";
+        return 1;
+    }
     if (!stage5_stl_geometry_reference_regression()) {
         std::cerr << "Stage 5 STL actual geometry independent reference regression failed\n";
         return 1;
@@ -486,10 +989,18 @@ int main() {
     {
         auto pl = kernel.surfaces().make_plane({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0});
         auto trimmed_plane = kernel.surfaces().make_trimmed(*pl.value, 0.0, 10.0, 0.0, 20.0);
-        auto l0 = kernel.curves().make_line({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
-        auto l1 = kernel.curves().make_line({10.0, 0.0, 0.0}, {0.0, 1.0, 0.0});
-        auto l2 = kernel.curves().make_line({10.0, 20.0, 0.0}, {-1.0, 0.0, 0.0});
-        auto l3 = kernel.curves().make_line({0.0, 20.0, 0.0}, {0.0, -1.0, 0.0});
+        if (!pl.value || !trimmed_plane.value) return 1;
+        std::array<axiom::Point3, 4> trim_corners{};
+        const std::array<axiom::Point2, 4> trim_uv{{{0,0},{10,0},{10,20},{0,20}}};
+        for (std::size_t i=0; i<trim_uv.size(); ++i) {
+            const auto sample=kernel.surface_service().eval(*pl.value,trim_uv[i].x,trim_uv[i].y,0);
+            if (!sample.value) return 1;
+            trim_corners[i]=sample.value->point;
+        }
+        auto l0 = kernel.curves().make_line_segment(trim_corners[0],trim_corners[1]);
+        auto l1 = kernel.curves().make_line_segment(trim_corners[1],trim_corners[2]);
+        auto l2 = kernel.curves().make_line_segment(trim_corners[2],trim_corners[3]);
+        auto l3 = kernel.curves().make_line_segment(trim_corners[3],trim_corners[0]);
         if (pl.status != axiom::StatusCode::Ok || !pl.value.has_value() ||
             trimmed_plane.status != axiom::StatusCode::Ok || !trimmed_plane.value.has_value() ||
             l0.status != axiom::StatusCode::Ok || !l0.value.has_value() ||
@@ -501,10 +1012,10 @@ int main() {
             return 1;
         }
         auto ttx = kernel.topology().begin_transaction();
-        auto tv0 = ttx.create_vertex({0.0, 0.0, 0.0});
-        auto tv1 = ttx.create_vertex({10.0, 0.0, 0.0});
-        auto tv2 = ttx.create_vertex({10.0, 20.0, 0.0});
-        auto tv3 = ttx.create_vertex({0.0, 20.0, 0.0});
+        auto tv0 = ttx.create_vertex(trim_corners[0]);
+        auto tv1 = ttx.create_vertex(trim_corners[1]);
+        auto tv2 = ttx.create_vertex(trim_corners[2]);
+        auto tv3 = ttx.create_vertex(trim_corners[3]);
         auto te0 = ttx.create_edge(*l0.value, *tv0.value, *tv1.value);
         auto te1 = ttx.create_edge(*l1.value, *tv1.value, *tv2.value);
         auto te2 = ttx.create_edge(*l2.value, *tv2.value, *tv3.value);
@@ -795,6 +1306,21 @@ int main() {
             std::filesystem::remove(mesh_report_path);
             return 1;
         }
+        ReferenceObj swept_reference;
+        if (!read_reference_obj(kernel,*sw_body.value,swept_reference)) return 1;
+        long double swept_area=0;
+        for (const auto& p : swept_reference.vertices)
+            if (std::abs(p.y)>1e-12 || p.x<-1e-12 || p.x>1+1e-12 || p.z<-1e-12 || p.z>2+1e-12) return 1;
+        for (const auto& face : swept_reference.triangles) {
+            const auto& a=swept_reference.vertices[face[0]];
+            const auto& b=swept_reference.vertices[face[1]];
+            const auto& c=swept_reference.vertices[face[2]];
+            const long double ny=(static_cast<long double>(b.z)-a.z)*(c.x-a.x)-
+                (static_cast<long double>(b.x)-a.x)*(c.z-a.z);
+            if (!(ny<0)) return 1;
+            swept_area-=ny/2;
+        }
+        if (std::abs(swept_area-2)>1e-10L) return 1;
     }
 
     // 解析 Revolved 曲面 + 四边形环：`sweeps().revolve` 物化体多为平面三角片，此处覆盖 `mesh_from_face_derived_patch`。
@@ -888,19 +1414,21 @@ int main() {
             return 1;
         }
         axiom::TessellationOptions rev_tes {0.12, 18.0, true};
+        const auto before=kernel.runtime_store_counts();
+        const auto next=kernel.next_object_id();
         auto rev_mesh = kernel.convert().brep_to_mesh(*rv_body.value, rev_tes);
-        if (rev_mesh.status != axiom::StatusCode::Ok || !rev_mesh.value.has_value()) {
-            std::cerr << "revolved-surface brep_to_mesh failed\n";
-            std::filesystem::remove(mesh_report_path);
-            return 1;
-        }
-        auto rev_tris = kernel.convert().mesh_triangle_count(*rev_mesh.value);
-        auto rev_insp = kernel.convert().inspect_mesh(*rev_mesh.value);
-        if (rev_tris.status != axiom::StatusCode::Ok || !rev_tris.value.has_value() ||
-            rev_insp.status != axiom::StatusCode::Ok || !rev_insp.value.has_value() ||
-            *rev_tris.value < 8 || rev_insp.value->tessellation_strategy != "owned_topo_welded" ||
-            rev_insp.value->has_degenerate_triangles) {
-            std::cerr << "revolved analytic surface should use derived parametric patch tessellation\n";
+        const auto diagnostic=kernel.diagnostics().get(rev_mesh.diagnostic_id);
+        const auto after=kernel.runtime_store_counts();
+        // These edges are chords, not the two circular arcs of this UV patch.
+        // Refusing the unsupported boundary prevents the old bbox-domain fill.
+        if (rev_mesh.status == axiom::StatusCode::Ok || rev_mesh.value || !diagnostic.value ||
+            std::none_of(diagnostic.value->issues.begin(),diagnostic.value->issues.end(),[](const axiom::Issue& issue) {
+                return issue.code==axiom::diag_codes::kTesFailure && issue.stage=="rep.tessellation.face";
+            }) || !before.value || !after.value || kernel.next_object_id().value!=next.value ||
+            before.value->mesh_records!=after.value->mesh_records ||
+            before.value->tessellation_cache_entries!=after.value->tessellation_cache_entries ||
+            before.value->face_tessellation_cache_entries!=after.value->face_tessellation_cache_entries) {
+            std::cerr << "revolved chord boundary must fail without publishing a curved patch\n";
             std::filesystem::remove(mesh_report_path);
             return 1;
         }

@@ -1119,7 +1119,35 @@ if (!restored.value || *restored.value != committed_mesh ||
     !dirty_after_restore.value || !*dirty_after_restore.value) return;
 ```
 
-旧 MeshId 是不可变快照；存活体可以保留历史缓存，只有当前边界键且 `source_body` 正确才命中。`mesh_to_brep` 会把网格 source_body 重绑定到新 MeshRep 体，原体须重新生成网格。owned 失败不发布部分网格/缓存，也不回退 bbox/创建参数；编辑 native primitive 撤销创建参数资格，回滚恢复。Eval recompute 仅管理图状态，实际查询/表示仍需显式调用；恢复后消费者再次 dirty，不保证自动重算。移除体在恢复或提交后清理关联网格/缓存/体绑定，源体及共享源壳保留。
+旧 MeshId 是不可变快照；存活体可以保留历史缓存，只有当前边界键且 `source_body` 正确才命中。`mesh_to_brep` 首次把网格 source_body 绑定到新 MeshRep 体，原体须重新生成网格；cycle-0086 起对本入口已建立的 `MeshRep + brep_from_mesh` 关联重复转换返回同一 BodyId。两向 round-trip 的临时转换在成功及失败后均恢复原绑定/缓存/统计/分配状态。owned 失败不发布部分网格/缓存，也不回退 bbox/创建参数；编辑 native primitive 撤销创建参数资格，回滚恢复。Eval recompute 仅管理图状态，实际查询/表示仍需显式调用；恢复后消费者再次 dirty，不保证自动重算。移除体在恢复或提交后清理关联网格/缓存/体绑定，源体及共享源壳保留。
+
+### 12.2.1 Stage 5 批量、往返及幂等转换（cycle-0086）
+
+以下接续成功建模的 `body_id` 与 `tess`；参数曲面须满足 [API §7.3.2](AxiomKernel_详细模块接口清单.md#732-stage-5-真实边界三角化与转换一致性cycle-0086--s5-tessellation) 的真实矩形边界、四极点双线性/一阶等权归一化夹持节点或 LineSegment Swept 合同。一般曲边、高阶、非矩形/孔曲面裁剪及 Offset/Revolved 拒绝；关闭可选细化不关闭边界与必需误差检查。
+
+```cpp
+auto mesh = kernel.convert().brep_to_mesh(body_id, tess);
+if (!mesh.value) return;
+auto forward = kernel.convert().verify_brep_mesh_round_trip(body_id, tess);
+auto reverse = kernel.convert().verify_mesh_brep_round_trip(*mesh.value, tess);
+if (!forward.value || !reverse.value || !forward.value->passed || !reverse.value->passed) return;
+// verify 的临时状态已恢复，此处仍持有原网格及原绑定。
+auto converted = kernel.convert().mesh_to_brep(*mesh.value);
+auto repeated = kernel.convert().mesh_to_brep(*mesh.value);
+if (!converted.value || converted.value != repeated.value) return;
+const std::array meshes{*mesh.value, *mesh.value};
+auto bodies = kernel.convert().mesh_to_brep_batch(meshes);
+if (!bodies.value || bodies.value->size() != 2 ||
+    (*bodies.value)[0] != *converted.value || (*bodies.value)[1] != *converted.value) return;
+const std::array inputs{body_id, BodyId{}};
+auto rejected_batch = kernel.convert().brep_to_mesh_batch(inputs, tess);
+if (rejected_batch.status == StatusCode::Ok || rejected_batch.value) return;
+auto diagnostic = kernel.diagnostics().get(rejected_batch.diagnostic_id);
+if (!diagnostic.value) return;
+// 后项失败恢复前项产生的 mesh/body/cache/统计/next_id，诊断可继续查询。
+```
+
+缺嵌入网格的 MeshRep 返回 `AXM-TES-E-0001 / rep.tessellation.support`，不生成 bbox 替代；`mesh_to_brep` 的 bbox 来自实际顶点，但不生成 owned ExactBRep，也不使开放曲面获得质量查询资格。metadata/implicit 显示代理不认证物理量；round-trip 报告还须结合独立边界/面积/体积参考。OBJ 不导出 vertex normals，本批核对三角 cross 与解析/Geo法向。此文档片段未单独编译；固定回归随调度器最终16/16（200.26 s）通过，两条证据见 [验收 §1.13](../quality/AxiomKernel_测试与验收方案.md#113-cycle-0086--s5-tessellation-门禁与逐项证据)，正式文档门禁及提交尚未记录。
 
 ## 12.3 基础零件建模到查询与表示闭环
 

@@ -2102,6 +2102,38 @@ bool stage3_eval_rollback_consistency_regression() {
             txn.write_operation_count().value!=writes.value || !dirty(false) ||
             txn.rollback_to_savepoint(*savepoint.value).status!=axiom::StatusCode::Ok || !dirty(false)) return false;
         if (txn.replace_surface(faces.value->front(),*displaced.value).status!=axiom::StatusCode::Ok || !dirty(true)) return false;
+        // The edited support invalidates the warm body cache. All tessellation
+        // entry points must reject it without allocations, cache counter changes,
+        // Eval recomputes, or changes to the caller's transaction write set.
+        const auto fingerprint=[&] {
+            const auto r=kernel.runtime_store_counts();
+            const auto c=kernel.tessellation_cache_stats();
+            if (!r.value || !c.value) return std::array<std::uint64_t,14>{};
+            return std::array{kernel.next_object_id().value.value_or(0),kernel.object_count_total().value.value_or(0),
+                r.value->mesh_records,r.value->tessellation_cache_entries,r.value->face_tessellation_cache_entries,
+                r.value->surface_eval_cache_entries,c.value->body_cache_hits,c.value->body_cache_misses,
+                c.value->body_cache_stale_evictions,c.value->face_cache_hits,c.value->face_cache_misses,
+                c.value->face_cache_stale_evictions,txn.write_operation_count().value.value_or(0),
+                eval.total_recompute_count().value.value_or(0)};
+        };
+        const auto before_conversion=fingerprint();
+        const auto rejects=[&](const axiom::Result<axiom::MeshId>& result) {
+            const auto diagnostic=kernel.diagnostics().get(result.diagnostic_id);
+            return result.status==axiom::StatusCode::OperationFailed && !result.value && diagnostic.value &&
+                std::any_of(diagnostic.value->issues.begin(),diagnostic.value->issues.end(),[](const axiom::Issue& issue) {
+                    return issue.code==axiom::diag_codes::kTesFailure && issue.stage=="rep.tessellation.face";
+                }) && fingerprint()==before_conversion && dirty(true);
+        };
+        const axiom::TessellationOptions cold{.083,13,true};
+        if (!rejects(kernel.convert().brep_to_mesh(*body.value,{})) ||
+            !rejects(kernel.convert().brep_to_mesh(*body.value,cold)) ||
+            !rejects(kernel.convert().brep_to_mesh_local(*body.value,*faces.value,cold)) ||
+            !rejects(kernel.convert().brep_to_mesh_shell(*body.value,shells.value->front(),cold))) return false;
+        const auto batch=kernel.convert().brep_to_mesh_batch(std::array{*other.value,*body.value},cold);
+        const auto roundtrip=kernel.convert().verify_brep_mesh_round_trip(*body.value,cold);
+        if (batch.status==axiom::StatusCode::Ok || batch.value || roundtrip.status==axiom::StatusCode::Ok ||
+            roundtrip.value || fingerprint()!=before_conversion || !dirty(true) ||
+            !kernel.convert().inspect_mesh(*original_mesh.value).value) return false;
         const auto failed=kernel.query().mass_properties(*body.value);
         const auto diagnostic=kernel.diagnostics().get(failed.diagnostic_id);
         if (failed.value || !diagnostic.value ||
@@ -2119,17 +2151,86 @@ bool stage3_eval_rollback_consistency_regression() {
     // PCurve rebinding on a polyhedral face must dirty the same body even though
     // it never held analytic mass eligibility. Its mesh key also follows the bind.
     const auto edges=topo.edges_of_body(*body.value);
+    const auto vertices=topo.vertices_of_body(*body.value);
     const auto coedges=edges.value && !edges.value->empty() ? topo.coedges_of_edge(edges.value->front())
         : axiom::Result<std::vector<axiom::CoedgeId>>{};
-    if (!coedges.value || coedges.value->empty()) return false;
+    const auto owners=edges.value && !edges.value->empty() ? topo.faces_of_edge(edges.value->front())
+        : axiom::Result<std::vector<axiom::FaceId>>{};
+    const auto endpoints=edges.value && !edges.value->empty() ? topo.vertices_of_edge(edges.value->front())
+        : axiom::Result<std::array<axiom::VertexId,2>>{};
+    if (!coedges.value || coedges.value->empty() || !owners.value || owners.value->empty() ||
+        !vertices.value || vertices.value->size()!=8 || !endpoints.value) return false;
+    // This fixed extrude allocates the four input profile vertices followed by
+    // the four vertices translated by Z=4. Handles recover that known fixture
+    // order; no private vertex record or triangulator supplies the coordinates.
+    auto ordered_vertices=*vertices.value;
+    std::sort(ordered_vertices.begin(),ordered_vertices.end(),[](auto lhs,auto rhs) { return lhs.value<rhs.value; });
+    std::array<axiom::Point3,2> points{};
+    for (std::size_t i=0; i<points.size(); ++i) {
+        const auto vertex=std::find(ordered_vertices.begin(),ordered_vertices.end(),(*endpoints.value)[i]);
+        if (vertex==ordered_vertices.end()) return false;
+        const auto index=static_cast<std::size_t>(vertex-ordered_vertices.begin());
+        points[i]=profile.polygon_xyz[index%4];
+        if (index>=4) points[i].z+=4;
+    }
+    // Coedges and faces are allocated together, one face at a time. Selecting
+    // their minima identifies the earliest owner without index iteration order.
+    const auto coedge=*std::min_element(coedges.value->begin(),coedges.value->end(),
+        [](auto lhs,auto rhs) { return lhs.value<rhs.value; });
+    const auto owner=*std::min_element(owners.value->begin(),owners.value->end(),
+        [](auto lhs,auto rhs) { return lhs.value<rhs.value; });
+    const auto owner_surface=topo.surface_of_face(owner);
+    const auto plane=owner_surface.value ? kernel.surface_service().eval(*owner_surface.value,0,0,1)
+        : axiom::Result<axiom::SurfaceEvalResult>{};
+    if (!plane.value) return false;
+    std::array<axiom::Point2,2> uv{};
+    for (std::size_t i=0; i<points.size(); ++i) {
+        const axiom::Vec3 d{points[i].x-plane.value->point.x,points[i].y-plane.value->point.y,points[i].z-plane.value->point.z};
+        uv[i]={d.x*plane.value->du.x+d.y*plane.value->du.y+d.z*plane.value->du.z,
+               d.x*plane.value->dv.x+d.y*plane.value->dv.y+d.z*plane.value->dv.z};
+        const auto mapped=kernel.surface_service().eval(*owner_surface.value,uv[i].x,uv[i].y,0);
+        if (!mapped.value || std::abs(mapped.value->point.x-points[i].x)>1e-12 ||
+            std::abs(mapped.value->point.y-points[i].y)>1e-12 || std::abs(mapped.value->point.z-points[i].z)>1e-12) return false;
+    }
+    const auto matching_pcurve=kernel.pcurves().make_polyline(uv);
+    if (!matching_pcurve.value) return false;
     {
         auto txn=kernel.topology().begin_transaction();
-        if (txn.set_coedge_pcurve(coedges.value->front(),*pcurve.value).status!=axiom::StatusCode::Ok || !dirty(true)) return false;
+        if (txn.set_coedge_pcurve(coedge,*pcurve.value).status!=axiom::StatusCode::Ok || !dirty(true)) return false;
+        const auto fingerprint=[&] {
+            const auto r=kernel.runtime_store_counts();
+            const auto c=kernel.tessellation_cache_stats();
+            if (!r.value || !c.value) return std::array<std::uint64_t,14>{};
+            return std::array{kernel.next_object_id().value.value_or(0),kernel.object_count_total().value.value_or(0),
+                r.value->mesh_records,r.value->tessellation_cache_entries,r.value->face_tessellation_cache_entries,
+                r.value->surface_eval_cache_entries,c.value->body_cache_hits,c.value->body_cache_misses,
+                c.value->body_cache_stale_evictions,c.value->face_cache_hits,c.value->face_cache_misses,
+                c.value->face_cache_stale_evictions,txn.write_operation_count().value.value_or(0),
+                eval.total_recompute_count().value.value_or(0)};
+        };
+        const auto before=fingerprint();
+        const auto rejected=kernel.convert().brep_to_mesh(*body.value,{});
+        const auto diagnostic=kernel.diagnostics().get(rejected.diagnostic_id);
+        if (rejected.status!=axiom::StatusCode::OperationFailed || rejected.value || !diagnostic.value ||
+            std::none_of(diagnostic.value->issues.begin(),diagnostic.value->issues.end(),[](const axiom::Issue& issue) {
+                return issue.code==axiom::diag_codes::kTesFailure && issue.stage=="rep.tessellation.face";
+            }) || fingerprint()!=before || !dirty(true) || txn.rollback().status!=axiom::StatusCode::Ok ||
+            !dirty(true) || !restored() || eval.recompute(*consumer.value).status!=axiom::StatusCode::Ok || !dirty(false)) {
+            std::cerr << "Eval mismatched PCurve rejection/rollback failed\n";
+            return false;
+        }
+    }
+    {
+        auto txn=kernel.topology().begin_transaction();
+        if (txn.set_coedge_pcurve(coedge,*matching_pcurve.value).status!=axiom::StatusCode::Ok || !dirty(true)) return false;
         const auto changed=kernel.convert().brep_to_mesh(*body.value,{});
         if (!changed.value || changed.value==original_mesh.value ||
             eval.recompute(*consumer.value).status!=axiom::StatusCode::Ok || !dirty(false) ||
             txn.rollback().status!=axiom::StatusCode::Ok || !dirty(true) || !restored() ||
-            eval.recompute(*consumer.value).status!=axiom::StatusCode::Ok || !dirty(false)) return false;
+            eval.recompute(*consumer.value).status!=axiom::StatusCode::Ok || !dirty(false)) {
+            std::cerr << "Eval matching PCurve cache identity/rollback failed\n";
+            return false;
+        }
     }
     for (int removal=0; removal<3; ++removal) {
         auto txn=kernel.topology().begin_transaction();
