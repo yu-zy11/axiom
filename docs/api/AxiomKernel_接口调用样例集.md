@@ -742,57 +742,298 @@ cycle-0083 / S4-EXIT 沿用上述公开签名和调用片段，新增执行证�
 
 ## 8.1 偏置
 
+以下片段使用已有 `kernel`，标准头包括 `<vector>`、`<cmath>`、`<cassert>`；创建4×5×6完整轴对齐盒。仅认证当前 owned 六平面矩形闭壳；正距离外扩、负距离内缩，位移须大于有效容差且可在当前坐标精度下表达。
+
 ```cpp
+auto stock = kernel.primitives().box({1,2,3}, 4,5,6);
+if (!stock.value) { handle_error(stock); return; }
 auto offset = kernel.modify().offset_body(
-  body_id,
-  2.0,
+  *stock.value,
+  0.5,
   kernel.tolerance().global_policy()
 );
+if (!offset.value) { handle_error(offset); return; }
+auto offset_strict = kernel.validate().validate_all(
+    offset.value->output, ValidationMode::Strict);
+if (offset_strict.status != StatusCode::Ok) { handle_error(offset_strict); return; }
+// 真实外边界为 [0.5,5.5] × [1.5,7.5] × [2.5,9.5]，尺寸5×6×7。
 ```
 
 ## 8.2 抽壳
 
 ```cpp
-std::vector<FaceId> removed_faces = {face_1};
-
+auto& topo = kernel.topology().query();
+auto faces = topo.faces_of_body(offset.value->output);
+if (!faces.value) { handle_error(faces); return; }
+FaceId top_face {};
+for (auto face : *faces.value) {
+  auto bounds = topo.bbox_of_face(face);
+  if (!bounds.value) { handle_error(bounds); return; }
+  if (std::abs(bounds.value->min.z-9.5) < 1e-9 &&
+      std::abs(bounds.value->max.z-9.5) < 1e-9) top_face = face;
+}
+assert(top_face.value != 0);
+std::vector<FaceId> removed_faces {top_face};
 auto shelled = kernel.modify().shell_body(
-  body_id,
+  offset.value->output,
   removed_faces,
-  2.5
+  0.5
 );
+if (!shelled.value) { handle_error(shelled); return; }
+auto strict = kernel.validate().validate_all(shelled.value->output, ValidationMode::Strict);
+if (strict.status != StatusCode::Ok) { handle_error(strict); return; }
+auto mass = kernel.query().mass_properties(shelled.value->output);
+if (!mass.value) { handle_error(mass); return; }
+assert(std::abs(mass.value->volume-80.0) < 1e-7);
+assert(std::abs(mass.value->area-331.0) < 1e-7);
+
+// 无移除面：原4×5×6盒保持外边界，生成反向内腔双闭壳。
+std::vector<FaceId> no_opening;
+auto cavity = kernel.modify().shell_body(*stock.value, no_opening, 0.5);
+if (!cavity.value) { handle_error(cavity); return; }
+auto cavity_mass = kernel.query().mass_properties(cavity.value->output);
+if (!cavity_mass.value) { handle_error(cavity_mass); return; }
+assert(std::abs(cavity_mass.value->volume-60.0) < 1e-7);
+assert(std::abs(cavity_mass.value->area-242.0) < 1e-7);
 ```
 
-## 8.3 删除面补面
+单面开口支持六个方向；实际外5面、内5面与四片口沿构成闭合材料壳，保留壁厚为真实平面间距0.5。偏置后的上开口内腔为4×5×6.5，故 V=210−130=80，A=331；原盒上开口参考为 V=54/A=225。空移除集合生成外6面与反向内6面的双闭壳，内腔为3×4×5，V=120−60=60，A=148+94=242。一般曲面、多开口、异属/重复/不存在移除面、塌缩、容差接触或不可表达厚度拒绝。
+
+源和结果在私有暂存中 Strict 检查；失败无部分结果、live ID/源拓扑来源索引/Eval/暖缓存保持。成功追加独立 `Generic/ExactBRep`，通知输入 Eval 及下游失效；活动事务回滚清理派生几何/拓扑/表示/缓存，保留源暖网格，成功分配 ID 允许空档。可从 diagnostic_id 查看 `modify.offset.* / modify.shell.*` 阶段。ReportOnly 保持厚度已有回归，修改式 Safe 修复保形未认证。
+
+片段未独立编译，本轮未运行测试；执行证据来自已通过调度器完整门禁的 [Ops/Heal/Rep 回归与两条验收证据](../quality/AxiomKernel_测试与验收方案.md#116-cycle-0089--s6-offset-shell-门禁与逐项证据)。独立参考为解析公式/公开 OBJ 积分，无外部工业内核认证；完整支持与限制见 [API §8.3.1](AxiomKernel_详细模块接口清单.md#831-stage-6-真实偏置与抽壳支持矩阵cycle-0089--s6-offset-shell)。
+
+## 8.3 直接编辑：移动面、替换面与删除补面拒绝
+
+以下独立片段延续已有`kernel`，标准头包括`<cmath>`、`<cassert>`。只支持独占完整owned轴对齐六平面盒的单面移动/严格平行Plane替换。目标从每次输入的当前公开拓扑选取，连续编辑须重新选结果面，不能复用源FaceId。
 
 ```cpp
-auto healed = kernel.modify().delete_face_and_heal(body_id, target_face);
+auto source = kernel.primitives().box({0,0,0}, 4,5,6);
+if (!source.value) { handle_error(source); return; }
+auto& topo = kernel.topology().query();
+auto faces = topo.faces_of_body(*source.value);
+if (!faces.value) { handle_error(faces); return; }
+FaceId top {};
+for (auto face : *faces.value) {
+  auto bounds = topo.bbox_of_face(face);
+  if (!bounds.value) { handle_error(bounds); return; }
+  if (std::abs(bounds.value->min.z-6.0) < 1e-9 &&
+      std::abs(bounds.value->max.z-6.0) < 1e-9) top = face;
+}
+assert(top.value != 0);
+auto moved = kernel.modify().move_face(*source.value, top, 1.0);
+if (!moved.value) { handle_error(moved); return; }
+auto strict = kernel.validate().validate_all(moved.value->output, ValidationMode::Strict);
+if (strict.status != StatusCode::Ok) { handle_error(strict); return; }
+auto mass = kernel.query().mass_properties(moved.value->output);
+if (!mass.value) { handle_error(mass); return; }
+assert(std::abs(mass.value->volume-140.0) < 1e-7);
+assert(std::abs(mass.value->area-166.0) < 1e-7);
+auto inside = topo.locate_point(moved.value->output, {2,2.5,6.5});
+auto source_outside = topo.locate_point(*source.value, {2,2.5,6.5});
+auto boundary = topo.locate_point(moved.value->output, {2,2.5,7});
+if (!inside.value || !source_outside.value || !boundary.value) { return; }
+assert(inside.value->location == BodyPointLocation::Inside);
+assert(source_outside.value->location == BodyPointLocation::Outside);
+assert(boundary.value->location == BodyPointLocation::Boundary);
+
+// 从当前4×5×7结果选右面，以x=4.5的Plane替换。
+auto current_faces = topo.faces_of_body(moved.value->output);
+if (!current_faces.value) { handle_error(current_faces); return; }
+FaceId right {};
+for (auto face : *current_faces.value) {
+  auto bounds = topo.bbox_of_face(face);
+  if (!bounds.value) { handle_error(bounds); return; }
+  if (std::abs(bounds.value->min.x-4.0) < 1e-9 &&
+      std::abs(bounds.value->max.x-4.0) < 1e-9) right = face;
+}
+assert(right.value != 0);
+auto plane = kernel.surfaces().make_plane({4.5,0,0}, {1,0,0});
+if (!plane.value) { handle_error(plane); return; }
+auto replaced = kernel.modify().replace_face(moved.value->output, right, *plane.value);
+if (!replaced.value) { handle_error(replaced); return; }
+auto replaced_strict = kernel.validate().validate_all(replaced.value->output, ValidationMode::Strict);
+if (replaced_strict.status != StatusCode::Ok) { handle_error(replaced_strict); return; }
+auto replaced_mass = kernel.query().mass_properties(replaced.value->output);
+if (!replaced_mass.value) { handle_error(replaced_mass); return; }
+assert(std::abs(replaced_mass.value->volume-157.5) < 1e-7);
+assert(std::abs(replaced_mass.value->area-178.0) < 1e-7);
+assert(std::abs(replaced_mass.value->centroid.x-2.25) < 1e-7);
+assert(std::abs(replaced_mass.value->centroid.y-2.5) < 1e-7);
+assert(std::abs(replaced_mass.value->centroid.z-3.5) < 1e-7);
+
+// 删除补面尚无认证路径：合法目标也返回结构化不支持，无结果。
+auto deleted = kernel.modify().delete_face_and_heal(*source.value, top);
+assert(deleted.status == StatusCode::NotImplemented && !deleted.value);
+// diagnostic_id对应AXM-MOD-E-0009 / modify.delete_face.support_gate。
 ```
+
+移动正值沿目标外法向扩张、负值收缩；四邻面延伸/重裁，结果重建8角点/12直边/6面。替换Plane支持反向法向，任意非零离轴分量均拒绝。位移须大于内核有效线性容差，剩余各轴尺寸须大于两倍容差且坐标可表示；无变化替换、塌缩/近容差、一般曲面、共享/开放边界和批量编辑拒绝。非法/异属删除目标为E-0006/input_gate，合法删除目标为E-0009/support_gate。
+
+失败不发布、不消耗live模型ID，源拓扑/来源/索引、Eval和暖缓存保持；成功追加独立Generic/ExactBRep、全部六面逐面对应立即源并通知输入Eval及下游失效。活动事务保存点/完整回滚清派生几何/拓扑/表示/缓存和体绑定，保留源暖Mesh身份，成功ID允许空档、诊断可增加。详细范围和阶段见[API§8.3.2](AxiomKernel_详细模块接口清单.md#832-stage-6-真实直接编辑支持矩阵cycle-0090--s6-direct-edit)及[MOD字典](../diagnostics/AxiomKernel_错误码与诊断码字典.md#77-mod-修改模块错误码)。片段未独立编译；执行证据来自已通过调度器完整16/16门禁的[两条验收证据](../quality/AxiomKernel_测试与验收方案.md#117-cycle-0090--s6-direct-edit-门禁与逐项证据)，参考为解析公式/公开OBJ积分，无外部工业内核认证。本轮文档工作未构建或运行测试。
+
+## 8.4 Stage 6 固定机械夹具（cycle-0091 / S6-EXIT）
+
+以下片段延续已有`kernel`与`handle_error`；使用`axiom`命名空间及`<array>/<optional>/<cmath>/<cassert>`。与实际`stage6_mechanical_fixture`相同，保留原盒、各编辑结果及完整来源祖先，每次从当前结果选择面/边；高级特征是同一最终毛坯的独立终点。片段未独立编译，执行证据来自[调度器完整门禁及两条验收证据](../quality/AxiomKernel_测试与验收方案.md#118-cycle-0091--s6-exit-门禁与逐项证据)，本轮没有重建或运行测试。
+
+```cpp
+auto& topo = kernel.topology().query();
+auto plane_face = [&](BodyId body, int axis, double coordinate) -> FaceId {
+  auto faces = topo.faces_of_body(body);
+  if (!faces.value) return {};
+  for (auto face : *faces.value) {
+    auto bounds = topo.bbox_of_face(face);
+    if (!bounds.value) return {};
+    std::array<double, 3> low {bounds.value->min.x, bounds.value->min.y, bounds.value->min.z};
+    std::array<double, 3> high {bounds.value->max.x, bounds.value->max.y, bounds.value->max.z};
+    if (std::abs(low[axis]-coordinate) < 1e-9 &&
+        std::abs(high[axis]-coordinate) < 1e-9) return face;
+  }
+  return {};
+};
+auto stock = kernel.primitives().box({0,0,0}, 8,5,3);
+auto replacement = kernel.surfaces().make_plane({0,0,4}, {0,0,-1});
+if (!stock.value) { handle_error(stock); return; }
+if (!replacement.value) { handle_error(replacement); return; }
+// 用活动事务覆盖全部派生体；原盒和替换Plane在事务前创建。
+auto writer = kernel.topology().begin_transaction();
+auto moved = kernel.modify().move_face(*stock.value, plane_face(*stock.value,0,8), 1);
+if (!moved.value) { handle_error(moved); return; }
+auto replaced = kernel.modify().replace_face(
+    moved.value->output, plane_face(moved.value->output,2,3), *replacement.value);
+if (!replaced.value) { handle_error(replaced); return; }
+auto offset = kernel.modify().offset_body(replaced.value->output, 0.5, {});
+if (!offset.value) { handle_error(offset); return; }
+auto base = offset.value->output; // [-0.5,9.5] × [-0.5,5.5] × [-0.5,4.5]
+EdgeId selected {};
+auto edges = topo.edges_of_body(base);
+if (!edges.value) { handle_error(edges); return; }
+for (auto edge : *edges.value) {
+  auto endpoints = topo.vertices_of_edge(edge);
+  if (!endpoints.value) { handle_error(endpoints); return; }
+  auto a = topo.point_of_vertex((*endpoints.value)[0]);
+  auto b = topo.point_of_vertex((*endpoints.value)[1]);
+  if (!a.value || !b.value) return;
+  if (std::abs(a.value->x+0.5) < 1e-8 && std::abs(b.value->x+0.5) < 1e-8 &&
+      std::abs(a.value->y+0.5) < 1e-8 && std::abs(b.value->y+0.5) < 1e-8 &&
+      std::abs(a.value->z-b.value->z) > 4.9) selected = edge;
+}
+assert(selected.value != 0);
+auto chamfer = kernel.blends().chamfer_edges(base, std::array{selected}, 0.5);
+if (!chamfer.value) { handle_error(chamfer); return; }
+auto fillet = kernel.blends().fillet_edges(base, std::array{selected}, 0.5);
+if (!fillet.value) { handle_error(fillet); return; }
+auto cavity = kernel.modify().shell_body(base, {}, 0.5);
+if (!cavity.value) { handle_error(cavity); return; }
+auto open = kernel.modify().shell_body(base, std::array{plane_face(base,2,4.5)}, 0.5);
+if (!open.value) { handle_error(open); return; }
+std::array outputs {moved.value->output, replaced.value->output, base,
+                    chamfer.value->output, fillet.value->output,
+                    cavity.value->output, open.value->output};
+for (auto body : outputs) {
+  auto strict = kernel.validate().validate_all(body, ValidationMode::Strict);
+  if (strict.status != StatusCode::Ok) { handle_error(strict); return; }
+  auto mesh = kernel.convert().brep_to_mesh(body, {});
+  if (!mesh.value) { handle_error(mesh); return; }
+}
+auto open_mass = kernel.query().mass_properties(open.value->output);
+if (!open_mass.value) { handle_error(open_mass); return; }
+assert(std::abs(open_mass.value->volume-97.5) < 1e-7);
+assert(std::abs(open_mass.value->area-406.0) < 1e-7);
+assert(std::abs(open_mass.value->centroid.z-1.480769230769) < 1e-7);
+auto curved_mass = kernel.query().mass_properties(fillet.value->output);
+assert(curved_mass.status == StatusCode::NotImplemented && !curved_mass.value);
+// CORE-E-0004 / query.mass_properties.support_gate：网格成功不扩大质量支持域。
+auto continuation = kernel.modify().offset_body(chamfer.value->output, 0.2, {});
+assert(continuation.status == StatusCode::NotImplemented && !continuation.value);
+// MOD-E-0009 / modify.offset.support_gate，源与已有结果保持。
+auto rollback = writer.rollback();
+if (rollback.status != StatusCode::Ok) { handle_error(rollback); return; }
+for (auto body : outputs) assert(topo.has_body(body).value == std::optional{false});
+assert(topo.has_body(*stock.value).value == std::optional{true});
+```
+
+独立参考V/A依次120/158→135/174→180/202→300/280；倒角299.375/≈278.285533906、闭腔120/482、单开口97.5/406。圆角解析Circle/Cylinder与公开OBJ采样积分独立核对，默认5°角预算传播误差，解析V/A不作为质量服务输出。实际回归还验证立即来源、owned网格组件、Modify输入Eval/下游失效与Blend源Eval保持、稳定拒绝、失败缓存/ID隔离、七派生体完整回滚/绑定清理与源暖MeshId保留及重试；保存点由既有Query/Eval回归覆盖。本片段只展示主要调用与部分断言。
+
+仅完整祖先保留的owned轴对齐六Plane闭盒链和独立终点受认证；删除祖先后再Blend、一般曲面/批量/删除补面、终点后续盒域编辑未支持。拒绝循环实际覆盖倒角/圆角/单开口终点的offset/shell/move/chamfer，其他组合不宣称逐项注入。圆角质量/通用实体空间查询及无PCurve面面积仍不支持；无外部工业内核认证。完整限制见[API§8.3.3](AxiomKernel_详细模块接口清单.md#833-stage-6-固定机械夹具退出支持矩阵cycle-0091--s6-exit)。
 
 ## 9. 圆角与倒角样例
 
-## 9.1 常半径圆角
+### 9.1 从当前公开边界选平行边（cycle-0088 / S6-BLEND）
+
+以下片段延续已创建的 `kernel`；使用 4×5×6 轴对齐盒的四条 Z 向凸边，半径/退让距离均为 0.4，退让区互不干涉。X/Y 轴同样支持。选择和核验使用公开查询；所需标准头包括 `<vector>`、`<cmath>`、`<cassert>`。
 
 ```cpp
-std::vector<EdgeId> edges = {edge_1, edge_2, edge_3};
-auto fillet = kernel.blends().fillet_edges(body_id, edges, 3.0);
-```
-
-## 9.2 倒角
-
-```cpp
-auto chamfer = kernel.blends().chamfer_edges(body_id, edges, 2.0);
-```
-
-## 9.3 圆角失败处理建议
-
-```cpp
-if (fillet.status != StatusCode::Ok) {
-  auto diag = kernel.diagnostics().get(fillet.diagnostic_id);
-  if (contains_issue(diag, "AXM-BLEND-E-0002")) {
-    suggest_user("请减小圆角半径");
-  }
+auto source = kernel.primitives().box({0,0,0}, 4,5,6);
+if (!source.value) { handle_error(source); return; }
+auto& topo = kernel.topology().query();
+auto source_edges = topo.edges_of_body(*source.value);
+if (!source_edges.value) { handle_error(source_edges); return; }
+std::vector<EdgeId> edges;
+for (auto edge : *source_edges.value) {
+  auto vertices = topo.vertices_of_edge(edge);
+  if (!vertices.value) { handle_error(vertices); return; }
+  auto a = topo.point_of_vertex((*vertices.value)[0]);
+  auto b = topo.point_of_vertex((*vertices.value)[1]);
+  if (!a.value || !b.value) { return; }
+  if (std::abs(a.value->x-b.value->x) < 1e-12 &&
+      std::abs(a.value->y-b.value->y) < 1e-12 &&
+      std::abs(a.value->z-b.value->z) > 5.0) edges.push_back(edge);
 }
+assert(edges.size() == 4);
+// 可选 1–4 条同轴平行边；每次从同一 source 生成独立结果。
+auto fillet = kernel.blends().fillet_edges(*source.value, edges, 0.4);
+if (!fillet.value) { handle_error(fillet); return; }
+auto fillet_strict = kernel.validate().validate_all(
+    fillet.value->output, ValidationMode::Strict);
+if (fillet_strict.status != StatusCode::Ok) { handle_error(fillet_strict); return; }
 ```
+
+### 9.2 公开核对真实圆弧及倒角
+
+```cpp
+auto rounded_edges = topo.edges_of_body(fillet.value->output);
+if (!rounded_edges.value) { handle_error(rounded_edges); return; }
+std::size_t arc_count = 0;
+for (auto edge : *rounded_edges.value) {
+  auto curve = topo.curve_of_edge(edge);
+  auto interval = topo.edge_curve_interval(edge);
+  if (!curve.value || !interval.value) { return; }
+  if (!*interval.value) continue;  // 兼容直边可无显式区间
+  const auto range = **interval.value;
+  auto mid = kernel.curve_service().eval(
+      *curve.value, (range.start_parameter+range.end_parameter)/2, 2);
+  if (!mid.value) { handle_error(mid); return; }
+  if (std::abs(mid.value->curvature) < 1e-12) continue;
+  ++arc_count;
+  auto length = topo.edge_length(edge);
+  assert(length.value);
+  assert(std::abs(mid.value->curvature-1/0.4) < 1e-8);
+  assert(std::abs(*length.value-std::acos(-1.0)*0.4/2) < 1e-8);
+}
+assert(arc_count == 8);  // 每条圆角棱边两端各有一个四分之一圆弧
+
+// 倒角仍调用原 source；distance 是邻接平面的退让距离。
+auto chamfer = kernel.blends().chamfer_edges(*source.value, edges, 0.4);
+if (!chamfer.value) { handle_error(chamfer); return; }
+auto chamfer_strict = kernel.validate().validate_all(
+    chamfer.value->output, ValidationMode::Strict);
+if (chamfer_strict.status != StatusCode::Ok) { handle_error(chamfer_strict); return; }
+auto mass = kernel.query().mass_properties(chamfer.value->output);
+if (!mass.value) { handle_error(mass); return; }
+const double section = 4*5-4*0.4*0.4/2;
+const double perimeter = 2*(4+5)+4*(std::sqrt(2.0)-2)*0.4;
+assert(std::abs(mass.value->volume-6*section) < 1e-8);
+assert(std::abs(mass.value->area-(2*section+6*perimeter)) < 1e-8);
+```
+
+斜面边宽为 `sqrt(2)*0.4`。`surface_of_face` 可取得真实 Cylinder/Plane 支撑，独立曲率与端点切触检查见 [验收 §1.15](../quality/AxiomKernel_测试与验收方案.md#115-cycle-0088--s6-blend-门禁与逐项证据)。getter 只读不分配模型对象或写几何缓存，诊断与读审计可增长。圆角体通用质量/实体空间查询及无 PCurve 面面积不支持；圆角质量明确返回 NotImplemented、无 value 与 `query.mass_properties.support_gate`，不能照用上述倒角积分参考。
+
+### 9.3 失败与回滚
+
+失败使用 `diagnostic_id` 查询 `Issue.code/stage`，前缀为 `blend.fillet.` 或 `blend.chamfer.`：input_gate/E-0001 检查输入，support_gate/E-0003 检查当前边界，intersection_gate/E-0004 拒绝非平行边与角区，radius_gate 或 distance_gate/E-0002 表示退让接触/重叠，geometry_gate/E-0005 表示容差或浮点退化，validation/E-0006 表示 Strict 失败。成功为 complete/I-0001；具体文案见 [字典 §7.6](../diagnostics/AxiomKernel_错误码与诊断码字典.md#76-blend-圆角倒角错误码)。
+
+失败无输出，不改变源模型、ID、索引、Eval 或暖缓存。成功输出由活动事务登记，保存点及完整 writer 回滚清理派生几何/缓存并保留源暖缓存；已成功分配的 ID 不承诺复用。仅支持当前完整轴对齐矩形闭壳及互不干涉平行凸边；一般曲面、连续二次圆角、变半径/变距未支持，不能对 fillet 输出继续倒角并期待成功。调度器最终完整 CTest 16/16、200.33 s 通过，本片段为文档样例，本轮未编译运行样例。
 
 ## 10. 查询与分析样例
 
@@ -974,6 +1215,62 @@ use_if_valid(valid);
 
 四格式读取预算为 64 MiB，超限在 `.read` 失败，STEP 严格容器/字段与 STL 闭合/非有限/溢出拒绝均可由 diagnostic_id 检索。固定三元数据文件证明参数/坐标精确 double 往返及零 owned shells；固定 STL 实际积分 V=4（非 bbox 的24）、面积/质心误差≤1e-12，详见 API §11.1.1。导出文本使用 classic locale/max_digits10，但 glTF float32 等格式能力不因此扩大。四网格格式开启 `write_mesh_validation_report` 时先成功写侧车再发布主文件；侧车可能保留，侧车/主文件及全批不承诺跨文件事务、掉电持久性或并发目录修改安全。发布失败有 `.publish` 合同，但该失败分支未单独注入回归。
 
+### 11.2.2 S5-EXIT 显式 STL 修复、三角化与往返
+
+以下调用片段未单独编译；固定 `s5_io_precision_tetra.stl` 的实际验收来自[本批§1.14](../quality/AxiomKernel_测试与验收方案.md#114-cycle-0087--s5-exit-门禁与逐项证据)，四必需回归随完整16/16、196.58 s通过。须分别检查外层Result和OpReport状态。
+
+```cpp
+ImportOptions opts;
+opts.run_validation = true;
+auto source = kernel.io().import_stl(input_path, opts);
+if (source.status != StatusCode::Ok || !source.value) {
+  handle_error(source);
+  return;
+}
+auto before = kernel.validate().validate_all(*source.value, ValidationMode::Strict);
+if (before.status != StatusCode::Ok) {
+  handle_error(before);
+  return;
+}
+auto repaired = kernel.repair().auto_repair(*source.value, RepairMode::Safe);
+if (repaired.status != StatusCode::Ok || !repaired.value ||
+    repaired.value->status != StatusCode::Ok) {
+  auto report = kernel.diagnostics().get(repaired.diagnostic_id);
+  handle_query_error(report);
+  return;
+}
+BodyId output = repaired.value->output;
+// MeshRep 内部后验是 Standard；这里额外显式检查 Strict。
+auto strict = kernel.validate().validate_all(output, ValidationMode::Strict);
+if (strict.status != StatusCode::Ok) {
+  handle_error(strict);
+  return;
+}
+auto mesh = kernel.convert().brep_to_mesh(output, {});
+if (mesh.status != StatusCode::Ok || !mesh.value) {
+  handle_error(mesh);
+  return;
+}
+auto exported = kernel.io().export_stl(output, output_path, {});
+if (exported.status != StatusCode::Ok) {
+  handle_error(exported);
+  return;
+}
+auto reimported = kernel.io().import_stl(output_path, opts);
+if (reimported.status != StatusCode::Ok || !reimported.value) {
+  handle_error(reimported);
+  return;
+}
+auto final_valid = kernel.validate().validate_all(*reimported.value, ValidationMode::Strict);
+use_if_valid(final_valid);
+```
+
+Safe派生新BodyId/新MeshId完整实际网格快照，源MeshId及坐标保留；该合同仅适用auto_repair，不泛化所有修复入口。固定源/派生/再导入均4三角、零owned shells；独立ASCII解析积分V=4、A=13+sqrt(244)/2、C=固定原点+(0.5,0.75,1)，误差≤1e-12，bbox体积24不是分析参考。Strict及固定积分不证明任意mesh流形/自交或实体质量服务资格。
+
+STEP/IGES/BREP须按[API§11.1.2](AxiomKernel_详细模块接口清单.md#1112-stage-5-集成退出支持矩阵cycle-0087--s5-exit)区分：原Box元数据Standard/ReportOnly可通过但零owned shells，直接三角化 `rep.tessellation.topology` 拒绝、质量 `query.mass_properties.empty_gate` 拒绝；显式Safe合成Modified bbox边界可owned_topo_welded显示，导出再导入仍零壳/bbox_proxy，两者质量support_gate拒绝。不能把上述STL片段的成功预期直接套用到原metadata或标准实体。
+
+缺mesh与复制后angular=0修复失败无value，`heal.auto_repair.post_validate` 保留HEAL-E-0006及VAL-E-0004/0003根因；回收派生体/mesh、恢复缓存统计/Eval、源快照保持。独立Heal允许ID空档，IO导入外层另恢复next_id。模型单位/64 MiB、float32限制、单主文件发布/侧车及批量非事务、无直接publish注入合同沿用§11.2.1；本例不是标准BRep交换或通用分析认证。
+
 ### 精确 B-Rep 文本子集的失败诊断
 
 ```cpp
@@ -1119,7 +1416,35 @@ if (!restored.value || *restored.value != committed_mesh ||
     !dirty_after_restore.value || !*dirty_after_restore.value) return;
 ```
 
-旧 MeshId 是不可变快照；存活体可以保留历史缓存，只有当前边界键且 `source_body` 正确才命中。`mesh_to_brep` 会把网格 source_body 重绑定到新 MeshRep 体，原体须重新生成网格。owned 失败不发布部分网格/缓存，也不回退 bbox/创建参数；编辑 native primitive 撤销创建参数资格，回滚恢复。Eval recompute 仅管理图状态，实际查询/表示仍需显式调用；恢复后消费者再次 dirty，不保证自动重算。移除体在恢复或提交后清理关联网格/缓存/体绑定，源体及共享源壳保留。
+旧 MeshId 是不可变快照；存活体可以保留历史缓存，只有当前边界键且 `source_body` 正确才命中。`mesh_to_brep` 首次把网格 source_body 绑定到新 MeshRep 体，原体须重新生成网格；cycle-0086 起对本入口已建立的 `MeshRep + brep_from_mesh` 关联重复转换返回同一 BodyId。两向 round-trip 的临时转换在成功及失败后均恢复原绑定/缓存/统计/分配状态。owned 失败不发布部分网格/缓存，也不回退 bbox/创建参数；编辑 native primitive 撤销创建参数资格，回滚恢复。Eval recompute 仅管理图状态，实际查询/表示仍需显式调用；恢复后消费者再次 dirty，不保证自动重算。移除体在恢复或提交后清理关联网格/缓存/体绑定，源体及共享源壳保留。
+
+### 12.2.1 Stage 5 批量、往返及幂等转换（cycle-0086）
+
+以下接续成功建模的 `body_id` 与 `tess`；参数曲面须满足 [API §7.3.2](AxiomKernel_详细模块接口清单.md#732-stage-5-真实边界三角化与转换一致性cycle-0086--s5-tessellation) 的真实矩形边界、四极点双线性/一阶等权归一化夹持节点或 LineSegment Swept 合同。一般曲边、高阶、非矩形/孔曲面裁剪及 Offset/Revolved 拒绝；关闭可选细化不关闭边界与必需误差检查。
+
+```cpp
+auto mesh = kernel.convert().brep_to_mesh(body_id, tess);
+if (!mesh.value) return;
+auto forward = kernel.convert().verify_brep_mesh_round_trip(body_id, tess);
+auto reverse = kernel.convert().verify_mesh_brep_round_trip(*mesh.value, tess);
+if (!forward.value || !reverse.value || !forward.value->passed || !reverse.value->passed) return;
+// verify 的临时状态已恢复，此处仍持有原网格及原绑定。
+auto converted = kernel.convert().mesh_to_brep(*mesh.value);
+auto repeated = kernel.convert().mesh_to_brep(*mesh.value);
+if (!converted.value || converted.value != repeated.value) return;
+const std::array meshes{*mesh.value, *mesh.value};
+auto bodies = kernel.convert().mesh_to_brep_batch(meshes);
+if (!bodies.value || bodies.value->size() != 2 ||
+    (*bodies.value)[0] != *converted.value || (*bodies.value)[1] != *converted.value) return;
+const std::array inputs{body_id, BodyId{}};
+auto rejected_batch = kernel.convert().brep_to_mesh_batch(inputs, tess);
+if (rejected_batch.status == StatusCode::Ok || rejected_batch.value) return;
+auto diagnostic = kernel.diagnostics().get(rejected_batch.diagnostic_id);
+if (!diagnostic.value) return;
+// 后项失败恢复前项产生的 mesh/body/cache/统计/next_id，诊断可继续查询。
+```
+
+缺嵌入网格的 MeshRep 返回 `AXM-TES-E-0001 / rep.tessellation.support`，不生成 bbox 替代；`mesh_to_brep` 的 bbox 来自实际顶点，但不生成 owned ExactBRep，也不使开放曲面获得质量查询资格。metadata/implicit 显示代理不认证物理量；round-trip 报告还须结合独立边界/面积/体积参考。OBJ 不导出 vertex normals，本批核对三角 cross 与解析/Geo法向。此文档片段未单独编译；固定回归随调度器最终16/16（200.26 s）通过，两条证据见 [验收 §1.13](../quality/AxiomKernel_测试与验收方案.md#113-cycle-0086--s5-tessellation-门禁与逐项证据)，正式文档门禁及提交尚未记录。
 
 ## 12.3 基础零件建模到查询与表示闭环
 

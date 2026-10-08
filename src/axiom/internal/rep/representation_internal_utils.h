@@ -38,16 +38,23 @@ MeshRecord tessellate_cylinder(const BodyRecord& body, const TessellationOptions
 MeshRecord tessellate_cone(const BodyRecord& body, const TessellationOptions& options);
 MeshRecord tessellate_torus(const BodyRecord& body, const TessellationOptions& options);
 
-// Face-level tessellation (Topo-driven). Uses face boundary (outer loop) to generate a planar triangulation.
+// Face-level planar tessellation from the owned outer/inner loops and edge supports.
 MeshRecord tessellate_face_planar(const KernelState& state, FaceId face_id, const TessellationOptions& options);
 
-// Topo-driven face tessellation: supported curved patches or current planar
-// straight-edge regions (including holes). Failed patches never flatten to a fan.
+// Topo-driven face tessellation: planar regions with straight or explicitly
+// trimmed circular edges (including holes), cylindrical strips bounded by two
+// opposite circular arcs and two axial generators, or certified rectangular
+// bilinear/line-segment swept patches. Caps and cylinders share arc stations.
+// Tensor splines
+// require degree one, equal weights and unit clamped knots. General curve trims
+// and higher-order/derived patches fail instead of filling their UV bbox.
 MeshRecord tessellate_face(const KernelState& state, FaceId face_id, const TessellationOptions& options);
 
 // Weld vertices by quantized position to improve connectivity across faces.
 // If normals are present, they are averaged on weld.
 // When texcoords are present (per-vertex), weld key includes quantized UV so seams stay valid.
+// A zero position_quant_step uses exact position/UV keys, preserving certified
+// owned-boundary geometry without moving near-coincident vertices.
 void weld_mesh_vertices_quantized(MeshRecord& mesh, bool weld_normals, Scalar position_quant_step,
                                   Scalar shading_split_angle_deg = static_cast<Scalar>(180));
 void weld_mesh_vertices(MeshRecord& mesh, const TessellationOptions& options);

@@ -361,16 +361,27 @@ prep隔离新增两输入网格暖缓存、固定CurveId域及四点无缓存poi
 
 ## 7.6 `BLEND` 圆角倒角错误码
 
-| 错误码 | 严重级别 | 含义 |
-|---|---|---|
-| `AXM-BLEND-E-0001` | Error | 目标边不存在 |
-| `AXM-BLEND-E-0002` | Error | 半径或倒角距离非法 |
-| `AXM-BLEND-E-0003` | Error | 邻面不支持当前圆角求解 |
-| `AXM-BLEND-E-0004` | Error | 角区求解失败 |
-| `AXM-BLEND-E-0005` | Warning | 局部圆角结果存在近自交风险 |
-| `AXM-BLEND-E-0006` | Error | 圆角修剪失败 |
-| `AXM-BLEND-W-0001` | Warning | 圆角/倒角为拓扑占位与参数门禁：工业级滚球、角区、变半径等未实现 |
-| `AXM-BLEND-W-0002` | Warning | 一次处理多条边时角区/连续圆角或倒角/变半径仍为占位实现 |
+cycle-0088 为 E-0003..0006 增加公开常量，并将已有字典中的概念语义对齐真实路径；新增 I-0001，无 BLEND-D 码。阶段前缀为 `blend.fillet.` 或 `blend.chamfer.`。
+
+| 码 / 常量 | 级别 / StatusCode | 阶段后缀 | 含义 |
+|---|---|---|---|
+| `AXM-BLEND-E-0001` / `kBlendInvalidTarget` | Error / InvalidInput | input_gate | 无效体、空集合、非法/重复/外来边，非有限或非正参数、非法容差策略 |
+| `AXM-BLEND-E-0002` / `kBlendParameterTooLarge` | Error / OperationFailed | radius_gate / distance_gate | 参数过大、退让区域接触或重叠、剩余侧壁不大于线性容差 |
+| `AXM-BLEND-E-0003` / `kBlendUnsupportedGeometry` | Error / NotImplemented | support_gate | 当前实体、支撑几何或边界不属于受支持轴对齐矩形六平面闭壳 |
+| `AXM-BLEND-E-0004` / `kBlendIntersectingEdges` | Error / NotImplemented | intersection_gate | 非平行选边或相交角区不支持；非平行但不共顶点也拒绝 |
+| `AXM-BLEND-E-0005` / `kBlendDegenerateGeometry` | Error / DegenerateGeometry | geometry_gate | 参数不大于容差、非有限坐标/尺寸，或退让位置因浮点分辨率退化 |
+| `AXM-BLEND-E-0006` / `kBlendTopologyFailure` | Error / InvalidTopology | validation | 源闭壳或真实结果未通过 Strict 后验验证 |
+| `AXM-BLEND-I-0001` / `kBlendCompleted` | Info | complete | 已发布独立真实解析闭壳并通过 Strict |
+| `AXM-BLEND-W-0001` / `kBlendApproximatePlaceholder` | Warning（历史） | 历史占位阶段 | 保留稳定码；真实圆角/倒角不返回占位警告 |
+| `AXM-BLEND-W-0002` / `kBlendMultiEdgeCornerPlaceholder` | Warning（历史） | 历史多边阶段 | 保留稳定码；当前不支持角区返回结构化失败 |
+
+支持限当前完整轴对齐矩形闭壳、三轴任一方向的 1–4 条互不干涉平行凸边；范围见 [API §8.4.1](../api/AxiomKernel_详细模块接口清单.md#841-stage-6-真实圆角与倒角支持矩阵cycle-0088--s6-blend)。Circle/Cylinder 共享采样使 Strict 可用，不扩大圆角体质量/空间查询或无 PCurve 面面积资格。真实平面倒角进入既有质量路径；圆角与旧 proxy BlendResult 质量仍为 `NotImplemented / AXM-CORE-E-0004 / query.mass_properties.support_gate`、无 value。
+
+源/结果几何与 Strict 均在私有暂存状态检查，保留源关系索引，避免静默修复输入。失败无 value，不消耗模型 ID，不改源索引、next_version、活动事务写数/服务分配范围、Eval 或暖缓存，诊断可增加。成功只追加新模型与关系、登记活动事务服务分配范围；保存点/完整回滚移除派生几何及网格/缓存，保留源暖缓存；成功分配的 ID 不承诺复用。失败 Issue 关联输入 BodyId，成功 Issue 关联输入及输出 BodyId。
+
+回归中 NaN 顶点、proxy 面、悬空 curve 为 E-0003/support_gate，支撑线偏移、反向 coedge、缺失 edge 索引为 E-0006/validation；不要把所有损伤统一解释成几何退化。新 Topo getter 非有限顶点/悬空曲线为 `InvalidTopology / AXM-TOPO-E-0007`，非法或回滚句柄为 `InvalidInput / AXM-CORE-E-0001`，没有 getter 专用阶段。成功/拒绝/回滚断言及真实完整门禁见 [验收 §1.15](../quality/AxiomKernel_测试与验收方案.md#115-cycle-0088--s6-blend-门禁与逐项证据)；不能把防御性 validation 分支都称为已注入全部失败根因。
+
+cycle-0091 / S6-EXIT复用本节既有码与阶段，没有新增生产失败路径或常量。固定夹具从编辑/偏置后的10×6×5完整盒独立生成单边圆角/倒角，成功分别断言`AXM-BLEND-I-0001 / blend.fillet.complete`与`blend.chamfer.complete`；r=6以`OperationFailed / AXM-BLEND-E-0002 / blend.fillet.radius_gate`拒绝，d=1e-8以`DegenerateGeometry / AXM-BLEND-E-0005 / blend.chamfer.geometry_gate`拒绝。倒角/圆角/单开口抽壳终点再次倒角为`NotImplemented / AXM-BLEND-E-0003 / blend.chamfer.support_gate`。圆角质量仍明确`NotImplemented / AXM-CORE-E-0004 / query.mass_properties.support_gate`且无value；解析V/A仅用于采样OBJ参考。夹具保留完整祖先，不认证删除祖先后再Blend；成功Blend保持源Eval，失败隔离和回滚见[本批两条证据](../quality/AxiomKernel_测试与验收方案.md#118-cycle-0091--s6-exit-门禁与逐项证据)。
 
 ## 7.7 `MOD` 修改模块错误码
 
@@ -380,9 +391,69 @@ prep隔离新增两输入网格暖缓存、固定CurveId域及四点无缓存poi
 | `AXM-MOD-E-0002` | Error | 偏置后发生自交 |
 | `AXM-MOD-E-0003` | Error | 抽壳失败 |
 | `AXM-MOD-E-0004` | Error | 拔模方向非法 |
-| `AXM-MOD-E-0005` | Error | 替换面与目标不兼容 |
-| `AXM-MOD-E-0006` | Error | 删除面补面失败 |
+| `AXM-MOD-E-0005` | Error | 替换输入/目标无效，或替换曲面不为严格平行轴对齐Plane |
+| `AXM-MOD-E-0006` | Error | 删除补面目标无效或不属于当前体；合法选择的算法不支持使用E-0009 |
 | `AXM-MOD-E-0007` | Warning | 修改导致小特征被移除 |
+| `AXM-MOD-E-0008` | Error | 抽壳源或真实结果未通过 Strict，结果未发布（既有公开常量，cycle-0089补录） |
+| `AXM-MOD-E-0009` | Error | 当前实际边界/开口选择不在认证支持域，或删除补面尚无认证算法 |
+| `AXM-MOD-E-0010` | Error | 距离/厚度/编辑位移、残余边界或坐标分辨率数值退化 |
+| `AXM-MOD-E-0011` | Error | 偏置源或真实结果未通过 Strict，结果未发布 |
+| `AXM-MOD-E-0012` | Error | 移动面输入/目标无效、零或非有限距离、非法容差 |
+| `AXM-MOD-E-0013` | Error | 直接编辑源或真实暂存结果未通过Strict，结果未发布 |
+| `AXM-MOD-I-0001` | Info | 真实偏置/抽壳/移动面/替换面边界通过私有Strict后发布 |
+
+cycle-0089 / S6-OFFSET-SHELL 新增 E-0009/0010/0011 与 I-0001 公开常量，复用 E-0001/0002/0003/0008；没有新增 MOD-D 码。支持限当前 owned 轴对齐六平面矩形闭壳及无开口/单面开口抽壳，见 [API §8.3.1](../api/AxiomKernel_详细模块接口清单.md#831-stage-6-真实偏置与抽壳支持矩阵cycle-0089--s6-offset-shell)。
+
+| StatusCode / 稳定码 | Issue.stage | 根因 / 结果 |
+|---|---|---|
+| InvalidInput / E-0001 | `modify.offset.input_gate` | 无效体、非有限/零距离、非法或非有限容差 |
+| InvalidInput / E-0003 | `modify.shell.input_gate` | 无效体、非有限/非正厚度、非法或非有限内核容差 |
+| InvalidInput / E-0003 | `modify.shell.invalid_faces` | 不存在、重复或不属于当前输入体的移除面 |
+| NotImplemented / E-0009 | `modify.offset.support_gate` / `modify.shell.support_gate` | 非认证当前盒边界、一般曲面或多开口，不回退代理 |
+| DegenerateGeometry / E-0010 | `modify.offset.geometry_gate` / `modify.shell.geometry_gate` | 距离/厚度不大于有效容差，退化 bbox、位移舍入或坐标/尺寸溢出 |
+| OperationFailed / E-0002 | `modify.offset.self_intersection` | 认证盒域内负偏置塌缩或接触，不代表一般曲面自交算法 |
+| OperationFailed / E-0003 | `modify.shell.thickness` / `modify.shell.cavity_tolerance` | 内腔塌缩或剩余内腔尺寸不大于容差 |
+| InvalidTopology / E-0011 | `modify.offset.source_validate` / `modify.offset.validate` | 当前源/真实暂存结果未通过 Strict |
+| InvalidTopology / E-0008 | `modify.shell.source_validate` / `modify.shell.validate` | 当前源/真实暂存结果未通过 Strict |
+| Ok / I-0001 | `modify.offset.complete` / `modify.shell.complete` | 独立真实边界发布成功 |
+
+表中 E/I 简写均为 `AXM-MOD-` 前缀。失败 Issue 关联源 BodyId，成功关联源和输出 BodyId；外层及 OpReport 可用 diagnostic_id 查询、按阶段/码检索和 JSON 导出。源当前 owned 边界与结果在私有暂存状态 Strict 核验，历史 body/shell/face 来源只在暂存隔离与恢复，live 源不变。失败无 value、不泄漏部分模型、不消耗 live ID，源拓扑/来源/索引、next_version、事务写数/分配范围、Eval clean/dirty 状态及桥/重算计数、暖缓存保持，诊断允许增加。
+
+成功仅追加新模型与关系，登记活动事务范围，并通知直接输入绑定 Eval 节点及下游失效；不自动重算业务算法。回滚移除派生几何/拓扑/表示/缓存、保留源暖 Mesh 身份，成功已分配 ID 允许空档。[验收 §1.16](../quality/AxiomKernel_测试与验收方案.md#116-cycle-0089--s6-offset-shell-门禁与逐项证据)直接覆盖两种 source_validate 及偏置输出 validate；抽壳输出 validate 属防御合同，不宣称全部根因直接注入。修改式 Safe 修复保形不在本工作流内。
+
+cycle-0090 / S6-DIRECT-EDIT 新增 `kModMoveFaceInvalid`（E-0012）与 `kModDirectEditValidateFailed`（E-0013），复用E-0005/0006，E-0009/0010/I-0001扩展至直接编辑；不新增MOD-D码。支持限独占完整owned轴对齐六平面盒单面移动/严格平行Plane替换，删除补面明确不支持，见[API§8.3.2](../api/AxiomKernel_详细模块接口清单.md#832-stage-6-真实直接编辑支持矩阵cycle-0090--s6-direct-edit)。
+
+| StatusCode / 稳定码 | Issue.stage | 根因 / 结果 |
+|---|---|---|
+| InvalidInput / E-0012 | `modify.move_face.input_gate` | 无效体/目标、异属面、零/非有限距离或非法容差 |
+| InvalidInput / E-0005 | `modify.replace_face.input_gate` | 无效体/目标、异属面、无效Surface或非法容差 |
+| InvalidInput / E-0005 | `modify.replace_face.support_gate` | 替换为非Plane、非有限平面、非平行/倾斜法向；即使微小离轴分量也拒绝 |
+| InvalidInput / E-0006 | `modify.delete_face.input_gate` | 无效体/目标或异属面 |
+| NotImplemented / E-0009 | `modify.delete_face.support_gate` | 合法owned目标仍无认证删除补面算法，无输出 |
+| NotImplemented / E-0009 | `modify.move_face.support_gate` / `modify.replace_face.support_gate` | 当前源边界非完整独占轴对齐六平面盒，含共享/开放/一般曲面/非轴对齐 |
+| DegenerateGeometry / E-0010 | `modify.move_face.geometry_gate` / `modify.replace_face.geometry_gate` | 亚容差/无变化、塌缩/接触/近容差余宽、位移不可表示或数值溢出 |
+| InvalidTopology / E-0013 | `modify.move_face.source_validate` / `modify.replace_face.source_validate` | 当前源未通过私有Strict |
+| InvalidTopology / E-0013 | `modify.move_face.validate` / `modify.replace_face.validate` | 暂存重建结果未通过Strict，未发布 |
+| Ok / I-0001 | `modify.move_face.complete` / `modify.replace_face.complete` | 独立真实边界发布成功 |
+
+简码均为 `AXM-MOD-` 前缀。失败Issue关联输入BodyId与目标FaceId；成功额外关联输出BodyId，外层/OpReport的diagnostic_id可查询、检索和JSON导出。源与结果在私有状态Strict验证，历史来源仅暂存隔离后恢复。失败无value、不发布、不消耗live模型ID；源拓扑/来源/索引、事务写数、Eval及暖缓存保持，诊断可增加。成功只追加新记录，登记活动事务范围并通知输入绑定Eval及下游失效。保存点/完整回滚清理派生几何/拓扑/表示/缓存与体Eval绑定，使消费节点失效，保留源暖Mesh身份；成功ID允许空档，累计遥测不承诺回退。
+
+[验收§1.17](../quality/AxiomKernel_测试与验收方案.md#117-cycle-0090--s6-direct-edit-门禁与逐项证据)覆盖输入/支持/数值稳定码与隔离，错误PCurve直接注入move的E-0013/source_validate。`.validate`是生产防御合同；输出随后删面后的Strict失败及回滚恢复不是服务内部结果validate失败注入，不宣称所有E-0013组合已直接注入。
+
+### cycle-0091 / S6-EXIT 固定机械夹具诊断与隔离证据
+
+公开签名、既有码和生产实现均不变，完成阶段沿用`modify.move_face.complete / modify.replace_face.complete / modify.offset.complete / modify.shell.complete`的`AXM-MOD-I-0001`。固定盒链保留完整祖先，结果体逐步对应立即源；不会因本批组合验收扩大一般曲面/删除补面/批量或终点后续操作资格。
+
+| 本批直接注入场景 | StatusCode / 稳定码 | Issue.stage |
+|---|---|---|
+| 倒角/圆角/单开口抽壳终点再偏置/抽壳/移动 | NotImplemented / `AXM-MOD-E-0009` | `modify.offset.support_gate / modify.shell.support_gate / modify.move_face.support_gate` |
+| +Z面移动−5导致盒域塌缩 | DegenerateGeometry / `AXM-MOD-E-0010` | `modify.move_face.geometry_gate` |
+| 负偏置−2.5导致接触/塌缩 | OperationFailed / `AXM-MOD-E-0002` | `modify.offset.self_intersection` |
+| 抽壳厚度2.5过大 | OperationFailed / `AXM-MOD-E-0003` | `modify.shell.thickness` |
+
+本批`stage6_mechanical_fixture::rejected`逐次核对稳定码/阶段/Error、非空诊断及no-value；live ID/拓扑版本、对象/几何计数、事务写数、stock/base当前面边和来源快照、暖缓存计数、Eval桥/重算/clean状态不变，早期派生体及事务sentinel保留。完整writer回滚清7个派生体及全部派生拓扑、整体几何/缓存/网格和体绑定，逐输出抽样Curve/Surface删除；使派生消费者失效，保留源暖MeshId、原拓扑/来源与源Eval，索引/runtime一致且重试成功。成功ID可空档、诊断可增加，累计遥测不承诺倒退。
+
+闭腔终点及replace/fillet续接没有在本批拒绝循环逐项注入；source_validate/validate历史防御分支不因此记为全部根因注入。保存点仍引用既有Query/Eval回归。[两条验收证据](../quality/AxiomKernel_测试与验收方案.md#118-cycle-0091--s6-exit-门禁与逐项证据)记录完整16/16、201.93 s门禁与[支持矩阵](../api/AxiomKernel_详细模块接口清单.md#833-stage-6-固定机械夹具退出支持矩阵cycle-0091--s6-exit)限制；不新增错误码或扩大查询支持域。
 
 ## 7.8 `QUERY` 查询分析错误码
 
@@ -492,6 +563,23 @@ prep隔离新增两输入网格暖缓存、固定CurveId域及四点无缓存poi
 
 配置 linear 必须有限正值且在有限正值 min_local/max_local 内；焊接拒绝多候选和链式漂移。真实派生结果 Strict 成功才保留。Heal 单项/批量失败恢复模型、反向索引、几何求值/三角化缓存及统计和 Eval；批量后项失败回收前项输出及失效，保留诊断但不承诺恢复 `next_id`，允许 ID 空档。IO 八具体格式入口单项及既有批量回滚另恢复 `next_id`，可原位重试；失败诊断继续保留。cycle-0085 八主格式保护失败项主文件，但侧车/全批无跨文件事务。默认 STEP/IGES/BREP 仍限 Axiom 元数据子集，不证明完整标准交换或工业通用修复。
 
+### cycle-0087 / S5-EXIT 快照修复与资格拒绝（复用既有码）
+
+公开签名与常量不变；本批完整16/16、196.58 s及两条证据见[验收§1.14](../quality/AxiomKernel_测试与验收方案.md#114-cycle-0087--s5-exit-门禁与逐项证据)。MeshRep `auto_repair` 复制完整实际MeshRecord到新体/新mesh，源快照保留；内部后验为Standard，固定STL回归另显式Strict通过。
+
+| 场景 | 稳定码 / 阶段及证据 |
+|---|---|
+| MeshRep修复后验成功 | Info `AXM-HEAL-D-0005 / heal.auto_repair.post_validate` |
+| 缺所属网格修复失败 | `OperationFailed / AXM-HEAL-E-0006 / heal.auto_repair.post_validate`，无value；复制根因 `AXM-VAL-E-0004` |
+| 实际mesh复制后angular=0失败 | 同一HEAL码/阶段，根因 `AXM-VAL-E-0003`；`allocated_object_count>=2`、`rollback_applied=1` |
+| 原Box元数据零owned shells三角化 | `AXM-TES-E-0001 / rep.tessellation.topology`，无mesh结果；ExactBRep/Box标签不授予原生边界资格 |
+| 同体质量查询 | `InvalidTopology / AXM-TOPO-E-0005 / query.mass_properties.empty_gate` |
+| Safe合成Modified bbox边界与再导入代理质量 | `NotImplemented / AXM-CORE-E-0004 / query.mass_properties.support_gate`，无质量结果；显示成功不授予分析资格 |
+
+原始MeshRep几何验证仍在 `heal.validate_geometry.mesh`；本兼容自动修复分支复制Error/Fatal到修复报告时映射为 `heal.auto_repair.post_validate`，原验证报告保留，不能泛称全部分支保留原子阶段。owned真实平面修复的 `.planar.*` 合同不变。缺网格重复失败及复制后失败回归保持对象/mesh/缓存/六项统计/Eval、源MeshId及坐标；Heal回收派生对象但不恢复next_id，允许ID空档并保留诊断。IO外层导入事务另恢复next_id，继续使用 `io.post_import.validation/repair/post_validate` 并复制根因/追加IO-E-0004。
+
+四格式读取预算/标准拒绝、八格式单主文件发布及失败保护沿用§7.11；侧车/全批无跨文件事务，无掉电/并发目录安全认证，publish失败仍无直接注入回归。以上是受限固定证据，非工业全实体交换/任意mesh质量或通用修复认证。
+
 ## 7.12 `TES` 三角化错误码
 
 | 错误码 | 严重级别 | 含义 |
@@ -500,6 +588,24 @@ prep隔离新增两输入网格暖缓存、固定CurveId域及四点无缓存poi
 | `AXM-TES-E-0002` | Error | 法向计算失败 |
 | `AXM-TES-E-0003` | Warning | 三角化结果未满足目标误差 |
 | `AXM-TES-E-0004` | Warning | 使用近似曲面片替代精确曲面片 |
+
+### cycle-0086 / S5-TESSELLATION 稳定阶段与失败恢复
+
+本批没有新增错误码常量，继续复用 `kTesFailure = AXM-TES-E-0001`。阶段是失败类别，不能据此承诺每种底层根因有独立阶段；当前支持范围见 [API §7.3.2](../api/AxiomKernel_详细模块接口清单.md#732-stage-5-真实边界三角化与转换一致性cycle-0086--s5-tessellation)。
+
+| 失败类别 | Status / code | Issue.stage / 实体 |
+|---|---|---|
+| 真实环/曲线/参数/PCurve/支撑不一致；不支持的参数 patch；面误差不可达或发布前非有限/退化 | OperationFailed / AXM-TES-E-0001 | `rep.tessellation.face`；BodyId、ShellId、FaceId |
+| 原生网格误差/资源预算不可达或原生边界退化 | OperationFailed / AXM-TES-E-0001 | `rep.tessellation.budget`；BodyId |
+| MeshRep 缺嵌入网格；编辑原生解析体只剩代理壳，或 Stage 3 多面体失去平面支撑 | NotImplemented / AXM-TES-E-0001 | `rep.tessellation.support`；BodyId，按路径附 ShellId/FaceId |
+| owned 壳/面缺失或空；建模体缺当前 owned 边界 | OperationFailed / AXM-TES-E-0001 | `rep.tessellation.topology`；BodyId，按路径附 ShellId/FaceId |
+| 组装索引/规模/空结果或焊接后非有限/退化 | OperationFailed / AXM-TES-E-0001 | `rep.tessellation.assembly`；BodyId，按路径附 ShellId/FaceId |
+
+无效句柄/options 仍使用既有 CORE 前置码；`mesh_to_brep` 非有限/退化网格使用 `AXM-VAL-E-0002`，不新增 TES 阶段承诺。参数 patch 的高阶、不等权、非夹持、非矩形/孔裁剪等拒绝使用 `.face`，不能统一写成 `.support`。full/local/shell 失败无 value、无部分网格或缓存，不以 bbox/创建参数代替当前边界。两种 batch 的任一项失败、双向 round-trip 的成功或失败均恢复相应调用的 mesh/body、source_body 绑定、体/面缓存、Geo 曲线/曲面缓存、六项统计及 next_id，保留可查询诊断。重复转换仅对已由 `mesh_to_brep` 建立的 `MeshRep + brep_from_mesh` 关联幂等；round-trip 不证明任意 BRep 保真。
+
+新结果发布前有限/退化校验不替代已有 MeshRep 的 IO 政策：嵌入网格转换直接返回旧身份，严格 QA 仍为 `AXM-IO-E-0006 / io.export.mesh_strict_qa`；兼容模式仍允许既有退化三角形，非法索引/非有限坐标仍拒绝。glTF float32 超范围优先保留 `AXM-IO-E-0005 / io.export.gltf.mesh`，检查先于严格 QA。glTF 二进制 float32 NaN/Inf 即使 `run_validation=false` 仍物化前拒绝，使用 `InvalidInput / AXM-IO-E-0004 / io.import.gltf.validation`，IDs/mesh/cache 不变；关闭可选后验验证不关闭有限输入检查。
+
+真实测试、独立参考和未认证范围见 [验收 §1.13](../quality/AxiomKernel_测试与验收方案.md#113-cycle-0086--s5-tessellation-门禁与逐项证据)。本合同不扩张为侧车/批量文件事务，不认证 metadata/implicit 的物理量或 seam/法向拆分后的流形性。
 
 ## 7.13 `EVAL` 缓存与增量模块错误码
 
@@ -553,7 +659,7 @@ prep隔离新增两输入网格暖缓存、固定CurveId域及四点无缓存poi
 | `AXM-BOOL-W-0001` | 布尔预处理近退化/仅接触或受限 bbox 语义告警（包括分离输入与 Split 占位）；`Issue.stage=bool.prep` |
 | `AXM-BOOL-W-0002` | 壳/区域级无局部候选，交集回退全局 bbox 或减运算保留左体；`Issue.stage=bool.prep` |
 | `AXM-BOOL-W-0003` | 布尔结果在重建后 Strict 验证仍残留问题（可审计告警） |
-| `AXM-BLEND-W-0002` | 圆角/倒角一次处理多条边时角区仍为占位实现 |
+| `AXM-BLEND-W-0002` | 历史多边角区占位码；真实路径不返回，当前不支持角区结构化拒绝 |
 | `AXM-HEAL-W-0001` | 修复时删除了局部小特征 |
 | `AXM-IO-W-0001` | 导入后部分属性未映射 |
 | `AXM-TES-W-0001` | 三角化误差达到上限边缘 |

@@ -22,7 +22,7 @@
 
 | `ImportOptions` | 与导出的关系 |
 |-----------------|-------------|
-| `run_validation` | 导入后 `validate_all(Standard)`；失败进入诊断与可选 `auto_repair`。未解决的验证/修复/再验证失败无 Body value，并回滚本次模型、缓存/统计、Eval 和 next_id；false 显式跳过闭环。 |
+| `run_validation` | 导入后 `validate_all(Standard)`；失败进入诊断与可选 `auto_repair`。未解决的验证/修复/再验证失败无 Body value，并回滚本次模型、缓存/统计、Eval 和 next_id；false 显式跳过可选后验闭环，仍须通过格式与物化前有限输入检查。cycle-0086 glTF float32 NaN/Inf 在 false 时返回 `InvalidInput / AXM-IO-E-0004 / io.import.gltf.validation`，不发布对象。 |
 | `auto_repair` | 仅在验证失败且为真时触发修复管线；与导出策略独立。 |
 
 ## 4. 回归入口
@@ -31,6 +31,10 @@
 - `axiom_io_dataset_test`：`tests/data/io` 最小 STEP/OBJ 数据集 + STL 策略组合烟测。
 
 cycle-0085 调度器完整构建成功，CTest **16/16、0 失败、227.56 s**；必需 workflow/dataset/representation_io **14.77/0.70/12.23 s**。四格式固定 double/实际 STL 积分、64 MiB 预算及旧主文件/冷暖缓存失败保护见 [验收 §1.12](AxiomKernel_测试与验收方案.md#112-cycle-0085--s5-io-门禁与逐项证据)。publish 失败由实现静态核验，无独立 rename 失败注入；本轮未重跑测试，正式验收条件保留。
+
+cycle-0086 repair 后最终完整 CTest **16/16、0 失败、200.26 s**，IO workflow **13.34 s**、representation_io **15.40 s** 通过；新增关闭可选验证时 glTF NaN/Inf 拒绝及 IDs/mesh/cache 原子性，保留严格/兼容 QA 与旧文件保护，见 [验收 §1.13](AxiomKernel_测试与验收方案.md#113-cycle-0086--s5-tessellation-门禁与逐项证据)。已有 MeshRep 嵌入转换返回同一 MeshId，QA 由 IO 执行；新生成网格的发布前有限/退化校验不抢占这些既有诊断。
+
+cycle-0087 / S5-EXIT 当前集成代码门禁：完整构建成功，CTest **16/16、0失败、196.58 s**；四必需io_workflow/io_dataset/heal/representation_io **13.05/0.55/0.78/14.32 s**。固定STL显式Strict→Safe完整新体/新mesh快照→Strict/三角化→导出再导入，源mesh保留，独立ASCII积分V4、A=13+sqrt(244)/2、质心误差≤1e-12。metadata原Box零owned shells直接转换拒绝；Safe合成Modified边界owned_topo_welded仅显示，派生再导入零壳/bbox_proxy，质量拒绝。缺mesh及复制后angular=0后验失败恢复模型/cache/统计/Eval；独立Heal允许ID空档，IO外层另恢复next_id。两条证据与支持域见[验收§1.14](AxiomKernel_测试与验收方案.md#114-cycle-0087--s5-exit-门禁与逐项证据)。内部MeshRep后验为Standard，固定回归额外Strict；不授予通用实体质量或标准交换资格。本轮未重跑测试，最终文档门禁及提交未记录，不能正式已验收；§6发布及多文件限制保持。
 
 ## 5. 刻意不覆盖（避免误解）
 
@@ -52,6 +56,8 @@ cycle-0085 调度器完整构建成功，CTest **16/16、0 失败、227.56 s**�
 | `publish` | rename 发布主文件失败，`OperationFailed / AXM-IO-E-0005`，含有限 filesystem_error |
 
 严格 QA 仍使用 `AXM-IO-E-0006 / io.export.mesh_strict_qa`，所有失败关联输入 Body；不改变现有错误码含义或公开签名。cycle-0073 的 Error 及以上失败 issue 补齐有限 `status_code/related_entity_count` 与分支证据，非有限测量值过滤并计入 `non_finite_evidence_omitted`；审计使用 `issue_code_prefix="AXM-"` 和 `stage_prefix="io."`，覆盖复用下层根因码的失败。
+
+glTF float32 超范围检查先于严格 QA，保留 `AXM-IO-E-0005 / io.export.gltf.mesh`；已有嵌入网格两种模式仍分别执行上述策略，不能把 Rep 新结果退化检查解释为取消兼容模式。
 
 失败保留输入模型、已有网格、实体 ID 及三角化缓存/统计；成功仍保留转换缓存。回滚范围仅为本次导出的三角化状态，诊断报告保留以供检索。输入、转换和网格校验失败不创建或截断主文件；临时 payload 写入/关闭失败不尝试写侧车。cycle-0085 起八格式采用同目录独占临时文件→检查关闭→请求侧车→rename 发布，失败清理临时 payload，已有主文件逐字节保留、无旧文件时不新建被宣称成功的主文件，可修复路径后重试。所有格式使用 classic locale/max_digits10；glTF float32 等格式固有限制保留。侧车沿用 REP 出口，自身可能已写出；侧车与主文件、批量文件无跨文件事务，不承诺掉电持久性或并发目录修改安全。
 

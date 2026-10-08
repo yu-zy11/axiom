@@ -523,11 +523,14 @@ Result<BodyShellAnalysis> analyze_body_shells(detail::KernelState &state,
   // Several older body factories own a planar bbox shell even though their
   // represented geometry is curved or still a modelling placeholder. Such a
   // shell is not evidence of a real polyhedron. Never integrate or query it as
-  // the represented solid. User-authored Generic topology is checked below.
+  // the represented solid. Generic and BlendResult topology is checked below;
+  // shell measurement still rejects proxy faces, curved surfaces and curved
+  // edges, so only real planar chamfers enter the polyhedron query path.
   const auto &body = body_it->second;
   const bool real_polyhedron = body.rep_kind == RepKind::ExactBRep &&
       (body.kind == detail::BodyKind::Generic || body.kind == detail::BodyKind::Box ||
        body.kind == detail::BodyKind::Wedge ||
+       body.kind == detail::BodyKind::BlendResult ||
        (body.kind == detail::BodyKind::BooleanResult && body.boolean_rebuilt_boundary) ||
        (body.kind == detail::BodyKind::Sweep && body.sweep_polyhedral_mass_valid));
   if (!real_polyhedron) {

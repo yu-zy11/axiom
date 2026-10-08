@@ -302,10 +302,50 @@ class ModifyService {
 public:
     explicit ModifyService(std::shared_ptr<detail::KernelState> state);
 
+    /// Offset the current owned axis-aligned six-plane rectangular closed boundary.
+    /// A finite nonzero signed distance moves each plane outward (positive) or inward
+    /// (negative), rebuilding independent vertices, edges and faces. The caller's valid
+    /// tolerance policy controls the distance and collapse gates; coordinate rounding
+    /// must preserve the requested plane displacement within that tolerance.
+    /// Unsupported boundaries, self-intersection/collapse and numerical degeneracy
+    /// return staged diagnostics. The source's current owned boundary (excluding
+    /// historical provenance) and the result pass Strict in private staging;
+    /// failures allocate no model IDs and preserve source topology, Eval and warm caches.
+    /// Successful publication invalidates the input body's bound Eval nodes and their
+    /// downstream consumers, and registers the result for active transaction rollback.
     Result<OpReport> offset_body(BodyId body_id, Scalar distance, const TolerancePolicy& tolerance);
+    /// Shell the same rectangular closed input with a finite positive inward thickness.
+    /// No removed faces creates separate outer and inward-oriented cavity boundaries;
+    /// one currently owned face creates an open rectangular housing with a real rim.
+    /// The exterior bounds remain fixed and each retained wall has the requested
+    /// plane-to-plane thickness. Multiple openings and general surfaces are unsupported.
+    /// Thickness/cavity clearance must exceed the kernel tolerance and be representable
+    /// in world coordinates. Source/result Strict validation and failure/transaction
+    /// isolation follow offset_body; no partial body is published on failure.
     Result<OpReport> shell_body(BodyId body_id, std::span<const FaceId> removed_faces, Scalar thickness);
     Result<OpReport> draft_faces(BodyId body_id, std::span<const FaceId> faces, const Vec3& pull_dir, Scalar angle);
+    /// Move one currently owned face of a complete axis-aligned six-plane rectangular
+    /// closed ExactBRep by a finite nonzero signed distance along its outward normal.
+    /// Positive expands, negative contracts the selected side; adjacent planes are
+    /// retrimmed to an independently rebuilt boundary. The kernel's linear tolerance
+    /// gates distance, remaining thickness and representability in world coordinates.
+    /// Current source and result pass Strict in private staging, excluding obsolete
+    /// historical source provenance from the source check. Failure preserves live model
+    /// IDs, source topology/provenance, Eval and warm caches. Success returns a new body
+    /// with immediate face/shell/body provenance, invalidates input Eval consumers and
+    /// registers the result for active transaction rollback. No source is edited in place.
+    /// General surfaces, shared/open boundaries and collapsed results are unsupported.
+    Result<OpReport> move_face(BodyId body_id, FaceId target, Scalar signed_distance);
+    /// Replace a currently owned rectangular box face with a parallel Plane, extending
+    /// or trimming its four adjacent faces and rebuilding all real boundary geometry.
+    /// Either replacement normal sign is accepted; outward output orientation is kept.
+    /// A displacement exceeding kernel tolerance is required. The supported domain,
+    /// Strict staging, immediate provenance and isolation contract follow move_face.
+    /// Nonparallel/curved replacements and no-op replacements return staged diagnostics.
     Result<OpReport> replace_face(BodyId body_id, FaceId target, SurfaceId replacement);
+    /// Face deletion with adjacent-surface healing is unsupported in this package.
+    /// Valid owned selections return NotImplemented with modify.delete_face.support_gate;
+    /// invalid or foreign selections return InvalidInput. No result is published.
     Result<OpReport> delete_face_and_heal(BodyId body_id, FaceId target);
 
 private:
@@ -316,7 +356,15 @@ class BlendService {
 public:
     explicit BlendService(std::shared_ptr<detail::KernelState> state);
 
+    /// 在当前边界仍为轴对齐矩形毛坯的单条或多条平行凸边上生成常半径真实圆柱补面，
+    /// 并重建独立闭壳（圆弧封盖边界），通过 Strict 验证后发布。
+    /// 相交角区、退让区接触、非平行边、非矩形当前闭壳不受支持，明确阶段诊断。
+    /// 半径须有限、正且大于容差/坐标分辨率；失败不修改模型、ID 或 Eval/缓存。
+    /// 活动拓扑事务可回滚结果。公开面/边/顶点及曲线/曲面求值可查真实几何；
+    /// 圆角体的质量、面积及实体空间查询仍受对应查询服务的曲面支持范围限制。
     Result<OpReport> fillet_edges(BodyId body_id, std::span<const EdgeId> edges, Scalar radius);
+    /// 同圆角的毛坯/选边/事务边界；生成真实平面等距倒角，distance 为在每个
+    /// 邻接平面上从原棱边量取的退让距离，不是倒角斜面的宽度。
     Result<OpReport> chamfer_edges(BodyId body_id, std::span<const EdgeId> edges, Scalar distance);
 
 private:

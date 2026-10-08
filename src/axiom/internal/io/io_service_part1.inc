@@ -413,6 +413,14 @@ Result<BodyId> IOService::import_gltf(std::string_view path, const ImportOptions
         return fail_before_import(StatusCode::OperationFailed, diag_codes::kIoImportFailure,
                                   *parse_err, "io.import.gltf.parse");
     }
+    // Binary float positions must be checked independently of geometric QA,
+    // including when the optional post-import validator is disabled.
+    if (std::any_of(mesh.vertices.begin(), mesh.vertices.end(), [](const Point3& point) {
+            return !std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z);
+        })) {
+        return fail_before_import(StatusCode::InvalidInput, diag_codes::kIoImportFailure,
+                                  "glTF 导入失败：顶点坐标非有限值", "io.import.gltf.validation");
+    }
     if (mesh.vertices.empty() || mesh.indices.empty() || (mesh.indices.size() % 3) != 0) {
         return fail_before_import(StatusCode::InvalidInput, diag_codes::kIoImportFailure,
                                   "glTF 导入失败：网格数据无效", "io.import.gltf.validation");
@@ -1165,10 +1173,6 @@ Result<void> IOService::export_gltf(BodyId body_id, std::string_view path, const
         return bind_mesh_export_failure(*state_, error_void(mesh_id.status, mesh_id.diagnostic_id),
                                         body_id, "io.export.gltf.convert");
     }
-    const auto strict_gate = mesh_export_strict_gate(*state_, convert, *mesh_id.value, options, body_id);
-    if (strict_gate.status != StatusCode::Ok) {
-        return bind_mesh_export_failure(*state_, strict_gate, body_id, "io.export.mesh_strict_qa");
-    }
 
     const auto mesh_it = state_->meshes.find(mesh_id.value->value);
     if (mesh_it == state_->meshes.end()) {
@@ -1177,19 +1181,8 @@ Result<void> IOService::export_gltf(BodyId body_id, std::string_view path, const
                               "io.export.gltf.mesh", {{"mesh_exists", 0.0, "bool"}});
     }
     const auto& mesh = mesh_it->second;
-    if (mesh.vertices.empty() || mesh.indices.empty() || (mesh.indices.size() % 3) != 0 ||
-        detail::has_out_of_range_indices(mesh.vertices, mesh.indices) ||
-        std::any_of(mesh.vertices.begin(), mesh.vertices.end(), [](const Point3& point) {
-            return !std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z);
-        })) {
-        return io_failed_void(
-            *state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
-            "glTF 导出失败：网格数据无效", "glTF 导出失败", {body_id.value},
-            "io.export.gltf.mesh",
-            {{"vertex_count", static_cast<Scalar>(mesh.vertices.size()), "count"},
-             {"index_count", static_cast<Scalar>(mesh.indices.size()), "count"}});
-    }
-
+    // Format representability precedes geometric QA; neither policy may
+    // serialize a coordinate that cannot be stored in float32.
     const auto float_limit = static_cast<Scalar>(std::numeric_limits<float>::max());
     if (std::any_of(mesh.vertices.begin(), mesh.vertices.end(), [float_limit](const Point3& point) {
             return std::abs(point.x) > float_limit || std::abs(point.y) > float_limit ||
@@ -1201,6 +1194,24 @@ Result<void> IOService::export_gltf(BodyId body_id, std::string_view path, const
             "io.export.gltf.mesh",
             {{"float32_max", float_limit, "model_unit"},
              {"vertex_count", static_cast<Scalar>(mesh.vertices.size()), "count"}});
+    }
+
+    const auto strict_gate = mesh_export_strict_gate(*state_, convert, *mesh_id.value, options, body_id);
+    if (strict_gate.status != StatusCode::Ok) {
+        return bind_mesh_export_failure(*state_, strict_gate, body_id, "io.export.mesh_strict_qa");
+    }
+
+    if (mesh.vertices.empty() || mesh.indices.empty() || (mesh.indices.size() % 3) != 0 ||
+        detail::has_out_of_range_indices(mesh.vertices, mesh.indices) ||
+        std::any_of(mesh.vertices.begin(), mesh.vertices.end(), [](const Point3& point) {
+            return !std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z);
+        })) {
+        return io_failed_void(
+            *state_, StatusCode::InvalidInput, diag_codes::kIoExportFailure,
+            "glTF 导出失败：网格数据无效", "glTF 导出失败", {body_id.value},
+            "io.export.gltf.mesh",
+            {{"vertex_count", static_cast<Scalar>(mesh.vertices.size()), "count"},
+             {"index_count", static_cast<Scalar>(mesh.indices.size()), "count"}});
     }
 
     std::vector<std::uint8_t> buffer;

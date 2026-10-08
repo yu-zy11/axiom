@@ -189,6 +189,41 @@ Result<TopologySavepointMetrics> TopologyService::savepoint_metrics() const {
 
 TopologyQueryService &TopologyService::query() { return query_service_; }
 
+Result<Point3> TopologyQueryService::point_of_vertex(VertexId vertex_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
+  const auto vertex = state_->vertices.find(vertex_id.value);
+  if (vertex == state_->vertices.end()) {
+    return detail::invalid_input_result<Point3>(
+        *state_, diag_codes::kCoreInvalidHandle, "顶点查询失败：目标顶点不存在",
+        "顶点坐标查询失败");
+  }
+  const auto& point = vertex->second.point;
+  if (!std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z)) {
+    return detail::failed_result<Point3>(
+        *state_, StatusCode::InvalidTopology, diag_codes::kTopoRelationInconsistent,
+        "顶点查询失败：坐标不是有限数", "顶点坐标查询失败");
+  }
+  return ok_result(vertex->second.point,
+                   state_->create_diagnostic("已查询顶点坐标"));
+}
+
+Result<CurveId> TopologyQueryService::curve_of_edge(EdgeId edge_id) const {
+  TopoQueryAuditScope _topo_query_audit{state_};
+  const auto edge = state_->edges.find(edge_id.value);
+  if (edge == state_->edges.end()) {
+    return detail::invalid_input_result<CurveId>(
+        *state_, diag_codes::kCoreInvalidHandle, "边查询失败：目标边不存在",
+        "边支撑曲线查询失败");
+  }
+  if (!detail::has_curve(*state_, edge->second.curve_id)) {
+    return detail::failed_result<CurveId>(
+        *state_, StatusCode::InvalidTopology, diag_codes::kTopoRelationInconsistent,
+        "边查询失败：支撑曲线不存在", "边支撑曲线查询失败");
+  }
+  return ok_result(edge->second.curve_id,
+                   state_->create_diagnostic("已查询边支撑曲线"));
+}
+
 TopologyValidationService &TopologyService::validate() {
   return validation_service_;
 }

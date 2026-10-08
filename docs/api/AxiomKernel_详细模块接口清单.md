@@ -574,6 +574,8 @@ struct EdgeCurveInterval {
 class TopologyQueryService {
 public:
   Result<std::array<VertexId, 2>> vertices_of_edge(EdgeId) const;
+  Result<Point3> point_of_vertex(VertexId) const;
+  Result<CurveId> curve_of_edge(EdgeId) const;
   Result<std::vector<EdgeId>> edges_of_loop(LoopId) const;
   Result<std::vector<LoopId>> loops_of_face(FaceId) const;
   Result<SurfaceId> surface_of_face(FaceId) const;
@@ -611,6 +613,8 @@ public:
 PCurve 必须为至少两点的折线，按 coedge 方向连续闭合，各点位于当前包装后参数域，且 UV 端点在支撑曲面上与定向拓扑顶点的 3D 位置一致。退化、自交、断裂或越域的外/内环分别返回 `InvalidTopology / AXM-TOPO-E-0003/0004`；内环必须严格位于外环内且不得相交、重叠或嵌套。非有限面积返回 `NumericalInstability / AXM-QUERY-E-0003`，扣孔后非正或退化返回 `DegenerateGeometry / AXM-GEO-E-0003`，结果溢出返回 `InvalidInput / AXM-CORE-E-0002`；所有失败均无部分面积。周期参数缝须由调用方在同一展开区间内表达，查询不自动解包裹。每次查询从当前面/环/曲面重算，不写求值或网格缓存；事务内替换/删除即时可见，回滚后恢复。
 
 `shell_mass_properties / body_shell_regions / body_mass_properties` 从当前真实拓扑重算单位密度的体积、表面积、质心及关于质心的世界坐标系 3×3 行主序惯性张量。体积、面积、质心和惯性的单位分别是模型长度单位的三次方、平方、一次方和五次方。支持平面、Line/LineSegment 边组成的双边流形闭壳，面可凹且可带孔。`body_shell_regions` 以严格包含深度给出 Material/Void 和直接父壳；`body_mass_properties` 用平行轴定理累加偶数深度材料壳、扣除奇数深度空腔壳，面积保留全部边界面积。多壳相交、重叠或在建模容差内接触返回 `InvalidTopology / AXM-QUERY-E-0006`；曲面、曲边、空/开/非流形壳、共享边同向、环绕向错误、非共面或零体积均结构化失败且无部分值。查询不发布网格、不写缓存、不改变 Eval 状态或事务写计数；事务内删除/替换即时可见，回滚后恢复。cycle-0076 起明确拒绝兼容代理面，包括重新组壳后的原生解析体代理面；原生解析质量资格仅供通用查询使用，完整范围与稳定失败阶段见 §6.1.3。
+
+cycle-0088 新增 `point_of_vertex`（当前顶点坐标）与 `curve_of_edge`（三维支撑曲线）；边的有向裁剪范围仍由 `edge_curve_interval` 返回。两个入口不分配模型对象、不写几何求值缓存，诊断记录与 Topo 只读审计允许增加。非法或回滚后的句柄为 `InvalidInput / AXM-CORE-E-0001`，非有限顶点或悬空曲线引用为 `InvalidTopology / AXM-TOPO-E-0007`；不承诺 getter 专用 `Issue.stage`。回归见 `tests/topo/topology_test.cpp::stage6_blend_topology_guard_regression`。
 
 `edge_curve_interval / edge_length / loop_length / face_boundary_length` 组成拓扑边界长度接口族，单位为模型长度单位。`create_trimmed_edge` 创建的边保存有向参数区间，`edge_length` 调用同一支撑曲线的区间弧长实现，覆盖圆/椭圆/抛物线/双曲线、Bezier/BSpline/NURBS、折线和复合链；递减区间合法，区间起止必须分别对应 v0/v1。旧 `create_edge` 保持兼容：Line/LineSegment 继续按端点真实距离计算，未携带区间的曲边仍返回 `NotImplemented / AXM-CORE-E-0004`，绝不以弦长冒充弧长。显式曲边还会把解析区间极值或控制点凸包纳入面/壳/体拓扑包围盒，避免半圆等边界只取端点而低估范围。
 
@@ -662,9 +666,13 @@ PCurve 必须为至少两点的折线，按 coedge 方向连续闭合，各点�
 
 详细查询每次消费当前拓扑，只增加诊断与 Topo 只读审计，不写模型/网格/交线存储、曲线/曲面求值缓存、体/面三角化缓存、Eval 失效/重算或事务写计数。编辑失败不得恢复旧拓扑质量或 bbox fallback；rollback 后截面与质量恢复。内部零壳分支约定截面成功空、距离 `DegenerateGeometry / AXM-QUERY-E-0001 / query.distance.empty_gate`，但公共 `create_body({})` 返回 `OperationFailed / AXM-TX-E-0001`，本批仅验证创建拒绝及写计数不变，未构造或验收零壳查询分支。
 
-调度器修复后完整构建及 CTest **16/16 通过、148.44 s**；Query/Eval **0.90 s**、Ops/Heal **121.81 s**、representation/IO **9.87 s**。逐项独立参考与四条验收证据见 [测试与验收方案 §1.2](../quality/AxiomKernel_测试与验收方案.md#12-cycle-0075--s3-query-门禁与逐项证据)，稳定失败码见 [错误码字典](../diagnostics/AxiomKernel_错误码与诊断码字典.md)。该节保留 S3-QUERY 历史代码门禁与支持范围；Stage 3 历史退出任务为 cycle-0079 / S3-EXIT（§6.1.4）；当前唯一任务为 S5-IO（§11.1.1），正式状态见当前进度 §5.2.1，不由历史日志推断文档检查/提交成功。Stage 3 / FR-QUERY-001 保持进行中。
+调度器修复后完整构建及 CTest **16/16 通过、148.44 s**；Query/Eval **0.90 s**、Ops/Heal **121.81 s**、representation/IO **9.87 s**。逐项独立参考与四条验收证据见 [测试与验收方案 §1.2](../quality/AxiomKernel_测试与验收方案.md#12-cycle-0075--s3-query-门禁与逐项证据)，稳定失败码见 [错误码字典](../diagnostics/AxiomKernel_错误码与诊断码字典.md)。该节保留 S3-QUERY 历史代码门禁与支持范围；Stage 3 历史退出任务为 cycle-0079 / S3-EXIT（§6.1.4）；当前唯一任务为 S6-EXIT（§8.3.2），正式状态见当前进度 §5.2.1，不由历史日志推断文档检查/提交成功。Stage 3 / FR-QUERY-001 保持进行中。
 
 本矩阵由 cycle-0078 / S3-CONSISTENCY 继续回归锁定：五类代表建模结果的截面/最近点/距离/质量、owned 表示、有效来源与 Eval 绑定闭环通过；成功提交、失败与回滚的一致性见 [§7.3.1](#731-stage-3-表示来源与-eval-一致性合同cycle-0078--s3-consistency) 和 [验收 §1.5](../quality/AxiomKernel_测试与验收方案.md#15-cycle-0078--s3-consistency-门禁与逐项证据)。全量 16/16、164.60 s；支持体类不扩大，详细查询只读，拓扑修改/恢复自身会传播 Eval dirty。
+
+cycle-0088 的真实平面倒角沿用本节当前平面直边实体查询合同；圆角曲面/曲边闭壳仍不支持通用实体空间查询。Blend 真实拓扑查询与 Strict 的支持边界见 §8.4.1。
+
+cycle-0089 的真实 `offset_body/shell_body` 输出为独立 Generic/ExactBRep 平面直边闭壳，沿用本节 Generic 查询合同；Ops 本批实际证明内腔点 Outside、壳角色及质量，不宣称新增截面/距离专项穷举。封闭抽壳为外材料壳与反向 Void 内腔，单面开口为带真实口沿的单个闭合材料壳；来源体标签不代替当前边界检查。支持域与独立参考见 §8.3.1，历史 §6.1.4 的17行 Stage 3 回归矩阵保持原范围。
 
 ### 6.1.3 Stage 3 质量属性支持矩阵（cycle-0076 / S3-MASS）
 
@@ -684,17 +692,21 @@ PCurve 必须为至少两点的折线，按 coedge 方向连续闭合，各点�
 | 旧 label-only Sweep/extrude、历史占位 thicken 记录、兼容run的占位Boolean/Modified、未知或不支持体类/表示 | 明确 `NotImplemented / AXM-CORE-E-0004 / query.mass_properties.support_gate`，无 value | 删除 bbox、Boolean/Modified 来源组合及 Sweep 创建缓存质量恢复。cycle-0077 平面直边 Face thicken 已有真实质量路径，历史代理记录仍拒绝 |
 | metadata-only STEP 等恢复记录、mesh/implicit 派生 BRep、重新组壳的兼容代理面 | 不继承原生解析资格，不能以标签/来源/ExactBRep 名称证明实际边界 | `representation_io_test` 检查导入与派生体拒绝；代理面标记随克隆及布尔 imprint 切分保留，重新归属和删除原 owner 后仍拒绝 |
 
+cycle-0088 的真实平面倒角 `BlendResult` 已纳入既有平面直边闭壳查询路径；独立体积/表面积参考通过。圆角 Cylinder/曲边体及旧 proxy BlendResult 仍拒绝质量（`NotImplemented / AXM-CORE-E-0004 / query.mass_properties.support_gate`，无 value），不以 bbox 代算；实体空间及无 PCurve 面面积同样不因 Blend 成功扩大范围。
+
+cycle-0089 真实偏置/抽壳的 Generic/ExactBRep 结果从当前平面直边 owned 拓扑积分质量；内腔体积扣除、内外表面积均计入，单开口包括四片口沿。通用及专用体质量、质心和真实面面积与解析参考相符，见 §8.3.1；旧 Modified/bbox 代理仍拒绝，不继承本批认证。
+
 真实多面体要求无自交的嵌入平面直边双边流形闭壳。每次消费当前拓扑，合法编辑会改变结果；换曲面、支撑平面错配、开壳或删除目标则即时失败，即使已热缓存网格也不恢复旧数值。成功/失败质量查询不发布网格、不改模型、三角化/求值缓存、Eval invalid/recompute 或事务写计数；诊断与 Topo 只读审计可增加。回滚恢复当前拓扑、质量及来源记录，不以 provenance 冒充几何证明。
 
 所有失败无 `value`，不返回部分体积/面积/重心/惯性。稳定阶段为 `query.mass_properties.support_gate/preflight/empty_gate/numeric`；原生解析溢出/惯性下溢、非有限结果或非正惯性对角项为 `NumericalInstability / AXM-QUERY-E-0003 / numeric`。无效/删除句柄为 `InvalidInput / AXM-CORE-E-0001 / preflight`；其余拓扑根因保留错误码。公共 API 无零壳体夹具，删除最后壳会删除 owner Body，回归核对的是 InvalidInput/preflight，内部 empty_gate 不声称已覆盖。
 
-独立参考、采样误差和三条 `stage_evidence` 见 [测试与验收 §1.3](../quality/AxiomKernel_测试与验收方案.md#13-cycle-0076--s3-mass-门禁与逐项证据)。调度器完整构建成功，全量 CTest **16/16、0 失败、147.97 s**；此为 S3-MASS 历史代码门禁；历史任务 S3-EXIT 的证据见 §6.1.4 与测试与验收 §1.6；当前唯一任务S5-IO见§11.1.1，正式状态见当前进度 §5.2.1。Stage 3 / FR-QUERY-001 继续进行中。
+独立参考、采样误差和三条 `stage_evidence` 见 [测试与验收 §1.3](../quality/AxiomKernel_测试与验收方案.md#13-cycle-0076--s3-mass-门禁与逐项证据)。调度器完整构建成功，全量 CTest **16/16、0 失败、147.97 s**；此为 S3-MASS 历史代码门禁；历史任务 S3-EXIT 的证据见 §6.1.4 与测试与验收 §1.6；当前唯一任务S6-EXIT见§8.3.2，正式状态见当前进度 §5.2.1。Stage 3 / FR-QUERY-001 继续进行中。
 
 本矩阵由 cycle-0078 / S3-CONSISTENCY 继续回归锁定：五类代表建模结果的截面/最近点/距离/质量、owned 表示、有效来源与 Eval 绑定闭环通过；成功提交、失败与回滚的一致性见 [§7.3.1](#731-stage-3-表示来源与-eval-一致性合同cycle-0078--s3-consistency) 和 [验收 §1.5](../quality/AxiomKernel_测试与验收方案.md#15-cycle-0078--s3-consistency-门禁与逐项证据)。全量 16/16、164.60 s；支持体类不扩大，详细查询只读，拓扑修改/恢复自身会传播 Eval dirty。
 
 ### 6.1.4 Stage 3 统一退出支持矩阵（cycle-0079 / S3-EXIT）
 
-此表保留 Stage 3 历史支持合同；当前唯一任务S5-IO见§11.1.1。此表统一 §6.1.2 截面/最近点/距离、§6.1.3 质量、§8.1.1 五类建模与 §7.3.1 表示/来源/Eval 合同，复用既有接口及错误码，不扩展支持域。`stage_task_id=S3-EXIT`、`stage_outcome=ready_for_acceptance`；调度器独立完整构建成功，全量 CTest **16/16、0 失败、163.78 s**。三条验收证据与退出项映射见 [验收 §1.6](../quality/AxiomKernel_测试与验收方案.md#16-cycle-0079--s3-exit-门禁与逐项证据)，正式状态见 [当前进度 §5.2.1](../plan/AxiomKernel_当前开发进度.md#521-stage-5-当前退出任务)。
+此表保留 Stage 3 历史支持合同；当前唯一任务S6-EXIT见§8.3.2。此表统一 §6.1.2 截面/最近点/距离、§6.1.3 质量、§8.1.1 五类建模与 §7.3.1 表示/来源/Eval 合同，复用既有接口及错误码，不扩展支持域。`stage_task_id=S3-EXIT`、`stage_outcome=ready_for_acceptance`；调度器独立完整构建成功，全量 CTest **16/16、0 失败、163.78 s**。三条验收证据与退出项映射见 [验收 §1.6](../quality/AxiomKernel_测试与验收方案.md#16-cycle-0079--s3-exit-门禁与逐项证据)，正式状态见 [当前进度 §5.2.1](../plan/AxiomKernel_当前开发进度.md#521-stage-6-当前退出任务)。
 
 以下 17 行逐一对应 `tests/eval/query_eval_test.cpp::stage3_exit_support_matrix_regression` 中的 Row.label（main 已调用）。V/A/C 分别为体积/面积/质心，S 为水平截面积；单位及世界坐标质心惯性沿用 §6.1.3。距离列同时涵盖 `closest_points`、正反 `min_distance`，最近点涵盖 `closest_point/locate_point`。支持行先通过 Strict；矩阵不以 ExactBRep 标签、bbox 或来源作为物理边界证明。
 
@@ -879,6 +891,9 @@ struct TessellationOptions {
   bool generate_texcoords;
   /// 默认 `180`：仅按位置/UV 焊接；小于 `180` 时在法向夹角过大处保留折边顶点。
   Scalar weld_shading_split_angle_deg;
+  bool use_principal_curvature_refinement; // 默认 true；受支持双线性片可直接满足误差界
+  int refine_patch_chordal_max_passes; // 默认 3，合法 0..12；0 不关闭边界/必需误差检查
+  bool uv_parametric_seam; // 默认 false；与 generate_texcoords 联用
 };
 
 /// 体级/面级三角化缓存观测；`clear_mesh_store` / `reset_runtime_stores` 时清零。
@@ -926,9 +941,13 @@ public:
   Result<MeshId> brep_to_mesh(BodyId, const TessellationOptions&);
   Result<MeshId> brep_to_mesh_local(BodyId, std::span<const FaceId> dirty_faces, const TessellationOptions&);
   Result<MeshId> brep_to_mesh_shell(BodyId, ShellId, const TessellationOptions&);
-  /// 成功后将 `MeshRecord::source_body` 设为新建 `MeshRep` 体，便于 `brep_to_mesh` 嵌入返回同一网格。
+  /// 首次创建 MeshRep 并绑定网格；重复转换已由本入口建立的关联返回同一 BodyId。
   Result<BodyId> mesh_to_brep(MeshId);
   Result<MeshId> implicit_to_mesh(ImplicitFieldId, const TessellationOptions&);
+  Result<std::vector<MeshId>> brep_to_mesh_batch(std::span<const BodyId>, const TessellationOptions&);
+  Result<std::vector<BodyId>> mesh_to_brep_batch(std::span<const MeshId>);
+  Result<RoundTripReport> verify_brep_mesh_round_trip(BodyId, const TessellationOptions&);
+  Result<RoundTripReport> verify_mesh_brep_round_trip(MeshId, const TessellationOptions&);
   Result<TessellationCacheStats> tessellation_cache_stats() const;
   Result<void> export_tessellation_cache_stats_json(std::string_view path) const;
   Result<void> export_round_trip_report_json(const RoundTripReport& report, std::string_view path) const;
@@ -959,7 +978,34 @@ public:
 
 旧 metadata-only 体仍可输出显式 `bbox_proxy` 显示网格，此兼容显示路径不证明 owned BRep、物理质量或实体空间查询。`RepresentationService::classify_point/distance_to_body` 仍为 bbox 辅助语义，实体查询使用 QueryService / TopologyQueryService；本批一致性不能扩大到这些旧辅助入口、通用解析体曲面壳或 metadata 派生体。
 
-完整构建及全量 CTest **16/16、0 失败、164.60 s**，四个必需回归通过。按三条要求排列的独立参考与限制见 [验收 §1.5](../quality/AxiomKernel_测试与验收方案.md#15-cycle-0078--s3-consistency-门禁与逐项证据)；`stage_outcome=ready_for_acceptance`，本节为 cycle-0078 历史证据，当前 S3-EXIT 门禁及残余告警见验收 §1.6，正式验收条件见 [当前进度 §5.2.1](../plan/AxiomKernel_当前开发进度.md#521-stage-5-当前退出任务)。
+完整构建及全量 CTest **16/16、0 失败、164.60 s**，四个必需回归通过。按三条要求排列的独立参考与限制见 [验收 §1.5](../quality/AxiomKernel_测试与验收方案.md#15-cycle-0078--s3-consistency-门禁与逐项证据)；`stage_outcome=ready_for_acceptance`，本节为 cycle-0078 历史证据，当前 S3-EXIT 门禁及残余告警见验收 §1.6，正式验收条件见 [当前进度 §5.2.1](../plan/AxiomKernel_当前开发进度.md#521-stage-6-当前退出任务)。
+
+### 7.3.2 Stage 5 真实边界三角化与转换一致性（cycle-0086 / S5-TESSELLATION）
+
+公开签名及数据布局不变，补充已有接口的合同；复用既有错误码。`stage_task_id=S5-TESSELLATION`、`stage_outcome=ready_for_acceptance`。调度器 repair 后完整构建成功，最终 CTest **16/16、0 失败、200.26 s**；必需 representation_io/geometry/query_eval **15.40/0.66/1.82 s**。按两项退出要求排列的独立参考、断言及限制见 [验收 §1.13](../quality/AxiomKernel_测试与验收方案.md#113-cycle-0086--s5-tessellation-门禁与逐项证据)。最终文档门禁及调度器提交尚未记录，FR-REP-001 受限可用，Stage 5 进行中。
+
+| 输入 / 路径 | 支持合同 | 拒绝与限制 |
+|---|---|---|
+| owned 平面直边面 | 读取完整外环与孔环，核对 Line/LineSegment 支撑、端点、显式参数区间、可选 PCurve 和面支撑；保留凹口与孔洞，三角绕序及法向遵循实际外环 | 不以凸 fan 或 UV bbox 填充真实边界；一般曲边不支持 |
+| 四极点 Bezier；BSpline/NURBS | 仅四控制点双线性 patch；样条限 u/v degree=1、等权、工厂归一化后的 `{0,0,1,1}` 夹持节点；须认证真实四边矩形及等参数边 | 高阶、不等权、真实非夹持节点拒绝；`{2,2,5,5}` 经既有工厂仿射归一化后合法，不能误写成拒绝所有非单位输入节点 |
+| LineSegment Swept、矩形 Trimmed | 线段扫掠及上述受支持基曲面的矩形裁剪；四角世界位置与曲线/参数须一致，参数 patch 的 PCurve 可全无或四边全有；Trimmed 外 UV 环为四矩形角且无孔 | 混合缺失 PCurve、错误映射、曲面孔洞/非矩形裁剪、非矩形 Trimmed、一般 Swept、Offset/Revolved 拒绝；UV bbox 本身不是边界认证 |
+| 未编辑 native box/sphere/cylinder/cone/torus | 创建参数路径保留资格门禁；box 精确焊接，球/锥极点不输出退化三角形，真实三角绕序、内部偏差及法向有独立参考 | 编辑撤销原生资格；不能通过创建参数恢复已编辑代理壳；固定参考不证明工业全局误差 |
+| MeshRep | 已附着网格直接返回同一 MeshId；`mesh_to_brep` 从实际有限顶点计算 bbox，并关联 MeshRep | 嵌入网格丢失返回 `NotImplemented / AXM-TES-E-0001 / rep.tessellation.support`，不生成 bbox 替代；转换不生成 owned ExactBRep，不证明闭壳或开放曲面的物理质量 |
+| metadata / implicit | 仅具代理资格的路径可显示；cycle-0087固定Box原始元数据零owned shells，直接转换在 `rep.tessellation.topology` 拒绝；Safe合成Modified边界可显示，派生再导入为bbox_proxy | ExactBRep/Box标签不授予native资格；代理不认证物理边界、面积/体积或实体空间查询，详见§11.1.2 |
+
+`chordal_error` 为模型长度单位的绝对偏差，须有限正值且不超过 Scalar 最大值的一半；`angular_error` 为度、有限正值，认证使用 `min(90°, angular_error)`。位置匹配阈值为 `min(max(1e-12, abs(model linear tolerance)), chordal_error/4)`；它用于匹配支撑而不是最小边长，1e-3 模型容差下合法 2e-4 窄边仍可接受。双线性三角内部界 `|mixed|/(4*nu*nv)` 使用 3/4 弦高预算；仿射法向的四角锥覆盖全单元，以 atan2 核对有向法向角，避免只测顶点/中点。平面倾斜薄环同样接受法向角门禁。owned 与 box 仅焊接精确位置，不移动邻近点；法向折边拆分及 UV seam 可保留重复顶点，不认证流形连通性。
+
+patch 每方向最多 256 段，原生圆周最多 4096 段、原生网格最多 1000000 顶点；达不到必需误差或发布前发现非有限坐标/法向/面积及退化则失败。小尺度 polygon 基础绝对门槛保留。`compute_normals` 输出受焊接/折边策略影响；OBJ 不导出 vertex normals，本轮独立核对的是三角 cross 与解析/Geo 法向。
+
+full/local/shell 先完成所有面片与组装再发布；local 的 dirty_faces 强制重算，其余仅复用当前身份匹配缓存。缓存键覆盖 BodyId、当前拓扑、支撑/base、曲线/PCurve、节点、trim 和 options，旧 MeshId 是快照。任一 batch 成员失败恢复本次 mesh/body、源网格绑定、体/面缓存、Geo 曲线/曲面缓存、六项统计及 next_id，失败诊断保留，无部分结果。重复转换仅在源网格已关联 `MeshRep` 且 label 为 `brep_from_mesh` 时返回同一 BodyId；导入 MeshRep 首次转换仍可创建新关联。两种 verify 的临时转换状态在成功及失败时均恢复；报告不证明任意 BRep 属性保真。既有嵌入网格的严格/兼容 QA 仍由 IO 执行，不以新结果发布检查抢占 `io.export.mesh_strict_qa` 或 glTF float32 范围诊断。
+
+cycle-0089 沿用 owned 平面直边三角化，为真实抽壳新增 `offset_shell_representation_regression`：公开 OBJ 顶点独立匹配8个真实内角点，有向三角积分核对4×5×6/t=0.5闭腔V=60/A=242与上开口V=54/A=225，并核对双壳2组件/单开口1组件、owned网格及暖缓存身份。representation_io **15.09 s** 随完整16/16（200.60 s）通过；未扩展一般曲面、多开口或工业全局误差资格，见 [验收 §1.16](../quality/AxiomKernel_测试与验收方案.md#116-cycle-0089--s6-offset-shell-门禁与逐项证据)。
+
+### 7.3.3 Stage 6 圆弧端盖与圆柱条带采样（cycle-0088）
+
+为 S6-BLEND 的 Strict 直接阻断项补齐共享采样：平面端盖接受有限显式裁剪区间的解析 Circle 边，核对有限坐标、正半径、正交单位轴、区间跨度不超过一周、端点与拓扑及平面支撑一致；圆柱条带须为无孔、无 PCurve 的四共边环，由两条相对圆弧与两条轴向直母线围成。两弧必须同半径、与 Cylinder 同轴、等采样数且逐站相差同一轴向平移；端盖与侧壁共用圆弧采样站及拓扑端点，避免裂缝。采样沿用弦高/角度和最多 4096 段门禁；范围仅为认证解析圆边/圆柱条带，不授予一般曲边、任意曲面裁剪、无 PCurve 面面积或实体质量资格。
+
+该路径随 `axiom_ops_heal_test` 的真实圆角 Strict 与 `axiom_query_eval_test` 的转换/回滚断言通过；full/local/shell 的发布与缓存原子性沿用 §7.3.1。cycle-0086 §7.3.2 表的“一般曲边拒绝”保留，其受限圆弧例外以本节为准。
 
 ## 8. `OpsCore` 接口清单
 
@@ -1074,7 +1120,7 @@ public:
 
 当前退出统一矩阵及 cycle-0079 自动化证据见 [§6.1.4](#614-stage-3-统一退出支持矩阵cycle-0079--s3-exit)；本节保留专项合同与历史门禁。
 
-此节保留 cycle-0077 历史五类路径证据；Stage 3 历史退出任务为 cycle-0079 / S3-EXIT（§6.1.4）；当前唯一任务为 S5-IO（§11.1.1）。公开签名不变，未新增错误码。cycle-0077 核验既有四类路径，并以真实平面直边 Face 加厚补齐第五类；下表只声明可证明子集。
+此节保留 cycle-0077 历史五类路径证据；Stage 3 历史退出任务为 cycle-0079 / S3-EXIT（§6.1.4）；当前唯一任务为 S6-EXIT（§8.3.2）。公开签名不变，未新增错误码。cycle-0077 核验既有四类路径，并以真实平面直边 Face 加厚补齐第五类；下表只声明可证明子集。
 
 | 入口 / 主路径 | 实际拓扑与质量语义 | 本批回归及支持边界 |
 |---|---|---|
@@ -1206,7 +1252,7 @@ struct BooleanIntersectionPreparation {
 
 ### 8.2.2 Stage 4 第一代切分与实体分类支持矩阵（cycle-0081 / S4-SPLIT-CLASSIFY）
 
-本批新增 `BooleanService::prepare_split_classification` 与 `classify_points` 两个只读公开入口，类型在 `include/axiom/core/types.h`，实现为 `src/axiom/ops/boolean_split_classify.cpp`。真实交线接入实际面/边切分，并从实体裁剪边界判定内外；不分配拓扑 ID 或重建实体。`stage_outcome=ready_for_acceptance`，调度器最终完整构建成功、CTest **16/16、0 失败、173.96 s**；按三项要求排列的证据见 [验收 §1.8](../quality/AxiomKernel_测试与验收方案.md#18-cycle-0081--s4-split-classify-门禁与逐项证据)。本节为历史只读准备证据，当前任务 S5-IO 见 §11.1.1；Stage 4 / FR-BOOL-001 仍进行中，正式状态见当前进度 §5.2.1。
+本批新增 `BooleanService::prepare_split_classification` 与 `classify_points` 两个只读公开入口，类型在 `include/axiom/core/types.h`，实现为 `src/axiom/ops/boolean_split_classify.cpp`。真实交线接入实际面/边切分，并从实体裁剪边界判定内外；不分配拓扑 ID 或重建实体。`stage_outcome=ready_for_acceptance`，调度器最终完整构建成功、CTest **16/16、0 失败、173.96 s**；按三项要求排列的证据见 [验收 §1.8](../quality/AxiomKernel_测试与验收方案.md#18-cycle-0081--s4-split-classify-门禁与逐项证据)。本节为历史只读准备证据，当前任务 S6-EXIT 见 §8.3.3；Stage 4 / FR-BOOL-001 仍进行中，正式状态见当前进度 §5.2.1。
 
 ```cpp
 enum class BooleanPointLocation { Outside, Inside, Boundary };
@@ -1272,7 +1318,7 @@ struct BooleanSplitClassificationPreparation {
 
 ### 8.2.3 Stage 4 真实实体重建支持矩阵（cycle-0082 / S4-REBUILD）
 
-`BooleanService::run_rebuilt` 是真实重建入口，仅接受 Union/Subtract/Intersect；Split 返回 InvalidInput。公开只读 `prepare_intersections/prepare_split_classification` 继续按 §8.2.1/§8.2.2 拒绝共面（E-0014），重建内部另启共面区域切分与两侧材料分类。兼容 `run` 保留历史 bbox/proxy 语义，不继承本节认证。实现 `src/axiom/ops/boolean_rebuild.cpp` 已随调度器最终全量 **16/16、0失败、184.89 s** 通过，逐项证据见 [验收 §1.9](../quality/AxiomKernel_测试与验收方案.md#19-cycle-0082--s4-rebuild-门禁与逐项证据)。`stage_outcome=ready_for_acceptance` 为该历史批次报告；当前唯一退出任务 cycle-0085 / S5-IO 见 §11.1.1，Stage 4 / FR-BOOL-001 仍进行中；正式状态见当前进度 §5.2.1。
+`BooleanService::run_rebuilt` 是真实重建入口，仅接受 Union/Subtract/Intersect；Split 返回 InvalidInput。公开只读 `prepare_intersections/prepare_split_classification` 继续按 §8.2.1/§8.2.2 拒绝共面（E-0014），重建内部另启共面区域切分与两侧材料分类。兼容 `run` 保留历史 bbox/proxy 语义，不继承本节认证。实现 `src/axiom/ops/boolean_rebuild.cpp` 已随调度器最终全量 **16/16、0失败、184.89 s** 通过，逐项证据见 [验收 §1.9](../quality/AxiomKernel_测试与验收方案.md#19-cycle-0082--s4-rebuild-门禁与逐项证据)。`stage_outcome=ready_for_acceptance` 为该历史批次报告；当前唯一退出任务 cycle-0091 / S6-EXIT 见 §8.3.3，Stage 4 / FR-BOOL-001 仍进行中；正式状态见当前进度 §5.2.1。
 
 ```cpp
 struct BooleanRebuildOptions {
@@ -1324,7 +1370,7 @@ struct BooleanRebuildReport {
 
 ### 8.2.4 Stage 4 退出支持矩阵（cycle-0083 / S4-EXIT）
 
-此节保留 cycle-0083 / Stage 4 历史退出证据；当前 Stage 5 / S5-IO 见 §11.1.1。本批公开 API、生产实现和既有错误码冻结；沿用 §8.2.1～§8.2.3 合同，补固定模型稳定性、独立表示参考与全链路诊断验收。`stage_task_id=S4-EXIT`、`stage_outcome=ready_for_acceptance`；调度器完整配置/并发4构建成功，CTest **16/16、0失败、194.58 s**。五项必需 workflow/prep/query_eval/representation_io/runtime 各 **4.25/5.63/2.01/10.17/0.04 s**，性能基线 **2.03 s**。按退出要求排列的测试/断言/参考/限制见 [验收 §1.10](../quality/AxiomKernel_测试与验收方案.md#110-cycle-0083--s4-exit-门禁与逐项证据)。正式文档门禁与调度器提交尚未记录，Stage 4 / FR-BOOL-001 保持进行中。
+此节保留 cycle-0083 / Stage 4 历史退出证据；当前 Stage 6 / S6-EXIT 见 §8.3.3。本批公开 API、生产实现和既有错误码冻结；沿用 §8.2.1～§8.2.3 合同，补固定模型稳定性、独立表示参考与全链路诊断验收。`stage_task_id=S4-EXIT`、`stage_outcome=ready_for_acceptance`；调度器完整配置/并发4构建成功，CTest **16/16、0失败、194.58 s**。五项必需 workflow/prep/query_eval/representation_io/runtime 各 **4.25/5.63/2.01/10.17/0.04 s**，性能基线 **2.03 s**。按退出要求排列的测试/断言/参考/限制见 [验收 §1.10](../quality/AxiomKernel_测试与验收方案.md#110-cycle-0083--s4-exit-门禁与逐项证据)。正式文档门禁与调度器提交尚未记录，Stage 4 / FR-BOOL-001 保持进行中。
 
 | 体类 / 能力 | 固定支持与独立证据 | 限制 / 拒绝 |
 |---|---|---|
@@ -1347,10 +1393,67 @@ public:
   Result<OpReport> offset_body(BodyId, Scalar distance, const TolerancePolicy&);
   Result<OpReport> shell_body(BodyId, std::span<const FaceId> removed_faces, Scalar thickness);
   Result<OpReport> draft_faces(BodyId, std::span<const FaceId>, const Vec3& pull_dir, Scalar angle);
+  Result<OpReport> move_face(BodyId, FaceId target, Scalar signed_distance);
   Result<OpReport> replace_face(BodyId, FaceId target, SurfaceId replacement);
   Result<OpReport> delete_face_and_heal(BodyId, FaceId target);
 };
 ```
+
+### 8.3.1 Stage 6 真实偏置与抽壳支持矩阵（cycle-0089 / S6-OFFSET-SHELL）
+
+本节保留cycle-0089历史支持与代码门禁；当前唯一任务见§8.3.3，不追认历史正式验收或提交。`ModifyService::offset_body/shell_body` 公开签名保持不变，实现集中在 `src/axiom/ops/offset_shell_services.cpp`。`stage_task_id=S6-OFFSET-SHELL`、`stage_outcome=ready_for_acceptance`；调度器 repair 后完整构建成功，最终 CTest **16/16、0 失败、200.60 s**。必需 ops_heal/heal/representation_io **156.06/0.91/15.09 s**，关联 query_eval **1.96 s**；[两条逐项证据](../quality/AxiomKernel_测试与验收方案.md#116-cycle-0089--s6-offset-shell-门禁与逐项证据)覆盖真实厚度、Strict、独立参考及失败/事务隔离。最终文档门禁及调度器提交成功未记录，不记正式已验收或 Stage 6 已退出。
+
+| 输入 / 操作 | 真实支持合同 | 限制与拒绝 |
+|---|---|---|
+| 当前输入认证 | owned、ExactBRep、单个完整轴对齐矩形六 Plane 闭壳，8 个角点/12 条直边；核验当前支撑、坐标、绕向与索引 | 不以体类、创建参数或 bbox 代替实际边界认证；proxy、一般曲面、非矩形、多壳及损坏边界拒绝 |
+| 有符号偏置 | 有限非零距离 d；各平面正向外移、负向内移，各轴尺寸由 L 变为 L+2d；独立重建六个真实 Plane 面 | 请求位移须大于调用方有效线性容差且在坐标精度下可表达；负向塌缩/接触、溢出和输出 Strict 失败均拒绝 |
+| 无开口抽壳 | 有限正厚度 t，外边界不动，内角点各向内缩 t；外6面与反向内6面为两个闭壳，内腔角色 Void | 使用内核容差；内腔各轴余宽须大于容差；厚度过大或近容差拒绝；不接受抽壳结果作为新的六面盒输入 |
+| 单面开口抽壳 | 从当前 owned 六面中移除一面，支持六个方向；保留外5面、反向内5面并添加4片口沿，组成14面单个闭合材料壳；保留壁厚为实际平面间距 t | 开口方向的内腔到达原外平面，该方向内长 L−t，其余方向 L−2t；不存在/重复/异属面拒绝，多开口不支持；“开口”不等于拓扑开放壳 |
+| 成功发布 / 查询 | 输出为独立 `Generic / ExactBRep` 真实平面直边体，具有立即输入体及当前壳/面的来源；现有质量、壳角色、点定位及 owned 三角化路径可用 | 无 bbox 或旧 `Modified` 代理回退；独立参考为解析公式和公开 OBJ 三角积分，无外部工业内核认证；不新增通用曲面查询资格 |
+
+源当前 owned 边界及结果在私有暂存状态 Strict 验证。历史 body/shell/face 来源只在暂存隔离后恢复，live 源始终不改；源关系索引保留供验证，不静默修复。失败无 value、不发布部分对象、不消耗 live 模型 ID，源拓扑/来源/索引、next_version、活动事务写数/分配范围、Eval clean/dirty 状态及桥/重算计数、暖缓存与计数保持；诊断允许增加。成功仅追加新记录/索引，登记活动事务回滚范围，然后通知输入体绑定 Eval 节点及下游失效；不自动执行质量或表示算法重算。活动事务回滚清除派生几何/拓扑/表示/缓存，保留源索引与暖网格身份，成功已分配 ID 允许空档。
+
+独立参考：4×5×6、t=0.5 闭腔 **V=60/A=242**，上开口 **V=54/A=225**；先偏置 +0.5 得5×6×7，再上开口抽壳 t=0.5 为 **V=80/A=331**。Ops 核对真实内外角点、Plane 位置/法向、面面积、双使用边和质心；Rep 以 OBJ 顶点和有向三角积分核对原盒两种抽壳。Heal 的 Strict、自交/trim 及 ReportOnly 保持厚度已有回归，**修改式 Safe 修复保形不属于本工作流**。一般曲面、多开口及通用自交算法仍不支持；本包停止功能扩展。
+
+稳定 MOD 码与 `modify.offset.* / modify.shell.*` 阶段见 [字典 §7.7](../diagnostics/AxiomKernel_错误码与诊断码字典.md#77-mod-修改模块错误码)，调用见 [样例 §8.1/8.2](AxiomKernel_接口调用样例集.md#81-偏置)。
+
+### 8.3.2 Stage 6 真实直接编辑支持矩阵（cycle-0090 / S6-DIRECT-EDIT）
+
+本节保留cycle-0090历史支持与代码门禁；当前唯一退出任务cycle-0091 / S6-EXIT见§8.3.3，不追认本节正式验收或提交。
+
+新增 `ModifyService::move_face(BodyId, FaceId, Scalar signed_distance)`；`replace_face/delete_face_and_heal` 签名保持，旧占位成功已移除，实现集中于 `src/axiom/ops/direct_edit_services.cpp`。历史报告 `stage_task_id=S6-DIRECT-EDIT`、`stage_outcome=ready_for_acceptance`。调度器完整构建成功，CTest **16/16、0失败、203.36 s**；四必需 ops_heal/topology/query_eval/runtime **158.99/0.46/2.06/0.09 s**。[两条逐项证据](../quality/AxiomKernel_测试与验收方案.md#117-cycle-0090--s6-direct-edit-门禁与逐项证据)覆盖真实编辑→Strict→查询与表示/来源/Eval及失败/回滚隔离。最终文档门禁及调度器提交成功未记录，不记正式已验收或Stage 6已退出。
+
+| 输入 / 操作 | 真实支持合同 | 限制与拒绝 |
+|---|---|---|
+| 当前输入认证 | 完整、独占、owned、轴对齐六Plane矩形ExactBRep单闭壳，8角点/12直边；认证当前支撑、坐标、绕向、修剪环和索引 | 不以创建参数/bbox/历史来源替代当前边界；共享点/边/环/面/壳、开放边界、多壳、一般曲面、非轴对齐及旧代理拒绝 |
+| `move_face` | 当前owned单面按外法向有符号移动；正值扩张、负值收缩，其余对面不动；重建8角点/12直边/6Plane及闭合修剪环，四邻面延伸/重裁 | 有限非零距离，使用内核有效线性容差；距离须大于容差，实际浮点位移与请求差不大于容差；编辑后三轴余宽须大于两倍容差，塌缩/接触/溢出及不可表示坐标拒绝 |
+| `replace_face` | 替换曲面为严格平行的轴对齐Plane，按其真实平面位置移动目标边界；反向法向和切向origin允许，输出重新采用正确外法向；与移动相同重建 | 任意非零离轴法向分量均拒绝，不以近似平行开放资格；曲面/倾斜替换为E-0005/support_gate，无变化/亚容差/塌缩替换为E-0010/geometry_gate |
+| `delete_face_and_heal` | 有效owned目标明确返回 `NotImplemented / AXM-MOD-E-0009 / modify.delete_face.support_gate`，无输出 | 尚无认证删除补面算法；非法/异属面为 `InvalidInput / E-0006 / input_gate`，不再返回旧占位成功 |
+| 发布 / 来源 / 查询 / 表示 | 独立 `Generic/ExactBRep`；立即source_body/source_shell与全部六source_faces，逐面一对一对应；质量/点定位和owned网格使用当前拓扑 | 不继承primitive参数或旧Modified代理；一般曲面、批量编辑和通用直接编辑工业闭环不在本包内 |
+
+源与结果在私有暂存状态Strict验证，历史body/shell/face来源仅在暂存隔离后恢复，live源不改。失败无value、不发布部分模型、不消耗live模型ID；源几何/拓扑/来源/索引、next_version、事务写数/分配范围、Eval clean/dirty与桥/重算计数、暖缓存保持，诊断可增加。成功只追加新记录并登记活动事务回滚范围，使输入绑定Eval及下游失效，不自动重算业务算法。保存点/完整回滚清理派生几何/拓扑/表示/缓存与体Eval绑定，使消费节点失效，保留源暖Mesh身份；成功ID可空档，累计遥测不承诺倒退。
+
+独立参考：三尺度0.1/1/10、六方向、正负移动/替换与反向替换法向由解析公式核对真实Plane/角点/边使用/四邻面面积及V/A/质心/中心惯性/bbox；公开OBJ三角独立积分覆盖单位尺度和连续机械链路。4×5×6上面+1得4×5×7，**V=140/A=166**；再从当前结果选择右面替换至x=4.5得4.5×5×7，**V=157.5/A=178、质心=(2.25,2.5,3.5)**。点z=6.5由源Outside变结果Inside，z=7为Boundary。独立参考无外部工业内核认证。
+
+稳定码与 `modify.move_face.* / modify.replace_face.* / modify.delete_face.*` 阶段见[字典§7.7](../diagnostics/AxiomKernel_错误码与诊断码字典.md#77-mod-修改模块错误码)，调用见[样例§8.3](AxiomKernel_接口调用样例集.md#83-直接编辑移动面替换面与删除补面拒绝)。源错误PCurve直接覆盖move的E-0013/source_validate；服务内部结果validate为防御合同，不能把输出随后删面导致Strict失败写成内部结果验证失败注入。本包停止功能扩展。
+
+### 8.3.3 Stage 6 固定机械夹具退出支持矩阵（cycle-0091 / S6-EXIT）
+
+当前唯一退出任务`stage_task_id=S6-EXIT`、`stage_outcome=ready_for_acceptance`。本批公开签名、既有码和生产实现不变；新增固定机械夹具接入既有Ops回归，Rep仅补公开注释。调度器完整构建成功，CTest **16/16、0失败、201.93 s**；四必需ops_heal/query_eval/representation_io/runtime **158.06/1.95/14.88/0.13 s**，性能**1.83 s**。[两条验收证据](../quality/AxiomKernel_测试与验收方案.md#118-cycle-0091--s6-exit-门禁与逐项证据)分别对应固定工作流/独立参考/失败回滚与完整门禁/文档检查。最终文档门禁及调度器提交成功未记录，不记正式验收或Stage 6退出。
+
+| 固定工作流 / 验证 | 本批真实支持与独立参考 | 限制 |
+|---|---|---|
+| 当前盒域与祖先 | owned、独占、轴对齐六Plane ExactBRep闭盒，8角点/12直边/6面；夹具保留全部祖先 | 不以创建参数或bbox认证边界；删除祖先后再Blend未认证，不能把Modify的历史来源隔离推广至Blend |
+| 建模→移动→替换→偏置 | 8×5×3，+X面move(+1)→9×5×3，+Z面replace至z=4（法向−Z）→9×5×4，offset(+0.5)→10×6×5；V/A=120/158→135/174→180/202→300/280 | 每步从当前结果重新选面；单面move/严格平行轴对齐Plane replace，仅完整盒域可连续操作 |
+| 单边等距倒角终点 | 从最终盒x=y=−0.5的Z向边退让0.5；真实Plane闭壳、Strict、质量/OBJ参考V=299.375/A≈278.285533906 | 独立分支，结果不再作为六面盒操作输入 |
+| 单边常半径圆角终点 | 同边r=0.5；两Circle四分之一圆弧和一个Cylinder、10顶点/15边/7面、Strict与公开OBJ独立积分 | OBJ有采样误差；通用质量为NotImplemented/CORE-E-0004/query.mass_properties.support_gate/no-value，实体空间查询及无PCurve面面积仍不支持 |
+| 无开口/单开口抽壳终点 | t=0.5，闭腔V=120/A=482，+Z单开口V=97.5/A=406、质心z≈1.480769230769；壁内Inside/腔内Outside与Strict | 闭腔两个闭壳/网格2组件；单开口是14面闭合材料壳/1组件；多开口和结果再次盒域编辑不支持 |
+| 来源/表示/Eval | 7个派生体均对应立即源、ExactBRep和当前owned网格，无越界/退化三角；Modify通知输入Eval/下游失效，Blend源Eval保持 | 表示支持不扩大圆角实体查询域；不自动重算建模算法 |
+| 稳定失败/全链回滚 | 高级特征终点再offset/shell/move/chamfer、塌缩/过厚/过大/亚容差失败无输出且隔离；writer回滚清7体及派生拓扑/几何/网格/缓存/绑定，保留源暖MeshId与原来源/Eval并重试 | 拒绝循环直接覆盖倒角、圆角、单开口终点，未逐项注入闭腔终点及replace/fillet续接；成功ID可空档、诊断可增加，累计遥测不承诺倒退 |
+
+独立平面OBJ积分V/A误差预算1e-6；圆角参考截面`60−(1−π/4)×0.25`、周长`32+(π/2−2)×0.5`，V为截面×5，A为两端截面+周长×5。默认5°角预算δ给出截面损失上界`r²πδ²/24`、弧长损失`rπδ²/48`，再按长度5传播至OBJ体积/面积；解析值不冒充圆角质量服务结果。有限Circle端盖与两相对圆弧/两直母线围成的无PCurve四边Cylinder条带共享采样，沿用既有弦高/角度预算，不授予一般曲面/曲边网格或查询资格。
+
+失败快照核对stock/base拓扑/来源、live ID/版本、对象/几何/事务写数、缓存计数、Eval桥/重算与clean状态；成功回滚核对全部派生拓扑句柄，几何句柄逐输出抽样并结合整体计数/缓存，不声称逐一核对所有Curve/Surface。保存点沿用Query/Eval历史回归。一般曲面、非轴对齐/共享/开放边界、批量、删除补面及通用特征组合不支持；参考仅独立公式/公开OBJ/快照，**无外部工业内核认证**。调用见[样例§8.4](AxiomKernel_接口调用样例集.md#84-stage-6-固定机械夹具cycle-0091--s6-exit)，稳定阶段见[MOD字典](../diagnostics/AxiomKernel_错误码与诊断码字典.md#77-mod-修改模块错误码)和[BLEND字典](../diagnostics/AxiomKernel_错误码与诊断码字典.md#76-blend-圆角倒角错误码)。
 
 ### 8.4 圆角与倒角接口
 
@@ -1361,6 +1464,22 @@ public:
   Result<OpReport> chamfer_edges(BodyId, std::span<const EdgeId>, Scalar distance);
 };
 ```
+
+### 8.4.1 Stage 6 真实圆角与倒角支持矩阵（cycle-0088 / S6-BLEND）
+
+本节保留 cycle-0088 历史支持与代码门禁；当前唯一任务 S6-EXIT 见 §8.3.3，不追认历史提交或正式验收。两个 Blend 签名保持不变；`stage_task_id=S6-BLEND`、`stage_outcome=ready_for_acceptance`。调度器 repair 后完整构建成功，最终 CTest **16/16、0 失败、200.33 s**；两条逐项断言、独立参考及限制见 [验收 §1.15](../quality/AxiomKernel_测试与验收方案.md#115-cycle-0088--s6-blend-门禁与逐项证据)。完整代码门禁已通过，正式验收仍须最终文档门禁及调度器提交成功。
+
+| 输入 / 操作 | 真实支持合同 | 限制与拒绝 |
+|---|---|---|
+| 当前矩形毛坯 | ExactBRep、单个完整闭壳，六个非 proxy Plane 面、8 顶点/12 直边、无孔，轴对齐；核验当前支撑、坐标、绕向、关系索引与 Strict | 不以 BodyKind、创建参数或 bbox 代替边界认证；wedge、损坏/非矩形闭壳、一般曲面及已有 Blend 结果再次处理拒绝 |
+| 单边 / 多边 | X/Y/Z 任一轴向，1–4 条互不干涉平行凸边；生成独立 `BlendResult` owned 闭壳，源边面保持不变 | 非平行选边即使没有共顶点也拒绝；相交角区、退让区域接触/重叠拒绝；不支持连续二次圆角、变半径或变距 |
+| 常半径圆角 | 解析四分之一 Circle 端盖边与 Cylinder 侧面，端点相切；半径有限、正且大于容差，并在坐标精度下可分辨 | 通用体质量/实体空间查询及无 PCurve 面面积仍不支持；不能用弦、bbox 或原毛坯参数代算 |
+| 等距倒角 | 真实 Plane 倒角侧面；distance 是两个邻接平面上从原棱边量取的退让距离，斜边长为 `sqrt(2)*distance` | 退让后的侧壁余量须大于线性容差；真实平面直边闭壳进入既有多面体查询/质量路径，未扩展积分算法 |
+| 输出检查 | 选 n 条边：V=`8+2n`、E=`12+3n`、F=`6+n`；公开顶点/曲线/区间/曲面可核对，Strict 通过 | 闭合由每边两不同 coedge、两不同邻接面及环序列两次相反使用证明；既有 `boundary_edge_count_of_body` 按单壳归属返回 E，不能要求为零 |
+
+源及结果在私有暂存状态完成 Strict 核验，源索引保留供检查，不静默重建修复输入。失败无 value、不发布对象，不消耗模型 ID，不改变源索引、next_version、活动事务写数/服务分配范围、Eval 或暖缓存；诊断允许增加。成功仅追加新模型和关系并登记活动事务服务分配范围；保存点/完整 writer 回滚清除派生几何、网格/缓存，保留源暖缓存，可重试。成功分配后的 ID 不承诺复用。稳定 `blend.fillet.* / blend.chamfer.*` 阶段与 BLEND E-0001..0006/I-0001 见 [字典 §7.6](../diagnostics/AxiomKernel_错误码与诊断码字典.md#76-blend-圆角倒角错误码)；历史占位警告不再由真实路径返回。
+
+圆角参数参考是公开解析几何与独立公式，倒角参数/体积/表面积参考同样独立；没有外部工业参考内核认证，不宣称一般机械零件或全部 Stage 6 能力可用。
 
 ### 8.5 查询与分析接口
 
@@ -1441,11 +1560,13 @@ public:
 
 单项修改型修复在物化后验证，后验失败回收本次派生体及拓扑/几何对象并保留失败诊断；`auto_repair` 失败也回收派生结果。`repair_face_trim_pcurves` 支持 Plane/Cylinder/Sphere，投影重建或后验验证失败恢复全部原 coedge PCurve 绑定并删除本次新建 PCurve。四个 `repair_many_*` 入口任一子项失败时回滚此前子项全部派生对象及 Eval 失效状态，不返回半成功结果；批量失败报告关联失败子项目标，并附 `heal.repair_many_*.rollback` 与 `completed_item_count/requested_item_count/rollback_applied`，其中 `repair_many_auto` 另附 `allocated_object_count`（以分配 ID 增量计）；`repair_many_auto` 将失败子项 issue 复制到批量报告并保留非空子阶段，同时附批量 rollback 证据；其他三个批量入口仍将子项根因保留在原诊断，不合并全部 issue。HEAL 回滚不恢复 `next_id`，被回收对象占用的 ID 可留下空档，不承诺重试复用原 ID。诊断记录作为失败证据保留。
 
+cycle-0087补充：仅 `auto_repair` 的 MeshRep派生分支复制完整实际网格快照，新BodyId/新MeshId并将网格owner绑定到新体，源网格保留。内部Standard后验通过才发布；固定STL回归随后显式Strict通过。缺网格或复制后容差验证失败在 `heal.auto_repair.post_validate` 原子拒绝，无bbox替代；不泛化其他修复入口，独立Heal允许ID空档。详见§11.1.2。
+
 ### 9.2.1 Stage 5 第一代导入修复闭环（cycle-0084 / S5-HEAL）
 
-本节为 S5-HEAL 历史支持合同；当前唯一退出任务 cycle-0085 / S5-IO 的支持与证据见 §11.1.1。
+本节为 S5-HEAL 历史支持合同；当前唯一退出任务 cycle-0091 / S6-EXIT 的支持与证据见 §8.3.3。
 
-公开签名与错误码常量保持不变；本批修改 `auto_repair`、导入闭环语义及 MeshRep 验证。`stage_task_id=S5-HEAL`、`stage_outcome=ready_for_acceptance`；调度器最终完整 CTest **16/16、0 失败、214.19 s**。逐项断言、独立参考及限制见 [验收 §1.11](../quality/AxiomKernel_测试与验收方案.md#111-cycle-0084--s5-heal-门禁与逐项证据)，正式状态见 [当前进度 §5.2.1](../plan/AxiomKernel_当前开发进度.md#521-stage-5-当前退出任务)。
+公开签名与错误码常量保持不变；本批修改 `auto_repair`、导入闭环语义及 MeshRep 验证。`stage_task_id=S5-HEAL`、`stage_outcome=ready_for_acceptance`；调度器最终完整 CTest **16/16、0 失败、214.19 s**。逐项断言、独立参考及限制见 [验收 §1.11](../quality/AxiomKernel_测试与验收方案.md#111-cycle-0084--s5-heal-门禁与逐项证据)，正式状态见 [当前进度 §5.2.1](../plan/AxiomKernel_当前开发进度.md#521-stage-6-当前退出任务)。
 
 | 条件 / 策略 | 当前行为与支持边界 |
 |---|---|
@@ -1540,7 +1661,7 @@ IO 外层复制根因码、实体和有限数值证据，Error/Fatal 阶段映�
 
 ### 11.1.1 Stage 5 受限 IO 主链路（cycle-0085 / S5-IO）
 
-公开签名、ImportOptions/ExportOptions 不变，仅补充公开合同注释；既有码复用。`stage_task_id=S5-IO`、`stage_outcome=ready_for_acceptance`，调度器完整构建成功、CTest **16/16、0 失败、227.56 s**，三项必需 workflow/dataset/representation_io **14.77/0.70/12.23 s**；[三条逐项证据](../quality/AxiomKernel_测试与验收方案.md#112-cycle-0085--s5-io-门禁与逐项证据)覆盖本包退出要求，正式条件见当前进度 §5.2.1。
+本节保留 cycle-0085 历史 IO 合同；当前唯一任务见 §11.1.2。公开签名、ImportOptions/ExportOptions 不变，仅补充公开合同注释；既有码复用。`stage_task_id=S5-IO`、`stage_outcome=ready_for_acceptance`，调度器完整构建成功、CTest **16/16、0 失败、227.56 s**，三项必需 workflow/dataset/representation_io **14.77/0.70/12.23 s**；[三条逐项证据](../quality/AxiomKernel_测试与验收方案.md#112-cycle-0085--s5-io-门禁与逐项证据)覆盖本包退出要求，正式条件见当前进度 §5.2.1。
 
 | 格式/路径 | 当前实际支持与固定参考 | 保留限制 |
 |---|---|---|
@@ -1551,6 +1672,25 @@ IO 外层复制根因码、实体和有限数值证据，Error/Fatal 阶段映�
 STEP/IGES/BREP/STL 在分配模型对象前施加 **64 MiB（67108864 字节）**读取预算，超限归入 `io.import.<format>.read`。STEP 新增严格容器、字段完整性和有限数值门禁；STL 拒绝不完整容器、闭合后垃圾、非有限坐标与面积计算溢出。坐标保留模型单位，无 SI_UNIT 或 IGES 单位换算认证；AXMJSON 原有 64 MiB 合同保留。导入后的验证/修复和失败回滚沿用上文共享管线。
 
 STEP/AXMJSON/IGES/BREP/OBJ/STL/glTF/3MF 导出统一使用 classic locale / max_digits10（不扩大格式固有数值能力），同目录独占临时 payload 写完并检查关闭；四网格格式如请求侧车，侧车成功后再 rename 发布主文件。`.open/.write/.sidecar/.publish` 任一步失败均不宣称主文件成功；保护已有主文件、清理临时 payload，恢复本次三角化 mesh/cache/统计/next_id，保留诊断；成功仍保留转换缓存。publish 失败携带 `AXM-IO-E-0005 / io.export.<format>.publish`。侧车仍走 REP 出口，不承诺侧车与主文件、全批跨文件事务、掉电持久性或并发目录修改安全；辅助文本/诊断导出不自动继承此合同。
+
+### 11.1.2 Stage 5 集成退出支持矩阵（cycle-0087 / S5-EXIT）
+
+本节为历史集成代码门禁及支持合同；当前主线 Stage 6 / S6-EXIT 见 §8.3.3，不反推历史正式验收或提交。
+
+`stage_task_id=S5-EXIT`、`stage_outcome=ready_for_acceptance`；本批公开签名、共享类型与错误码冻结，仅补 `auto_repair` 的MeshRep完整快照合同及固定集成回归。调度器完整构建成功，CTest **16/16、0失败、196.58 s**；四必需 io_workflow/io_dataset/heal/representation_io **13.05/0.55/0.78/14.32 s**。两条验收断言/独立参考见[验收§1.14](../quality/AxiomKernel_测试与验收方案.md#114-cycle-0087--s5-exit-门禁与逐项证据)；最终文档门禁及提交尚未记录，Stage5进行中、FR-IO-001/FR-REP-001受限可用。
+
+| 格式 / 路径 | 导入验证修复与显示 / 分析依据 | 拒绝与限制 |
+|---|---|---|
+| 固定STEP/IGES/BREP原记录 | Axiom Box元数据、ExactBRep标签、零owned shells；Standard通过，ReportOnly返回原体；12字段origin/params/bbox独立double精确往返 | 原Box转换 `AXM-TES-E-0001 / rep.tessellation.topology`；质量 `InvalidTopology / AXM-TOPO-E-0005 / query.mass_properties.empty_gate`；不证明标准BRep实体或分析资格 |
+| metadata显式Safe及派生再导入 | Safe合成Modified bbox owned边界，Standard与owned_topo_welded显示通过；派生导出/再导入仍零shell、bbox_proxy显示 | 合成结果和再导入代理质量均 `NotImplemented / AXM-CORE-E-0004 / query.mass_properties.support_gate`；显示闭环不恢复源BRep |
+| 固定STL / MeshRep显式Safe | 源Strict→Safe新BodyId/新MeshId完整网格快照→显式Strict→三角化→导出/再导入，源MeshId保留；各实际4三角、零owned shells、io_import_stl，独立ASCII积分V=4、A=13+sqrt(244)/2、C=origin+(0.5,0.75,1)，误差≤1e-12且坐标精确相等 | 内部后验为Standard；Strict和固定积分不证明任意mesh闭合/自交或实体服务质量，bbox体积24不作参考；binary float32无损不承诺 |
+| 缺网格 / 复制后angular=0 | `OperationFailed / AXM-HEAL-E-0006 / heal.auto_repair.post_validate`，根因分别VAL-E-0004/0003；复制后allocated_object_count≥2/rollback_applied=1；模型/mesh/cache/六项统计/Eval/源几何保持 | 无bbox替代；Heal回收派生对象但不恢复next_id、诊断保留；IO外层恢复next_id。缺mesh重复失败后合法输入重试有回归，不承诺非法输入必能修复 |
+| 固定owned真实修复与三角化 | 现有workflow显式物化/注入缺陷→Safe→Strict，6面12边8点、V24/A52/截面6；真实边界及受限曲面显示/独立积分沿用§7.3.2 | 元数据夹具显式物化不是标准交换。平面直边凹/孔和认证矩形bilinear/degree1等权unit-clamped样条/LineSegment Swept/Trimmed子集；一般曲边/高阶/不等权/曲面孔洞非矩形/Offset/Revolved拒绝 |
+| 标准STEP/IGES桥接 | 默认标准物理文件拒绝及扫描摘要保持；CMake未定义或启用标准桥接 | 未实际执行BRIDGE=OFF；里程碑1～4 ON路线不适用，无单位转换或全实体交换认证 |
+
+沿用§7.3.2误差与资源合同：patch每向256、圆周4096、native百万顶点，不可达失败；小尺度polygon绝对门槛保留，UV seam/法向拆分不证明流形，开放曲面无实体质量资格，OBJ无vertex normals；固定积分及round-trip不证明任意BRep保真或工业全局误差。
+
+§11.1.1的四格式64 MiB、模型单位、八格式classic locale/max_digits10和临时文件→关闭→请求侧车→rename单主文件发布保持；失败保护旧主文件并恢复本次mesh/cache/统计/next_id。glTF float32、侧车/全批非跨文件事务、无掉电持久性/并发目录安全及publish失败无直接注入回归限制保持。本包停止扩展，不据代码门禁提前记录正式阶段退出。
 
 ## 12. `Diagnostics` 接口清单
 

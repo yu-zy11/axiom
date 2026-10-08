@@ -94,6 +94,8 @@ public:
   /// 用配置 linear（须在 min_local/max_local 内）焊接端点、去连续零长节点和重复面引用、统一面方向；
   /// 不跨壳/曲面/孔洞修复，派生结果须通过 Strict。失败回收模型/缓存并保留阶段诊断，原体可重试。
   /// 无 owned 拓扑的非法 bbox 在 Safe 下拒绝；Aggressive 的历史元数据单位盒恢复仅属兼容策略。
+  /// MeshRep 派生结果保留源体所属的实际网格快照并重新绑定，原体与网格不变；
+  /// 缺失或无效网格仍由再验证拒绝，不以 bbox 代理替代。独立修复失败可能消耗对象 ID。
   Result<OpReport> auto_repair(BodyId body_id, RepairMode mode);
   Result<Scalar> estimate_adaptive_linear_threshold(BodyId body_id,
                                                     Scalar input,

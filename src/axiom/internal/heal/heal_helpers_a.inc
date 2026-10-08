@@ -729,6 +729,23 @@ BodyId clone_modified_body(std::shared_ptr<detail::KernelState> state, BodyId so
     detail::materialize_body_bbox_topology(*state, record);
     const auto id = BodyId {state->allocate_id()};
     state->bodies.emplace(id.value, std::move(record));
+    if (state->bodies.at(id.value).rep_kind == RepKind::MeshRep &&
+        state->bodies.at(id.value).label == "auto_repair") {
+        // A MeshRep body owns its actual triangles through source_body. Keep a
+        // separate snapshot for the derived body; retaining only the body record
+        // would leave repair output without a mesh and fail post-validation.
+        std::vector<detail::MeshRecord> meshes;
+        for (const auto& [mesh_id, mesh] : state->meshes) {
+            if (mesh.source_body == source) {
+                meshes.push_back(mesh);
+                meshes.back().source_body = id;
+            }
+        }
+        for (auto& mesh : meshes) {
+            const auto mesh_id = MeshId {state->allocate_id()};
+            state->meshes.emplace(mesh_id.value, std::move(mesh));
+        }
+    }
     detail::rebuild_topology_links(*state);
     return id;
 }

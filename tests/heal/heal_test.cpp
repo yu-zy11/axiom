@@ -15,6 +15,56 @@
 
 namespace {
 
+// Heal observation must retain the manufactured wall and real inner boundary.
+// The 4x5x6 stock and t=0.5 give closed V=120-3*4*5=60, A=148+94=242;
+// an upper opening gives V=120-3*4*5.5=54, A=148+101-2*3*4=225.
+bool offset_shell_heal_regression() {
+    axiom::Kernel kernel;
+    const auto stock=kernel.primitives().box({0,0,0},4,5,6);
+    if (!stock.value) return false;
+    auto& query=kernel.topology().query();
+    const auto faces=query.faces_of_body(*stock.value);
+    if (!faces.value) return false;
+    axiom::FaceId top {};
+    for (const auto face : *faces.value) {
+        const auto bbox=query.bbox_of_face(face);
+        if (bbox.value && std::abs(bbox.value->min.z-6)<1e-9 && std::abs(bbox.value->max.z-6)<1e-9) top=face;
+    }
+    if (!top.value) return false;
+    for (const bool open : {false,true}) {
+        const std::vector<axiom::FaceId> removed=open ? std::vector<axiom::FaceId>{top} : std::vector<axiom::FaceId>{};
+        const auto result=kernel.modify().shell_body(*stock.value,removed,.5);
+        if (!result.value) return false;
+        const auto body=result.value->output;
+        const auto source_faces=query.faces_of_body(body).value;
+        const auto source_edges=query.edges_of_body(body).value;
+        const auto validation=kernel.validate().validate_all(body,axiom::ValidationMode::Strict);
+        if (validation.status!=axiom::StatusCode::Ok ||
+            kernel.validate().validate_self_intersection_all_shells(body,axiom::ValidationMode::Strict).status!=axiom::StatusCode::Ok ||
+            kernel.topology().validate().validate_body_trim_consistency(body).status!=axiom::StatusCode::Ok) return false;
+        const auto repaired=kernel.repair().auto_repair(body,axiom::RepairMode::ReportOnly);
+        if (!repaired.value || repaired.value->output!=body) {
+            const auto report=kernel.diagnostics().get(repaired.diagnostic_id);
+            if (report.value) for (const auto& issue : report.value->issues) std::cerr << issue.code << ' ' << issue.stage << '\n';
+            return false;
+        }
+        for (const auto checked : {body,repaired.value->output}) {
+            const auto mass=query.body_mass_properties(checked);
+            const auto void_point=query.locate_point(checked,{2,2.5,3});
+            const auto wall=query.locate_point(checked,{.25,2.5,3});
+            const auto boundary=query.locate_point(checked,{.5,2.5,3});
+            if (!mass.value || std::abs(mass.value->volume-(open ? 54 : 60))>1e-7 ||
+                std::abs(mass.value->area-(open ? 225 : 242))>1e-7 ||
+                !void_point.value || void_point.value->location!=axiom::BodyPointLocation::Outside ||
+                !wall.value || wall.value->location!=axiom::BodyPointLocation::Inside ||
+                !boundary.value || boundary.value->location!=axiom::BodyPointLocation::Boundary ||
+                kernel.validate().validate_all(checked,axiom::ValidationMode::Strict).status!=axiom::StatusCode::Ok) return false;
+        }
+        if (query.faces_of_body(body).value!=source_faces || query.edges_of_body(body).value!=source_edges) return false;
+    }
+    return kernel.validate().validate_all(*stock.value,axiom::ValidationMode::Strict).status==axiom::StatusCode::Ok;
+}
+
 // Fixed first-generation sewing corpus: six disconnected planar patches of a
 // 2x3x4 box. Only the top patch moves, and one side is deliberately reversed.
 // Coordinates, incidence defects and displacement bounds are input oracles;
@@ -766,6 +816,10 @@ bool check_heal_failure_evidence_and_rollback() {
 }  // namespace
 
 int main() {
+    if (!offset_shell_heal_regression()) {
+        std::cerr << "Stage 6 shell Strict/ReportOnly thickness regression failed\n";
+        return 1;
+    }
     if (!planar_post_validation_rollback_regression()) {
         std::cerr << "Stage 5 allocated planar postcondition rollback regression failed\n";
         return 1;

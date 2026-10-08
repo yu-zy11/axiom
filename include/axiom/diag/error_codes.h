@@ -106,9 +106,19 @@ inline constexpr std::string_view kBoolStageRepair = "AXM-BOOL-D-0018";
 
 inline constexpr std::string_view kBlendInvalidTarget = "AXM-BLEND-E-0001";
 inline constexpr std::string_view kBlendParameterTooLarge = "AXM-BLEND-E-0002";
-/// 圆角/倒角等混合特征当前仍为占位近似（拓扑骨架 + 参数门禁），未提供工业级几何生成。
+/// 真实圆角/倒角当前不支持的实体、支撑曲面或边配置。
+inline constexpr std::string_view kBlendUnsupportedGeometry = "AXM-BLEND-E-0003";
+/// 选中边角区相交或非平行选边；相邻退让区接触/重叠复用 E-0002。
+inline constexpr std::string_view kBlendIntersectingEdges = "AXM-BLEND-E-0004";
+/// 容差或浮点分辨率下无法形成非退化的真实补面。
+inline constexpr std::string_view kBlendDegenerateGeometry = "AXM-BLEND-E-0005";
+/// 真实结果物化或 Strict 后验验证失败；模型保持不变。
+inline constexpr std::string_view kBlendTopologyFailure = "AXM-BLEND-E-0006";
+/// 已生成独立真实补面/闭壳，并完成 Strict 后验验证。
+inline constexpr std::string_view kBlendCompleted = "AXM-BLEND-I-0001";
+/// 历史拓扑占位警告（保留稳定码）；真实圆角/倒角路径不再返回此警告。
 inline constexpr std::string_view kBlendApproximatePlaceholder = "AXM-BLEND-W-0001";
-/// 一次处理多条边：角区/连续滚球/变半径未实现，与单边的拓扑占位同级提示。
+/// 历史多边角区占位警告（保留稳定码）；不支持角区现在返回结构化失败。
 inline constexpr std::string_view kBlendMultiEdgeCornerPlaceholder = "AXM-BLEND-W-0002";
 
 inline constexpr std::string_view kModOffsetInvalid = "AXM-MOD-E-0001";
@@ -118,6 +128,18 @@ inline constexpr std::string_view kModReplaceFaceIncompatible = "AXM-MOD-E-0005"
 inline constexpr std::string_view kModDeleteFaceHealFailure = "AXM-MOD-E-0006";
 /// 抽壳等修改已生成结果体，但后验校验未通过并已回滚（结果体未保留）。
 inline constexpr std::string_view kModShellValidateFailed = "AXM-MOD-E-0008";
+/// 当前实际边界不在矩形六平面闭壳域内，或选择不支持的修改/补面；不回退到代理边界。
+inline constexpr std::string_view kModUnsupportedGeometry = "AXM-MOD-E-0009";
+/// 距离/厚度/面位移或坐标分辨率、残余边界数值退化；结果未发布。
+inline constexpr std::string_view kModDegenerateGeometry = "AXM-MOD-E-0010";
+/// 偏置源/结果 Strict 验证或真实边界物化失败；模型与 ID 保持不变。
+inline constexpr std::string_view kModOffsetValidateFailed = "AXM-MOD-E-0011";
+/// 移动面输入实体、当前所属面或有限非零距离无效；结果未发布。
+inline constexpr std::string_view kModMoveFaceInvalid = "AXM-MOD-E-0012";
+/// 直接编辑当前源/重建结果未通过 Strict；不发布模型或消耗 live 模型 ID。
+inline constexpr std::string_view kModDirectEditValidateFailed = "AXM-MOD-E-0013";
+/// 真实偏置/抽壳/直接编辑边界完成，并通过 Strict 验证后发布。
+inline constexpr std::string_view kModCompleted = "AXM-MOD-I-0001";
 
 inline constexpr std::string_view kQueryClosestPointFailure = "AXM-QUERY-E-0001";
 inline constexpr std::string_view kQuerySectionFailure = "AXM-QUERY-E-0002";
