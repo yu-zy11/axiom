@@ -189,7 +189,8 @@ std::vector<BooleanBoundaryHit> boolean_boundary_hits(const detail::KernelState&
     const BooleanPlanarFace& face, const Point3& point, Scalar tolerance);
 
 Result<BooleanIntersectionPreparation> prepare_planar_boolean_intersections(
-    detail::KernelState& state, BodyId lhs, BodyId rhs, const BooleanIntersectionOptions& options);
+    detail::KernelState& state, BodyId lhs, BodyId rhs, const BooleanIntersectionOptions& options,
+    bool resolve_coplanar = false);
 
 std::vector<FaceId> faces_for_body_boolean(const detail::KernelState& state, BodyId body_id);
 

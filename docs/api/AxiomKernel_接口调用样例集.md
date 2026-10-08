@@ -545,7 +545,7 @@ if (strict.status != StatusCode::Ok || !mass.value || !section.value) return 1;
 
 ## 7. 布尔操作样例
 
-第一代求交边界见 [§7.5](#75-只读平面几何求交准备cycle-0080--s4-intersection)，本批只读切分与实体分类见 [§7.6](#76-只读真实切分与实体分类cycle-0081--s4-split-classify)。§7.1～7.4 展示兼容 run 调用形态；圆柱代理与自动修复不构成连续曲面布尔或重建实体正确性认证。
+第一代求交边界见 [§7.5](#75-只读平面几何求交准备cycle-0080--s4-intersection)，只读切分与实体分类见 [§7.6](#76-只读真实切分与实体分类cycle-0081--s4-split-classify)。§7.1～7.4 展示兼容 run 调用形态；圆柱代理与自动修复不构成连续曲面布尔或重建实体正确性认证。
 
 ## 7.1 差集
 
@@ -685,7 +685,54 @@ consume_point_classifications(*classified.value);
 
 `show_issue` 与 `consume_*` 是应用侧示意函数，本样例未单独编译；执行证据来自 [回归与最终门禁 §1.8](../quality/AxiomKernel_测试与验收方案.md#18-cycle-0081--s4-split-classify-门禁与逐项证据)。默认容差独立于全局设置，上例显式复制；参考预期基于默认 1e-6 策略。不要照搬 §7.5 的 36 次面比较预算，split 后续累计边界读取/细分/邻接/分类另需工作预算。max_fragments 限 face+edge 总片数，max_segments 也限独立分类输入点数。
 
-盒总面积各24、对方内部面积各3；结果供后续实体重建使用，不新建模型、交线集合或写事务。分类使用实际裁剪边界和至少两条一致有效射线。真实舍入尺度边界返回 Boundary；5e-7 近边界不确定点返回 E-0013/bool.classify。非共面相切已回归；共面候选/面接触/相同体仍由 bool.intersect/E-0014 保守拒绝。稳定切分失败为 bool.split/E-0004，预算为 E-0012；先行求交阶段原样传播。全部支持范围、来源和邻接语义见 [API §8.2.2](AxiomKernel_详细模块接口清单.md#822-stage-4-第一代切分与实体分类支持矩阵cycle-0081--s4-split-classify)。兼容 run 仍含 bbox 实体语义，不由此声明精确实体重建、二维共面区域、曲面/曲边或全局嵌入认证。
+盒总面积各24、对方内部面积各3；结果供后续实体重建使用，不新建模型、交线集合或写事务。分类使用实际裁剪边界和至少两条一致有效射线。真实舍入尺度边界返回 Boundary；5e-7 近边界不确定点返回 E-0013/bool.classify。非共面相切已回归；共面候选/面接触/相同体仍由 bool.intersect/E-0014 保守拒绝。稳定切分失败为 bool.split/E-0004，预算为 E-0012；先行求交阶段原样传播。全部支持范围、来源和邻接语义见 [API §8.2.2](AxiomKernel_详细模块接口清单.md#822-stage-4-第一代切分与实体分类支持矩阵cycle-0081--s4-split-classify)。兼容run仍含bbox实体语义，本只读prepare不提供实体重建或二维共面；受限真实重建另见§7.7，曲面/曲边及全局嵌入仍未认证。
+
+## 7.7 真实并/差/交、空材料与可选Safe（cycle-0082 / S4-REBUILD）
+
+```cpp
+using namespace axiom;
+auto a = kernel.primitives().box({0,0,0}, 2, 2, 2);
+auto b = kernel.primitives().box({1,1,1}, 2, 2, 2);
+if (a.status != StatusCode::Ok || !a.value ||
+    b.status != StatusCode::Ok || !b.value) return;
+BooleanRebuildOptions options;
+options.preparation.intersection.tolerance = kernel.tolerance().global_policy();
+options.auto_repair = true;  // 仅对明确人工分片几何缺陷尝试受限Safe
+
+auto result = kernel.booleans().run_rebuilt(BooleanOp::Union, *a.value, *b.value, options);
+if (result.status != StatusCode::Ok || !result.value) {
+  auto diagnostic = kernel.diagnostics().get(result.diagnostic_id);
+  if (diagnostic.value)
+    for (const auto& issue : diagnostic.value->issues) show_issue(issue);
+  return;
+}
+if (!result.value->output) {
+  consume_empty_material();  // 空交/完全减除为成功，无BodyId可查询
+  return;
+}
+const BodyId output = *result.value->output;
+auto faces = kernel.topology().query().faces_of_body(output);
+auto edges = kernel.topology().query().edges_of_body(output);
+auto shells = kernel.topology().query().shells_of_body(output);
+auto sources = kernel.topology().query().source_bodies_of_body(output);
+auto mass = kernel.topology().query().body_mass_properties(output);
+auto strict = kernel.validate().validate_all(output, ValidationMode::Strict);
+if (!faces.value || !edges.value || !shells.value || !sources.value || !mass.value ||
+    strict.status != StatusCode::Ok) return;
+// 本固定并集V=15、A=42；auto_repair不代表repaired必为true。
+consume_rebuilt(output, result.value->repaired, *mass.value);
+
+// 完全减除：同ID只生成一侧并去重来源，成功空材料。
+auto empty = kernel.booleans().run_rebuilt(BooleanOp::Subtract, *a.value, *a.value);
+if (empty.status == StatusCode::Ok && empty.value && !empty.value->output)
+  consume_empty_material();
+```
+
+`show_issue/consume_*`为应用示意函数，片段未单独编译；执行证据来自workflow/heal/ops_heal/query_eval/prep实际回归及 [最终门禁§1.9](../quality/AxiomKernel_测试与验收方案.md#19-cycle-0082--s4-rebuild-门禁与逐项证据)。诊断在外层Result，必须分别检查Result.value与报告output。只接受U/D/I，Split拒绝。公开面/壳/体来源可查，边经faces_of_edge→source_faces_of_face间接追溯；同形/同ID/共面共享区域来源去重且保留双方信息。
+
+真实内部共面及面相切支持不改变§7.5/§7.6公开prep共面拒绝，兼容run保留历史bbox代理语义。成功非空输出已经Strict及真实壳材料关系认证；受限Safe保持真外/孔环和角点，不调用bbox代理修复或放宽Strict。固定Safe夹具准备1e-6、服务Strict1e-3：Union auto=false以bool.validate失败，auto=true成功repaired=true；Subtract直接Strict成功repaired=false。若设置服务容差，使用现有ToleranceService API，准备选项本身不改变服务Strict容差。
+
+在已打开的拓扑writer内调用成功非空重建会登记服务分配，不增加显式write_operation_count，输出参与保存点/完整rollback；失败恢复新增对象、geometry/cache/Eval而保留diagnostic/递增ID，输入Eval保持有效。保存点只清其后输出，完整rollback防delete后的旧快照复活，回滚后可重试；合法累计遥测不回退。[支持矩阵及V/A/S参考](AxiomKernel_详细模块接口清单.md#823-stage-4-真实实体重建支持矩阵cycle-0082--s4-rebuild)保留边点Union拒绝、真实薄层/Safe失败、曲面曲边/ExactCritical不认证、Strict至少六面/近似网格自交及人工节点截面数值拒绝限制。
 
 ## 8. 修改操作样例
 

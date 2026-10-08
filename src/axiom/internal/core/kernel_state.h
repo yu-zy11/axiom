@@ -232,6 +232,10 @@ struct BodyRecord {
     /// 由 `BooleanService::run` 写入的历史操作来源，不证明质量属性。
     bool has_boolean_op {false};
     BooleanOp boolean_op {BooleanOp::Union};
+    /// The Boolean factory reconstructed actual planar boundaries. Unlike the
+    /// compatibility run, topology queries may use these owned faces as their
+    /// authority; this is not a cached mass or an exemption from validation.
+    bool boolean_rebuilt_boundary {false};
     /// STEP 子集：与 HEADER 中 `AXIOM_STEP_SCHEMA` / `AXIOM_STEP_ENTITY` 往返（空则导出使用内核默认占位）。
     std::string io_step_file_schema;
     std::string io_step_entity_name;
@@ -339,6 +343,10 @@ struct KernelState {
     std::uint64_t topology_savepoint_last_rolled_back_write_operations{0};
     /// 当前拓扑写事务的唯一所有权令牌；事务关闭后弱引用自动失效。
     std::weak_ptr<void> active_topology_transaction;
+    /// Successful service materializations owned by the active writer. Half-open
+    /// ID ranges include private geometry and validation meshes; failed attempts
+    /// never register. Commit retains them, rollback removes them without ID reuse.
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> topology_service_allocation_ranges;
 
     std::uint64_t allocate_id() {
         return next_id++;

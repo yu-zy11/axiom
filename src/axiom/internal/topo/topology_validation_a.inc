@@ -650,6 +650,20 @@ TopologyValidationService::validate_face_trim_consistency(FaceId face_id) const 
       return true;
     };
 
+  const auto uv_area_failure = [&](LoopId loop_id, std::string_view code,
+                                   std::string message, const std::string& reason,
+                                   Scalar area) {
+    auto issue = detail::make_error_issue(code, std::move(message),
+                                         {face_id.value, loop_id.value});
+    if (reason == "环有符号面积过小") {
+      issue.numeric_evidence = {{"uv_loop_area", area, "parameter_unit_squared"},
+                                {"uv_loop_area_threshold", tol_ori * tol_ori * 10,
+                                 "parameter_unit_squared"}};
+    }
+    return error_void(StatusCode::InvalidTopology,
+                      state_->create_diagnostic("面修剪验证失败", {std::move(issue)}));
+  };
+
   const auto outer_lit = state_->loops.find(face_it->second.outer_loop.value);
   const std::size_t outer_coedge_n =
       outer_lit != state_->loops.end() ? outer_lit->second.coedges.size() : 0;
@@ -661,20 +675,16 @@ TopologyValidationService::validate_face_trim_consistency(FaceId face_id) const 
     std::string area_reason;
     if (!compute_loop_signed_uv_area(face_it->second.outer_loop, outer_area,
                                      area_reason)) {
-      return detail::failed_void(*state_, StatusCode::InvalidTopology,
-                                 diag_codes::kTopoFaceOuterLoopInvalid,
-                                 "面修剪验证失败：外环方向不可判定（" + area_reason + "）",
-                                 "面修剪验证失败",
-                                 {face_id.value, face_it->second.outer_loop.value});
+      return uv_area_failure(face_it->second.outer_loop, diag_codes::kTopoFaceOuterLoopInvalid,
+                             "面修剪验证失败：外环方向不可判定（" + area_reason + "）",
+                             area_reason, outer_area);
     }
     for (const auto inner_loop_id : face_it->second.inner_loops) {
       Scalar inner_area = 0.0;
       if (!compute_loop_signed_uv_area(inner_loop_id, inner_area, area_reason)) {
-        return detail::failed_void(*state_, StatusCode::InvalidTopology,
-                                   diag_codes::kTopoFaceInnerLoopInvalid,
-                                   "面修剪验证失败：内环方向不可判定（" + area_reason + "）",
-                                   "面修剪验证失败",
-                                   {face_id.value, inner_loop_id.value});
+        return uv_area_failure(inner_loop_id, diag_codes::kTopoFaceInnerLoopInvalid,
+                               "面修剪验证失败：内环方向不可判定（" + area_reason + "）",
+                               area_reason, inner_area);
       }
       if ((outer_area > 0.0 && inner_area > 0.0) ||
           (outer_area < 0.0 && inner_area < 0.0)) {
@@ -892,8 +902,12 @@ TopologyValidationService::validate_face_trim_consistency(FaceId face_id) const 
             "面修剪验证失败：参数曲线控制点不足", "面修剪验证失败",
             {face_id.value, loop_id.value, coedge_id.value, pc_id.value});
       }
-      const Point2 pc_start = pc.poles.front();
-      const Point2 pc_end = pc.poles.back();
+      // PCurve poles follow the underlying edge direction, as in UV loop
+      // traversal and the interior sampling below. Compare oriented endpoints.
+      const Point2 pc_start =
+          coedge_it->second.reversed ? pc.poles.back() : pc.poles.front();
+      const Point2 pc_end =
+          coedge_it->second.reversed ? pc.poles.front() : pc.poles.back();
       const Point2 s2{uv_start.value->first, uv_start.value->second};
       const Point2 e2{uv_end.value->first, uv_end.value->second};
       const auto ds = dist2(pc_start, s2);

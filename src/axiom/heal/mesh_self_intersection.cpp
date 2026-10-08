@@ -95,7 +95,7 @@ bool triangles_intersect_sat(const Point3 ta[3], const Point3 tb[3], Scalar sat_
     const Vec3 n1 = crossv(vsub(ta[1], ta[0]), vsub(ta[2], ta[0]));
     const Vec3 n2 = crossv(vsub(tb[1], tb[0]), vsub(tb[2], tb[0]));
 
-    std::array<Vec3, 11> axes {};
+    std::array<Vec3, 17> axes {};
     std::size_t axis_count = 0;
     auto push_axis = [&axes, &axis_count](Vec3 a) {
         normalize_or_zero(&a);
@@ -117,6 +117,10 @@ bool triangles_intersect_sat(const Point3 ta[3], const Point3 tb[3], Scalar sat_
 
     const std::array<Vec3, 3> ea {a01, a12, a20};
     const std::array<Vec3, 3> eb {b01, b12, b20};
+    // Coplanar triangles also need in-plane edge normals: their face normals
+    // and edge cross-products alone cannot separate disjoint planar regions.
+    for (const Vec3& edge : ea) push_axis(crossv(n1, edge));
+    for (const Vec3& edge : eb) push_axis(crossv(n2, edge));
     for (const Vec3& u : ea) {
         for (const Vec3& v : eb) {
             push_axis(crossv(u, v));

@@ -16,6 +16,177 @@
 
 namespace {
 
+// The new material boundary remains usable by the next modeling operation and
+// by Heal's complete Strict gate, rather than terminating at an imprinted proxy.
+bool rebuilt_boolean_heal_chain_regression() {
+    axiom::Kernel kernel;
+    axiom::DiagnosticId last_diagnostic {};
+    axiom::Kernel* diagnostic_kernel = &kernel;
+    const auto fail = [&](int line) {
+        std::cerr << "rebuilt Boolean/Heal chain line=" << line << "\n";
+        const auto diagnostic = diagnostic_kernel->diagnostics().get(last_diagnostic);
+        if (diagnostic.value) for (const auto& issue : diagnostic.value->issues) {
+            std::cerr << issue.stage << " " << issue.code << " " << issue.message << "\n";
+            for (const auto& evidence : issue.numeric_evidence)
+                std::cerr << "  " << evidence.name << "=" << evidence.value << " " << evidence.unit << "\n";
+        }
+        return false;
+    };
+
+    const auto a = kernel.primitives().box({0,0,0},2,2,2), b = kernel.primitives().box({1,1,1},2,2,2);
+    const auto inner = kernel.primitives().box({0.25,0.25,0.25},0.5,0.5,0.5);
+    if (!a.value || !b.value || !inner.value) return fail(__LINE__);
+    axiom::BooleanRebuildOptions options;
+    options.auto_repair = true;
+    const auto united = kernel.booleans().run_rebuilt(axiom::BooleanOp::Union,*a.value,*b.value,options);
+    last_diagnostic = united.diagnostic_id;
+    if (!united.value || !united.value->output || united.value->repaired ||
+        kernel.validate().validate_all(*united.value->output,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok)
+        return fail(__LINE__);
+    const auto cut = kernel.booleans().run_rebuilt(axiom::BooleanOp::Subtract,*united.value->output,*inner.value);
+    last_diagnostic = cut.diagnostic_id;
+    if (!cut.value || !cut.value->output ||
+        kernel.validate().validate_all(*cut.value->output,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok)
+        return fail(__LINE__);
+    const auto mass = kernel.query().mass_properties(*cut.value->output);
+    const auto source_bodies = kernel.topology().query().source_bodies_of_body(*cut.value->output);
+    const auto cavity = kernel.topology().query().locate_point(*cut.value->output,{0.5,0.5,0.5});
+    const auto material = kernel.topology().query().locate_point(*cut.value->output,{1.5,1.5,1.5});
+    if (!mass.value || std::abs(mass.value->volume-14.875) > 1e-7 || std::abs(mass.value->area-43.5) > 1e-7 ||
+        !source_bodies.value || std::find(source_bodies.value->begin(),source_bodies.value->end(),*united.value->output) ==
+            source_bodies.value->end() || !cavity.value || cavity.value->location != axiom::BodyPointLocation::Outside ||
+        !material.value || material.value->location != axiom::BodyPointLocation::Inside ||
+        kernel.validate().validate_all(*a.value,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok ||
+        kernel.validate().validate_all(*b.value,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok)
+        return fail(__LINE__);
+    const auto aligned = kernel.primitives().box({1,0,0},2,2,2);
+    const auto tunnel = kernel.primitives().box({0.25,0.25,0},0.5,0.5,2);
+    if (!aligned.value || !tunnel.value) return fail(__LINE__);
+    const auto fused = kernel.booleans().run_rebuilt(axiom::BooleanOp::Union,*a.value,*aligned.value,options);
+    last_diagnostic = fused.diagnostic_id;
+    if (!fused.value || !fused.value->output || fused.value->repaired) return fail(__LINE__);
+    const auto perforated = kernel.booleans().run_rebuilt(
+        axiom::BooleanOp::Subtract,*fused.value->output,*tunnel.value,options);
+    last_diagnostic = perforated.diagnostic_id;
+    if (!perforated.value || !perforated.value->output || perforated.value->repaired) return fail(__LINE__);
+    const auto clipped = kernel.booleans().run_rebuilt(
+        axiom::BooleanOp::Intersect,*perforated.value->output,*a.value,options);
+    last_diagnostic = clipped.diagnostic_id;
+    if (!clipped.value || !clipped.value->output || clipped.value->repaired) return fail(__LINE__);
+    for (const bool final_clip : {false,true}) {
+        const auto body = final_clip ? *clipped.value->output : *perforated.value->output;
+        const auto properties = kernel.query().mass_properties(body);
+        // The straight through-hole section is constant for every 0<z<2.
+        // Require one fixed regular height and retain z=1 below as a checked
+        // probe through artificial subdivision nodes, without moving any gates.
+        const auto section = kernel.query().section_detailed(body,{{0,0,0.875},{0,0,1}});
+        const auto opening = kernel.topology().query().locate_point(body,{0.5,0.5,1});
+        const auto validation = kernel.validate().validate_all(body,axiom::ValidationMode::Strict);
+        // Rectangular 3x2 or 2x2 section minus the 0.5x0.5 tunnel;
+        // V=h*S and A=2*S+h*(outer_perimeter+hole_perimeter), h=2.
+        if (!properties.value || std::abs(properties.value->volume-(final_clip ? 7.5 : 11.5)) > 1e-7 ||
+            std::abs(properties.value->area-(final_clip ? 27.5 : 35.5)) > 1e-7 || !section.value ||
+            std::abs(section.value->area-(final_clip ? 3.75 : 5.75)) > 1e-7 || !opening.value ||
+            opening.value->location != axiom::BodyPointLocation::Outside ||
+            validation.status != axiom::StatusCode::Ok) {
+            std::cerr << "rebuilt chain final_clip=" << final_clip << " body=" << body.value
+                      << " volume=" << (properties.value ? properties.value->volume : -1) << '/' << (final_clip ? 7.5 : 11.5)
+                      << " area=" << (properties.value ? properties.value->area : -1) << '/' << (final_clip ? 27.5 : 35.5)
+                      << " section=" << (section.value ? section.value->area : -1) << '/' << (final_clip ? 3.75 : 5.75)
+                      << " opening=" << (opening.value ? static_cast<int>(opening.value->location) : -1)
+                      << '/' << static_cast<int>(axiom::BodyPointLocation::Outside)
+                      << " Strict=" << static_cast<int>(validation.status) << "\n";
+            for (const auto diagnostic_id : {properties.diagnostic_id,section.diagnostic_id,opening.diagnostic_id,validation.diagnostic_id}) {
+                const auto diagnostic = kernel.diagnostics().get(diagnostic_id);
+                if (diagnostic.value) for (const auto& issue : diagnostic.value->issues) {
+                    std::cerr << issue.stage << " " << issue.code << " " << issue.message << "\n";
+                    for (const auto& evidence : issue.numeric_evidence)
+                        std::cerr << "  " << evidence.name << "=" << evidence.value << " " << evidence.unit << "\n";
+                }
+            }
+            return fail(__LINE__);
+        }
+        const auto original_section = kernel.query().section_detailed(body,{{0,0,1},{0,0,1}});
+        if (original_section.status == axiom::StatusCode::Ok) {
+            if (!original_section.value || std::abs(original_section.value->area-(final_clip ? 3.75 : 5.75)) > 1e-7)
+                return fail(__LINE__);
+        } else {
+            last_diagnostic = original_section.diagnostic_id;
+            const auto diagnostic = kernel.diagnostics().get(original_section.diagnostic_id);
+            if (original_section.status != axiom::StatusCode::NumericalInstability || original_section.value || !diagnostic.value ||
+                std::none_of(diagnostic.value->issues.begin(),diagnostic.value->issues.end(),[](const auto& issue) {
+                    return issue.code == axiom::diag_codes::kQuerySectionFailure &&
+                        issue.stage == "query.section.numeric" && issue.severity == axiom::IssueSeverity::Error;
+                })) return fail(__LINE__);
+        }
+    }
+    // Safe repair removes artificial coplanar seams, then the resulting real
+    // boundary must support a new cavity cut and the same Strict gate.
+    axiom::Kernel repaired_kernel;
+    diagnostic_kernel = &repaired_kernel;
+    constexpr double overlap = 2e-4;
+    const auto repair_a = repaired_kernel.primitives().box({0,0,0},2,2,2);
+    const auto repair_b = repaired_kernel.primitives().box({2-overlap,0,0},2,2,2);
+    const auto repair_inner = repaired_kernel.primitives().box({0.25,0.25,0.25},0.5,0.5,0.5);
+    if (!repair_a.value || !repair_b.value || !repair_inner.value ||
+        repaired_kernel.set_linear_tolerance(1e-3).status != axiom::StatusCode::Ok) return fail(__LINE__);
+    axiom::BooleanRebuildOptions safe_options;
+    safe_options.preparation.intersection.tolerance.linear = 1e-6;
+    const auto unhealed = repaired_kernel.booleans().run_rebuilt(
+        axiom::BooleanOp::Union,*repair_a.value,*repair_b.value,safe_options);
+    last_diagnostic = unhealed.diagnostic_id;
+    const auto rejected = repaired_kernel.diagnostics().get(unhealed.diagnostic_id);
+    if (unhealed.status == axiom::StatusCode::Ok || unhealed.value || !rejected.value ||
+        std::none_of(rejected.value->issues.begin(),rejected.value->issues.end(),[](const auto& issue) {
+            return issue.code == axiom::diag_codes::kBoolRebuildFailure && issue.stage == "bool.validate";
+        }) || std::none_of(rejected.value->issues.begin(),rejected.value->issues.end(),[](const auto& issue) {
+            if (issue.severity != axiom::IssueSeverity::Error) return false;
+            if (issue.code == axiom::diag_codes::kValNearDuplicateVertices &&
+                issue.stage == "heal.validate_geometry.near_duplicate_vertices") return true;
+            if (issue.code == axiom::diag_codes::kValDegenerateGeometry &&
+                (issue.stage == "heal.validate_geometry.edges" ||
+                 issue.stage == "heal.validate_geometry.face_area")) return true;
+            if (issue.stage != "heal.validate_topology.trim_consistency" ||
+                (issue.code != axiom::diag_codes::kTopoFaceOuterLoopInvalid &&
+                 issue.code != axiom::diag_codes::kTopoFaceInnerLoopInvalid)) return false;
+            std::optional<double> area, threshold;
+            for (const auto& evidence : issue.numeric_evidence) {
+                if (evidence.name == "uv_loop_area") area = evidence.value;
+                if (evidence.name == "uv_loop_area_threshold") threshold = evidence.value;
+            }
+            return area && threshold && std::isfinite(*area) && std::isfinite(*threshold) &&
+                std::abs(*area) > 0 && *threshold > 0 && std::abs(*area) <= *threshold;
+        })) return fail(__LINE__);
+    safe_options.auto_repair = true;
+    const auto healed = repaired_kernel.booleans().run_rebuilt(
+        axiom::BooleanOp::Union,*repair_a.value,*repair_b.value,safe_options);
+    last_diagnostic = healed.diagnostic_id;
+    if (!healed.value || !healed.value->output || !healed.value->repaired ||
+        repaired_kernel.validate().validate_all(*healed.value->output,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok)
+        return fail(__LINE__);
+    const auto cavity_cut = repaired_kernel.booleans().run_rebuilt(
+        axiom::BooleanOp::Subtract,*healed.value->output,*repair_inner.value,safe_options);
+    last_diagnostic = cavity_cut.diagnostic_id;
+    if (!cavity_cut.value || !cavity_cut.value->output) return fail(__LINE__);
+    const auto repair_query = repaired_kernel.topology().query();
+    const auto repaired_mass = repair_query.body_mass_properties(*cavity_cut.value->output);
+    axiom::BodySpatialQueryOptions query_options;
+    query_options.position_tolerance = 1e-6;
+    const auto repaired_section = repair_query.section(*cavity_cut.value->output,{{0,0,0.5},{0,0,1}},query_options);
+    const auto cavity_location = repair_query.locate_point(*cavity_cut.value->output,{0.5,0.5,0.5},query_options);
+    const auto healed_sources = repair_query.source_bodies_of_body(*cavity_cut.value->output);
+    // L=4-overlap,w=h=2 minus a .5^3 cavity: V=4L-.125,
+    // A=8L+8+1.5, mid-cavity S=2L-.25.
+    return repaired_mass.value && std::abs(repaired_mass.value->volume-(15.875-4*overlap)) < 1e-7 &&
+        std::abs(repaired_mass.value->area-(41.5-8*overlap)) < 1e-7 && repaired_section.value &&
+        std::abs(repaired_section.value->area-(7.75-2*overlap)) < 1e-7 && cavity_location.value &&
+        cavity_location.value->location == axiom::BodyPointLocation::Outside && healed_sources.value &&
+        std::find(healed_sources.value->begin(),healed_sources.value->end(),*healed.value->output) != healed_sources.value->end() &&
+        repaired_kernel.validate().validate_all(*cavity_cut.value->output,axiom::ValidationMode::Strict).status == axiom::StatusCode::Ok &&
+        repaired_kernel.validate().validate_all(*repair_a.value,axiom::ValidationMode::Strict).status == axiom::StatusCode::Ok &&
+        repaired_kernel.validate().validate_all(*repair_b.value,axiom::ValidationMode::Strict).status == axiom::StatusCode::Ok;
+}
+
 bool has_issue_code(const axiom::DiagnosticReport& report, std::string_view code) {
     for (const auto& issue : report.issues) {
         if (issue.code == code) {
@@ -4830,6 +5001,10 @@ bool test_stage3_model_query_chain() {
 }  // namespace
 
 int main() {
+    if (!rebuilt_boolean_heal_chain_regression()) {
+        std::cerr << "rebuilt Boolean to Heal chain regression\n";
+        return 1;
+    }
     const auto run_stage = [](const char* name, const auto& test) {
         std::cerr << "[stage] " << name << " begin\n";
         const bool passed = test();

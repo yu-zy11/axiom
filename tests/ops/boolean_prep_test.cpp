@@ -259,6 +259,86 @@ bool planar_failure(int line) {
     return false;
 }
 
+// The same explicit hole topology used for independent source-edge interpolation
+// must survive reconstruction. Analytic cross sections count the two separated
+// strips, rather than filling the hole or the concave notch with a bbox face.
+bool check_rebuild_holed_references() {
+    for (const bool holed : {false,true}) for (const bool full_height : {false,true}) {
+        axiom::Kernel kernel;
+        axiom::ProfileRef profile;
+        profile.label = "s4-rebuild-concave-U-reference";
+        profile.polygon_xyz = {{0,0,0},{4,0,0},{4,4,0},{3,4,0},{3,1,0},{1,1,0},{1,4,0},{0,4,0}};
+        const auto prism = holed ? make_reference_holed_prism(kernel) : kernel.sweeps().extrude(profile,{0,0,1},2);
+        const auto cutter = full_height ? kernel.primitives().box({-1,1.5,0},6,1,2)
+                                        : kernel.primitives().box({-1,1.5,-0.5},6,1,1);
+        if (!prism.value || !cutter.value) return planar_failure(__LINE__);
+        const auto query = kernel.topology().query();
+        const double prism_volume = holed ? 24 : 20, prism_area = holed ? 72 : 64;
+        const std::array<axiom::BooleanOp,3> operations {
+            axiom::BooleanOp::Union,axiom::BooleanOp::Subtract,axiom::BooleanOp::Intersect};
+        // At full height, section intersection is two 1x1 strips. Union
+        // perimeters are 30 (hole) / 28 (U), difference perimeters 24 / 22,
+        // and intersection perimeter 8. V=2*S, A=2*S+2*P independently.
+        const std::array<double,3> volumes = full_height
+            ? std::array<double,3>{prism_volume+8,prism_volume-4,4}
+            : std::array<double,3>{prism_volume+5,prism_volume-1,1};
+        const std::array<double,3> areas = full_height
+            ? std::array<double,3>{holed ? 92.0 : 84.0,holed ? 68.0 : 60.0,20}
+            : std::array<double,3>{prism_area+18,prism_area,8};
+        const std::array<double,3> sections {holed ? 16.0 : 14.0,holed ? 10.0 : 8.0,2};
+        for (std::size_t i = 0; i < operations.size(); ++i) {
+            const auto result = kernel.booleans().run_rebuilt(operations[i],*prism.value,*cutter.value);
+            if (!result.value || !result.value->output) {
+                const auto report = kernel.diagnostics().get(result.diagnostic_id);
+                if (report.value) for (const auto& issue : report.value->issues)
+                    std::cerr << "rebuild holed=" << holed << " full_height=" << full_height << " operation=" << i << " " << issue.stage << " "
+                              << issue.code << " " << issue.message << "\n";
+                return planar_failure(__LINE__);
+            }
+            const auto output = *result.value->output;
+            const auto mass = query.body_mass_properties(output);
+            const auto section = query.section(output,{{0,0,0.25},{0,0,1}});
+            const auto representation = kernel.representation().kind_of_body(output);
+            const auto shells = query.shells_of_body(output);
+            const auto faces = query.faces_of_body(output);
+            const auto edges = query.edges_of_body(output);
+            if (!mass.value || std::abs(mass.value->volume-volumes[i]) > 1e-7 ||
+                std::abs(mass.value->area-areas[i]) > 1e-7 || !section.value ||
+                std::abs(section.value->area-sections[i]) > 1e-7 ||
+                !representation.value || *representation.value != axiom::RepKind::ExactBRep ||
+                !faces.value || faces.value->empty() || !edges.value || edges.value->empty() || !shells.value ||
+                (full_height && shells.value->size() != (i == 0 ? 1 : i == 1 ? (holed ? 2 : 3) : 2)) ||
+                kernel.validate().validate_all(output,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok)
+                return planar_failure(__LINE__);
+            for (const auto edge : *edges.value) {
+                const auto owners = query.faces_of_edge(edge);
+                if (!owners.value || owners.value->size() != 2) return planar_failure(__LINE__);
+            }
+            for (const auto face : *faces.value) {
+                const auto sources = query.source_faces_of_face(face);
+                if (!sources.value || sources.value->empty()) return planar_failure(__LINE__);
+            }
+            const std::array<axiom::Point3,4> points {{{2,2,0.25},{0.5,2,0.25},{0.5,2,1},{4.5,0.5,1}}};
+            const std::array<std::array<bool,4>,3> expected = full_height
+                ? std::array<std::array<bool,4>,3>{{{true,true,true,false},
+                                                  {false,false,false,false},{false,true,true,false}}}
+                : std::array<std::array<bool,4>,3>{{{true,true,true,false},
+                                                  {false,false,true,false},{false,true,false,false}}};
+            for (std::size_t j = 0; j < points.size(); ++j) {
+                const auto location = query.locate_point(output,points[j]);
+                if (!location.value || location.value->location != (expected[i][j] ? axiom::BodyPointLocation::Inside
+                                                                                 : axiom::BodyPointLocation::Outside))
+                    return planar_failure(__LINE__);
+            }
+        }
+        const auto original = query.body_mass_properties(*prism.value);
+        if (!original.value || std::abs(original.value->volume-prism_volume) > 1e-7 ||
+            std::abs(original.value->area-prism_area) > 1e-7)
+            return planar_failure(__LINE__);
+    }
+    return true;
+}
+
 bool check_planar_intersection_references() {
     axiom::Kernel kernel;
     const auto a = kernel.primitives().box({0,0,0},2,2,2);
@@ -1170,6 +1250,10 @@ bool check_split_classification_references() {
 }  // namespace
 
 int main() {
+    if (!check_rebuild_holed_references()) {
+        std::cerr << "real Boolean hole/concavity reconstruction regression\n";
+        return 1;
+    }
     if (!check_split_classification_references()) {
         std::cerr << "planar boolean split/classification analytic regression\n";
         return 1;

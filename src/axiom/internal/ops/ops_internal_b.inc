@@ -114,13 +114,13 @@ bool read_boolean_planar_face(const detail::KernelState& state, FaceId id, Scala
     out.u = detail::cross(out.v,out.normal);
     std::vector<std::array<int, 3>> triangles;
     if (out.rings.size() == 1) {
-        if (!detail::triangulate_extrude_profile(out.rings.front(), out.normal, triangles)) return false;
+        if (!detail::triangulate_extrude_profile(out.rings.front(), out.normal, triangles, true)) return false;
     } else {
         const std::vector<std::vector<Point3>> holes(out.rings.begin() + 1, out.rings.end());
         std::vector<Point3> points;
         std::vector<std::pair<int, int>> boundary;
         if (!detail::triangulate_extrude_region(out.rings.front(), holes, out.normal, tolerance,
-                                               points, boundary, triangles)) return false;
+                                               points, boundary, triangles, true)) return false;
     }
     return true;
 }
@@ -246,7 +246,8 @@ bool boolean_boxes_overlap(const BoundingBox& a, const BoundingBox& b, Scalar to
 }
 
 Result<BooleanIntersectionPreparation> prepare_planar_boolean_intersections(
-    detail::KernelState& state, BodyId lhs, BodyId rhs, const BooleanIntersectionOptions& options) {
+    detail::KernelState& state, BodyId lhs, BodyId rhs, const BooleanIntersectionOptions& options,
+    bool resolve_coplanar) {
     const auto fail = [&](StatusCode status, std::string_view code, std::string_view stage,
                           const char* message, FaceId lhs_face = {}, FaceId rhs_face = {}) {
         auto issue = detail::make_error_issue(code,message,{lhs.value,rhs.value});
@@ -332,8 +333,15 @@ Result<BooleanIntersectionPreparation> prepare_planar_boolean_intersections(
         std::sort(faces[side].begin(),faces[side].end(),[](const auto& a,const auto& b) { return a.id.value < b.id.value; });
     }
     BooleanIntersectionPreparation result;
+    std::size_t coplanar_work = lhs_count * rhs_count;
+    const auto consume_coplanar = [&](std::size_t count) {
+        if (count > options.max_face_pairs-coplanar_work) return false;
+        coplanar_work += count;
+        return true;
+    };
     for (const auto& a : faces[0]) for (const auto& b : faces[1]) {
         if (!boolean_boxes_overlap(a.bbox,b.bbox,tolerance.linear)) continue;
+        const auto pair_segment_begin = result.segments.size();
         BooleanFaceCandidate candidate;
         candidate.lhs_face = a.id;
         candidate.rhs_face = b.id;
@@ -347,9 +355,74 @@ Result<BooleanIntersectionPreparation> prepare_planar_boolean_intersections(
             if (sine > 64*std::numeric_limits<Scalar>::epsilon())
                 return fail(StatusCode::NumericalInstability,diag_codes::kBoolNumericalFailure,"bool.intersect",
                             "候选面近平行，交线在角容差内无法可靠确定",a.id,b.id);
-            if (std::abs(distance) <= tolerance.linear)
-                return fail(StatusCode::NotImplemented,diag_codes::kBoolCoplanarUnsupported,"bool.intersect",
-                            "共面候选需要二维区域求交，禁止用包围盒产生交线",a.id,b.id);
+            if (std::abs(distance) <= tolerance.linear) {
+                if (!resolve_coplanar)
+                    return fail(StatusCode::NotImplemented,diag_codes::kBoolCoplanarUnsupported,"bool.intersect",
+                                "共面候选需要二维区域求交，禁止用包围盒产生交线",a.id,b.id);
+                Scalar resolution = 64 * std::numeric_limits<Scalar>::epsilon();
+                for (const auto* face : {&a,&b}) for (const auto& ring : face->rings)
+                    for (const auto& point : ring)
+                        resolution = std::max(resolution,64 * std::numeric_limits<Scalar>::epsilon() *
+                            std::max({std::abs(point.x),std::abs(point.y),std::abs(point.z)}));
+                for (const auto* face : {&a,&b}) for (const auto& ring : face->rings)
+                    for (const auto& point : ring)
+                        if (std::abs(detail::dot(a.normal,detail::subtract(point,a.origin))) > resolution ||
+                            std::abs(detail::dot(b.normal,detail::subtract(point,b.origin))) > resolution)
+                            return fail(StatusCode::NumericalInstability,diag_codes::kBoolNumericalFailure,"bool.intersect",
+                                        "近共面间隙不能按线容差吸附为二维区域",a.id,b.id);
+                // Every real ring edge contributes a support line. Partitioning
+                // both trimmed regions by these lines resolves overlap and holes
+                // independently of either face's original triangulation.
+                for (const auto* face : {&a,&b}) for (const auto& ring : face->rings)
+                    for (std::size_t i = 0; i < ring.size(); ++i) {
+                        const auto origin = ring[i];
+                        const auto direction = detail::normalize(detail::subtract(ring[(i+1)%ring.size()],origin));
+                        const std::size_t ring_edges = result.candidates.back().lhs_edges.size() +
+                            result.candidates.back().rhs_edges.size();
+                        // Knot construction scans every real ring; interval and
+                        // endpoint membership each scan both trimmed regions.
+                        if (!consume_coplanar(ring_edges) || ring_edges > options.max_face_pairs /
+                            std::max<std::size_t>(1,8*ring_edges) ||
+                            !consume_coplanar(8*ring_edges*ring_edges))
+                            return fail(StatusCode::OperationFailed,diag_codes::kBoolPreparationBudgetExceeded,"bool.intersect",
+                                        "共面二维区域约束超过累计几何工作预算",a.id,b.id);
+                        auto segments = trim_boolean_planar_line(state,a,b,origin,direction,resolution);
+                        for (auto& segment : segments) {
+                            for (const auto point : {segment.begin,segment.end})
+                                if (!boolean_finite_point(point) ||
+                                    std::abs(detail::dot(a.normal,detail::subtract(point,a.origin))) > resolution ||
+                                    std::abs(detail::dot(b.normal,detail::subtract(point,b.origin))) > resolution)
+                                    return fail(StatusCode::NumericalInstability,diag_codes::kBoolNumericalFailure,"bool.intersect",
+                                                "共面约束未通过真实支撑平面残差检查",a.id,b.id);
+                            const auto length = detail::norm(detail::subtract(segment.end,segment.begin));
+                            if (!segment.point_contact && length <= tolerance.linear)
+                                return fail(StatusCode::NumericalInstability,diag_codes::kBoolNumericalFailure,"bool.intersect",
+                                            "共面区域交段处于未解析的线容差带",a.id,b.id);
+                            // Earlier pairs cannot be duplicates: the equality
+                            // contract includes both source faces. Scan only this pair.
+                            if (!consume_coplanar(result.segments.size()-pair_segment_begin))
+                                return fail(StatusCode::OperationFailed,diag_codes::kBoolPreparationBudgetExceeded,"bool.intersect",
+                                            "共面约束去重超过累计几何工作预算",a.id,b.id);
+                            const bool duplicate = std::any_of(result.segments.begin()+
+                                static_cast<std::ptrdiff_t>(pair_segment_begin),result.segments.end(),[&](const auto& old) {
+                                if (old.lhs_face != a.id || old.rhs_face != b.id) return false;
+                                const auto equal = [&](const auto& p,const auto& q) {
+                                    return detail::norm(detail::subtract(p,q)) <= resolution;
+                                };
+                                return (equal(old.begin,segment.begin) && equal(old.end,segment.end)) ||
+                                       (equal(old.begin,segment.end) && equal(old.end,segment.begin));
+                            });
+                            if (duplicate) continue;
+                            if (result.segments.size() == options.max_segments)
+                                return fail(StatusCode::OperationFailed,diag_codes::kBoolPreparationBudgetExceeded,"bool.intersect",
+                                            "共面二维边界约束超过交段预算",a.id,b.id);
+                            if (segment.begin_hits.empty() || segment.end_hits.empty())
+                                return fail(StatusCode::NumericalInstability,diag_codes::kBoolNumericalFailure,"bool.intersect",
+                                            "共面区域约束端点无法关联真实环边",a.id,b.id);
+                            result.segments.push_back(std::move(segment));
+                        }
+                    }
+            }
             continue;
         }
         // Anchor the solve at a real face vertex to avoid subtracting large

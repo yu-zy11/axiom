@@ -13,6 +13,810 @@
 
 namespace {
 
+// Analytic material references are independent of the reconstruction's selection
+// rule. Integrate the public, oriented face loops as a second volume/area oracle;
+// the section and point references also distinguish a solid from a bbox proxy.
+bool check_real_rebuild_references() {
+    axiom::Kernel kernel;
+    const auto query = kernel.topology().query();
+    const auto fail = [&](const char* reference, int line) {
+        std::cerr << "real rebuild reference=" << reference << " line=" << line << "\n";
+        return false;
+    };
+    const auto check = [&](axiom::BodyId lhs, axiom::BodyId rhs, axiom::BooleanOp operation,
+                           double volume, double area, const axiom::Plane& plane, double section_area,
+                           std::size_t shell_count, const char* reference,
+                           const axiom::Plane* node_section = nullptr) {
+        const auto lhs_mass = query.body_mass_properties(lhs), rhs_mass = query.body_mass_properties(rhs);
+        const auto lhs_faces = query.faces_of_body(lhs), rhs_faces = query.faces_of_body(rhs);
+        const auto lhs_edges = query.edges_of_body(lhs), rhs_edges = query.edges_of_body(rhs);
+        if (!lhs_mass.value || !rhs_mass.value || !lhs_faces.value || !rhs_faces.value ||
+            !lhs_edges.value || !rhs_edges.value) return fail(reference,__LINE__);
+        const auto before = kernel.body_count();
+        axiom::BooleanRebuildOptions options;
+        options.auto_repair = true;  // A valid result must pass Strict without needing repair.
+        const auto result = kernel.booleans().run_rebuilt(operation,lhs,rhs,options);
+        if (!result.value || result.status != axiom::StatusCode::Ok || result.diagnostic_id.value == 0) {
+            const auto diagnostic = kernel.diagnostics().get(result.diagnostic_id);
+            if (diagnostic.value) for (const auto& issue : diagnostic.value->issues)
+                std::cerr << reference << " " << issue.stage << " " << issue.code << " " << issue.message << "\n";
+            return fail(reference,__LINE__);
+        }
+        if (volume == 0) {
+            return !result.value->output && result.value->selected_fragments == 0 && result.value->output_faces == 0 &&
+                !result.value->repaired && kernel.body_count().value == before.value;
+        }
+        if (!result.value->output || result.value->repaired || result.value->selected_fragments == 0)
+            return fail(reference,__LINE__);
+        const auto output = *result.value->output;
+        const auto faces = query.faces_of_body(output);
+        const auto edges = query.edges_of_body(output);
+        const auto shells = query.shells_of_body(output);
+        const auto bodies = query.source_bodies_of_body(output);
+        const auto representation = kernel.representation().kind_of_body(output);
+        const auto mass = query.body_mass_properties(output);
+        const auto section = query.section(output,plane);
+        const auto validation = kernel.validate().validate_all(output,axiom::ValidationMode::Strict);
+        if (!faces.value || !edges.value || !shells.value || !bodies.value || !representation.value ||
+            *representation.value != axiom::RepKind::ExactBRep || shells.value->size() != shell_count ||
+            faces.value->size() != result.value->output_faces || faces.value->empty() || edges.value->empty() ||
+            std::find(bodies.value->begin(),bodies.value->end(),lhs) == bodies.value->end() ||
+            std::find(bodies.value->begin(),bodies.value->end(),rhs) == bodies.value->end() ||
+            (lhs == rhs && (bodies.value->size() != 1 || bodies.value->front() != lhs)) ||
+            !mass.value || std::abs(mass.value->volume-volume) > 1e-7 || std::abs(mass.value->area-area) > 1e-7 ||
+            !section.value || std::abs(section.value->area-section_area) > 1e-7 ||
+            validation.status != axiom::StatusCode::Ok) {
+            std::cerr << reference << " output=" << output.value
+                      << " faces=" << (faces.value ? faces.value->size() : 0) << '/' << result.value->output_faces
+                      << " edges=" << (edges.value ? edges.value->size() : 0)
+                      << " shells=" << (shells.value ? shells.value->size() : 0) << '/' << shell_count
+                      << " sources=" << (bodies.value ? bodies.value->size() : 0)
+                      << " representation=" << (representation.value ? static_cast<int>(*representation.value) : -1)
+                      << " volume=" << (mass.value ? mass.value->volume : -1) << '/' << volume
+                      << " area=" << (mass.value ? mass.value->area : -1) << '/' << area
+                      << " section=" << (section.value ? section.value->area : -1) << '/' << section_area
+                      << " Strict=" << static_cast<int>(validation.status) << "\n";
+            for (const auto diagnostic_id : {mass.diagnostic_id,section.diagnostic_id,validation.diagnostic_id}) {
+                const auto diagnostic = kernel.diagnostics().get(diagnostic_id);
+                if (diagnostic.value) for (const auto& issue : diagnostic.value->issues)
+                    std::cerr << reference << " " << issue.stage << " " << issue.code << " " << issue.message << "\n";
+            }
+            return fail(reference,__LINE__);
+        }
+        if (node_section) {
+            // Retain the original section through artificial subdivision nodes.
+            // The query conservatively rejects distinct projected events within
+            // arithmetic resolution; it must return no partial section then.
+            // The separately fixed regular plane above must still succeed.
+            const auto original = query.section(output,*node_section);
+            if (original.status == axiom::StatusCode::Ok) {
+                if (!original.value || std::abs(original.value->area-section_area) > 1e-7)
+                    return fail(reference,__LINE__);
+            } else {
+                const auto diagnostic = kernel.diagnostics().get(original.diagnostic_id);
+                if (original.status != axiom::StatusCode::NumericalInstability || original.value || !diagnostic.value ||
+                    std::none_of(diagnostic.value->issues.begin(),diagnostic.value->issues.end(),[](const auto& issue) {
+                        return issue.code == axiom::diag_codes::kQuerySectionFailure &&
+                            issue.stage == "query.section.numeric" && issue.severity == axiom::IssueSeverity::Error;
+                    })) return fail(reference,__LINE__);
+            }
+        }
+        if (std::string_view(reference) == "face-touch-union") {
+            // The coincident source face at x=2 is internal material after
+            // union. Keeping it would incorrectly make this point Boundary.
+            const auto former_interface = query.locate_point(output,{2,1,1});
+            if (!former_interface.value || former_interface.value->location != axiom::BodyPointLocation::Inside)
+                return fail(reference,__LINE__);
+        }
+        double integrated_volume = 0, integrated_area = 0;
+        std::size_t shared_faces = 0;
+        for (const auto face : *faces.value) {
+            if (std::find(lhs_faces.value->begin(),lhs_faces.value->end(),face) != lhs_faces.value->end() ||
+                std::find(rhs_faces.value->begin(),rhs_faces.value->end(),face) != rhs_faces.value->end())
+                return fail(reference,__LINE__);
+            const auto sources = query.source_faces_of_face(face);
+            const auto loops = query.loops_of_face(face);
+            const auto surface = query.surface_of_face(face);
+            if (!sources.value || sources.value->empty() || !loops.value || loops.value->size() != 1 || !surface.value)
+                return fail(reference,__LINE__);
+            for (const auto source : *sources.value)
+                if (std::find(lhs_faces.value->begin(),lhs_faces.value->end(),source) == lhs_faces.value->end() &&
+                    std::find(rhs_faces.value->begin(),rhs_faces.value->end(),source) == rhs_faces.value->end())
+                    return fail(reference,__LINE__);
+            const auto uv = query.face_loop_uv_polyline(face,loops.value->front());
+            if (!uv.value || uv.value->size() < 3) return fail(reference,__LINE__);
+            std::vector<axiom::Point3> points;
+            for (const auto p : *uv.value) {
+                const auto evaluation = kernel.surface_service().eval(*surface.value,p.x,p.y,0);
+                if (!evaluation.value) return fail(reference,__LINE__);
+                points.push_back(evaluation.value->point);
+            }
+            const bool identical_reference = std::string_view(reference).starts_with("identical-") && lhs != rhs;
+            const bool overlap_reference = std::string_view(reference).starts_with("coplanar-overlap-");
+            const auto constant_coordinate = [&](int coordinate, double value) {
+                return std::all_of(points.begin(),points.end(),[&](const auto& p) {
+                    return std::abs((coordinate == 1 ? p.y : p.z)-value) < 1e-8;
+                });
+            };
+            const bool shared_cap = overlap_reference &&
+                std::all_of(points.begin(),points.end(),[](const auto& p) { return p.x >= 1-1e-8 && p.x <= 2+1e-8; }) &&
+                (constant_coordinate(1,0) || constant_coordinate(1,2) ||
+                 constant_coordinate(2,0) || constant_coordinate(2,2));
+            if (identical_reference || shared_cap) {
+                // Coincident regions retain both real source faces even when
+                // only one operand's triangle tessellation is selected.
+                const bool has_lhs = std::any_of(sources.value->begin(),sources.value->end(),[&](const auto source) {
+                    return std::find(lhs_faces.value->begin(),lhs_faces.value->end(),source) != lhs_faces.value->end();
+                });
+                const bool has_rhs = std::any_of(sources.value->begin(),sources.value->end(),[&](const auto source) {
+                    return std::find(rhs_faces.value->begin(),rhs_faces.value->end(),source) != rhs_faces.value->end();
+                });
+                if (!has_lhs || !has_rhs) return fail(reference,__LINE__);
+                ++shared_faces;
+            }
+            const auto p = points.front();
+            for (std::size_t i = 1; i+1 < points.size(); ++i) {
+                const auto q = points[i], r = points[i+1];
+                const axiom::Vec3 cross {(q.y-p.y)*(r.z-p.z)-(q.z-p.z)*(r.y-p.y),
+                    (q.z-p.z)*(r.x-p.x)-(q.x-p.x)*(r.z-p.z),
+                    (q.x-p.x)*(r.y-p.y)-(q.y-p.y)*(r.x-p.x)};
+                integrated_area += 0.5*std::hypot(cross.x,cross.y,cross.z);
+                integrated_volume += (p.x*(q.y*r.z-q.z*r.y)+p.y*(q.z*r.x-q.x*r.z)+
+                                      p.z*(q.x*r.y-q.y*r.x))/6;
+            }
+        }
+        if (std::abs(integrated_volume-volume) > 1e-7 || std::abs(integrated_area-area) > 1e-7)
+            return fail(reference,__LINE__);
+        if (((std::string_view(reference).starts_with("identical-") && lhs != rhs) ||
+             (std::string_view(reference).starts_with("coplanar-overlap-") && operation != axiom::BooleanOp::Subtract)) &&
+            shared_faces == 0) return fail(reference,__LINE__);
+        for (const auto edge : *edges.value) {
+            const auto owners = query.faces_of_edge(edge);
+            const auto endpoints = query.vertices_of_edge(edge);
+            if (!owners.value || owners.value->size() != 2 || !endpoints.value ||
+                (*endpoints.value)[0] == (*endpoints.value)[1] ||
+                std::find(lhs_edges.value->begin(),lhs_edges.value->end(),edge) != lhs_edges.value->end() ||
+                std::find(rhs_edges.value->begin(),rhs_edges.value->end(),edge) != rhs_edges.value->end())
+                return fail(reference,__LINE__);
+        }
+        for (const auto shell : *shells.value) {
+            const auto owned_faces = query.faces_of_shell(shell);
+            const auto source_shells = query.source_shells_of_shell(shell);
+            const auto source_faces = query.source_faces_of_shell(shell);
+            if (!owned_faces.value || owned_faces.value->empty() || !source_shells.value || source_shells.value->empty() ||
+                !source_faces.value || source_faces.value->empty()) return fail(reference,__LINE__);
+        }
+        const auto lhs_after = query.body_mass_properties(lhs), rhs_after = query.body_mass_properties(rhs);
+        return lhs_after.value && rhs_after.value && lhs_after.value->volume == lhs_mass.value->volume &&
+            lhs_after.value->area == lhs_mass.value->area && rhs_after.value->volume == rhs_mass.value->volume &&
+            rhs_after.value->area == rhs_mass.value->area && query.faces_of_body(lhs).value == lhs_faces.value &&
+            query.faces_of_body(rhs).value == rhs_faces.value &&
+            kernel.validate().validate_all(lhs,axiom::ValidationMode::Strict).status == axiom::StatusCode::Ok &&
+            kernel.validate().validate_all(rhs,axiom::ValidationMode::Strict).status == axiom::StatusCode::Ok;
+    };
+    const auto a = kernel.primitives().box({0,0,0},2,2,2), b = kernel.primitives().box({1,1,1},2,2,2);
+    const auto separated = kernel.primitives().box({4,5,6},1,1.5,2);
+    const auto inner = kernel.primitives().box({0.25,0.25,0.25},0.5,0.5,0.5);
+    const auto identical = kernel.primitives().box({0,0,0},2,2,2);
+    const auto coplanar = kernel.primitives().box({1,0,0},2,2,2);
+    const auto face_touch = kernel.primitives().box({2,0,0},2,2,2);
+    const auto edge_touch = kernel.primitives().box({2,2,0},2,2,2);
+    const auto point_touch = kernel.primitives().box({2,2,2},2,2,2);
+    if (!a.value || !b.value || !separated.value || !inner.value || !identical.value || !coplanar.value ||
+        !face_touch.value || !edge_touch.value || !point_touch.value) return fail("fixtures",__LINE__);
+    using Op = axiom::BooleanOp;
+    const axiom::Plane middle {{0,0,1.5},{0,0,1}}, inside {{0,0,0.5},{0,0,1}};
+    if (!check(*a.value,*b.value,Op::Union,15,42,middle,7,1,"offset-box-union") ||
+        !check(*a.value,*b.value,Op::Subtract,7,24,middle,3,1,"offset-box-subtract") ||
+        !check(*a.value,*b.value,Op::Intersect,1,6,middle,1,1,"offset-box-intersect") ||
+        !check(*a.value,*separated.value,Op::Union,11,37,middle,4,2,"separate-union") ||
+        !check(*a.value,*separated.value,Op::Subtract,8,24,middle,4,1,"separate-subtract") ||
+        !check(*a.value,*separated.value,Op::Intersect,0,0,middle,0,0,"empty-intersection") ||
+        !check(*a.value,*inner.value,Op::Union,8,24,inside,4,1,"contained-union") ||
+        !check(*a.value,*inner.value,Op::Subtract,7.875,25.5,inside,3.75,2,"contained-cavity") ||
+        !check(*a.value,*inner.value,Op::Intersect,0.125,1.5,inside,0.25,1,"contained-intersection") ||
+        !check(*inner.value,*a.value,Op::Subtract,0,0,inside,0,0,"complete-subtraction")) return false;
+    // These full-height models have independently known rectangular sections.
+    // For a prism, V = h*S and A = 2*S+h*P. Identical inputs also
+    // exercise the same handle on both sides, where body ID cannot encode side.
+    for (const auto rhs : {*a.value,*identical.value})
+        if (!check(*a.value,rhs,Op::Union,8,24,inside,4,1,"identical-union") ||
+            !check(*a.value,rhs,Op::Intersect,8,24,inside,4,1,"identical-intersection") ||
+            !check(*a.value,rhs,Op::Subtract,0,0,inside,0,0,"identical-subtraction")) return false;
+    if (!check(*a.value,*coplanar.value,Op::Union,12,32,inside,6,1,"coplanar-overlap-union") ||
+        !check(*a.value,*coplanar.value,Op::Subtract,4,16,inside,2,1,"coplanar-overlap-subtract") ||
+        !check(*a.value,*coplanar.value,Op::Intersect,4,16,inside,2,1,"coplanar-overlap-intersection") ||
+        !check(*a.value,*face_touch.value,Op::Union,16,40,inside,8,1,"face-touch-union") ||
+        !check(*a.value,*face_touch.value,Op::Subtract,8,24,inside,4,1,"face-touch-subtract") ||
+        !check(*a.value,*face_touch.value,Op::Intersect,0,0,inside,0,0,"face-touch-empty-intersection")) return false;
+    for (const auto contact : {*edge_touch.value,*point_touch.value})
+        if (!check(*a.value,contact,Op::Subtract,8,24,inside,4,1,"lower-dimensional-contact-subtract") ||
+            !check(*a.value,contact,Op::Intersect,0,0,inside,0,0,"lower-dimensional-empty-intersection")) return false;
+    const auto rotate = [](axiom::Point3 p) -> axiom::Point3 {
+        const double x = 0.6*p.x-0.8*p.y, y = 0.8*p.x+0.6*p.y;
+        return {x,(12*y-5*p.z)/13,(5*y+12*p.z)/13};
+    };
+    const auto rotated_box = [&](double low) {
+        axiom::ProfileRef profile;
+        profile.label = "s4-rebuild-independent-rotated-box";
+        for (const auto p : {axiom::Point3{low,low,low},axiom::Point3{low+2,low,low},
+                            axiom::Point3{low+2,low+2,low},axiom::Point3{low,low+2,low}})
+            profile.polygon_xyz.push_back(rotate(p));
+        return kernel.sweeps().extrude(profile,{0,-5.0/13,12.0/13},2);
+    };
+    const auto ra = rotated_box(0), rb = rotated_box(1);
+    // Every fixed local height strictly between 1 and 2 has section areas
+    // Union=7, Subtract=3 and Intersect=1. Use one regular height, while retaining
+    // the original artificial-node plane as a checked numeric-failure probe.
+    const axiom::Plane rotated_middle {rotate({0,0,1.375}),{0,-5.0/13,12.0/13}};
+    const axiom::Plane rotated_node_section {rotate({0,0,1.5}),{0,-5.0/13,12.0/13}};
+    if (!ra.value || !rb.value ||
+        !check(*ra.value,*ra.value,Op::Union,8,24,rotated_middle,4,1,"rotated-identical-union",&rotated_node_section) ||
+        !check(*ra.value,*ra.value,Op::Intersect,8,24,rotated_middle,4,1,"rotated-identical-intersection",&rotated_node_section) ||
+        !check(*ra.value,*ra.value,Op::Subtract,0,0,rotated_middle,0,0,"rotated-identical-subtraction")) return false;
+    return
+        check(*ra.value,*rb.value,Op::Union,15,42,rotated_middle,7,1,"rotated-union",&rotated_node_section) &&
+        check(*ra.value,*rb.value,Op::Subtract,7,24,rotated_middle,3,1,"rotated-subtract",&rotated_node_section) &&
+        check(*ra.value,*rb.value,Op::Intersect,1,6,rotated_middle,1,1,"rotated-intersect",&rotated_node_section);
+}
+
+// A failed rebuild preserves warmed input geometry, Eval and caches. A result
+// created under a caller-owned writer is removed by that writer's rollback,
+// including when deleting it has recorded an ordinary transaction snapshot.
+bool check_real_rebuild_isolation() {
+    for (const bool active_writer : {false,true}) {
+        axiom::Kernel kernel;
+        const auto query = kernel.topology().query();
+        const auto a = kernel.primitives().box({0,0,0},2,2,2), b = kernel.primitives().box({1,1,1},2,2,2);
+        const auto touching = kernel.primitives().box({2,0,0},2,2,2);
+        const auto uncertain = kernel.primitives().box({2-5e-7,0,0},2,2,2);
+        const auto edge_touch = kernel.primitives().box({2,2,0},2,2,2);
+        const auto point_touch = kernel.primitives().box({2,2,2},2,2,2);
+        const auto narrow = kernel.primitives().box({2-2e-4,2-2e-4,2-2e-4},2,2,2);
+        const auto wedge = kernel.primitives().wedge({0,0,0},2,2,2);
+        const auto tangent = kernel.primitives().box({0.75,1.25,0.25},0.5,0.5,0.5);
+        axiom::ProfileRef u_profile;
+        u_profile.label = "s4-connected-shell-vertex-pinch-U";
+        u_profile.polygon_xyz = {{0,0,0},{4,0,0},{4,4,0},{3,4,0},{3,1,0},{1,1,0},{1,4,0},{0,4,0}};
+        axiom::ProfileRef triangle_profile;
+        triangle_profile.label = "s4-connected-shell-vertex-pinch-triangle";
+        triangle_profile.polygon_xyz = {{-1,1,0},{1,3,0},{-1,3,0}};
+        const auto pinch_u = kernel.sweeps().extrude(u_profile,{0,0,1},2);
+        const auto pinch_triangle = kernel.sweeps().extrude(triangle_profile,{1,0,1},2*std::sqrt(2.0));
+        if (!a.value || !b.value || !touching.value || !uncertain.value || !edge_touch.value || !point_touch.value ||
+            !narrow.value || !wedge.value || !tangent.value || !pinch_u.value || !pinch_triangle.value) return false;
+        // At z=t, the oblique prism is the triangle [(t-1,1),(t+1,3),(t-1,3)].
+        // (0.5,2,1) is inside both operands, joining their global boundary.
+        // Its rightmost x=t+1 reaches the U's right arm x>=3 only at t=2,
+        // y=3: the unique point (3,3,2) has two local face fans in one shell.
+        const std::array<axiom::Point3,4> pinch_points {{{0.5,2,1},{3,3,2},
+            {2.9999,2.999975,1.99995},{3.0001,3,1.9999}}};
+        const auto u_locations = kernel.booleans().classify_points(*pinch_u.value,pinch_points);
+        const auto triangle_locations = kernel.booleans().classify_points(*pinch_triangle.value,pinch_points);
+        using Location = axiom::BooleanPointLocation;
+        const std::array<Location,4> u_expected {Location::Inside,Location::Boundary,Location::Outside,Location::Inside};
+        const std::array<Location,4> triangle_expected {Location::Inside,Location::Boundary,Location::Inside,Location::Outside};
+        if (!u_locations.value || !triangle_locations.value || u_locations.value->size() != pinch_points.size() ||
+            triangle_locations.value->size() != pinch_points.size()) return false;
+        for (std::size_t i = 0; i < pinch_points.size(); ++i)
+            if ((*u_locations.value)[i].location != u_expected[i] ||
+                (*triangle_locations.value)[i].location != triangle_expected[i]) return false;
+        if (kernel.validate().validate_all(*pinch_u.value,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok ||
+            kernel.validate().validate_all(*pinch_triangle.value,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok)
+            return false;
+        const auto source_node = kernel.eval_graph().register_node(axiom::NodeKind::Geometry,"body:"+std::to_string(a.value->value));
+        const auto pinch_u_node = kernel.eval_graph().register_node(axiom::NodeKind::Geometry,"body:"+std::to_string(pinch_u.value->value));
+        const auto pinch_triangle_node = kernel.eval_graph().register_node(axiom::NodeKind::Geometry,"body:"+std::to_string(pinch_triangle.value->value));
+        const auto dependent = kernel.eval_graph().register_node(axiom::NodeKind::Analysis,"rebuild-isolation-analysis");
+        if (!source_node.value || !pinch_u_node.value || !pinch_triangle_node.value || !dependent.value ||
+            kernel.eval_graph().add_dependency(*dependent.value,*source_node.value).status != axiom::StatusCode::Ok ||
+            kernel.eval_graph().add_dependency(*dependent.value,*pinch_u_node.value).status != axiom::StatusCode::Ok ||
+            kernel.eval_graph().add_dependency(*dependent.value,*pinch_triangle_node.value).status != axiom::StatusCode::Ok ||
+            kernel.eval_graph().recompute(*dependent.value).status != axiom::StatusCode::Ok) return false;
+        const auto recomputes = kernel.eval_graph().total_recompute_count().value;
+        const auto eval_unchanged = [&] {
+            return !kernel.eval_graph().is_invalid(*source_node.value).value.value_or(true) &&
+                !kernel.eval_graph().is_invalid(*dependent.value).value.value_or(true) &&
+                kernel.eval_graph().has_dependency(*dependent.value,*source_node.value).value.value_or(false) &&
+                !kernel.eval_graph().is_invalid(*pinch_u_node.value).value.value_or(true) &&
+                !kernel.eval_graph().is_invalid(*pinch_triangle_node.value).value.value_or(true) &&
+                kernel.eval_graph().has_dependency(*dependent.value,*pinch_u_node.value).value.value_or(false) &&
+                kernel.eval_graph().has_dependency(*dependent.value,*pinch_triangle_node.value).value.value_or(false) &&
+                kernel.eval_graph().total_recompute_count().value == recomputes;
+        };
+        const auto cache_statistics = [&] {
+            const auto stats = kernel.tessellation_cache_stats();
+            if (!stats.value) return std::array<std::uint64_t,6>{};
+            const auto& r = *stats.value;
+            return std::array{r.body_cache_hits,r.body_cache_misses,r.body_cache_stale_evictions,
+                r.face_cache_hits,r.face_cache_misses,r.face_cache_stale_evictions};
+        };
+        const auto counts = [&] {
+            const auto runtime = kernel.runtime_store_counts();
+            if (!runtime.value) return std::array<std::uint64_t,10>{};
+            const auto& r = *runtime.value;
+            return std::array{kernel.body_count().value.value_or(0),kernel.geometry_count().value.value_or(0),
+                kernel.topology_count().value.value_or(0),r.mesh_records,r.tessellation_cache_entries,
+                r.face_tessellation_cache_entries,r.intersection_records,r.curve_eval_cache_entries,
+                r.surface_eval_cache_entries,r.eval_node_records};
+        };
+        const auto bridge = [&] {
+            const auto metrics = kernel.eval_graph_metrics();
+            if (!metrics.value) return std::array<std::uint64_t,5>{};
+            const auto& m = metrics.value->invalidation_bridge;
+            return std::array{m.for_body_entries,m.for_faces_entries,m.for_bodies_batches,
+                m.for_bodies_list_size_total,m.downstream_invalidation_steps};
+        };
+        const auto snapshot = [&] {
+            std::pair<std::vector<std::uint64_t>,std::vector<double>> result;
+            for (const auto body : {*a.value,*b.value,*touching.value,*uncertain.value,*edge_touch.value,*point_touch.value,
+                                   *narrow.value,*wedge.value,*tangent.value,*pinch_u.value,*pinch_triangle.value}) {
+                const auto faces = query.faces_of_body(body);
+                const auto shells = query.shells_of_body(body);
+                if (!faces.value || !shells.value) return decltype(result){};
+                result.first.insert(result.first.end(),{body.value,faces.value->size(),shells.value->size()});
+                for (const auto shell : *shells.value) result.first.push_back(shell.value);
+                for (const auto face : *faces.value) {
+                    const auto loops = query.loops_of_face(face);
+                    const auto surface = query.surface_of_face(face);
+                    const auto bbox = query.bbox_of_face(face);
+                    if (!loops.value || !surface.value || !bbox.value || !bbox.value->is_valid) return decltype(result){};
+                    result.first.insert(result.first.end(),{face.value,surface.value->value,loops.value->size()});
+                    const auto& box = *bbox.value;
+                    result.second.insert(result.second.end(),{box.min.x,box.min.y,box.min.z,box.max.x,box.max.y,box.max.z});
+                    // Three surface samples capture the support-plane coordinate frame.
+                    // Warm their cache before taking the store baseline.
+                    for (const auto uv : {axiom::Point2{0,0},axiom::Point2{1,0},axiom::Point2{0,1}}) {
+                        const auto sample = kernel.surface_service().eval(*surface.value,uv.x,uv.y,0);
+                        if (!sample.value) return decltype(result){};
+                        const auto p = sample.value->point;
+                        result.second.insert(result.second.end(),{p.x,p.y,p.z});
+                    }
+                    for (const auto loop : *loops.value) {
+                        const auto vertices = query.vertices_of_loop(loop);
+                        const auto edges = query.edges_of_loop(loop);
+                        if (!vertices.value || !edges.value) return decltype(result){};
+                        result.first.insert(result.first.end(),{loop.value,vertices.value->size(),edges.value->size()});
+                        for (const auto vertex : *vertices.value) result.first.push_back(vertex.value);
+                        for (const auto edge : *edges.value) {
+                            const auto endpoints = query.vertices_of_edge(edge);
+                            const auto owners = query.faces_of_edge(edge);
+                            const auto length = query.edge_length(edge);
+                            if (!endpoints.value || !owners.value || !length.value) return decltype(result){};
+                            result.first.insert(result.first.end(),{edge.value,(*endpoints.value)[0].value,
+                                (*endpoints.value)[1].value,owners.value->size()});
+                            auto sorted_owners = *owners.value;
+                            std::sort(sorted_owners.begin(),sorted_owners.end(),[](auto a, auto b) { return a.value < b.value; });
+                            for (const auto owner : sorted_owners) result.first.push_back(owner.value);
+                            result.second.push_back(*length.value);
+                        }
+                    }
+                }
+            }
+            return result;
+        };
+        const auto input = snapshot();
+        if (input.first.empty()) return false;
+        const auto committed = counts();
+        auto transaction = kernel.topology().begin_transaction();
+        if (!active_writer && transaction.rollback().status != axiom::StatusCode::Ok) return false;
+        const auto sentinel = active_writer ? transaction.create_vertex({99,98,97}) : axiom::Result<axiom::VertexId>{};
+        if (active_writer && !sentinel.value) return false;
+        const auto writes = transaction.write_operation_count().value;
+        const auto baseline = counts();
+        const auto bridge_baseline = bridge();
+        const auto cache_baseline = cache_statistics();
+        const auto expect_failure = [&](axiom::BooleanOp op, axiom::BodyId rhs, const axiom::BooleanRebuildOptions& options,
+                                       std::string_view code, std::string_view stage, axiom::BodyId lhs) {
+            const auto result = kernel.booleans().run_rebuilt(op,lhs,rhs,options);
+            const auto report = kernel.diagnostics().get(result.diagnostic_id);
+            const auto active = kernel.topology().has_active_write_transaction();
+            bool found = false;
+            if (report.value) for (const auto& issue : report.value->issues)
+                if (issue.code == code && issue.stage == stage && issue.severity == axiom::IssueSeverity::Error)
+                    found = true;
+            if (result.status == axiom::StatusCode::Ok || result.value || result.diagnostic_id.value == 0 || !found ||
+                !active.value || *active.value != active_writer || counts() != baseline || snapshot() != input ||
+                bridge() != bridge_baseline || cache_statistics() != cache_baseline || !eval_unchanged() || (active_writer && (transaction.write_operation_count().value != writes ||
+                    !transaction.has_created_vertex(*sentinel.value).value.value_or(false)))) {
+                std::cerr << "real rebuild isolation expected stage=" << stage << " writer=" << active_writer << "\n";
+                if (report.value) for (const auto& issue : report.value->issues)
+                    std::cerr << issue.stage << " " << issue.code << " " << issue.message << "\n";
+                return false;
+            }
+            const auto path = std::filesystem::temp_directory_path()/"axiom_rebuild_failure.json";
+            if (kernel.diagnostics().export_report_json(result.diagnostic_id,path.string()).status != axiom::StatusCode::Ok)
+                return false;
+            std::ifstream in(path);
+            const std::string json((std::istreambuf_iterator<char>(in)),std::istreambuf_iterator<char>());
+            in.close();
+            std::filesystem::remove(path);
+            return json.find("\"stage\":\""+std::string(stage)+"\"") != std::string::npos &&
+                json.find("\"code\":\""+std::string(code)+"\"") != std::string::npos;
+        };
+        axiom::BooleanRebuildOptions options;
+        if (!expect_failure(static_cast<axiom::BooleanOp>(255),*b.value,options,
+                axiom::diag_codes::kBoolInvalidInput,"bool.rebuild",*a.value) ||
+            !expect_failure(axiom::BooleanOp::Union,*uncertain.value,options,
+                axiom::diag_codes::kBoolNumericalFailure,"bool.intersect",*a.value) ||
+            !expect_failure(axiom::BooleanOp::Union,*edge_touch.value,options,
+                axiom::diag_codes::kBoolRebuildFailure,"bool.rebuild",*a.value) ||
+            !expect_failure(axiom::BooleanOp::Union,*point_touch.value,options,
+                axiom::diag_codes::kBoolRebuildFailure,"bool.rebuild",*a.value) ||
+            !expect_failure(axiom::BooleanOp::Union,*pinch_triangle.value,options,
+                axiom::diag_codes::kBoolRebuildFailure,"bool.rebuild",*pinch_u.value) ||
+            !expect_failure(axiom::BooleanOp::Union,*tangent.value,options,
+                axiom::diag_codes::kBoolRebuildFailure,"bool.rebuild",*wedge.value)) return false;
+        // Preparation resolves these 2e-4 cuts using its explicit 1e-6
+        // tolerance. The stricter service configuration rejects the resolved
+        // small output through Strict near-duplicate/degeneracy gates.
+        if (kernel.set_linear_tolerance(1.0).status != axiom::StatusCode::Ok) return false;
+        options.preparation.intersection.tolerance.linear = 1e-6;
+        if (!expect_failure(axiom::BooleanOp::Union,*narrow.value,options,
+                axiom::diag_codes::kBoolRebuildFailure,"bool.validate",*a.value)) return false;
+        options.auto_repair = true;
+        if (!expect_failure(axiom::BooleanOp::Union,*narrow.value,options,
+                axiom::diag_codes::kBoolRebuildFailure,"bool.repair",*a.value)) return false;
+        if (kernel.set_linear_tolerance(1e-6).status != axiom::StatusCode::Ok) return false;
+        const auto success = kernel.booleans().run_rebuilt(axiom::BooleanOp::Intersect,*a.value,*b.value);
+        const auto active = kernel.topology().has_active_write_transaction();
+        if (!success.value || !success.value->output || !active.value || *active.value != active_writer ||
+            snapshot() != input || bridge() != bridge_baseline || !eval_unchanged() ||
+            (active_writer && transaction.write_operation_count().value != writes)) return false;
+        const auto output = *success.value->output;
+        const auto faces = query.faces_of_body(output);
+        const auto edges = query.edges_of_body(output);
+        if (!faces.value || faces.value->empty() || !edges.value || edges.value->empty()) return false;
+        if (active_writer) {
+            // Warm output surface evaluations, then delete the output in the
+            // ordinary transaction: rollback must discard rather than resurrect it.
+            const auto surface = query.surface_of_face(faces.value->front());
+            if (!surface.value || !kernel.surface_service().eval(*surface.value,0,0,0).value ||
+                transaction.delete_body(output).status != axiom::StatusCode::Ok ||
+                transaction.rollback().status != axiom::StatusCode::Ok || query.has_body(output).value.value_or(true) ||
+                counts() != committed || snapshot() != input || !eval_unchanged()) return false;
+            for (const auto face : *faces.value) if (query.has_face(face).value.value_or(true)) return false;
+            for (const auto edge : *edges.value) if (query.has_edge(edge).value.value_or(true)) return false;
+            const auto retry_bridge = bridge();
+            const auto retry_cache = cache_statistics();
+            const auto rejected_pinch = kernel.booleans().run_rebuilt(
+                axiom::BooleanOp::Union,*pinch_u.value,*pinch_triangle.value);
+            const auto pinch_diagnostic = kernel.diagnostics().get(rejected_pinch.diagnostic_id);
+            if (rejected_pinch.status == axiom::StatusCode::Ok || rejected_pinch.value || !pinch_diagnostic.value ||
+                std::none_of(pinch_diagnostic.value->issues.begin(),pinch_diagnostic.value->issues.end(),[](const auto& issue) {
+                    return issue.code == axiom::diag_codes::kBoolRebuildFailure && issue.stage == "bool.rebuild" &&
+                        issue.severity == axiom::IssueSeverity::Error;
+                }) || kernel.topology().has_active_write_transaction().value.value_or(true) ||
+                counts() != committed || snapshot() != input || !eval_unchanged() ||
+                bridge() != retry_bridge || cache_statistics() != retry_cache) return false;
+            const auto retry = kernel.booleans().run_rebuilt(axiom::BooleanOp::Intersect,*a.value,*b.value);
+            if (!retry.value || !retry.value->output ||
+                kernel.validate().validate_all(*retry.value->output,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok)
+                return false;
+        }
+        if (kernel.validate().validate_all(*a.value,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok ||
+            kernel.validate().validate_all(*b.value,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok) return false;
+    }
+    return true;
+}
+
+// A narrow coplanar overlap introduces short subdivision seams on the four
+// long rectangular faces. They are removable without moving the material
+// boundary. The same overlap is a genuinely thin intersection, which Safe
+// must reject instead of deleting its real corners or replacing it by a bbox.
+bool check_safe_rebuild_repair_references() {
+    for (const auto operation : {axiom::BooleanOp::Union,axiom::BooleanOp::Subtract})
+      for (const bool active_writer : {false,true}) {
+        axiom::Kernel kernel;
+        axiom::DiagnosticId last_diagnostic {};
+        const auto fail = [&](int line) {
+            std::cerr << "Safe rebuild operation=" << static_cast<int>(operation)
+                      << " active_writer=" << active_writer << " line=" << line << "\n";
+            const auto diagnostic = kernel.diagnostics().get(last_diagnostic);
+            if (diagnostic.value) for (const auto& issue : diagnostic.value->issues)
+                std::cerr << issue.stage << " " << issue.code << " " << issue.message << "\n";
+            return false;
+        };
+
+        const auto query = kernel.topology().query();
+        constexpr double overlap = 2e-4;
+        const double length = operation == axiom::BooleanOp::Union ? 4-overlap : 2-overlap;
+        const auto a = kernel.primitives().box({0,0,0},2,2,2);
+        const auto b = kernel.primitives().box({2-overlap,0,0},2,2,2);
+        if (!a.value || !b.value || kernel.set_linear_tolerance(1e-3).status != axiom::StatusCode::Ok)
+            return fail(__LINE__);
+        const auto source = kernel.eval_graph().register_node(axiom::NodeKind::Geometry,"body:"+std::to_string(a.value->value));
+        const auto dependent = kernel.eval_graph().register_node(axiom::NodeKind::Analysis,"safe-rebuild-repair-analysis");
+        if (!source.value || !dependent.value ||
+            kernel.eval_graph().add_dependency(*dependent.value,*source.value).status != axiom::StatusCode::Ok ||
+            kernel.eval_graph().recompute(*dependent.value).status != axiom::StatusCode::Ok) return fail(__LINE__);
+        const auto recomputes = kernel.eval_graph().total_recompute_count().value;
+        // Primitive boxes have no PCurves. Freeze their actual line records
+        // before the service can allocate outputs; all fixture edges have length 2.
+        // Public support queries plus the endpoint samples cover their geometry.
+        const auto input_id_limit = kernel.next_object_id();
+        if (!input_id_limit.value) return fail(__LINE__);
+        std::vector<axiom::CurveId> input_curves;
+        for (std::uint64_t id = 1; id < *input_id_limit.value; ++id) {
+            const auto present = kernel.has_curve_id({id});
+            if (!present.value) return fail(__LINE__);
+            if (*present.value) input_curves.push_back({id});
+        }
+        if (input_curves.size() != 24) return fail(__LINE__);
+        const auto input_snapshot = [&] {
+            std::pair<std::vector<std::uint64_t>,std::vector<double>> snapshot;
+            for (const auto curve : input_curves) {
+                const auto domain = kernel.curve_service().domain(curve);
+                if (!domain.value) return decltype(snapshot){};
+                snapshot.first.push_back(curve.value);
+                snapshot.second.insert(snapshot.second.end(),{domain.value->min,domain.value->max});
+                for (const double parameter : {0.0,2.0}) {
+                    const auto point = kernel.curve_service().point_at_parameter(curve,parameter);
+                    if (!point.value) return decltype(snapshot){};
+                    snapshot.second.insert(snapshot.second.end(),{point.value->x,point.value->y,point.value->z});
+                }
+            }
+            for (const auto body : {*a.value,*b.value}) {
+                const auto faces = query.faces_of_body(body);
+                const auto edges = query.edges_of_body(body);
+                if (!faces.value || !edges.value) return decltype(snapshot){};
+                snapshot.first.push_back(body.value);
+                for (const auto face : *faces.value) {
+                    const auto loops = query.loops_of_face(face);
+                    const auto surface = query.surface_of_face(face);
+                    if (!loops.value || !surface.value) return decltype(snapshot){};
+                    snapshot.first.insert(snapshot.first.end(),{face.value,surface.value->value});
+                    for (const auto uv : {axiom::Point2{0,0},axiom::Point2{1,0},axiom::Point2{0,1}}) {
+                        const auto point = kernel.surface_service().eval(*surface.value,uv.x,uv.y,0);
+                        if (!point.value) return decltype(snapshot){};
+                        snapshot.second.insert(snapshot.second.end(),{point.value->point.x,point.value->point.y,point.value->point.z});
+                    }
+                    for (const auto loop : *loops.value) {
+                        const auto vertices = query.vertices_of_loop(loop);
+                        const auto loop_edges = query.edges_of_loop(loop);
+                        if (!vertices.value || !loop_edges.value) return decltype(snapshot){};
+                        snapshot.first.insert(snapshot.first.end(),{loop.value,vertices.value->size(),loop_edges.value->size()});
+                        for (const auto vertex : *vertices.value) snapshot.first.push_back(vertex.value);
+                        for (const auto edge : *loop_edges.value) snapshot.first.push_back(edge.value);
+                        const auto uv = query.face_loop_uv_polyline(face,loop);
+                        snapshot.first.push_back(uv.value ? uv.value->size() : 0);
+                        if (uv.value) for (const auto p : *uv.value) {
+                            const auto world = kernel.surface_service().eval(*surface.value,p.x,p.y,0);
+                            if (!world.value) return decltype(snapshot){};
+                            snapshot.second.insert(snapshot.second.end(),{p.x,p.y,world.value->point.x,world.value->point.y,world.value->point.z});
+                        }
+                    }
+                }
+                for (const auto edge : *edges.value) {
+                    const auto vertices = query.vertices_of_edge(edge);
+                    const auto owners = query.faces_of_edge(edge);
+                    const auto coedges = query.coedges_of_edge(edge);
+                    const auto edge_length = query.edge_length(edge);
+                    if (!vertices.value || !owners.value || !coedges.value || !edge_length.value) return decltype(snapshot){};
+                    snapshot.first.insert(snapshot.first.end(),{edge.value,(*vertices.value)[0].value,(*vertices.value)[1].value});
+                    // Adjacency queries expose sets whose order may change when
+                    // rebuilding links; loop order and all geometry stay ordered.
+                    auto sorted_owners = *owners.value;
+                    auto sorted_coedges = *coedges.value;
+                    std::sort(sorted_owners.begin(),sorted_owners.end(),[](auto lhs, auto rhs) { return lhs.value < rhs.value; });
+                    std::sort(sorted_coedges.begin(),sorted_coedges.end(),[](auto lhs, auto rhs) { return lhs.value < rhs.value; });
+                    for (const auto owner : sorted_owners) snapshot.first.push_back(owner.value);
+                    for (const auto coedge : sorted_coedges) {
+                        const auto pcurve = query.pcurve_of_coedge(coedge);
+                        snapshot.first.insert(snapshot.first.end(),{coedge.value,pcurve.value ? pcurve.value->value : 0});
+                    }
+                    snapshot.second.push_back(*edge_length.value);
+                }
+            }
+            return snapshot;
+        };
+        const auto input = input_snapshot();
+        if (input.first.empty()) return fail(__LINE__);
+        const auto runtime_counts = [&] {
+            const auto r = kernel.runtime_store_counts();
+            if (!r.value) return std::array<std::uint64_t,10>{};
+            return std::array{kernel.body_count().value.value_or(0),kernel.geometry_count().value.value_or(0),
+                kernel.topology_count().value.value_or(0),r.value->mesh_records,r.value->tessellation_cache_entries,
+                r.value->face_tessellation_cache_entries,r.value->intersection_records,r.value->curve_eval_cache_entries,
+                r.value->surface_eval_cache_entries,r.value->eval_node_records};
+        };
+        const auto bridge = [&] {
+            const auto m = kernel.eval_graph_metrics();
+            if (!m.value) return std::array<std::uint64_t,5>{};
+            const auto& b = m.value->invalidation_bridge;
+            return std::array{b.for_body_entries,b.for_faces_entries,b.for_bodies_batches,
+                b.for_bodies_list_size_total,b.downstream_invalidation_steps};
+        };
+        const auto cache = [&] {
+            const auto s = kernel.tessellation_cache_stats();
+            if (!s.value) return std::array<std::uint64_t,6>{};
+            return std::array{s.value->body_cache_hits,s.value->body_cache_misses,s.value->body_cache_stale_evictions,
+                s.value->face_cache_hits,s.value->face_cache_misses,s.value->face_cache_stale_evictions};
+        };
+        const auto eval_unchanged = [&] {
+            return !kernel.eval_graph().is_invalid(*source.value).value.value_or(true) &&
+                !kernel.eval_graph().is_invalid(*dependent.value).value.value_or(true) &&
+                kernel.eval_graph().has_dependency(*dependent.value,*source.value).value.value_or(false) &&
+                kernel.eval_graph().total_recompute_count().value == recomputes;
+        };
+        const auto committed_counts = runtime_counts();
+        auto transaction = kernel.topology().begin_transaction();
+        if (!active_writer && transaction.rollback().status != axiom::StatusCode::Ok) return fail(__LINE__);
+        const auto sentinel = active_writer ? transaction.create_vertex({99,98,97}) : axiom::Result<axiom::VertexId>{};
+        if (active_writer && !sentinel.value) return fail(__LINE__);
+        const auto writes = transaction.write_operation_count().value;
+        const auto before = runtime_counts();
+        const auto before_bridge = bridge();
+        const auto before_cache = cache();
+        axiom::BooleanRebuildOptions options;
+        options.preparation.intersection.tolerance.linear = 1e-6;
+        const auto failed = [&](axiom::BooleanOp operation, std::string_view stage) {
+            const auto result = kernel.booleans().run_rebuilt(operation,*a.value,*b.value,options);
+            last_diagnostic = result.diagnostic_id;
+            const auto diagnostic = kernel.diagnostics().get(result.diagnostic_id);
+            const bool expected = diagnostic.value && std::any_of(diagnostic.value->issues.begin(),diagnostic.value->issues.end(),[&](const auto& issue) {
+                return issue.stage == stage && issue.code == axiom::diag_codes::kBoolRebuildFailure &&
+                    issue.severity == axiom::IssueSeverity::Error;
+            });
+            const bool geometric_failure = diagnostic.value && std::any_of(
+                diagnostic.value->issues.begin(),diagnostic.value->issues.end(),[](const auto& issue) {
+                    if (issue.severity != axiom::IssueSeverity::Error) return false;
+                    if (issue.code == axiom::diag_codes::kValNearDuplicateVertices &&
+                        issue.stage == "heal.validate_geometry.near_duplicate_vertices") return true;
+                    if (issue.code == axiom::diag_codes::kValDegenerateGeometry &&
+                        (issue.stage == "heal.validate_geometry.edges" ||
+                         issue.stage == "heal.validate_geometry.face_area")) return true;
+                    if (issue.stage != "heal.validate_topology.trim_consistency" ||
+                        (issue.code != axiom::diag_codes::kTopoFaceOuterLoopInvalid &&
+                         issue.code != axiom::diag_codes::kTopoFaceInnerLoopInvalid)) return false;
+                    std::optional<double> area, threshold;
+                    for (const auto& evidence : issue.numeric_evidence) {
+                        if (evidence.name == "uv_loop_area") area = evidence.value;
+                        if (evidence.name == "uv_loop_area_threshold") threshold = evidence.value;
+                    }
+                    return area && threshold && std::isfinite(*area) && std::isfinite(*threshold) &&
+                        std::abs(*area) > 0 && *threshold > 0 && std::abs(*area) <= *threshold;
+                });
+            const auto after_counts = runtime_counts();
+            const auto after_bridge = bridge();
+            const auto after_cache = cache();
+            const auto after_input = input_snapshot();
+            const bool same_eval = eval_unchanged();
+            const bool same_writer = kernel.topology().has_active_write_transaction().value == std::optional<bool>{active_writer};
+            const bool same_writes = !active_writer || (transaction.write_operation_count().value == writes &&
+                transaction.has_created_vertex(*sentinel.value).value.value_or(false));
+            const bool matched = result.status != axiom::StatusCode::Ok && !result.value && expected &&
+                (stage != "bool.validate" || geometric_failure) && after_counts == before &&
+                after_bridge == before_bridge && after_cache == before_cache && after_input == input &&
+                same_eval && same_writer && same_writes;
+            if (!matched) {
+                std::cerr << "Safe failure expected_stage=" << stage
+                          << " status=" << static_cast<int>(result.status) << " value=" << result.value.has_value()
+                          << " expected_diagnostic=" << expected << " geometric_failure=" << geometric_failure
+                          << " counts=" << (after_counts == before) << " bridge=" << (after_bridge == before_bridge)
+                          << " cache=" << (after_cache == before_cache) << " input=" << (after_input == input)
+                          << " Eval=" << same_eval << " writer=" << same_writer << " writes=" << same_writes << "\n";
+                for (std::size_t i = 0; i < before.size(); ++i)
+                    if (after_counts[i] != before[i]) std::cerr << "store[" << i << "] " << before[i] << " -> " << after_counts[i] << "\n";
+                if (after_input != input) {
+                    std::cerr << "input ID sizes=" << input.first.size() << '/' << after_input.first.size()
+                              << " coordinate sizes=" << input.second.size() << '/' << after_input.second.size() << "\n";
+                    for (std::size_t i = 0; i < std::min(input.first.size(),after_input.first.size()); ++i)
+                        if (input.first[i] != after_input.first[i])
+                            std::cerr << "input ID[" << i << "] " << input.first[i] << " -> " << after_input.first[i] << "\n";
+                    for (std::size_t i = 0; i < std::min(input.second.size(),after_input.second.size()); ++i)
+                        if (input.second[i] != after_input.second[i])
+                            std::cerr << "input coordinate[" << i << "] " << input.second[i] << " -> " << after_input.second[i] << "\n";
+                }
+                if (diagnostic.value) for (const auto& issue : diagnostic.value->issues) {
+                    std::cerr << issue.stage << " " << issue.code << "\n";
+                    for (const auto& evidence : issue.numeric_evidence)
+                        std::cerr << "  " << evidence.name << "=" << evidence.value << "\n";
+                }
+            }
+            return matched;
+        };
+        const bool expect_repair = operation == axiom::BooleanOp::Union;
+        if (expect_repair && !failed(operation,"bool.validate")) return fail(__LINE__);
+        options.auto_repair = true;
+        if (!failed(axiom::BooleanOp::Intersect,"bool.repair")) return fail(__LINE__);
+        // The subtraction has no thin artificial fragments after clipping.
+        // Explicitly require its auto=false result to be a real Strict solid.
+        options.auto_repair = expect_repair;
+        const auto repaired = kernel.booleans().run_rebuilt(operation,*a.value,*b.value,options);
+        last_diagnostic = repaired.diagnostic_id;
+        if (!repaired.value || !repaired.value->output || repaired.value->repaired != expect_repair ||
+            (expect_repair && repaired.value->output_faces >= repaired.value->selected_fragments) || bridge() != before_bridge ||
+            input_snapshot() != input || !eval_unchanged() ||
+            kernel.topology().has_active_write_transaction().value != std::optional<bool>{active_writer} ||
+            (active_writer && transaction.write_operation_count().value != writes)) return fail(__LINE__);
+        const auto output = *repaired.value->output;
+        const auto diagnostic = kernel.diagnostics().get(repaired.diagnostic_id);
+        if (!diagnostic.value || (expect_repair && std::none_of(diagnostic.value->issues.begin(),diagnostic.value->issues.end(),[](const auto& issue) {
+            return issue.stage == "bool.repair" && issue.severity != axiom::IssueSeverity::Error;
+        }))) return fail(__LINE__);
+        const auto faces = query.faces_of_body(output);
+        const auto edges = query.edges_of_body(output);
+        const auto sources = query.source_bodies_of_body(output);
+        const auto regions = query.body_shell_regions(output);
+        const auto rep = kernel.representation().kind_of_body(output);
+        const auto mass = query.body_mass_properties(output);
+        axiom::BodySpatialQueryOptions point_options;
+        point_options.position_tolerance = 1e-6;
+        const auto section = query.section(output,{{0,0,1},{0,0,1}},point_options);
+        const auto seam = query.locate_point(output,{2-overlap/2,1,1},point_options);
+        // Independent rectangular-prism references, h=w=2. Integrate actual
+        // oriented public rings as well so a nominal mass cannot certify repair.
+        if (!faces.value || !edges.value || !sources.value || sources.value->size() != 2 ||
+            std::find(sources.value->begin(),sources.value->end(),*a.value) == sources.value->end() ||
+            std::find(sources.value->begin(),sources.value->end(),*b.value) == sources.value->end() ||
+            !regions.value || regions.value->size() != 1 || regions.value->front().role != axiom::BodyShellRole::Material ||
+            !rep.value || *rep.value != axiom::RepKind::ExactBRep || !mass.value ||
+            std::abs(mass.value->volume-4*length) > 1e-7 || std::abs(mass.value->area-(8*length+8)) > 1e-7 ||
+            !section.value || std::abs(section.value->area-2*length) > 1e-7 || !seam.value ||
+            seam.value->location != (operation == axiom::BooleanOp::Union ? axiom::BodyPointLocation::Inside
+                                                                          : axiom::BodyPointLocation::Outside) ||
+            kernel.validate().validate_all(output,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok)
+            return fail(__LINE__);
+        double volume = 0, area = 0;
+        std::size_t both_sources = 0;
+        const auto a_faces = query.faces_of_body(*a.value), b_faces = query.faces_of_body(*b.value);
+        if (!a_faces.value || !b_faces.value) return fail(__LINE__);
+        for (const auto face : *faces.value) {
+            const auto loops = query.loops_of_face(face);
+            const auto surface = query.surface_of_face(face);
+            const auto sources = query.source_faces_of_face(face);
+            if (!loops.value || loops.value->size() != 1 || !surface.value || !sources.value || sources.value->empty()) return fail(__LINE__);
+            const bool from_a = std::any_of(sources.value->begin(),sources.value->end(),[&](auto source_face) {
+                return std::find(a_faces.value->begin(),a_faces.value->end(),source_face) != a_faces.value->end();
+            });
+            const bool from_b = std::any_of(sources.value->begin(),sources.value->end(),[&](auto source_face) {
+                return std::find(b_faces.value->begin(),b_faces.value->end(),source_face) != b_faces.value->end();
+            });
+            if (from_a && from_b) ++both_sources;
+            const auto uv = query.face_loop_uv_polyline(face,loops.value->front());
+            if (!uv.value || uv.value->size() < 3) return fail(__LINE__);
+            std::vector<axiom::Point3> points;
+            for (const auto p : *uv.value) {
+                const auto world = kernel.surface_service().eval(*surface.value,p.x,p.y,0);
+                if (!world.value) return fail(__LINE__);
+                points.push_back(world.value->point);
+            }
+            const auto p = points.front();
+            for (std::size_t i = 1; i+1 < points.size(); ++i) {
+                const auto q = points[i], r = points[i+1];
+                const axiom::Vec3 cross {(q.y-p.y)*(r.z-p.z)-(q.z-p.z)*(r.y-p.y),
+                    (q.z-p.z)*(r.x-p.x)-(q.x-p.x)*(r.z-p.z),
+                    (q.x-p.x)*(r.y-p.y)-(q.y-p.y)*(r.x-p.x)};
+                area += 0.5*std::hypot(cross.x,cross.y,cross.z);
+                volume += (p.x*(q.y*r.z-q.z*r.y)+p.y*(q.z*r.x-q.x*r.z)+p.z*(q.x*r.y-q.y*r.x))/6;
+            }
+        }
+        if ((operation == axiom::BooleanOp::Union && both_sources < 4) || std::abs(volume-4*length) > 1e-7 || std::abs(area-(8*length+8)) > 1e-7)
+            return fail(__LINE__);
+        for (const auto edge : *edges.value)
+            if (query.faces_of_edge(edge).value.value_or(std::vector<axiom::FaceId>{}).size() != 2) return fail(__LINE__);
+        if (active_writer) {
+            const auto surface = query.surface_of_face(faces.value->front());
+            if (!surface.value || transaction.delete_body(output).status != axiom::StatusCode::Ok ||
+                transaction.rollback().status != axiom::StatusCode::Ok || query.has_body(output).value.value_or(true) ||
+                kernel.has_surface_id(*surface.value).value.value_or(true) || runtime_counts() != committed_counts ||
+                input_snapshot() != input || !eval_unchanged() || !kernel.runtime_tessellation_caches_consistent().value.value_or(false))
+                return fail(__LINE__);
+            options.auto_repair = true;
+            const auto retry = kernel.booleans().run_rebuilt(operation,*a.value,*b.value,options);
+            last_diagnostic = retry.diagnostic_id;
+            if (!retry.value || !retry.value->output || retry.value->repaired != expect_repair ||
+                kernel.validate().validate_all(*retry.value->output,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok)
+                return fail(__LINE__);
+        }
+        if (kernel.validate().validate_all(*a.value,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok ||
+            kernel.validate().validate_all(*b.value,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok)
+            return fail(__LINE__);
+      }
+    return true;
+}
+
 // The compatibility workflow consumes polygon-trimmed wires. Count/topology
 // checks alone cannot establish that its final BooleanResult is a material solid.
 bool check_geometric_preparation_workflow() {
@@ -568,6 +1372,18 @@ bool check_split_classification_isolation() {
 }  // namespace
 
 int main() {
+    if (!check_safe_rebuild_repair_references()) {
+        std::cerr << "Safe rebuilt repair references failed\n";
+        return 1;
+    }
+    if (!check_real_rebuild_isolation()) {
+        std::cerr << "real Boolean reconstruction failure/rollback regression\n";
+        return 1;
+    }
+    if (!check_real_rebuild_references()) {
+        std::cerr << "real Boolean reconstruction reference regression\n";
+        return 1;
+    }
     if (!check_split_classification_isolation()) {
         std::cerr << "boolean split/classification isolation regression\n";
         return 1;

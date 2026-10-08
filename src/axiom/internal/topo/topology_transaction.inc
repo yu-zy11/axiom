@@ -50,6 +50,73 @@ void discard_removed_body_runtime(detail::KernelState& state) {
   }
 }
 
+// Service-created BReps own their geometry as well as their topology. They are
+// registered only after post-validation, and participate in the caller's undo
+// scope without changing the transaction API's explicit write counters.
+void discard_service_allocations(detail::KernelState& state, std::size_t keep) {
+  const auto removed = [&](std::uint64_t id) {
+    for (std::size_t i = keep; i < state.topology_service_allocation_ranges.size(); ++i) {
+      const auto [begin, end] = state.topology_service_allocation_ranges[i];
+      if (id >= begin && id < end) return true;
+    }
+    return false;
+  };
+  for (const auto& [id, body] : state.bodies) {
+    (void)body;
+    if (removed(id)) detail::invalidate_eval_for_body(state, BodyId{id});
+  }
+  const auto erase_records = [&](auto& records) {
+    for (auto it = records.begin(); it != records.end();) {
+      if (removed(it->first)) it = records.erase(it);
+      else ++it;
+    }
+  };
+  erase_records(state.bodies);
+  erase_records(state.shells);
+  erase_records(state.faces);
+  erase_records(state.loops);
+  erase_records(state.coedges);
+  erase_records(state.edges);
+  erase_records(state.vertices);
+  erase_records(state.surfaces);
+  erase_records(state.pcurves);
+  erase_records(state.curves);
+  erase_records(state.meshes);
+  erase_records(state.intersections);
+  for (auto* cache : {&state.tessellation_cache, &state.face_tessellation_cache}) {
+    for (auto it = cache->begin(); it != cache->end();) {
+      if (removed(it->second.value)) it = cache->erase(it);
+      else ++it;
+    }
+  }
+  // Evaluation keys start with the object's decimal ID and '|'; remove only
+  // discarded geometry, preserving warmed input caches.
+  const auto erase_evaluations = [&](auto& cache) {
+    for (auto it = cache.begin(); it != cache.end();) {
+      const auto delimiter = it->first.find('|');
+      bool discard = false;
+      if (delimiter != std::string::npos) {
+        std::uint64_t id = 0;
+        bool decimal = delimiter != 0;
+        for (std::size_t i = 0; i < delimiter; ++i) {
+          const auto ch = it->first[i];
+          if (ch < '0' || ch > '9' || id > (std::numeric_limits<std::uint64_t>::max() - (ch - '0')) / 10) {
+            decimal = false;
+            break;
+          }
+          id = id * 10 + (ch - '0');
+        }
+        discard = decimal && removed(id);
+      }
+      if (discard) it = cache.erase(it);
+      else ++it;
+    }
+  };
+  erase_evaluations(state.curve_eval_cache);
+  erase_evaluations(state.surface_eval_cache);
+  state.topology_service_allocation_ranges.resize(keep);
+}
+
 }  // namespace
 
 TopologyTransaction::TopologyTransaction(
@@ -961,6 +1028,7 @@ Result<VersionId> TopologyTransaction::commit() {
   discard_removed_body_runtime(*state_);
   if (const auto owner = state_->active_topology_transaction.lock();
       owner.get() == transaction_state_.get()) {
+    state_->topology_service_allocation_ranges.clear();
     state_->active_topology_transaction.reset();
   }
   transaction_state_->savepoints.clear();
@@ -1058,6 +1126,7 @@ Result<TopologySavepoint> TopologyTransaction::create_savepoint() {
   snapshot.coedge_pcurve_binds = txn_coedge_pcurve_binds_;
   snapshot.coedge_pcurve_clears = txn_coedge_pcurve_clears_;
   snapshot.write_operations = txn_write_ops_;
+  snapshot.service_allocation_range_count = state_->topology_service_allocation_ranges.size();
 
   const auto handle = snapshot.handle;
   transaction_state_->savepoints.push_back(std::move(snapshot));
@@ -1118,6 +1187,7 @@ TopologyTransaction::rollback_to_savepoint(TopologySavepoint savepoint) {
   const auto coedge_pcurve_binds = found->coedge_pcurve_binds;
   const auto coedge_pcurve_clears = found->coedge_pcurve_clears;
   const auto restored_write_operations = found->write_operations;
+  const auto service_allocation_range_count = found->service_allocation_range_count;
   const auto rolled_back_write_operations =
       txn_write_ops_ >= restored_write_operations
           ? txn_write_ops_ - restored_write_operations
@@ -1139,6 +1209,7 @@ TopologyTransaction::rollback_to_savepoint(TopologySavepoint savepoint) {
       detail::invalidate_eval_for_body(*state_, BodyId{id});
   }
 
+  discard_service_allocations(*state_, service_allocation_range_count);
   state_->vertices = std::move(vertices);
   state_->edges = std::move(edges);
   state_->coedges = std::move(coedges);
@@ -1273,6 +1344,7 @@ void TopologyTransaction::restore_model_and_close() {
   for (const auto &[id, record] : transaction_state_->original_bodies) {
     state_->bodies[id] = record;
   }
+  discard_service_allocations(*state_, 0);
 
   // 新建实体也可能因后续修改或级联删除进入快照。先恢复快照，再移除本事务
   // 创建的面/壳/体，避免快照将它们复活；保留现有触达/快照查询的语义。

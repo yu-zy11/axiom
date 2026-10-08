@@ -12,6 +12,139 @@
 
 namespace {
 
+// Derived solids participate in writer/savepoint rollback while existing Eval
+// dependencies remain valid. Spatial queries read the new material boundary.
+bool rebuilt_boundary_eval_rollback_regression() {
+    for (const int variant : {0,1,2}) {
+        const bool coplanar = variant == 1, safe_repair = variant == 2;
+        constexpr double overlap = 2e-4;
+        axiom::Kernel kernel;
+        axiom::DiagnosticId last_diagnostic {};
+        const auto fail = [&](int line) {
+            std::cerr << "rebuilt query/Eval variant=" << variant << " line=" << line << "\n";
+            const auto diagnostic = kernel.diagnostics().get(last_diagnostic);
+            if (diagnostic.value) for (const auto& issue : diagnostic.value->issues)
+                std::cerr << issue.stage << " " << issue.code << " " << issue.message << "\n";
+            return false;
+        };
+
+        const auto query = kernel.topology().query();
+        const auto a = kernel.primitives().box({0,0,0},2,2,2);
+        const auto b = kernel.primitives().box(safe_repair ? axiom::Point3{2-overlap,0,0} :
+            coplanar ? axiom::Point3{1,0,0} : axiom::Point3{1,1,1},2,2,2);
+        if (!a.value || !b.value || (safe_repair && kernel.set_linear_tolerance(1e-3).status != axiom::StatusCode::Ok))
+            return fail(__LINE__);
+        axiom::BooleanRebuildOptions options;
+        options.auto_repair = safe_repair;
+        options.preparation.intersection.tolerance.linear = 1e-6;
+        const auto second_operation = safe_repair ? axiom::BooleanOp::Subtract : axiom::BooleanOp::Intersect;
+        const auto source = kernel.eval_graph().register_node(axiom::NodeKind::Geometry,"body:"+std::to_string(a.value->value));
+        const auto rhs_source = kernel.eval_graph().register_node(axiom::NodeKind::Geometry,"body:"+std::to_string(b.value->value));
+        const auto dependent = kernel.eval_graph().register_node(axiom::NodeKind::Analysis,"s4-rebuild-input-analysis");
+        if (!source.value || !rhs_source.value || !dependent.value ||
+            kernel.eval_graph().add_dependency(*dependent.value,*source.value).status != axiom::StatusCode::Ok ||
+            kernel.eval_graph().add_dependency(*dependent.value,*rhs_source.value).status != axiom::StatusCode::Ok ||
+            kernel.eval_graph().recompute(*dependent.value).status != axiom::StatusCode::Ok) return fail(__LINE__);
+        const auto recomputes = kernel.eval_graph().total_recompute_count().value;
+        const auto counts = [&] {
+            const auto runtime = kernel.runtime_store_counts();
+            if (!runtime.value) return std::array<std::uint64_t,10>{};
+            const auto& r = *runtime.value;
+            return std::array{kernel.body_count().value.value_or(0),kernel.geometry_count().value.value_or(0),
+                kernel.topology_count().value.value_or(0),r.mesh_records,r.tessellation_cache_entries,
+                r.face_tessellation_cache_entries,r.intersection_records,r.curve_eval_cache_entries,
+                r.surface_eval_cache_entries,r.eval_node_records};
+        };
+        const auto baseline = counts();
+        const auto bridge_counts = [&] {
+            const auto metrics = kernel.eval_graph_metrics();
+            if (!metrics.value) return std::array<std::uint64_t,5>{};
+            const auto& b = metrics.value->invalidation_bridge;
+            return std::array{b.for_body_entries,b.for_faces_entries,b.for_bodies_batches,
+                b.for_bodies_list_size_total,b.downstream_invalidation_steps};
+        };
+        if (!kernel.eval_graph_metrics().value) return fail(__LINE__);
+        const auto bridge_before = bridge_counts();
+        const auto bridge_after_discard = [&](std::uint64_t discarded_bodies) {
+            auto expected = bridge_before;
+            // Savepoint rollback invalidates each removed body once before
+            // restoration and once while discarding its service allocation.
+            // These cumulative handle-entry metrics survive legal rollback;
+            // unbound derived bodies must not invalidate input consumers.
+            expected[0] += 2*discarded_bodies;
+            return bridge_counts() == expected;
+        };
+        auto transaction = kernel.topology().begin_transaction();
+        const auto sentinel = transaction.create_vertex({99,98,97});
+        const auto first = transaction.create_savepoint();
+        if (!sentinel.value || !first.value) return fail(__LINE__);
+        const auto writes = transaction.write_operation_count().value;
+        const auto out1 = kernel.booleans().run_rebuilt(axiom::BooleanOp::Union,*a.value,*b.value,options);
+        last_diagnostic = out1.diagnostic_id;
+        if (!out1.value || !out1.value->output || out1.value->repaired != safe_repair || !bridge_after_discard(0)) return fail(__LINE__);
+        const auto second = transaction.create_savepoint();
+        const auto out2 = kernel.booleans().run_rebuilt(second_operation,*a.value,*b.value,options);
+        last_diagnostic = out2.diagnostic_id;
+        // Safe is optional: the second operation is already Strict-valid,
+        // including subtraction of the narrow overlap, and must remain unrepaired.
+        if (!second.value || !out2.value || !out2.value->output || out2.value->repaired || !bridge_after_discard(0)) return fail(__LINE__);
+        const auto faces = query.faces_of_body(*out2.value->output);
+        if (!faces.value || faces.value->empty()) return fail(__LINE__);
+        const auto surface = query.surface_of_face(faces.value->front());
+        if (!surface.value || !kernel.surface_service().eval(*surface.value,0,0,0).value) return fail(__LINE__);
+        const auto phantom = query.locate_point(*out1.value->output,{0.5,2.5,1.5});
+        axiom::BodySpatialQueryOptions query_options;
+        query_options.position_tolerance = 1e-6;
+        const auto section = kernel.query().section_detailed(*out2.value->output,{{0,0,1.5},{0,0,1}},query_options);
+        if (!phantom.value || phantom.value->location != axiom::BodyPointLocation::Outside ||
+            !section.value || std::abs(section.value->area-(safe_repair ? 4-2*overlap : coplanar ? 2 : 1)) > 1e-7 ||
+            !kernel.topology().has_active_write_transaction().value.value_or(false) ||
+            transaction.write_operation_count().value != writes || !bridge_after_discard(0) ||
+            kernel.eval_graph().is_invalid(*source.value).value.value_or(true) ||
+            kernel.eval_graph().is_invalid(*rhs_source.value).value.value_or(true) ||
+            !kernel.eval_graph().has_dependency(*dependent.value,*source.value).value.value_or(false) ||
+            !kernel.eval_graph().has_dependency(*dependent.value,*rhs_source.value).value.value_or(false) ||
+            kernel.eval_graph().is_invalid(*dependent.value).value.value_or(true) ||
+            kernel.eval_graph().total_recompute_count().value != recomputes) return fail(__LINE__);
+        if (transaction.rollback_to_savepoint(*second.value).status != axiom::StatusCode::Ok ||
+            query.has_body(*out2.value->output).value.value_or(true) ||
+            !query.has_body(*out1.value->output).value.value_or(false) ||
+            kernel.has_surface_id(*surface.value).value.value_or(true) || !bridge_after_discard(1) ||
+            kernel.eval_graph().is_invalid(*source.value).value.value_or(true) ||
+            kernel.eval_graph().is_invalid(*rhs_source.value).value.value_or(true) ||
+            !kernel.eval_graph().has_dependency(*dependent.value,*source.value).value.value_or(false) ||
+            !kernel.eval_graph().has_dependency(*dependent.value,*rhs_source.value).value.value_or(false) ||
+            kernel.eval_graph().is_invalid(*dependent.value).value.value_or(true) ||
+            kernel.eval_graph().total_recompute_count().value != recomputes) return fail(__LINE__);
+        const auto retained = kernel.query().mass_properties(*out1.value->output);
+        if (!retained.value || std::abs(retained.value->volume-(safe_repair ? 16-4*overlap : coplanar ? 12 : 15)) > 1e-7 ||
+            transaction.rollback_to_savepoint(*first.value).status != axiom::StatusCode::Ok ||
+            query.has_body(*out1.value->output).value.value_or(true) ||
+            !bridge_after_discard(2) ||
+            !transaction.has_created_vertex(*sentinel.value).value.value_or(false) ||
+            transaction.rollback().status != axiom::StatusCode::Ok || counts() != baseline ||
+            kernel.eval_graph().is_invalid(*source.value).value.value_or(true) ||
+            kernel.eval_graph().is_invalid(*rhs_source.value).value.value_or(true) ||
+            !kernel.eval_graph().has_dependency(*dependent.value,*source.value).value.value_or(false) ||
+            !kernel.eval_graph().has_dependency(*dependent.value,*rhs_source.value).value.value_or(false) ||
+            kernel.eval_graph().is_invalid(*dependent.value).value.value_or(true) ||
+            kernel.eval_graph().total_recompute_count().value != recomputes ||
+            !bridge_after_discard(2) || kernel.topology().has_active_write_transaction().value.value_or(true) ||
+            !kernel.eval_graph_store_maps_consistent().value.value_or(false) ||
+            !kernel.runtime_tessellation_caches_consistent().value.value_or(false)) return fail(__LINE__);
+        const auto bridge_before_retry = bridge_counts();
+        const auto retry = kernel.booleans().run_rebuilt(second_operation,*a.value,*b.value,options);
+        last_diagnostic = retry.diagnostic_id;
+        const auto mass = retry.value && retry.value->output ? kernel.query().mass_properties(*retry.value->output)
+                                                           : axiom::Result<axiom::MassProperties>{};
+        if (!retry.value || retry.value->repaired || !mass.value ||
+            std::abs(mass.value->volume-(safe_repair ? 8-4*overlap : coplanar ? 4 : 1)) > 1e-7 ||
+            std::abs(mass.value->area-(safe_repair ? 24-8*overlap : coplanar ? 16 : 6)) > 1e-7 || bridge_counts() != bridge_before_retry ||
+            kernel.eval_graph().total_recompute_count().value != recomputes) return fail(__LINE__);
+    }
+    return true;
+}
+
 bool approx(double lhs, double rhs, double eps = 1e-6) {
     return std::abs(lhs - rhs) <= eps;
 }
@@ -2688,6 +2821,10 @@ bool curve_curve_intersection_regression() {
 }  // namespace
 
 int main() {
+    if (!rebuilt_boundary_eval_rollback_regression()) {
+        std::cerr << "rebuilt boundary query/Eval savepoint regression\n";
+        return 1;
+    }
     if (!stage3_exit_support_matrix_regression()) {
         std::cerr << "Stage 3 exit support matrix regression failed\n";
         return 1;

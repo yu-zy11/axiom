@@ -348,7 +348,7 @@ bool extract_query_shell_mesh(const detail::KernelState &state, ShellId shell_id
     std::vector<std::vector<Point3>> holes(rings.begin() + 1, rings.end());
     if (!detail::triangulate_extrude_region(
             rings.front(), holes, normal, tolerance, face_points, boundary,
-            face_triangles) || face_triangles.empty() ||
+            face_triangles, true) || face_triangles.empty() ||
         mesh.points.size() + face_points.size() >
             static_cast<std::size_t>(std::numeric_limits<int>::max())) return false;
     const int base = static_cast<int>(mesh.points.size());
@@ -528,6 +528,7 @@ Result<BodyShellAnalysis> analyze_body_shells(detail::KernelState &state,
   const bool real_polyhedron = body.rep_kind == RepKind::ExactBRep &&
       (body.kind == detail::BodyKind::Generic || body.kind == detail::BodyKind::Box ||
        body.kind == detail::BodyKind::Wedge ||
+       (body.kind == detail::BodyKind::BooleanResult && body.boolean_rebuilt_boundary) ||
        (body.kind == detail::BodyKind::Sweep && body.sweep_polyhedral_mass_valid));
   if (!real_polyhedron) {
     auto issue = detail::make_error_issue(diag_codes::kCoreOperationUnsupported,
@@ -2293,7 +2294,7 @@ TopologyQueryService::shell_mass_properties(ShellId shell_id) const {
     holes.assign(rings.begin() + 1, rings.end());
     if (!detail::triangulate_extrude_region(
             rings.front(), holes, normal, linear_tol, face_points, boundary,
-            face_triangles) || face_triangles.empty()) {
+            face_triangles, true) || face_triangles.empty()) {
       return failure(StatusCode::InvalidTopology, diag_codes::kTopoFaceOuterLoopInvalid,
           "壳质量属性查询失败：面区域自交、孔无效、非共面或无法三角化", {shell_id.value, face_id.value});
     }

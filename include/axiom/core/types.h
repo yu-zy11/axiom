@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -637,6 +638,29 @@ struct BooleanSplitClassificationPreparation {
   BooleanIntersectionPreparation intersection;
   std::vector<BooleanFaceFragment> fragments;
   std::vector<BooleanEdgeFragment> edge_fragments;
+};
+
+/// Real planar BRep reconstruction with trimmed coplanar region subdivision.
+/// Unresolved tolerance bands and non-manifold contacts are rejected.
+struct BooleanRebuildOptions {
+  BooleanSplitClassificationOptions preparation{};
+  /// On failed Strict validation, try boundary-preserving planar seam repair:
+  /// cancel same-oriented coplanar fragment seams and remove only roundoff-level
+  /// collinear subdivisions shared consistently by all incident faces. Material
+  /// corners and outer/hole geometry are preserved; no tolerance-sized feature
+  /// removal, bounding-box replacement or validation relaxation is allowed.
+  bool auto_repair{false};
+};
+
+struct BooleanRebuildReport {
+  /// Empty material (empty intersection or complete subtraction) is a successful
+  /// nullopt. No placeholder body or lower-dimensional contact body is created.
+  std::optional<BodyId> output;
+  std::size_t selected_fragments{};
+  std::size_t output_faces{};
+  /// True only after an initially failed Strict result has undergone certified
+  /// planar boundary-preserving repair and passed Strict and shell-region checks.
+  bool repaired{false};
 };
 
 struct OpReport {

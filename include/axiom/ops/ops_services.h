@@ -213,7 +213,39 @@ class BooleanService {
 public:
     explicit BooleanService(std::shared_ptr<detail::KernelState> state);
 
+    /// Compatibility workflow retains historical bbox/proxy material semantics.
+    /// Use run_rebuilt for real planar solid reconstruction and explicit emptiness.
     Result<OpReport> run(BooleanOp op, BodyId lhs, BodyId rhs, const BooleanOptions& options);
+    /// Reconstruct Union/Subtract/Intersect from actual planar face fragments
+    /// and solid classifications. Returns owned ExactBRep faces, shared edges
+    /// and connected shells with source provenance; successful nonempty outputs
+    /// pass validate_all(Strict). Empty material succeeds with output == nullopt.
+    /// Uses prepare_split_classification's embedded-shell, precision and budget
+    /// contract, with an internal coplanar region subdivision path. Resolved
+    /// coincident faces and face contacts use two-sided material classifications;
+    /// shared regions are emitted once with both source faces. Curved boundaries,
+    /// unresolved tolerance bands and non-manifold contacts are rejected.
+    /// No bounding-box or mesh material substitute is used. The public read-only
+    /// preparation entry points retain their explicit coplanar rejection.
+    /// Each source shell must be connected and wound out of the parity material;
+    /// unresolved two-sided orientation probes (including thin/nearby shells)
+    /// fail conservatively. Node synchronization caps twenty million comparisons
+    /// and at most twelve ring entries per preparation.max_fragments.
+    /// The existing Strict validator also rejects result shells with fewer than
+    /// six faces; no validation gate is bypassed for a reconstructed Boolean.
+    /// Optional Safe repair cancels same-oriented coplanar fragment seams and
+    /// synchronously removes only roundoff-level collinear subdivisions. It
+    /// preserves material corners, outer/hole boundaries and combined sources,
+    /// then repeats Strict validation and shell-region checks. Unresolved true
+    /// short features remain failures; no validation gate is relaxed. Failures
+    /// identify preparation, bool.rebuild, bool.validate or bool.repair, restore
+    /// model/Eval/cache state, and preserve the caller's active writer. Successful
+    /// derived outputs do not invalidate inputs and participate in caller rollback.
+    /// The report marks repaired only after this boundary-preserving repair
+    /// succeeds; auto_repair alone does not mark an already-valid result.
+    Result<BooleanRebuildReport> run_rebuilt(
+        BooleanOp op, BodyId lhs, BodyId rhs,
+        const BooleanRebuildOptions& options = {});
     /// Read-only geometric preparation for closed, oriented planar ExactBRep
     /// bodies (boxes, wedges and polygon prisms, including concavity/holes).
     /// Every face/edge is checked; proxy, curved, open or malformed inputs are
@@ -260,6 +292,9 @@ public:
     Result<void> export_boolean_prep_stats(BodyId lhs, BodyId rhs, std::string_view path) const;
 
 private:
+    Result<BooleanSplitClassificationPreparation> prepare_split_classification_impl(
+        BodyId lhs, BodyId rhs, const BooleanSplitClassificationOptions& options,
+        bool resolve_coplanar) const;
     std::shared_ptr<detail::KernelState> state_;
 };
 
