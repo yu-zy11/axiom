@@ -525,6 +525,16 @@ public:
     explicit HealModelMutationRollback(detail::KernelState& state,
                                        bool snapshot_eval_state = false)
         : state_(state), first_allocated_id_(state.next_id),
+          original_curve_eval_cache_(state.curve_eval_cache),
+          original_surface_eval_cache_(state.surface_eval_cache),
+          original_tessellation_cache_(state.tessellation_cache),
+          original_face_tessellation_cache_(state.face_tessellation_cache),
+          original_tessellation_cache_stats_(state.tessellation_cache_stats),
+          original_edge_to_coedges_(state.edge_to_coedges),
+          original_coedge_to_loop_(state.coedge_to_loop),
+          original_loop_to_faces_(state.loop_to_faces),
+          original_face_to_shells_(state.face_to_shells),
+          original_shell_to_bodies_(state.shell_to_bodies),
           snapshot_eval_state_(snapshot_eval_state) {
         if (snapshot_eval_state_) {
             original_eval_invalid_ = state.eval_invalid;
@@ -561,23 +571,16 @@ public:
         erase_heal_allocations_since(state_.bodies, first_allocated_id_);
         erase_heal_allocations_since(state_.meshes, first_allocated_id_);
         erase_heal_allocations_since(state_.intersections, first_allocated_id_);
-        for (auto it = state_.tessellation_cache.begin();
-             it != state_.tessellation_cache.end();) {
-            if (it->second.value >= first_allocated_id_) {
-                it = state_.tessellation_cache.erase(it);
-            } else {
-                ++it;
-            }
-        }
-        for (auto it = state_.face_tessellation_cache.begin();
-             it != state_.face_tessellation_cache.end();) {
-            if (it->second.value >= first_allocated_id_) {
-                it = state_.face_tessellation_cache.erase(it);
-            } else {
-                ++it;
-            }
-        }
-        detail::rebuild_topology_links(state_);
+        state_.curve_eval_cache = std::move(original_curve_eval_cache_);
+        state_.surface_eval_cache = std::move(original_surface_eval_cache_);
+        state_.tessellation_cache = std::move(original_tessellation_cache_);
+        state_.face_tessellation_cache = std::move(original_face_tessellation_cache_);
+        state_.tessellation_cache_stats = original_tessellation_cache_stats_;
+        state_.edge_to_coedges = std::move(original_edge_to_coedges_);
+        state_.coedge_to_loop = std::move(original_coedge_to_loop_);
+        state_.loop_to_faces = std::move(original_loop_to_faces_);
+        state_.face_to_shells = std::move(original_face_to_shells_);
+        state_.shell_to_bodies = std::move(original_shell_to_bodies_);
     }
 
     [[nodiscard]] std::uint64_t first_allocated_id() const {
@@ -604,6 +607,16 @@ private:
     detail::KernelState& state_;
     std::uint64_t first_allocated_id_ {};
     std::vector<std::pair<std::uint64_t, PCurveId>> original_coedge_pcurves_;
+    std::unordered_map<std::string, CurveEvalResult> original_curve_eval_cache_;
+    std::unordered_map<std::string, SurfaceEvalResult> original_surface_eval_cache_;
+    std::unordered_map<std::string, MeshId> original_tessellation_cache_;
+    std::unordered_map<std::string, MeshId> original_face_tessellation_cache_;
+    TessellationCacheStats original_tessellation_cache_stats_ {};
+    std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> original_edge_to_coedges_;
+    std::unordered_map<std::uint64_t, std::uint64_t> original_coedge_to_loop_;
+    std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> original_loop_to_faces_;
+    std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> original_face_to_shells_;
+    std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> original_shell_to_bodies_;
     std::unordered_map<std::uint64_t, bool> original_eval_invalid_;
     EvalInvalidationBridgeMetrics original_eval_invalidation_bridge_ {};
     bool snapshot_eval_state_ {false};

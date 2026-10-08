@@ -137,7 +137,7 @@ DiagnosticId merge_batch_path_transform_failure_diagnostic(detail::KernelState& 
 bool normalize_user_export_extension(std::string_view ext, std::string& out_dotless_lower);
 /// 将无点扩展名 token（小写）映射到与 `detect_format` / `export_auto` 一致的格式 id。
 bool export_format_from_extension_token(std::string_view token, std::string& out_format_id);
-BodyId run_post_import_validation_pipeline(const std::shared_ptr<detail::KernelState>& state, BodyId body_id,
+Result<BodyId> run_post_import_validation_pipeline(const std::shared_ptr<detail::KernelState>& state, BodyId body_id,
                                              const ImportOptions& options, const std::string& format_cn,
                                              std::vector<Issue>& issues, std::vector<Warning>& warnings);
 

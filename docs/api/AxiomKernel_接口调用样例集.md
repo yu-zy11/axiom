@@ -961,15 +961,22 @@ AXMJSON、Axiom IGES 元数据子集与 Axiom BREP JSON 子集均限 64 MiB，�
 ## 11.3 导入后修复
 
 ```cpp
-auto imported = kernel.io().import_step(path, opts);
-if (imported.status == StatusCode::Ok) {
-  auto valid = kernel.validate().validate_all(*imported.value, ValidationMode::Standard);
-  if (valid.status != StatusCode::Ok) {
-    auto repaired = kernel.repair().auto_repair(*imported.value, RepairMode::Safe);
-    use_if_valid(repaired);
-  }
+ImportOptions repair_opts;
+repair_opts.run_validation = true;
+repair_opts.auto_repair = true;
+repair_opts.repair_mode = RepairMode::Safe;
+auto imported = kernel.io().import_step(path, repair_opts);
+if (imported.status != StatusCode::Ok || !imported.value) {
+  // io.post_import.validation/repair/post_validate；本次模型/cache/Eval/next_id 已回滚。
+  handle_error(imported);
+  return;
 }
+// 返回原验证合格体或已修复且再验证合格的输出。
+auto strict = kernel.validate().validate_all(*imported.value, ValidationMode::Strict);
+use_if_valid(strict);
 ```
+
+若需保留缺陷体作人工预检，应显式 `run_validation=false` 后调用 `auto_repair(body, ReportOnly/SuggestOnly)`。观察返回原体，外层 Result 可 Ok，但 `OpReport::status` 是实际 Standard 预检状态；模型/Eval/cache 不改，诊断可增加。修改型 `auto_repair` 的新真实规则只在 Standard 失败时进入，限至少六唯一面的平面直边单壳外环，linear 必须位于配置 min_local/max_local；孔洞/曲面/多壳/代理面明确拒绝。Strict 后验成功输出 Generic + ExactBRep，有限 PCurve 支持公开 UV/质量/截面。默认 STEP/IGES/BREP 仍是 Axiom 元数据子集，样例不代表标准全实体交换。
 
 ### 批量导入失败、后验诊断与原位重试
 
@@ -992,7 +999,7 @@ if (!imported_batch.value) {
 }
 ```
 
-`import_many_step` 和 `import_many_auto` 具有相同模型存储原子性；单项实际失败触发整批回滚，诊断证据仍保留。STEP/AXMJSON 的后验验证、自动修复及修复后复验问题复制为 `io.post_import.validation/repair/post_validate`，保留有限数值证据且不改源 HEAL 报告。导入后验证或修复问题可能随成功导入报告返回，`Ok` 本身不保证有效体，须读取诊断或显式验证。批量导出不回滚已写文件，普通文本/目录辅助接口尚未纳入本批证据门禁。
+`import_many_step` 和 `import_many_auto` 具有相同模型存储原子性；单项实际失败触发整批回滚，诊断证据仍保留。八个具体格式入口的后验验证、自动修复及修复后复验 Error/Fatal 阶段映射为 `io.post_import.validation/repair/post_validate`，保留有限数值证据且不改源 HEAL 报告。`run_validation=true` 的未修复验证失败或修复/再验证失败返回失败且无 value，单项也回滚本次模型/缓存统计/Eval/next_id；ReportOnly/SuggestOnly 不升级为修改策略。`false` 显式跳过闭环，不承诺有效。批量导出不回滚已写文件，普通文本/目录辅助接口尚未纳入本批证据门禁。
 
 ### HEAL 修复失败与批量原子性
 
@@ -1007,7 +1014,7 @@ if (!repaired_batch.value) {
 }
 ```
 
-单项修改型修复后验失败会回收本次物化对象；`repair_many_auto/remove_small_edges/remove_small_faces/merge_near_coplanar_faces` 均不泄漏半成功结果。`repair_face_trim_pcurves(face_id, RepairMode::Safe)` 支持 Plane/Cylinder/Sphere，重建或后验失败恢复原 coedge PCurve 绑定并回收新增 PCurve。失败报告使用 `heal.*` 阶段、实体与有限数值证据，不扩大现有修复规则或曲面支持范围。HEAL 回滚不恢复 `next_id`，重试不保证复用被回收对象的 ID；批量子项根因保留在原诊断，返回的批量报告记录失败目标与回滚上下文。
+单项修改型修复后验失败会回收本次物化对象；`repair_many_auto/remove_small_edges/remove_small_faces/merge_near_coplanar_faces` 均不泄漏半成功结果。`repair_face_trim_pcurves(face_id, RepairMode::Safe)` 支持 Plane/Cylinder/Sphere，重建或后验失败恢复原 coedge PCurve 绑定并回收新增 PCurve。失败报告使用 `heal.*` 阶段、实体与有限数值证据，不扩大现有修复规则或曲面支持范围。HEAL 回滚不恢复 `next_id`，重试不保证复用被回收对象的 ID；`repair_many_auto` 返回报告复制失败子项 issue 并保留其非空阶段及批量 rollback 上下文；其余三个批量入口仍在原诊断保留子项根因。
 
 ## 12. 三角化样例
 

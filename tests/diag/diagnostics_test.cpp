@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -755,15 +756,21 @@ int main() {
     }
 
     axiom::ImportOptions import_options;
+    const auto import_objects_before = kernel.object_count_total().value;
+    const auto import_geometry_before = kernel.geometry_count().value;
+    const auto import_bodies_before = kernel.body_count().value;
     auto imported = kernel.io().import_step(invalid_import_path.string(), import_options);
-    if (imported.status != axiom::StatusCode::Ok || !imported.value.has_value() || imported.warnings.empty()) {
-        std::cerr << "expected successful import with validation warnings for invalid bbox metadata\n";
+    if (imported.status == axiom::StatusCode::Ok || imported.value.has_value() || imported.warnings.empty() ||
+        kernel.object_count_total().value != import_objects_before ||
+        kernel.geometry_count().value != import_geometry_before || kernel.body_count().value != import_bodies_before) {
+        std::cerr << "expected invalid bbox import to fail atomically with validation warning evidence\n";
         std::filesystem::remove(invalid_import_path);
         return 1;
     }
 
     auto import_diag = kernel.diagnostics().get(imported.diagnostic_id);
     if (import_diag.status != axiom::StatusCode::Ok || !import_diag.value.has_value() ||
+        !has_issue_code(*import_diag.value, axiom::diag_codes::kIoImportFailure) ||
         !has_issue_code(*import_diag.value, axiom::diag_codes::kIoPostImportValidation) ||
         !has_issue_code(*import_diag.value, axiom::diag_codes::kValDegenerateGeometry)) {
         std::cerr << "missing import validation diagnostic issues\n";
@@ -772,7 +779,13 @@ int main() {
     }
     {
         const auto* val_staged = find_issue(*import_diag.value, axiom::diag_codes::kIoPostImportValidation);
-        if (val_staged == nullptr || val_staged->stage != "io.post_import.validation") {
+        const auto* failure = find_issue(*import_diag.value, axiom::diag_codes::kIoImportFailure);
+        if (val_staged == nullptr || val_staged->stage != "io.post_import.validation" || failure == nullptr ||
+            failure->stage != "io.post_import.validation" || failure->severity != axiom::IssueSeverity::Error ||
+            failure->related_entities.empty() || failure->numeric_evidence.empty() ||
+            std::any_of(failure->numeric_evidence.begin(), failure->numeric_evidence.end(), [](const auto& evidence) {
+                return !std::isfinite(evidence.value);
+            })) {
             std::cerr << "expected io.post_import.validation stage on import validation issue\n";
             std::filesystem::remove(invalid_import_path);
             return 1;
@@ -795,6 +808,23 @@ int main() {
     }
 
     import_options.auto_repair = true;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        const auto safe_import = kernel.io().import_step(invalid_import_path.string(), import_options);
+        const auto safe_report = kernel.diagnostics().get(safe_import.diagnostic_id);
+        const auto* failure = safe_report.value ? find_issue(*safe_report.value, axiom::diag_codes::kIoImportFailure) : nullptr;
+        if (safe_import.status == axiom::StatusCode::Ok || safe_import.value || failure == nullptr ||
+            failure->stage != "io.post_import.repair" || failure->severity != axiom::IssueSeverity::Error ||
+            failure->related_entities.empty() || failure->numeric_evidence.empty() ||
+            kernel.object_count_total().value != import_objects_before ||
+            kernel.geometry_count().value != import_geometry_before || kernel.body_count().value != import_bodies_before) {
+            std::cerr << "expected Safe invalid bbox import rejection with stable repair stage and retry rollback\n";
+            std::filesystem::remove(invalid_import_path);
+            return 1;
+        }
+    }
+    // Historical synthetic unit-box compatibility requires the explicit
+    // Aggressive policy; this is not reconstruction of missing STEP geometry.
+    import_options.repair_mode = axiom::RepairMode::Aggressive;
     auto repaired_import = kernel.io().import_step(invalid_import_path.string(), import_options);
     if (repaired_import.status != axiom::StatusCode::Ok || !repaired_import.value.has_value()) {
         std::cerr << "expected import auto repair to succeed\n";
@@ -811,6 +841,17 @@ int main() {
         !has_issue_code(*repaired_import_diag.value, axiom::diag_codes::kHealRepairValidated) ||
         repaired_import_valid.status != axiom::StatusCode::Ok) {
         std::cerr << "missing import auto repair diagnostic issues\n";
+        std::filesystem::remove(invalid_import_path);
+        return 1;
+    }
+    if (std::none_of(repaired_import_diag.value->issues.begin(), repaired_import_diag.value->issues.end(), [](const auto& issue) {
+            return issue.code == axiom::diag_codes::kHealFeatureRemovedWarning &&
+                issue.stage == "heal.auto_repair.metadata_bbox" &&
+                std::any_of(issue.numeric_evidence.begin(), issue.numeric_evidence.end(), [](const auto& evidence) {
+                    return evidence.name == "synthetic_bbox" && evidence.value == 1;
+                });
+        })) {
+        std::cerr << "expected explicit Aggressive synthetic bbox compatibility evidence\n";
         std::filesystem::remove(invalid_import_path);
         return 1;
     }

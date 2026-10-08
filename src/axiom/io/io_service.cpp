@@ -43,7 +43,7 @@ void erase_io_allocations_since(Map& records, std::uint64_t first_id) {
     }
 }
 
-// Batch imports can invoke validation and auto-repair, so their transaction
+// Single and batch imports invoke validation and auto-repair; their transaction
 // boundary covers every model store and derived cache touched by that pipeline.
 class IOImportBatchRollback {
 public:

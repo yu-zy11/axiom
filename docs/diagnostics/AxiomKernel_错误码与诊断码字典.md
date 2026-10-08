@@ -419,7 +419,7 @@ prep隔离新增两输入网格暖缓存、固定CurveId域及四点无缓存poi
 | `AXM-VAL-E-0010` | Error | 检测到非有限几何；第 70 批精确 B-Rep 文本子集导入绑定 `io.import.<format>.validation` |
 
 `validate_geometry` 的失败阶段包括 `input`、`bbox`、`references`、`surface_domain`、`curve_domain`、
-`vertices_finite`、`near_duplicate_vertices`、`edges`、`face_area` 与 `face_normal`，统一使用
+`vertices_finite`、`near_duplicate_vertices`、`edges`、`face_area`、`face_normal` 与 `mesh`，统一使用
 `heal.validate_geometry.` 前缀，便于按阶段聚合。
 
 ## 7.11 `IO` 数据交换模块错误码
@@ -447,14 +447,34 @@ prep隔离新增两输入网格暖缓存、固定CurveId域及四点无缓存poi
 | HEAL 验证 | `heal.validate_geometry.*`、`heal.validate_topology.*`、`heal.validate_self_intersection.*`、`heal.validate_tolerance.*` 及聚合验证；关联 Body/Shell/问题子实体 | 有限状态、实体数量及分支模式/计数/几何量，不扩大验证算法范围 |
 | HEAL 修复 | `heal.sew_faces/remove_small_edges/remove_small_faces/merge_near_coplanar_faces/auto_repair.*`；后验失败为相应 `.post_validate` | 失败回收本次派生体与物化对象，保留原模型和失败证据 |
 | Trim 重建 | `heal.repair_trim.input/surface/loop/rebuild/post_validate`；关联 Face/Surface/Loop 等 | Plane/Cylinder/Sphere；重建或复验失败恢复原 PCurve 绑定、删除新增 PCurve |
-| 批量修复 | `heal.repair_many_*.input/rollback`，关联失败子项目标；回滚记录 `completed_item_count/requested_item_count/rollback_applied`；`repair_many_auto` 另附 `allocated_object_count`（分配 ID 增量） | 任一子项失败回滚此前全部派生对象和 Eval 失效状态；子项根因保留在原诊断，批量报告不合并全部子项 issue；不恢复 `next_id` |
+| 批量修复 | `heal.repair_many_*.input/rollback`，关联失败子项目标；回滚记录 `completed_item_count/requested_item_count/rollback_applied`；`repair_many_auto` 另附 `allocated_object_count`（分配 ID 增量） | 任一子项失败回滚此前全部派生对象和 Eval 失效状态；`repair_many_auto` 复制失败子项 issue 并保留非空子阶段，其他三个入口仅在原诊断保留根因；不恢复 `next_id` |
 | 主格式 IO 与 auto | `io.import.<format>.*`、`io.export.<format>.*`、auto 路由阶段；有限状态、实体数量及分支路径/计数证据 | STEP/AXMJSON/IGES/BREP/OBJ/STL/glTF/3MF；导出关联输入 Body，预物化文件失败显式使用 `[0]` 令牌 |
-| 导入后验管线 | `io.post_import.validation/repair/post_validate`；复制 HEAL 问题，附验证/修复模式 | STEP/AXMJSON 接入共享管线；失败 issue 可随 `Ok` 导入结果返回，调用者须读取报告或显式验证 |
+| 导入后验管线 | `io.post_import.validation/repair/post_validate`；复制 HEAL 问题，附验证/修复模式 | cycle-0084 起八格式具体入口共享闭环：未修复的验证失败或修复/再验证失败返回非 Ok、无 value，撤销本次模型/cache/Eval/next_id；Error/Fatal 阶段映射为外层 IO 阶段，原 HEAL 诊断保留 |
 | 批量导入/导出 | `io.batch_import/io.batch_export`；保留根因及 `failed_item_index`（从零开始）、`completed_item_count`、`path_length`（byte） | STEP/AXMJSON/auto 批量导入实际失败恢复模型/网格/拓扑/几何、链接、缓存、Eval 失效及 `next_id`；批量导出不承诺文件回滚 |
 
 失败数值证据至少含 `status_code`（enum）与 `related_entity_count`（count）。空名称或非有限测量值被过滤；过滤数量非零时记录有限的 `non_finite_evidence_omitted`（count），避免将 NaN/Inf 冒充有效证据。零实体令牌说明尚无模型对象或无有效目标，不可用于句柄查询。候选导入、严格现有文件导入、目录导出及条件导出传播真实失败；AXMJSON/IGES/BREP 导出补齐 `input/path/open/write` 与最终流检查。
 
 `axiom_heal_test`、`axiom_io_workflow_test` 用 `issue_code_prefix="AXM-"` 与 `stage_prefix="heal."/"io."` 审计 Error 及以上 issue，并覆盖 JSON 数值证据、源报告不污染和回滚重试；cycle-0073 修复后完整 CTest **16/16 通过**。普通文本/目录工具等非主格式辅助接口尚未纳入该重量级包。标准 STEP/IGES 实体交换限制不变，IGES 仍按 `NotImplemented / AXM-IO-E-0011` 拒绝；设备或侧车写入失败不保证恢复目标文件。
+
+### cycle-0084 / S5-HEAL 阶段与失败原子性（复用既有码）
+
+公开签名和 `error_codes.h` 常量未新增或改号；下列流程标签属于 `Issue.stage`。新真实规则只在 Standard 预验证失败的 owned ExactBRep 上进入，限单壳、至少六唯一面、真实平面直边外环，无孔洞/曲面/多壳/代理面。固定缺陷与失败注入随最终完整 **16/16、214.19 s** 通过，见 [验收 §1.11](../quality/AxiomKernel_测试与验收方案.md#111-cycle-0084--s5-heal-门禁与逐项证据)。
+
+| 场景 | 稳定状态 / 既有码 | 阶段与证据 |
+|---|---|---|
+| 无效 Heal 目标 | `InvalidInput / AXM-HEAL-E-0006` | `heal.auto_repair.input` |
+| 新真实平面修复失败 | `OperationFailed / AXM-HEAL-E-0006` | `heal.auto_repair.planar.input/extract/weld/orient/rebuild/post_validate`，关联源体/壳/问题实体与有限数值；配置非法或非单壳为 input，不支持几何/五面为 extract，固定 1.01linear 间隙为 orient |
+| 分配后 Strict 失败 | 同上，并保留后验子问题既有码 | `heal.auto_repair.planar.post_validate`；`allocated_object_count>0`、`rollback_applied=1`；复制后验 issue 且保留非空真实子阶段 |
+| 真实修复成功 | Info `AXM-HEAL-D-0005` | `heal.auto_repair.planar.post_validate`；linear、焊接/清理/重定向计数、signed_volume 与 `maximum_vertex_displacement` |
+| 批量自动修复失败 | 子项状态 + `AXM-HEAL-E-0006` | `heal.repair_many_auto.rollback` 加子项真实阶段，记录完成/请求/分配计数及 rollback；源诊断不改 |
+| IO 导入后失败 | 传播验证/修复状态，追加 `AXM-IO-E-0004` | `io.post_import.validation/repair/post_validate`，复制根因码/实体/有限证据；Error/Fatal 阶段映射到 IO 外层，原 Heal 子阶段仍在原诊断 |
+| 显式 Aggressive 历史单位盒兼容 | Warning `AXM-HEAL-W-0001` | `heal.auto_repair.metadata_bbox`，`synthetic_bbox=1`；不是源几何真实修复 |
+| MeshRep 无所属合法网格、越界或退化 | `DegenerateGeometry / AXM-VAL-E-0004` | `heal.validate_geometry.mesh`；关联 Body/Mesh 与顶点/索引计数 |
+| MeshRep 非有限顶点或面积计算溢出 | `DegenerateGeometry / AXM-VAL-E-0010` | 同上；允许合法二维平面网格，但此检查不证明闭合/自交 |
+
+`auto_repair` 的 ReportOnly/SuggestOnly 仅 Standard 预检，外层 Result 可 Ok，`OpReport::status` 保留真实预检状态且 output 为原体；模型、Eval、缓存/统计不改，诊断可以新增。此语义不泛化其他旧修复入口。IO `run_validation=true` 且观察策略遇到无效体，在 validation 阶段原子拒绝，不升级 Safe；`run_validation=false` 跳过验证及自动修复。
+
+配置 linear 必须有限正值且在有限正值 min_local/max_local 内；焊接拒绝多候选和链式漂移。真实派生结果 Strict 成功才保留。Heal 单项/批量失败恢复模型、反向索引、几何求值/三角化缓存及统计和 Eval；批量后项失败回收前项输出及失效，保留诊断但不承诺恢复 `next_id`，允许 ID 空档。IO 八具体格式入口单项及既有批量回滚另恢复 `next_id`，可原位重试；失败诊断继续保留。导出不承诺文件系统事务。默认 STEP/IGES/BREP 仍限 Axiom 元数据子集，不证明完整标准交换或工业通用修复。
 
 ## 7.12 `TES` 三角化错误码
 

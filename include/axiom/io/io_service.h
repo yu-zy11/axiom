@@ -19,6 +19,9 @@ public:
   explicit IOService(std::shared_ptr<detail::KernelState> state);
 
   /// 重量级导入及导入后验证/修复失败均带 `io.*` 阶段、问题实体令牌和有限数值证据，可直接纳入 `audit_evidence` 门禁。
+  /// 所有导入入口在 run_validation=true 时，未修复的验证失败返回失败并回收本次模型、派生对象及缓存/Eval变化。
+  /// ReportOnly/SuggestOnly 不升级为修改型策略；run_validation=false 显式跳过该闭环。
+  /// 默认 STEP/IGES/BREP 仍为 Axiom 元数据子集，不支持标准文件的完整缺陷拓扑交换。
   Result<BodyId> import_step(std::string_view path,
                              const ImportOptions &options);
   /// 重量级导出失败均带 `io.export.*` 阶段、目标 Body（预物化失败使用零实体令牌）及有限数值证据。

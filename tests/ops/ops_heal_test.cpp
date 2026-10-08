@@ -16,6 +16,136 @@
 
 namespace {
 
+// Fixed first-generation sewing corpus: six disconnected planar patches of a
+// 2x3x4 box. Only the top patch moves, and one side is deliberately reversed.
+// Coordinates, incidence defects and displacement bounds are input oracles;
+// they do not come from the repair planner or a bounding-box volume estimate.
+axiom::Result<axiom::BodyId> stage5_disconnected_planar_box(axiom::Kernel& kernel, double gap,
+                                                   bool omit_top = false) {
+    std::array<std::array<axiom::Point3,4>,6> rings {{{{{0,0,0},{0,3,0},{2,3,0},{2,0,0}}},
+        {{{0,0,0},{2,0,0},{2,0,4},{0,0,4}}}, {{{2,0,0},{2,3,0},{2,3,4},{2,0,4}}},
+        {{{2,3,0},{0,3,0},{0,3,4},{2,3,4}}}, {{{0,3,0},{0,0,0},{0,0,4},{0,3,4}}},
+        {{{0,0,4+gap},{2,0,4+gap},{2,3,4+gap},{0,3,4+gap}}}}};
+    std::reverse(rings[2].begin(),rings[2].end());
+    auto transaction = kernel.topology().begin_transaction();
+    std::vector<axiom::FaceId> faces;
+    for (std::size_t f = 0; f < (omit_top ? 5u : 6u); ++f) {
+        const auto& p = rings[f];
+        const axiom::Vec3 u {p[1].x-p[0].x,p[1].y-p[0].y,p[1].z-p[0].z};
+        const axiom::Vec3 v {p[2].x-p[0].x,p[2].y-p[0].y,p[2].z-p[0].z};
+        const auto plane = kernel.surfaces().make_plane(p[0],
+            {u.y*v.z-u.z*v.y,u.z*v.x-u.x*v.z,u.x*v.y-u.y*v.x});
+        if (!plane.value) return {};
+        std::array<axiom::VertexId,4> vertices;
+        std::array<axiom::CoedgeId,4> coedges;
+        for (std::size_t i = 0; i < 4; ++i) {
+            const auto vertex = transaction.create_vertex(p[i]);
+            if (!vertex.value) return {};
+            vertices[i] = *vertex.value;
+        }
+        for (std::size_t i = 0; i < 4; ++i) {
+            const auto next = (i+1)%4;
+            const auto curve = kernel.curves().make_line_segment(p[i],p[next]);
+            const auto edge = curve.value ? transaction.create_edge(*curve.value,vertices[i],vertices[next])
+                                          : axiom::Result<axiom::EdgeId>{};
+            const auto coedge = edge.value ? transaction.create_coedge(*edge.value,false)
+                                           : axiom::Result<axiom::CoedgeId>{};
+            if (!coedge.value) return {};
+            coedges[i] = *coedge.value;
+        }
+        const auto loop = transaction.create_loop(coedges);
+        const auto face = loop.value ? transaction.create_face(*plane.value,*loop.value,{})
+                                      : axiom::Result<axiom::FaceId>{};
+        if (!face.value) return {};
+        faces.push_back(*face.value);
+    }
+    const auto shell = transaction.create_shell(faces);
+    const auto body = shell.value ? transaction.create_body(std::array {*shell.value})
+                                  : axiom::Result<axiom::BodyId>{};
+    if (!body.value || transaction.commit().status != axiom::StatusCode::Ok) return {};
+    return body;
+}
+
+// A late unrepairable open-shell item must roll back an earlier successful
+// sewing item, including its Eval invalidation, before that source is retried.
+bool stage5_repaired_modeling_chain_regression() {
+    axiom::Kernel kernel;
+    axiom::DiagnosticId last_diagnostic {};
+    const auto fail = [&](int line) {
+        std::cerr << "stage5_repaired_modeling_chain_regression line=" << line << "\n";
+        const auto diagnostic = kernel.diagnostics().get(last_diagnostic);
+        if (diagnostic.value) for (const auto& issue : diagnostic.value->issues) {
+            std::cerr << issue.stage << " " << issue.code << " " << issue.message << "\n";
+            for (const auto& evidence : issue.numeric_evidence)
+                std::cerr << "  " << evidence.name << "=" << evidence.value << " " << evidence.unit << "\n";
+        }
+        return false;
+    };
+    const auto dirty = stage5_disconnected_planar_box(kernel,0.0);
+    const auto open = stage5_disconnected_planar_box(kernel,0.0,true);
+    if (!dirty.value || !open.value) return fail(__LINE__);
+    auto& query = kernel.topology().query();
+    const auto source_faces = query.faces_of_body(*dirty.value).value;
+    const auto source_edges = query.edges_of_body(*dirty.value).value;
+    const auto node = kernel.eval_graph().register_node(axiom::NodeKind::Analysis,
+        "body:"+std::to_string(dirty.value->value));
+    const auto consumer = kernel.eval_graph().register_node(axiom::NodeKind::Analysis,"stage5:repair_consumer");
+    if (!node.value || !consumer.value || kernel.eval_graph().add_dependency(*consumer.value,*node.value).status !=
+        axiom::StatusCode::Ok) return fail(__LINE__);
+    const auto objects = kernel.object_count_total().value;
+    const auto geometry = kernel.geometry_count().value;
+    const auto bodies = kernel.body_count().value;
+    const auto stores = kernel.runtime_store_counts().value;
+    const std::array inputs {*dirty.value,*open.value};
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        const auto rejected = kernel.repair().repair_many_auto(inputs,axiom::RepairMode::Safe);
+        last_diagnostic = rejected.diagnostic_id;
+        const auto report = kernel.diagnostics().get(rejected.diagnostic_id);
+        const auto after = kernel.runtime_store_counts().value;
+        if (rejected.status == axiom::StatusCode::Ok || rejected.value || !report.value || !after || !stores ||
+            kernel.object_count_total().value != objects || kernel.geometry_count().value != geometry ||
+            kernel.body_count().value != bodies || query.faces_of_body(*dirty.value).value != source_faces ||
+            query.edges_of_body(*dirty.value).value != source_edges ||
+            after->mesh_records != stores->mesh_records ||
+            after->tessellation_cache_entries != stores->tessellation_cache_entries ||
+            after->face_tessellation_cache_entries != stores->face_tessellation_cache_entries ||
+            after->curve_eval_cache_entries != stores->curve_eval_cache_entries ||
+            after->surface_eval_cache_entries != stores->surface_eval_cache_entries ||
+            kernel.eval_graph().is_invalid(*node.value).value != std::optional<bool>{false} ||
+            kernel.eval_graph().is_invalid(*consumer.value).value != std::optional<bool>{false} ||
+            std::none_of(report.value->issues.begin(),report.value->issues.end(),[](const auto& issue) {
+                return issue.code == axiom::diag_codes::kHealAutoRepairFailure &&
+                    issue.stage == "heal.auto_repair.planar.extract" && !issue.related_entities.empty() &&
+                    !issue.numeric_evidence.empty();
+            })) return fail(__LINE__);
+    }
+    const auto repaired = kernel.repair().auto_repair(*dirty.value,axiom::RepairMode::Safe);
+    last_diagnostic = repaired.diagnostic_id;
+    if (!repaired.value || repaired.value->output == *dirty.value ||
+        kernel.validate().validate_all(repaired.value->output,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok ||
+        kernel.eval_graph().is_invalid(*node.value).value != std::optional<bool>{true} ||
+        kernel.eval_graph().is_invalid(*consumer.value).value != std::optional<bool>{true}) return fail(__LINE__);
+    const auto cutter = kernel.primitives().box({1,0,0},2,3,4);
+    if (!cutter.value) return fail(__LINE__);
+    const auto modeled = kernel.booleans().run_rebuilt(axiom::BooleanOp::Intersect,repaired.value->output,*cutter.value);
+    last_diagnostic = modeled.diagnostic_id;
+    if (!modeled.value || !modeled.value->output) return fail(__LINE__);
+    const auto result = *modeled.value->output;
+    const auto mass = query.body_mass_properties(result);
+    const auto inside = query.locate_point(result,{1.5,1.5,2});
+    const auto outside = query.locate_point(result,{0.5,1.5,2});
+    const auto sources = query.source_bodies_of_body(result);
+    // Independent intersection dimensions are 1x3x4, hence V=12,A=38.
+    return mass.value && std::abs(mass.value->volume-12) < 1e-8 && std::abs(mass.value->area-38) < 1e-8 &&
+        inside.value && inside.value->location == axiom::BodyPointLocation::Inside && outside.value &&
+        outside.value->location == axiom::BodyPointLocation::Outside && sources.value &&
+        std::find(sources.value->begin(),sources.value->end(),repaired.value->output) != sources.value->end() &&
+        kernel.validate().validate_all(result,axiom::ValidationMode::Strict).status == axiom::StatusCode::Ok &&
+        kernel.validate().validate_all(repaired.value->output,axiom::ValidationMode::Strict).status == axiom::StatusCode::Ok &&
+        query.faces_of_body(*dirty.value).value == source_faces && query.edges_of_body(*dirty.value).value == source_edges;
+}
+
+
 // The new material boundary remains usable by the next modeling operation and
 // by Heal's complete Strict gate, rather than terminating at an imprinted proxy.
 bool rebuilt_boolean_heal_chain_regression() {
@@ -5001,6 +5131,10 @@ bool test_stage3_model_query_chain() {
 }  // namespace
 
 int main() {
+    if (!stage5_repaired_modeling_chain_regression()) {
+        std::cerr << "Stage 5 repaired modeling and batch atomicity regression failed\n";
+        return 1;
+    }
     if (!rebuilt_boolean_heal_chain_regression()) {
         std::cerr << "rebuilt Boolean to Heal chain regression\n";
         return 1;

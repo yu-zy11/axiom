@@ -15,6 +15,297 @@
 
 namespace {
 
+// Fixed first-generation sewing corpus: six disconnected planar patches of a
+// 2x3x4 box. Only the top patch moves, and one side is deliberately reversed.
+// Coordinates, incidence defects and displacement bounds are input oracles;
+// they do not come from the repair planner or a bounding-box volume estimate.
+axiom::Result<axiom::BodyId> disconnected_planar_box(axiom::Kernel& kernel, double gap,
+                                                   bool omit_top = false) {
+    std::array<std::array<axiom::Point3,4>,6> rings {{{{{0,0,0},{0,3,0},{2,3,0},{2,0,0}}},
+        {{{0,0,0},{2,0,0},{2,0,4},{0,0,4}}}, {{{2,0,0},{2,3,0},{2,3,4},{2,0,4}}},
+        {{{2,3,0},{0,3,0},{0,3,4},{2,3,4}}}, {{{0,3,0},{0,0,0},{0,0,4},{0,3,4}}},
+        {{{0,0,4+gap},{2,0,4+gap},{2,3,4+gap},{0,3,4+gap}}}}};
+    std::reverse(rings[2].begin(),rings[2].end());
+    auto transaction = kernel.topology().begin_transaction();
+    std::vector<axiom::FaceId> faces;
+    for (std::size_t f = 0; f < (omit_top ? 5u : 6u); ++f) {
+        const auto& p = rings[f];
+        const axiom::Vec3 u {p[1].x-p[0].x,p[1].y-p[0].y,p[1].z-p[0].z};
+        const axiom::Vec3 v {p[2].x-p[0].x,p[2].y-p[0].y,p[2].z-p[0].z};
+        const auto plane = kernel.surfaces().make_plane(p[0],
+            {u.y*v.z-u.z*v.y,u.z*v.x-u.x*v.z,u.x*v.y-u.y*v.x});
+        if (!plane.value) return {};
+        std::array<axiom::VertexId,4> vertices;
+        std::array<axiom::CoedgeId,4> coedges;
+        for (std::size_t i = 0; i < 4; ++i) {
+            const auto vertex = transaction.create_vertex(p[i]);
+            if (!vertex.value) return {};
+            vertices[i] = *vertex.value;
+        }
+        for (std::size_t i = 0; i < 4; ++i) {
+            const auto next = (i+1)%4;
+            const auto curve = kernel.curves().make_line_segment(p[i],p[next]);
+            const auto edge = curve.value ? transaction.create_edge(*curve.value,vertices[i],vertices[next])
+                                          : axiom::Result<axiom::EdgeId>{};
+            const auto coedge = edge.value ? transaction.create_coedge(*edge.value,false)
+                                           : axiom::Result<axiom::CoedgeId>{};
+            if (!coedge.value) return {};
+            coedges[i] = *coedge.value;
+        }
+        const auto loop = transaction.create_loop(coedges);
+        const auto face = loop.value ? transaction.create_face(*plane.value,*loop.value,{})
+                                      : axiom::Result<axiom::FaceId>{};
+        if (!face.value) return {};
+        faces.push_back(*face.value);
+    }
+    const auto shell = transaction.create_shell(faces);
+    const auto body = shell.value ? transaction.create_body(std::array {*shell.value})
+                                  : axiom::Result<axiom::BodyId>{};
+    if (!body.value || transaction.commit().status != axiom::StatusCode::Ok) return {};
+    return body;
+}
+
+bool planar_import_repair_regression() {
+    // Binary-exact tolerance makes the equality boundary reproducible.
+    constexpr double tolerance = 1.0/1024;
+    for (const double gap : {0.0,tolerance/2,tolerance,tolerance*1.01}) {
+        axiom::KernelConfig config;
+        config.tolerance.linear = tolerance;
+        axiom::Kernel kernel {config};
+        axiom::DiagnosticId last_diagnostic {};
+        const auto fail = [&](int line) {
+            std::cerr << "planar_import_repair_regression line=" << line << "\n";
+            const auto diagnostic = kernel.diagnostics().get(last_diagnostic);
+            if (diagnostic.value) for (const auto& issue : diagnostic.value->issues) {
+                std::cerr << issue.stage << " " << issue.code << " " << issue.message << "\n";
+                for (const auto& evidence : issue.numeric_evidence)
+                    std::cerr << "  " << evidence.name << "=" << evidence.value << " " << evidence.unit << "\n";
+            }
+            return false;
+        };
+        const auto input = disconnected_planar_box(kernel,gap);
+        if (!input.value) return fail(__LINE__);
+        const auto body = *input.value;
+        auto& query = kernel.topology().query();
+        const auto input_faces = query.faces_of_body(body).value;
+        const auto input_edges = query.edges_of_body(body).value;
+        // Six unsewn quads have 24 one-sided edges and 24 independent vertices.
+        if (!input_faces || input_faces->size() != 6 || !input_edges || input_edges->size() != 24 ||
+            query.vertex_count_of_body(body).value != std::optional<std::uint64_t>{24} ||
+            query.boundary_edge_count_of_body(body).value != std::optional<std::uint64_t>{24} ||
+            kernel.validate().validate_all(body,axiom::ValidationMode::Standard).status == axiom::StatusCode::Ok)
+            return fail(__LINE__);
+        for (const auto edge : *input_edges) {
+            const auto incident_faces = query.faces_of_edge(edge);
+            const auto uses = query.coedges_of_edge(edge);
+            if (!incident_faces.value || incident_faces.value->size() != 1 || !uses.value || uses.value->size() != 1)
+                return fail(__LINE__);
+        }
+        const auto bound = kernel.eval_graph().register_node(axiom::NodeKind::Analysis,
+            "body:"+std::to_string(body.value));
+        const auto consumer = kernel.eval_graph().register_node(axiom::NodeKind::Analysis,"heal:consumer");
+        if (!bound.value || !consumer.value || kernel.eval_graph().add_dependency(*consumer.value,*bound.value).status !=
+            axiom::StatusCode::Ok) return fail(__LINE__);
+        const auto object_count = kernel.object_count_total().value;
+        const auto geometry_count = kernel.geometry_count().value;
+        const auto runtime = kernel.runtime_store_counts().value;
+        const auto unchanged = [&] {
+            const auto after = kernel.runtime_store_counts().value;
+            return after && runtime && kernel.object_count_total().value == object_count &&
+                kernel.geometry_count().value == geometry_count && query.faces_of_body(body).value == input_faces &&
+                query.edges_of_body(body).value == input_edges &&
+                after->mesh_records == runtime->mesh_records &&
+                after->tessellation_cache_entries == runtime->tessellation_cache_entries &&
+                after->face_tessellation_cache_entries == runtime->face_tessellation_cache_entries &&
+                after->curve_eval_cache_entries == runtime->curve_eval_cache_entries &&
+                after->surface_eval_cache_entries == runtime->surface_eval_cache_entries &&
+                kernel.eval_graph().is_invalid(*bound.value).value == std::optional<bool>{false} &&
+                kernel.eval_graph().is_invalid(*consumer.value).value == std::optional<bool>{false} &&
+                kernel.eval_graph().recompute_count(*bound.value).value == std::optional<std::uint64_t>{0};
+        };
+        for (const auto mode : {axiom::RepairMode::ReportOnly,axiom::RepairMode::SuggestOnly}) {
+            const auto report = kernel.repair().auto_repair(body,mode);
+            last_diagnostic = report.diagnostic_id;
+            if (!report.value || report.value->output != body || report.value->status == axiom::StatusCode::Ok ||
+                !unchanged()) return fail(__LINE__);
+        }
+        for (int attempt = 0; attempt < (gap > tolerance ? 2 : 1); ++attempt) {
+            const auto repaired = kernel.repair().auto_repair(body,axiom::RepairMode::Safe);
+            last_diagnostic = repaired.diagnostic_id;
+            const auto diagnostic = kernel.diagnostics().get(repaired.diagnostic_id);
+            if (gap > tolerance) {
+                if (repaired.status == axiom::StatusCode::Ok || repaired.value || !diagnostic.value || !unchanged() ||
+                    std::none_of(diagnostic.value->issues.begin(),diagnostic.value->issues.end(),[](const auto& issue) {
+                        return issue.code == axiom::diag_codes::kHealAutoRepairFailure &&
+                            issue.stage == "heal.auto_repair.planar.orient" && issue.severity == axiom::IssueSeverity::Error &&
+                            !issue.related_entities.empty() && !issue.numeric_evidence.empty() &&
+                            std::all_of(issue.numeric_evidence.begin(),issue.numeric_evidence.end(),[](const auto& value) {
+                                return std::isfinite(value.value);
+                            });
+                    })) return fail(__LINE__);
+                continue;
+            }
+            if (!repaired.value || repaired.status != axiom::StatusCode::Ok || repaired.value->output == body ||
+                !diagnostic.value) return fail(__LINE__);
+            const auto output = repaired.value->output;
+            const auto success = std::find_if(diagnostic.value->issues.begin(),diagnostic.value->issues.end(),[](const auto& issue) {
+                return issue.code == axiom::diag_codes::kHealRepairValidated &&
+                    issue.stage == "heal.auto_repair.planar.post_validate";
+            });
+            if (success == diagnostic.value->issues.end()) return fail(__LINE__);
+            const auto displacement = std::find_if(success->numeric_evidence.begin(),success->numeric_evidence.end(),[](const auto& value) {
+                return value.name == "maximum_vertex_displacement";
+            });
+            if (displacement == success->numeric_evidence.end() || std::abs(displacement->value-gap) > 1e-12 ||
+                displacement->value > tolerance) return fail(__LINE__);
+            const auto faces = query.faces_of_body(output);
+            const auto vertex_count = query.vertex_count_of_body(output).value;
+            const auto edge_count = query.edge_count_of_body(output).value;
+            const auto boundary_count = query.boundary_edge_count_of_body(output).value;
+            const auto strict = kernel.validate().validate_all(output,axiom::ValidationMode::Strict);
+            const auto bound_invalid = kernel.eval_graph().is_invalid(*bound.value).value;
+            const auto consumer_invalid = kernel.eval_graph().is_invalid(*consumer.value).value;
+            if (!faces.value || faces.value->size() != 6 ||
+                vertex_count != std::optional<std::uint64_t>{8} || edge_count != std::optional<std::uint64_t>{12} ||
+                boundary_count != std::optional<std::uint64_t>{12} || strict.status != axiom::StatusCode::Ok ||
+                bound_invalid != std::optional<bool>{true} || consumer_invalid != std::optional<bool>{true}) {
+                std::cerr << "gap=" << gap << " faces=" << (faces.value ? faces.value->size() : 0)
+                          << " vertices=" << vertex_count.value_or(0) << " edges=" << edge_count.value_or(0)
+                          << " boundary=" << boundary_count.value_or(0) << " Strict=" << static_cast<int>(strict.status)
+                          << " bound_invalid=" << bound_invalid.value_or(false)
+                          << " consumer_invalid=" << consumer_invalid.value_or(false) << "\n";
+                if (strict.status != axiom::StatusCode::Ok) last_diagnostic = strict.diagnostic_id;
+                return fail(__LINE__);
+            }
+            // boundary_edge_count currently counts single-shell ownership;
+            // actual closure is proved independently by two distinct incident
+            // faces and oppositely directed uses of every shared edge.
+            const auto output_edges = query.edges_of_body(output);
+            if (!output_edges.value || output_edges.value->size() != 12) return fail(__LINE__);
+            for (const auto edge : *output_edges.value) {
+                const auto adjacent = query.faces_of_edge(edge);
+                const auto uses = query.coedges_of_edge(edge);
+                const auto loops = query.loops_of_edge(edge);
+                if (!adjacent.value || adjacent.value->size() != 2 || adjacent.value->at(0) == adjacent.value->at(1) ||
+                    !uses.value || uses.value->size() != 2 || uses.value->at(0) == uses.value->at(1) ||
+                    !loops.value || loops.value->size() != 2) return fail(__LINE__);
+                std::array<std::array<axiom::VertexId,2>,2> directed {};
+                for (std::size_t i = 0; i < 2; ++i) {
+                    const auto edges = query.edges_of_loop(loops.value->at(i));
+                    const auto vertices = query.vertices_of_loop(loops.value->at(i));
+                    if (!edges.value || !vertices.value || edges.value->size() != vertices.value->size() ||
+                        vertices.value->empty()) return fail(__LINE__);
+                    const auto found = std::find(edges.value->begin(),edges.value->end(),edge);
+                    if (found == edges.value->end() || std::count(edges.value->begin(),edges.value->end(),edge) != 1)
+                        return fail(__LINE__);
+                    const auto index = static_cast<std::size_t>(found-edges.value->begin());
+                    directed[i] = {vertices.value->at(index),vertices.value->at((index+1)%vertices.value->size())};
+                }
+                if (directed[0][0] != directed[1][1] || directed[0][1] != directed[1][0]) return fail(__LINE__);
+            }
+            // Direct public-ring triangle integrals: signed volume, area and all
+            // eight expected corners, independently of mass/query bbox helpers.
+            double signed_volume = 0, area = 0;
+            std::array<bool,8> corners {};
+            for (const auto face : *faces.value) {
+                const auto surface = query.surface_of_face(face);
+                const auto loops = query.loops_of_face(face);
+                if (!surface.value || !loops.value || loops.value->size() != 1) return fail(__LINE__);
+                const auto uv = query.face_loop_uv_polyline(face,loops.value->front());
+                if (!uv.value || uv.value->size() < 4) return fail(__LINE__);
+                std::vector<axiom::Point3> points;
+                for (const auto p : *uv.value) {
+                    const auto world = kernel.surface_service().eval(*surface.value,p.x,p.y,0);
+                    if (!world.value) return fail(__LINE__);
+                    const auto q = world.value->point;
+                    const int x = std::abs(q.x) < 1e-9 ? 0 : std::abs(q.x-2) < 1e-9 ? 1 : -1;
+                    const int y = std::abs(q.y) < 1e-9 ? 0 : std::abs(q.y-3) < 1e-9 ? 1 : -1;
+                    const int z = std::abs(q.z) < 1e-9 ? 0 : std::abs(q.z-4) < 1e-9 ? 1 : -1;
+                    if (x < 0 || y < 0 || z < 0) return fail(__LINE__);
+                    corners[static_cast<std::size_t>(x+2*y+4*z)] = true;
+                    points.push_back(q);
+                }
+                const auto p = points.front();
+                for (std::size_t i = 1; i+1 < points.size(); ++i) {
+                    const auto q = points[i], r = points[i+1];
+                    area += std::hypot((q.y-p.y)*(r.z-p.z)-(q.z-p.z)*(r.y-p.y),
+                        (q.z-p.z)*(r.x-p.x)-(q.x-p.x)*(r.z-p.z),
+                        (q.x-p.x)*(r.y-p.y)-(q.y-p.y)*(r.x-p.x))/2;
+                    signed_volume += (p.x*(q.y*r.z-q.z*r.y)+p.y*(q.z*r.x-q.x*r.z)+p.z*(q.x*r.y-q.y*r.x))/6;
+                }
+            }
+            if (std::abs(signed_volume-24) > 1e-8 || std::abs(area-52) > 1e-8 ||
+                !std::all_of(corners.begin(),corners.end(),[](bool present) { return present; }) ||
+                query.faces_of_body(body).value != input_faces || query.edges_of_body(body).value != input_edges ||
+                query.boundary_edge_count_of_body(body).value != std::optional<std::uint64_t>{24} ||
+                kernel.validate().validate_all(body,axiom::ValidationMode::Standard).status == axiom::StatusCode::Ok)
+                return fail(__LINE__);
+        }
+    }
+    return true;
+}
+
+
+// Invalid angular policy lets valid planar sewing reach the actual Strict
+// postcondition. This is a natural after-allocation failure, not an injected
+// test hook; all derived records and invalidation must be undone together.
+bool planar_post_validation_rollback_regression() {
+    axiom::KernelConfig config;
+    config.tolerance.angular = 0;
+    axiom::Kernel kernel {config};
+    const auto source = disconnected_planar_box(kernel,0.0);
+    if (!source.value) return false;
+    auto& query = kernel.topology().query();
+    const auto faces = query.faces_of_body(*source.value).value;
+    const auto edges = query.edges_of_body(*source.value).value;
+    const auto node = kernel.eval_graph().register_node(axiom::NodeKind::Analysis,
+        "body:"+std::to_string(source.value->value));
+    const auto consumer = kernel.eval_graph().register_node(axiom::NodeKind::Analysis,"heal:postcondition_consumer");
+    if (!node.value || !consumer.value || kernel.eval_graph().add_dependency(*consumer.value,*node.value).status !=
+        axiom::StatusCode::Ok) return false;
+    const auto objects = kernel.object_count_total().value;
+    const auto geometry = kernel.geometry_count().value;
+    const auto bodies = kernel.body_count().value;
+    const auto next_version = kernel.topology_version_next().value;
+    const auto runtime = kernel.runtime_store_counts().value;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        const auto repaired = kernel.repair().auto_repair(*source.value,axiom::RepairMode::Safe);
+        const auto report = kernel.diagnostics().get(repaired.diagnostic_id);
+        const auto after = kernel.runtime_store_counts().value;
+        if (repaired.status == axiom::StatusCode::Ok || repaired.value || !report.value || !runtime || !after ||
+            kernel.object_count_total().value != objects || kernel.geometry_count().value != geometry ||
+            kernel.body_count().value != bodies || kernel.topology_version_next().value != next_version ||
+            query.faces_of_body(*source.value).value != faces || query.edges_of_body(*source.value).value != edges ||
+            after->mesh_records != runtime->mesh_records ||
+            after->tessellation_cache_entries != runtime->tessellation_cache_entries ||
+            after->face_tessellation_cache_entries != runtime->face_tessellation_cache_entries ||
+            after->curve_eval_cache_entries != runtime->curve_eval_cache_entries ||
+            after->surface_eval_cache_entries != runtime->surface_eval_cache_entries ||
+            after->tessellation_metrics.body_cache_hits != runtime->tessellation_metrics.body_cache_hits ||
+            after->tessellation_metrics.body_cache_misses != runtime->tessellation_metrics.body_cache_misses ||
+            after->tessellation_metrics.face_cache_hits != runtime->tessellation_metrics.face_cache_hits ||
+            after->tessellation_metrics.face_cache_misses != runtime->tessellation_metrics.face_cache_misses ||
+            kernel.eval_graph().is_invalid(*node.value).value != std::optional<bool>{false} ||
+            kernel.eval_graph().is_invalid(*consumer.value).value != std::optional<bool>{false} ||
+            kernel.eval_graph().recompute_count(*node.value).value != std::optional<std::uint64_t>{0} ||
+            std::none_of(report.value->issues.begin(),report.value->issues.end(),[](const auto& issue) {
+                return issue.code == axiom::diag_codes::kHealAutoRepairFailure &&
+                    issue.stage == "heal.auto_repair.planar.post_validate" && !issue.related_entities.empty() &&
+                    std::any_of(issue.numeric_evidence.begin(),issue.numeric_evidence.end(),[](const auto& value) {
+                        return value.name == "allocated_object_count" && value.value > 0 && std::isfinite(value.value);
+                    }) && std::all_of(issue.numeric_evidence.begin(),issue.numeric_evidence.end(),[](const auto& value) {
+                        return std::isfinite(value.value);
+                    });
+            })) return false;
+    }
+    // Retry the very same unmodified source after correcting the policy.
+    if (kernel.set_angular_tolerance(1e-6).status != axiom::StatusCode::Ok) return false;
+    const auto retry = kernel.repair().auto_repair(*source.value,axiom::RepairMode::Safe);
+    return retry.value && retry.value->output != *source.value &&
+        kernel.validate().validate_all(retry.value->output,axiom::ValidationMode::Strict).status == axiom::StatusCode::Ok &&
+        query.faces_of_body(*source.value).value == faces && query.edges_of_body(*source.value).value == edges;
+}
+
 // Validate a reconstructed cavity as two genuine, oppositely oriented closed
 // boundaries. This exercises Strict's cross-shell checks and trim validation.
 bool rebuilt_cavity_validation_regression() {
@@ -475,6 +766,14 @@ bool check_heal_failure_evidence_and_rollback() {
 }  // namespace
 
 int main() {
+    if (!planar_post_validation_rollback_regression()) {
+        std::cerr << "Stage 5 allocated planar postcondition rollback regression failed\n";
+        return 1;
+    }
+    if (!planar_import_repair_regression()) {
+        std::cerr << "Stage 5 planar repair independent reference regression failed\n";
+        return 1;
+    }
     if (!coplanar_self_intersection_regression()) {
         std::cerr << "coplanar mesh separation/overlap regression failed\n";
         return 1;

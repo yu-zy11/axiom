@@ -3701,7 +3701,32 @@ int main() {
     }
 
     auto replace_face_feature = kernel.modify().replace_face(*body.value, *face.value, *plane1.value);
-    auto repair_feature = kernel.repair().auto_repair(*body.value, axiom::RepairMode::Safe);
+    const auto repair_objects_before = kernel.object_count_total().value;
+    const auto repair_geometry_before = kernel.geometry_count().value;
+    const auto repair_faces_before = kernel.topology().query().faces_of_body(*body.value).value;
+    const auto rejected_open_repair = kernel.repair().auto_repair(*body.value, axiom::RepairMode::Safe);
+    const auto rejected_open_report = kernel.diagnostics().get(rejected_open_repair.diagnostic_id);
+    if (rejected_open_repair.status == axiom::StatusCode::Ok || rejected_open_repair.value ||
+        !rejected_open_report.value || kernel.object_count_total().value != repair_objects_before ||
+        kernel.geometry_count().value != repair_geometry_before ||
+        kernel.topology().query().faces_of_body(*body.value).value != repair_faces_before ||
+        std::none_of(rejected_open_report.value->issues.begin(), rejected_open_report.value->issues.end(), [](const auto& issue) {
+            return issue.code == axiom::diag_codes::kHealAutoRepairFailure &&
+                issue.stage == "heal.auto_repair.planar.extract" && !issue.related_entities.empty() &&
+                !issue.numeric_evidence.empty();
+        })) {
+        std::cerr << "expected one-face open-shell Safe repair to fail without synthetic geometry or source changes\n";
+        return 1;
+    }
+    const auto repair_source = kernel.primitives().box({5,5,5},2,3,4);
+    const auto repair_source_shells = repair_source.value
+        ? kernel.topology().query().shells_of_body(*repair_source.value) : axiom::Result<std::vector<axiom::ShellId>> {};
+    if (!repair_source.value || !repair_source_shells.value || repair_source_shells.value->size() != 1 ||
+        kernel.validate().validate_all(*repair_source.value, axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok) {
+        std::cerr << "expected closed six-face source for repair provenance regression\n";
+        return 1;
+    }
+    auto repair_feature = kernel.repair().auto_repair(*repair_source.value, axiom::RepairMode::Safe);
     if (replace_face_feature.status != axiom::StatusCode::Ok || !replace_face_feature.value.has_value() ||
         repair_feature.status != axiom::StatusCode::Ok || !repair_feature.value.has_value()) {
         std::cerr << "expected feature operations on topology body to succeed\n";
@@ -3729,7 +3754,7 @@ int main() {
     if (replace_feature_shells.status != axiom::StatusCode::Ok || !replace_feature_shells.value.has_value() ||
         replace_feature_shells.value->size() != 1 || replace_feature_shells.value->front().value != shell.value->value ||
         repair_feature_shells.status != axiom::StatusCode::Ok || !repair_feature_shells.value.has_value() ||
-        repair_feature_shells.value->size() != 1 || repair_feature_shells.value->front().value != shell.value->value ||
+        repair_feature_shells.value->size() != 1 || repair_feature_shells.value->front() != repair_source_shells.value->front() ||
         replace_feature_owned_shells.status != axiom::StatusCode::Ok || !replace_feature_owned_shells.value.has_value() ||
         repair_feature_owned_shells.status != axiom::StatusCode::Ok || !repair_feature_owned_shells.value.has_value() ||
         replace_feature_owned_faces.status != axiom::StatusCode::Ok || !replace_feature_owned_faces.value.has_value() ||

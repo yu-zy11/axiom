@@ -1740,79 +1740,98 @@ void append_issues_from_import_diag(
     }
 }
 
-BodyId run_post_import_validation_pipeline(const std::shared_ptr<detail::KernelState>& state, BodyId body_id,
-                                           const ImportOptions& options, const std::string& format_cn,
-                                           std::vector<Issue>& issues, std::vector<Warning>& warnings) {
-    BodyId result_body_id = body_id;
+Result<BodyId> run_post_import_validation_pipeline(
+    const std::shared_ptr<detail::KernelState>& state, BodyId body_id,
+    const ImportOptions& options, const std::string& format_cn,
+    std::vector<Issue>& issues, std::vector<Warning>& warnings) {
     if (!options.run_validation) {
-        return result_body_id;
+        return ok_result(body_id);
     }
-    auto validation_issue = detail::make_info_issue(diag_codes::kIoPostImportValidation, format_cn + " 导入后已触发自动验证");
+    auto validation_issue = detail::make_info_issue(
+        diag_codes::kIoPostImportValidation, format_cn + " 导入后已触发自动验证");
     validation_issue.related_entities = {body_id.value};
     validation_issue.stage = "io.post_import.validation";
     issues.push_back(std::move(validation_issue));
 
+    // The importer owns the allocation rollback. Keep rejected diagnostics, but
+    // never return an unresolved body as a successful import.
+    const auto reject = [&](StatusCode status, std::string_view stage,
+                             BodyId rejected_body, std::string message) {
+        auto issue = detail::make_error_issue(diag_codes::kIoImportFailure,
+                                              std::move(message));
+        issue.stage = stage;
+        issue.related_entities = {body_id.value};
+        if (rejected_body != body_id) {
+            issue.related_entities.push_back(rejected_body.value);
+        }
+        issue.numeric_evidence = complete_io_failure_evidence(
+            status, issue.related_entities.size(),
+            {{"validation_mode", static_cast<Scalar>(ValidationMode::Standard), "enum"},
+             {"repair_mode", static_cast<Scalar>(options.repair_mode), "enum"},
+             {"rollback_applied", 1.0, "bool"}});
+        issues.push_back(std::move(issue));
+        auto result = error_result<BodyId>(
+            status, state->create_diagnostic(format_cn + " 导入后验证/修复失败", issues));
+        result.warnings = warnings;
+        return result;
+    };
+
     ValidationService validation {state};
-    const auto validation_result = validation.validate_all(result_body_id, ValidationMode::Standard);
-    if (validation_result.status != StatusCode::Ok) {
-        append_issues_from_import_diag(
-            state.get(), issues, warnings, validation_result.diagnostic_id,
-            {result_body_id.value}, validation_result.status,
-            "io.post_import.validation",
-            {{"validation_mode", static_cast<Scalar>(ValidationMode::Standard), "enum"}});
-        if (validation_result.diagnostic_id.value == 0) {
-            const auto message = format_cn + " 导入后自动验证失败";
-            auto fallback_issue = detail::make_warning_issue(diag_codes::kIoImportFailure, message);
-            fallback_issue.related_entities = {result_body_id.value};
-            fallback_issue.stage = "io.post_import.validation";
-            fallback_issue.numeric_evidence = complete_io_failure_evidence(
-                validation_result.status, fallback_issue.related_entities.size(),
-                {{"validation_mode", static_cast<Scalar>(ValidationMode::Standard), "enum"}});
-            issues.push_back(std::move(fallback_issue));
-            warnings.push_back(Warning {std::string(diag_codes::kIoImportFailure), message});
-        }
-
-        if (options.auto_repair) {
-            const auto repair_mode =
-                options.repair_mode == RepairMode::ReportOnly ? RepairMode::Safe : options.repair_mode;
-            auto repair_mode_issue = detail::make_info_issue(
-                diag_codes::kIoPostImportRepairMode,
-                format_cn + " 导入后自动修复策略已启用: mode=" + std::to_string(static_cast<int>(repair_mode)));
-            repair_mode_issue.related_entities = {result_body_id.value};
-            repair_mode_issue.stage = "io.post_import.repair_mode";
-            issues.push_back(std::move(repair_mode_issue));
-
-            RepairService repair {state};
-            const auto repair_result = repair.auto_repair(result_body_id, repair_mode);
-            if (repair_result.status == StatusCode::Ok && repair_result.value.has_value()) {
-                result_body_id = repair_result.value->output;
-                append_issues_from_import_diag(
-                    state.get(), issues, warnings,
-                    repair_result.value->diagnostic_id,
-                    {body_id.value, result_body_id.value}, repair_result.status,
-                    "io.post_import.repair",
-                    {{"repair_mode", static_cast<Scalar>(repair_mode), "enum"}});
-
-                const auto repaired_validation = validation.validate_all(result_body_id, ValidationMode::Standard);
-                if (repaired_validation.status != StatusCode::Ok) {
-                    append_issues_from_import_diag(
-                        state.get(), issues, warnings,
-                        repaired_validation.diagnostic_id,
-                        {result_body_id.value}, repaired_validation.status,
-                        "io.post_import.post_validate",
-                        {{"validation_mode", static_cast<Scalar>(ValidationMode::Standard), "enum"},
-                         {"repair_mode", static_cast<Scalar>(repair_mode), "enum"}});
-                }
-            } else {
-                append_issues_from_import_diag(
-                    state.get(), issues, warnings, repair_result.diagnostic_id,
-                    {body_id.value}, repair_result.status,
-                    "io.post_import.repair",
-                    {{"repair_mode", static_cast<Scalar>(repair_mode), "enum"}});
-            }
-        }
+    const auto initial = validation.validate_all(body_id, ValidationMode::Standard);
+    if (initial.status == StatusCode::Ok) {
+        return ok_result(body_id);
     }
-    return result_body_id;
+    append_issues_from_import_diag(
+        state.get(), issues, warnings, initial.diagnostic_id,
+        {body_id.value}, initial.status, "io.post_import.validation",
+        {{"validation_mode", static_cast<Scalar>(ValidationMode::Standard), "enum"}});
+    if (!options.auto_repair || options.repair_mode == RepairMode::ReportOnly ||
+        options.repair_mode == RepairMode::SuggestOnly) {
+        return reject(initial.status, "io.post_import.validation", body_id,
+                      format_cn + " 导入后验证失败：未启用修改型修复，已撤销本次导入");
+    }
+
+    auto repair_mode_issue = detail::make_info_issue(
+        diag_codes::kIoPostImportRepairMode,
+        format_cn + " 导入后自动修复策略已启用: mode=" +
+            std::to_string(static_cast<int>(options.repair_mode)));
+    repair_mode_issue.related_entities = {body_id.value};
+    repair_mode_issue.stage = "io.post_import.repair_mode";
+    repair_mode_issue.numeric_evidence = {
+        {"repair_mode", static_cast<Scalar>(options.repair_mode), "enum"}};
+    issues.push_back(std::move(repair_mode_issue));
+
+    RepairService repair {state};
+    const auto repaired = repair.auto_repair(body_id, options.repair_mode);
+    append_issues_from_import_diag(
+        state.get(), issues, warnings, repaired.diagnostic_id,
+        {body_id.value}, repaired.status, "io.post_import.repair",
+        {{"repair_mode", static_cast<Scalar>(options.repair_mode), "enum"}});
+    if (repaired.status != StatusCode::Ok || !repaired.value.has_value()) {
+        const auto status = repaired.status == StatusCode::Ok
+                                ? StatusCode::OperationFailed : repaired.status;
+        return reject(status, "io.post_import.repair", body_id,
+                      format_cn + " 导入后修复失败，已撤销本次导入及派生模型");
+    }
+    const auto output = repaired.value->output;
+    const auto post = validation.validate_all(output, ValidationMode::Standard);
+    if (post.status != StatusCode::Ok) {
+        append_issues_from_import_diag(
+            state.get(), issues, warnings, post.diagnostic_id,
+            {output.value}, post.status, "io.post_import.post_validate",
+            {{"validation_mode", static_cast<Scalar>(ValidationMode::Standard), "enum"},
+             {"repair_mode", static_cast<Scalar>(options.repair_mode), "enum"}});
+        return reject(post.status, "io.post_import.post_validate", output,
+                      format_cn + " 导入后再验证失败，已撤销本次导入及派生模型");
+    }
+    auto post_issue = detail::make_info_issue(
+        diag_codes::kHealRepairValidated, format_cn + " 导入后修复结果已通过再验证");
+    post_issue.related_entities = {body_id.value, output.value};
+    post_issue.stage = "io.post_import.post_validate";
+    post_issue.numeric_evidence = {
+        {"validation_mode", static_cast<Scalar>(ValidationMode::Standard), "enum"}};
+    issues.push_back(std::move(post_issue));
+    return ok_result(output);
 }
 
 }  // namespace io_internal

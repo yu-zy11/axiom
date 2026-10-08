@@ -49,6 +49,7 @@ Result<BodyId> IOService::import_step(std::string_view path, const ImportOptions
                                     state_->create_diagnostic("STEP 标准实体交换未实现", std::move(issues)));
     }
 
+    IOImportBatchRollback rollback {*state_};
     const auto body_id = BodyId {state_->allocate_id()};
     detail::BodyRecord record;
     record.kind = detail::BodyKind::Imported;
@@ -63,11 +64,15 @@ Result<BodyId> IOService::import_step(std::string_view path, const ImportOptions
 
     std::vector<Issue> issues;
     std::vector<Warning> warnings;
-    const auto result_body_id = run_post_import_validation_pipeline(
+    const auto post_import = run_post_import_validation_pipeline(
         state_, body_id, options, std::string("STEP"), issues, warnings);
 
-    auto result = ok_result(result_body_id, state_->create_diagnostic("已导入STEP模型", std::move(issues)));
+    if (post_import.status != StatusCode::Ok || !post_import.value.has_value()) {
+        return post_import;
+    }
+    auto result = ok_result(*post_import.value, state_->create_diagnostic("已导入STEP模型", std::move(issues)));
     result.warnings = std::move(warnings);
+    rollback.commit();
     return result;
 }
 
@@ -211,16 +216,21 @@ Result<BodyId> IOService::import_axmjson(std::string_view path, const ImportOpti
         return std::move(*validation_failure);
     }
 
+    IOImportBatchRollback rollback {*state_};
     const auto body_id = BodyId {state_->allocate_id()};
     state_->bodies.emplace(body_id.value, record);
 
     std::vector<Issue> issues;
     std::vector<Warning> warnings;
-    const auto result_body_id = run_post_import_validation_pipeline(
+    const auto post_import = run_post_import_validation_pipeline(
         state_, body_id, options, std::string("AXMJSON"), issues, warnings);
 
-    auto result = ok_result(result_body_id, state_->create_diagnostic("已导入AXMJSON模型", std::move(issues)));
+    if (post_import.status != StatusCode::Ok || !post_import.value.has_value()) {
+        return post_import;
+    }
+    auto result = ok_result(*post_import.value, state_->create_diagnostic("已导入AXMJSON模型", std::move(issues)));
     result.warnings = std::move(warnings);
+    rollback.commit();
     return result;
 }
 
@@ -275,6 +285,7 @@ Result<BodyId> IOService::import_stl(std::string_view path, const ImportOptions&
                                   "STL 导入失败：存在退化三角形", "io.import.stl.validation");
     }
 
+    IOImportBatchRollback rollback {*state_};
     const auto body_id = BodyId {state_->allocate_id()};
     detail::BodyRecord record;
     record.kind = detail::BodyKind::Imported;
@@ -288,9 +299,13 @@ Result<BodyId> IOService::import_stl(std::string_view path, const ImportOptions&
 
     std::vector<Issue> issues;
     std::vector<Warning> warnings;
-    const auto result_body_id = run_post_import_validation_pipeline(state_, body_id, options, std::string("STL"), issues, warnings);
-    auto result = ok_result(result_body_id, state_->create_diagnostic("已导入STL模型", std::move(issues)));
+    const auto post_import = run_post_import_validation_pipeline(state_, body_id, options, std::string("STL"), issues, warnings);
+    if (post_import.status != StatusCode::Ok || !post_import.value.has_value()) {
+        return post_import;
+    }
+    auto result = ok_result(*post_import.value, state_->create_diagnostic("已导入STL模型", std::move(issues)));
     result.warnings = std::move(warnings);
+    rollback.commit();
     return result;
 }
 
@@ -345,6 +360,7 @@ Result<BodyId> IOService::import_gltf(std::string_view path, const ImportOptions
                                   "glTF 导入失败：存在退化三角形", "io.import.gltf.validation");
     }
 
+    IOImportBatchRollback rollback {*state_};
     const auto body_id = BodyId {state_->allocate_id()};
     detail::BodyRecord record;
     record.kind = detail::BodyKind::Imported;
@@ -358,9 +374,13 @@ Result<BodyId> IOService::import_gltf(std::string_view path, const ImportOptions
 
     std::vector<Issue> issues;
     std::vector<Warning> warnings;
-    const auto result_body_id = run_post_import_validation_pipeline(state_, body_id, options, std::string("glTF"), issues, warnings);
-    auto result = ok_result(result_body_id, state_->create_diagnostic("已导入glTF模型", std::move(issues)));
+    const auto post_import = run_post_import_validation_pipeline(state_, body_id, options, std::string("glTF"), issues, warnings);
+    if (post_import.status != StatusCode::Ok || !post_import.value.has_value()) {
+        return post_import;
+    }
+    auto result = ok_result(*post_import.value, state_->create_diagnostic("已导入glTF模型", std::move(issues)));
     result.warnings = std::move(warnings);
+    rollback.commit();
     return result;
 }
 
@@ -445,14 +465,19 @@ Result<BodyId> IOService::import_iges(std::string_view path, const ImportOptions
         return std::move(*validation_failure);
     }
 
+    IOImportBatchRollback rollback {*state_};
     const auto body_id = BodyId {state_->allocate_id()};
     state_->bodies.emplace(body_id.value, record);
 
     std::vector<Issue> issues;
     std::vector<Warning> warnings;
-    const auto result_body_id = run_post_import_validation_pipeline(state_, body_id, options, std::string("IGES"), issues, warnings);
-    auto result = ok_result(result_body_id, state_->create_diagnostic("已导入IGES模型", std::move(issues)));
+    const auto post_import = run_post_import_validation_pipeline(state_, body_id, options, std::string("IGES"), issues, warnings);
+    if (post_import.status != StatusCode::Ok || !post_import.value.has_value()) {
+        return post_import;
+    }
+    auto result = ok_result(*post_import.value, state_->create_diagnostic("已导入IGES模型", std::move(issues)));
     result.warnings = std::move(warnings);
+    rollback.commit();
     return result;
 }
 
@@ -523,14 +548,19 @@ Result<BodyId> IOService::import_brep(std::string_view path, const ImportOptions
         return std::move(*validation_failure);
     }
 
+    IOImportBatchRollback rollback {*state_};
     const auto body_id = BodyId {state_->allocate_id()};
     state_->bodies.emplace(body_id.value, record);
 
     std::vector<Issue> issues;
     std::vector<Warning> warnings;
-    const auto result_body_id = run_post_import_validation_pipeline(state_, body_id, options, std::string("BREP"), issues, warnings);
-    auto result = ok_result(result_body_id, state_->create_diagnostic("已导入BREP模型", std::move(issues)));
+    const auto post_import = run_post_import_validation_pipeline(state_, body_id, options, std::string("BREP"), issues, warnings);
+    if (post_import.status != StatusCode::Ok || !post_import.value.has_value()) {
+        return post_import;
+    }
+    auto result = ok_result(*post_import.value, state_->create_diagnostic("已导入BREP模型", std::move(issues)));
     result.warnings = std::move(warnings);
+    rollback.commit();
     return result;
 }
 
@@ -576,6 +606,7 @@ Result<BodyId> IOService::import_obj(std::string_view path, const ImportOptions&
     mesh.tessellation_strategy = "io_import_obj";
     mesh.bbox = detail::mesh_bbox_from_vertices(mesh.vertices);
 
+    IOImportBatchRollback rollback {*state_};
     const auto body_id = BodyId {state_->allocate_id()};
     detail::BodyRecord record;
     record.kind = detail::BodyKind::Imported;
@@ -589,9 +620,13 @@ Result<BodyId> IOService::import_obj(std::string_view path, const ImportOptions&
 
     std::vector<Issue> issues;
     std::vector<Warning> warnings;
-    const auto result_body_id = run_post_import_validation_pipeline(state_, body_id, options, std::string("OBJ"), issues, warnings);
-    auto result = ok_result(result_body_id, state_->create_diagnostic("已导入OBJ模型", std::move(issues)));
+    const auto post_import = run_post_import_validation_pipeline(state_, body_id, options, std::string("OBJ"), issues, warnings);
+    if (post_import.status != StatusCode::Ok || !post_import.value.has_value()) {
+        return post_import;
+    }
+    auto result = ok_result(*post_import.value, state_->create_diagnostic("已导入OBJ模型", std::move(issues)));
     result.warnings = std::move(warnings);
+    rollback.commit();
     return result;
 }
 
@@ -665,6 +700,7 @@ Result<BodyId> IOService::import_3mf(std::string_view path, const ImportOptions&
     mesh.tessellation_strategy = "io_import_3mf";
     mesh.bbox = detail::mesh_bbox_from_vertices(mesh.vertices);
 
+    IOImportBatchRollback rollback {*state_};
     const auto body_id = BodyId {state_->allocate_id()};
     detail::BodyRecord record;
     record.kind = detail::BodyKind::Imported;
@@ -678,9 +714,13 @@ Result<BodyId> IOService::import_3mf(std::string_view path, const ImportOptions&
 
     std::vector<Issue> issues;
     std::vector<Warning> warnings;
-    const auto result_body_id = run_post_import_validation_pipeline(state_, body_id, options, std::string("3MF"), issues, warnings);
-    auto result = ok_result(result_body_id, state_->create_diagnostic("已导入3MF模型", std::move(issues)));
+    const auto post_import = run_post_import_validation_pipeline(state_, body_id, options, std::string("3MF"), issues, warnings);
+    if (post_import.status != StatusCode::Ok || !post_import.value.has_value()) {
+        return post_import;
+    }
+    auto result = ok_result(*post_import.value, state_->create_diagnostic("已导入3MF模型", std::move(issues)));
     result.warnings = std::move(warnings);
+    rollback.commit();
     return result;
 }
 
