@@ -56,8 +56,20 @@ int main() {
         const auto faces = feature_kernel.topology().query().faces_of_body(*solid.value);
         const auto edges = feature_kernel.topology().query().edges_of_body(*solid.value);
         const auto mass = feature_kernel.query().mass_properties(*solid.value);
+        // S3-EXIT facade chain: midpoint scale is .75, so the triangle
+        // section is 6*.75^2. The upper vertex at (0,0,3) is one unit away.
+        const auto section = feature_kernel.query().section_detailed(*solid.value,{{0,0,1.5},{0,0,1}});
+        const auto nearest = feature_kernel.query().closest_point(*solid.value,{0,0,4});
+        const auto remote = feature_kernel.primitives().box({0,0,4},1,1,1);
+        const auto distance = remote.value ? feature_kernel.query().min_distance(*solid.value,*remote.value) : axiom::Result<axiom::Scalar>{};
+        const auto mesh = feature_kernel.convert().brep_to_mesh(*solid.value,{});
+        const auto mesh_report = mesh.value ? feature_kernel.convert().inspect_mesh(*mesh.value) : axiom::Result<axiom::MeshInspectionReport>{};
         if (!faces.value || faces.value->size() != 8 || !edges.value || edges.value->size() != 12 ||
             !mass.value || std::abs(mass.value->volume - 10.5) > 1e-9 ||
+            !section.value || section.value->triangles.empty() || std::abs(section.value->area - 3.375) > 1e-9 ||
+            !nearest.value || !nearest.value->nearest_boundary || std::abs(nearest.value->nearest_boundary->distance - 1) > 1e-9 ||
+            !distance.value || std::abs(*distance.value - 1) > 1e-9 || !mesh_report.value ||
+            mesh_report.value->triangle_count == 0 || mesh_report.value->tessellation_strategy != "owned_topo_welded" ||
             feature_kernel.validate().validate_all(*solid.value, axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok) {
             std::cerr << "scaled extrusion topology/mass/validation failed\n";
             return 1;

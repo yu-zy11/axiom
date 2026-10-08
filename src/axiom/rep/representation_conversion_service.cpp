@@ -137,6 +137,118 @@ Result<std::vector<Scalar>> RepresentationService::distances_to_body_batch(
     return ok_result(std::move(out), state_->create_diagnostic("已完成批量点到体距离计算"));
 }
 
+namespace {
+
+Result<MeshId> tessellation_failure(detail::KernelState& state, std::string_view stage,
+                                     std::string message, std::vector<std::uint64_t> entities,
+                                     StatusCode status = StatusCode::OperationFailed) {
+    auto issue = detail::make_error_issue(diag_codes::kTesFailure, std::move(message), std::move(entities));
+    issue.stage = std::string(stage);
+    return error_result<MeshId>(status, state.create_diagnostic("BRep 转网格失败", {std::move(issue)}));
+}
+
+// All three owned-boundary entry points stage the face meshes before publication.
+// A failed later face cannot leave early-face records, cache keys or IDs behind.
+Result<MeshId> tessellate_owned_shells(detail::KernelState& state, BodyId body_id,
+                                      std::span<const ShellId> shells, std::span<const FaceId> dirty_faces,
+                                      const TessellationOptions& options, std::string_view strategy) {
+    detail::MeshRecord assembled;
+    assembled.source_body = body_id;
+    assembled.label = strategy == "owned_topo_welded" ? "mesh_from_brep_owned_faces"
+        : strategy == "local_faces_welded" ? "mesh_from_brep_local_faces" : "mesh_from_brep_shell";
+    std::vector<std::pair<std::string, detail::MeshRecord>> pending;
+    std::uint64_t hits = 0, misses = 0, stale = 0;
+    const auto& body = state.bodies.at(body_id.value);
+    for (const auto shell_id : shells) {
+        const auto shell = state.shells.find(shell_id.value);
+        if (shell == state.shells.end() || shell->second.faces.empty()) {
+            return tessellation_failure(state, "rep.tessellation.topology", "owned 壳不存在或为空",
+                                         {body_id.value, shell_id.value});
+        }
+        for (const auto face_id : shell->second.faces) {
+            const auto face = state.faces.find(face_id.value);
+            if (face == state.faces.end()) {
+                return tessellation_failure(state, "rep.tessellation.topology", "owned 面不存在",
+                                             {body_id.value, shell_id.value, face_id.value});
+            }
+            // Analytic primitives own compatibility shells, not their physical
+            // curved boundaries. An edit cannot recover the creation mesh from them.
+            if (face->second.mass_boundary_proxy && !body.primitive_tessellation_valid &&
+                (body.kind == detail::BodyKind::Sphere || body.kind == detail::BodyKind::Cylinder ||
+                 body.kind == detail::BodyKind::Cone || body.kind == detail::BodyKind::Torus)) {
+                return tessellation_failure(state, "rep.tessellation.support", "已编辑解析体的代理壳不能恢复原生网格",
+                                             {body_id.value, shell_id.value, face_id.value}, StatusCode::NotImplemented);
+            }
+            const auto support = state.surfaces.find(face->second.surface_id.value);
+            if ((body.kind == detail::BodyKind::Box || body.kind == detail::BodyKind::Wedge ||
+                 (body.kind == detail::BodyKind::Sweep && body.sweep_polyhedral_mass_valid)) &&
+                support != state.surfaces.end() && support->second.kind != detail::SurfaceKind::Plane) {
+                return tessellation_failure(state, "rep.tessellation.support", "Stage 3 多面体已失去平面支撑",
+                                             {body_id.value, shell_id.value, face_id.value}, StatusCode::NotImplemented);
+            }
+            const auto key = detail::face_tessellation_cache_key(state, face_id, options)
+                + "|owner=" + std::to_string(body_id.value);
+            const auto cached = state.face_tessellation_cache.find(key);
+            const detail::MeshRecord* mesh = nullptr;
+            const bool dirty = std::any_of(dirty_faces.begin(), dirty_faces.end(),
+                                           [face_id](FaceId id) { return id == face_id; });
+            if (!dirty && cached != state.face_tessellation_cache.end()) {
+                const auto record = state.meshes.find(cached->second.value);
+                if (record != state.meshes.end() && record->second.source_body == body_id) {
+                    mesh = &record->second;
+                    ++hits;
+                } else {
+                    ++stale;
+                }
+            }
+            if (!mesh) {
+                auto face_mesh = detail::tessellate_face(state, face_id, options);
+                if (face_mesh.vertices.empty() || face_mesh.indices.empty()) {
+                    return tessellation_failure(state, "rep.tessellation.face", "owned 面不能按当前支撑和边界三角化",
+                                                 {body_id.value, shell_id.value, face_id.value});
+                }
+                face_mesh.source_body = body_id;
+                face_mesh.label = "mesh_face_" + std::to_string(face_id.value);
+                pending.emplace_back(key, std::move(face_mesh));
+                mesh = &pending.back().second;
+                ++misses;
+            }
+            if (detail::has_out_of_range_indices(mesh->vertices, mesh->indices) ||
+                mesh->indices.size() % 3 != 0 ||
+                assembled.vertices.size() + mesh->vertices.size() > std::numeric_limits<Index>::max()) {
+                return tessellation_failure(state, "rep.tessellation.assembly", "面网格索引或组装规模无效",
+                                             {body_id.value, shell_id.value, face_id.value});
+            }
+            const auto base = static_cast<Index>(assembled.vertices.size());
+            assembled.vertices.insert(assembled.vertices.end(), mesh->vertices.begin(), mesh->vertices.end());
+            if (options.compute_normals)
+                assembled.normals.insert(assembled.normals.end(), mesh->normals.begin(), mesh->normals.end());
+            assembled.texcoords.insert(assembled.texcoords.end(), mesh->texcoords.begin(), mesh->texcoords.end());
+            for (const auto index : mesh->indices) assembled.indices.push_back(base + index);
+        }
+    }
+    if (assembled.vertices.empty() || assembled.indices.empty()) {
+        return tessellation_failure(state, "rep.tessellation.assembly", "owned 面网格组装结果为空", {body_id.value});
+    }
+    detail::weld_mesh_vertices(assembled, options);
+    assembled.bbox = detail::mesh_bbox_from_vertices(assembled.vertices);
+    assembled.tessellation_budget_digest = detail::tessellation_budget_digest_json(options);
+    assembled.tessellation_strategy = strategy;
+    for (auto& [key, mesh] : pending) {
+        const auto id = MeshId{state.allocate_id()};
+        state.meshes.emplace(id.value, std::move(mesh));
+        state.face_tessellation_cache[key] = id;
+    }
+    state.tessellation_cache_stats.face_cache_hits += hits;
+    state.tessellation_cache_stats.face_cache_misses += misses;
+    state.tessellation_cache_stats.face_cache_stale_evictions += stale;
+    const auto id = MeshId{state.allocate_id()};
+    state.meshes.emplace(id.value, std::move(assembled));
+    return ok_result(id, state.create_diagnostic("已完成 owned 拓扑面转网格"));
+}
+
+}  // namespace
+
 RepresentationConversionService::RepresentationConversionService(std::shared_ptr<detail::KernelState> state) : state_(std::move(state)) {}
 
 Result<MeshId> RepresentationConversionService::brep_to_mesh(BodyId body_id, const TessellationOptions& options) {
@@ -167,153 +279,81 @@ Result<MeshId> RepresentationConversionService::brep_to_mesh(BodyId body_id, con
             }
         }
     }
-    const auto cache_key = detail::tessellation_cache_key(body, options);
+    const auto cache_key = detail::tessellation_cache_key(*state_, body_id, options);
     const auto cache_it = state_->tessellation_cache.find(cache_key);
     if (cache_it != state_->tessellation_cache.end()) {
         const auto mesh_it = state_->meshes.find(cache_it->second.value);
-        if (mesh_it != state_->meshes.end()) {
+        if (mesh_it != state_->meshes.end() && mesh_it->second.source_body == body_id) {
             ++state_->tessellation_cache_stats.body_cache_hits;
             return ok_result(cache_it->second, state_->create_diagnostic("已命中三角化缓存"));
         }
-        // stale cache entry
-        ++state_->tessellation_cache_stats.body_cache_stale_evictions;
-        state_->tessellation_cache.erase(cache_it);
     }
-    ++state_->tessellation_cache_stats.body_cache_misses;
+    const bool stale_cache = cache_it != state_->tessellation_cache.end();
 
     detail::MeshRecord mesh;
     mesh.source_body = body_id;
 
-    const auto is_analytic_primitive =
-        body.kind == detail::BodyKind::Box ||
-        body.kind == detail::BodyKind::Sphere ||
-        body.kind == detail::BodyKind::Cylinder ||
-        body.kind == detail::BodyKind::Cone ||
-        body.kind == detail::BodyKind::Torus;
-
-    // Prefer Topo-driven tessellation when owned topology exists (industrial path for derived bodies),
-    // but keep analytic primitive tessellation for primitives (it is curvature-sensitive and honors options).
-    if (!is_analytic_primitive && !body.shells.empty()) {
-        detail::MeshRecord assembled;
-        assembled.source_body = body_id;
-        assembled.label = "mesh_from_brep_owned_faces";
-        assembled.bbox = body.bbox;
-
-        for (const auto shell_id : body.shells) {
-            const auto shell_it = state_->shells.find(shell_id.value);
-            if (shell_it == state_->shells.end()) {
-                continue;
-            }
-            for (const auto face_id : shell_it->second.faces) {
-                const auto face_key = detail::face_tessellation_cache_key(*state_, face_id, options);
-                auto cache_it = state_->face_tessellation_cache.find(face_key);
-                if (cache_it != state_->face_tessellation_cache.end()) {
-                    const auto mesh_it = state_->meshes.find(cache_it->second.value);
-                    if (mesh_it == state_->meshes.end()) {
-                        ++state_->tessellation_cache_stats.face_cache_stale_evictions;
-                        state_->face_tessellation_cache.erase(cache_it);
-                        cache_it = state_->face_tessellation_cache.end();
-                    }
-                }
-
-                MeshId face_mesh_id{};
-                if (cache_it != state_->face_tessellation_cache.end()) {
-                    ++state_->tessellation_cache_stats.face_cache_hits;
-                    face_mesh_id = cache_it->second;
-                } else {
-                    ++state_->tessellation_cache_stats.face_cache_misses;
-                    auto face_mesh = detail::tessellate_face(*state_, face_id, options);
-                    if (face_mesh.vertices.empty() || face_mesh.indices.empty()) {
-                        // If face tessellation fails, fall back to analytic primitive or bbox proxy below.
-                        assembled.vertices.clear();
-                        assembled.indices.clear();
-                        goto FALLBACK_ANALYTIC_OR_BBOX;
-                    }
-                    face_mesh.source_body = body_id;
-                    face_mesh.label = "mesh_face_" + std::to_string(face_id.value);
-                    const auto new_id = MeshId{state_->allocate_id()};
-                    state_->meshes.emplace(new_id.value, std::move(face_mesh));
-                    state_->face_tessellation_cache[face_key] = new_id;
-                    face_mesh_id = new_id;
-                }
-
-                const auto face_mesh_it = state_->meshes.find(face_mesh_id.value);
-                if (face_mesh_it == state_->meshes.end()) {
-                    assembled.vertices.clear();
-                    assembled.indices.clear();
-                    goto FALLBACK_ANALYTIC_OR_BBOX;
-                }
-                const auto& fm = face_mesh_it->second;
-                const auto base = static_cast<Index>(assembled.vertices.size());
-                assembled.vertices.insert(assembled.vertices.end(), fm.vertices.begin(), fm.vertices.end());
-                if (options.compute_normals && !fm.normals.empty()) {
-                    assembled.normals.insert(assembled.normals.end(), fm.normals.begin(), fm.normals.end());
-                }
-                if (!fm.texcoords.empty()) {
-                    assembled.texcoords.insert(assembled.texcoords.end(), fm.texcoords.begin(), fm.texcoords.end());
-                }
-                assembled.indices.reserve(assembled.indices.size() + fm.indices.size());
-                for (const auto idx : fm.indices) {
-                    assembled.indices.push_back(base + idx);
-                }
-            }
+    // Creation parameters remain usable only while the primitive certificate is
+    // valid. Every other owned body is tessellated from its current boundary.
+    if (!body.primitive_tessellation_valid && !body.shells.empty()) {
+        const auto result = tessellate_owned_shells(*state_, body_id, body.shells, {}, options, "owned_topo_welded");
+        if (result.value) {
+            state_->tessellation_cache[cache_key] = *result.value;
+            ++state_->tessellation_cache_stats.body_cache_misses;
+            if (stale_cache) ++state_->tessellation_cache_stats.body_cache_stale_evictions;
         }
-
-        if (!assembled.vertices.empty() && !assembled.indices.empty()) {
-            // Improve connectivity across faces.
-            detail::weld_mesh_vertices(assembled, options);
-            assembled.tessellation_budget_digest = tess_budget_digest;
-            assembled.tessellation_strategy = "owned_topo_welded";
-            mesh = std::move(assembled);
-        } else {
-            // no usable faces, fall back
-            goto FALLBACK_ANALYTIC_OR_BBOX;
-        }
-    } else {
-FALLBACK_ANALYTIC_OR_BBOX:
-        switch (body.kind) {
-            case detail::BodyKind::Box:
-                mesh = detail::tessellate_box(body, options);
-                mesh.tessellation_strategy = "primitive_box";
-                break;
-            case detail::BodyKind::Sphere:
-                mesh = detail::tessellate_sphere(body, options);
-                mesh.tessellation_strategy = "primitive_sphere";
-                break;
-            case detail::BodyKind::Cylinder:
-                mesh = detail::tessellate_cylinder(body, options);
-                mesh.tessellation_strategy = "primitive_cylinder";
-                break;
-            case detail::BodyKind::Cone:
-                mesh = detail::tessellate_cone(body, options);
-                mesh.tessellation_strategy = "primitive_cone";
-                break;
-            case detail::BodyKind::Torus:
-                mesh = detail::tessellate_torus(body, options);
-                mesh.tessellation_strategy = "primitive_torus";
-                break;
-            default: {
-                // Conservative fallback: bbox proxy mesh (keeps pipeline alive).
-                const auto slices_per_face = detail::tessellation_slices_per_face(options);
-                mesh.label = "mesh_from_brep_bbox_proxy";
-                mesh.tessellation_strategy = "bbox_proxy";
-                mesh.bbox = body.bbox;
-                mesh.vertices = detail::bbox_corners(body.bbox);
-                mesh.indices = detail::triangulate_bbox(slices_per_face);
-                if (options.compute_normals) {
-                    mesh.normals.assign(mesh.vertices.size(), Vec3{0.0, 0.0, 1.0});
-                }
-                mesh.texcoords.assign(mesh.vertices.size(), Point2{0.0, 0.0});
-                break;
-            }
-        }
-        mesh.tessellation_budget_digest = tess_budget_digest;
+        return result;
     }
+    if (!body.primitive_tessellation_valid &&
+        (body.kind == detail::BodyKind::Box || body.kind == detail::BodyKind::Sphere ||
+         body.kind == detail::BodyKind::Cylinder || body.kind == detail::BodyKind::Cone ||
+         body.kind == detail::BodyKind::Torus || body.kind == detail::BodyKind::Sweep)) {
+        return tessellation_failure(*state_, "rep.tessellation.topology", "建模体缺少当前 owned 边界", {body_id.value});
+    }
+    switch (body.kind) {
+        case detail::BodyKind::Box:
+            mesh = detail::tessellate_box(body, options);
+            mesh.tessellation_strategy = "primitive_box";
+            break;
+        case detail::BodyKind::Sphere:
+            mesh = detail::tessellate_sphere(body, options);
+            mesh.tessellation_strategy = "primitive_sphere";
+            break;
+        case detail::BodyKind::Cylinder:
+            mesh = detail::tessellate_cylinder(body, options);
+            mesh.tessellation_strategy = "primitive_cylinder";
+            break;
+        case detail::BodyKind::Cone:
+            mesh = detail::tessellate_cone(body, options);
+            mesh.tessellation_strategy = "primitive_cone";
+            break;
+        case detail::BodyKind::Torus:
+            mesh = detail::tessellate_torus(body, options);
+            mesh.tessellation_strategy = "primitive_torus";
+            break;
+        default: {
+            // Legacy metadata-only bodies retain their explicit display proxy.
+            const auto slices_per_face = detail::tessellation_slices_per_face(options);
+            mesh.label = "mesh_from_brep_bbox_proxy";
+            mesh.tessellation_strategy = "bbox_proxy";
+            mesh.bbox = body.bbox;
+            mesh.vertices = detail::bbox_corners(body.bbox);
+            mesh.indices = detail::triangulate_bbox(slices_per_face);
+            if (options.compute_normals) {
+                mesh.normals.assign(mesh.vertices.size(), Vec3{0.0, 0.0, 1.0});
+            }
+            mesh.texcoords.assign(mesh.vertices.size(), Point2{0.0, 0.0});
+            break;
+        }
+    }
+    mesh.tessellation_budget_digest = tess_budget_digest;
     mesh.source_body = body_id;
 
     const auto id = MeshId {state_->allocate_id()};
     state_->meshes.emplace(id.value, std::move(mesh));
-    state_->tessellation_cache.emplace(cache_key, id);
+    state_->tessellation_cache[cache_key] = id;
+    ++state_->tessellation_cache_stats.body_cache_misses;
+    if (stale_cache) ++state_->tessellation_cache_stats.body_cache_stale_evictions;
     return ok_result(id, state_->create_diagnostic("已完成BRep转网格"));
 }
 
@@ -334,7 +374,6 @@ Result<MeshId> RepresentationConversionService::brep_to_mesh_local(
             *state_, diag_codes::kCoreParameterOutOfRange,
             "局部BRep转网格失败：三角化误差参数必须为正数", "局部BRep转网格失败");
     }
-    const auto tess_budget_digest = detail::tessellation_budget_digest_json(options);
 
     // If body has no owned topology, fallback to full tessellation.
     const auto body_it = state_->bodies.find(body_id.value);
@@ -367,85 +406,8 @@ Result<MeshId> RepresentationConversionService::brep_to_mesh_local(
         }
     }
 
-    // Build (or reuse) per-face meshes, then assemble.
-    detail::MeshRecord assembled;
-    assembled.source_body = body_id;
-    assembled.label = "mesh_from_brep_local_faces";
-    assembled.bbox = body_it->second.bbox;
-
-    auto is_dirty = [&](FaceId f) {
-        return std::any_of(dirty_faces.begin(), dirty_faces.end(),
-                           [f](FaceId d) { return d.value == f.value; });
-    };
-
-    for (const auto shell_id : body_it->second.shells) {
-        const auto shell_it = state_->shells.find(shell_id.value);
-        if (shell_it == state_->shells.end()) continue;
-        for (const auto face_id : shell_it->second.faces) {
-            const auto face_key = detail::face_tessellation_cache_key(*state_, face_id, options);
-            auto cache_it = state_->face_tessellation_cache.find(face_key);
-            bool need_rebuild = is_dirty(face_id);
-            if (!need_rebuild && cache_it != state_->face_tessellation_cache.end()) {
-                const auto mesh_it = state_->meshes.find(cache_it->second.value);
-                if (mesh_it != state_->meshes.end()) {
-                    // reuse cached face mesh
-                } else {
-                    ++state_->tessellation_cache_stats.face_cache_stale_evictions;
-                    state_->face_tessellation_cache.erase(cache_it);
-                    cache_it = state_->face_tessellation_cache.end();
-                }
-            }
-
-            MeshId face_mesh_id{};
-            if (!need_rebuild && cache_it != state_->face_tessellation_cache.end()) {
-                ++state_->tessellation_cache_stats.face_cache_hits;
-                face_mesh_id = cache_it->second;
-            } else {
-                ++state_->tessellation_cache_stats.face_cache_misses;
-                auto face_mesh = detail::tessellate_face(*state_, face_id, options);
-                if (face_mesh.vertices.empty() || face_mesh.indices.empty()) {
-                    // If we can't tessellate the face boundary, fallback to full body mesh.
-                    return brep_to_mesh(body_id, options);
-                }
-                face_mesh.source_body = body_id;
-                face_mesh.label = "mesh_face_" + std::to_string(face_id.value);
-                const auto new_id = MeshId{state_->allocate_id()};
-                state_->meshes.emplace(new_id.value, std::move(face_mesh));
-                state_->face_tessellation_cache[face_key] = new_id;
-                face_mesh_id = new_id;
-            }
-
-            const auto face_mesh_it = state_->meshes.find(face_mesh_id.value);
-            if (face_mesh_it == state_->meshes.end()) {
-                return brep_to_mesh(body_id, options);
-            }
-            const auto& fm = face_mesh_it->second;
-            const auto base = static_cast<Index>(assembled.vertices.size());
-            assembled.vertices.insert(assembled.vertices.end(), fm.vertices.begin(), fm.vertices.end());
-            if (options.compute_normals && !fm.normals.empty()) {
-                assembled.normals.insert(assembled.normals.end(), fm.normals.begin(), fm.normals.end());
-            }
-            if (!fm.texcoords.empty()) {
-                assembled.texcoords.insert(assembled.texcoords.end(), fm.texcoords.begin(), fm.texcoords.end());
-            }
-            assembled.indices.reserve(assembled.indices.size() + fm.indices.size());
-            for (const auto idx : fm.indices) {
-                assembled.indices.push_back(base + idx);
-            }
-        }
-    }
-
-    if (assembled.vertices.empty() || assembled.indices.empty()) {
-        return brep_to_mesh(body_id, options);
-    }
-
-    detail::weld_mesh_vertices(assembled, options);
-    assembled.tessellation_budget_digest = tess_budget_digest;
-    assembled.tessellation_strategy = "local_faces_welded";
-
-    const auto out_id = MeshId{state_->allocate_id()};
-    state_->meshes.emplace(out_id.value, std::move(assembled));
-    return ok_result(out_id, state_->create_diagnostic("已完成局部BRep转网格"));
+    return tessellate_owned_shells(*state_, body_id, body_it->second.shells, dirty_faces,
+                                   options, "local_faces_welded");
 }
 
 Result<MeshId> RepresentationConversionService::brep_to_mesh_shell(BodyId body_id, ShellId shell_id,
@@ -481,82 +443,8 @@ Result<MeshId> RepresentationConversionService::brep_to_mesh_shell(BodyId body_i
             *state_, diag_codes::kCoreParameterOutOfRange,
             "壳级BRep转网格失败：壳无有效拓扑面", "壳级BRep转网格失败");
     }
-    const auto tess_budget_digest = detail::tessellation_budget_digest_json(options);
-
-    detail::MeshRecord assembled;
-    assembled.source_body = body_id;
-    assembled.label = "mesh_from_brep_shell";
-    assembled.bbox = body.bbox;
-
-    for (const auto face_id : shell_it->second.faces) {
-        const auto face_key = detail::face_tessellation_cache_key(*state_, face_id, options);
-        auto cache_it = state_->face_tessellation_cache.find(face_key);
-        if (cache_it != state_->face_tessellation_cache.end()) {
-            const auto mesh_it = state_->meshes.find(cache_it->second.value);
-            if (mesh_it == state_->meshes.end()) {
-                ++state_->tessellation_cache_stats.face_cache_stale_evictions;
-                state_->face_tessellation_cache.erase(cache_it);
-                cache_it = state_->face_tessellation_cache.end();
-            }
-        }
-
-        MeshId face_mesh_id{};
-        if (cache_it != state_->face_tessellation_cache.end()) {
-            ++state_->tessellation_cache_stats.face_cache_hits;
-            face_mesh_id = cache_it->second;
-        } else {
-            ++state_->tessellation_cache_stats.face_cache_misses;
-            auto face_mesh = detail::tessellate_face(*state_, face_id, options);
-            if (face_mesh.vertices.empty() || face_mesh.indices.empty()) {
-                return detail::failed_result<MeshId>(
-                    *state_, StatusCode::OperationFailed, diag_codes::kTesFailure,
-                    "壳级BRep转网格失败：某个拓扑面无法三角化", "壳级BRep转网格失败",
-                    {body_id.value, shell_id.value, face_id.value});
-            }
-            face_mesh.source_body = body_id;
-            face_mesh.label = "mesh_face_" + std::to_string(face_id.value);
-            const auto new_id = MeshId{state_->allocate_id()};
-            state_->meshes.emplace(new_id.value, std::move(face_mesh));
-            state_->face_tessellation_cache[face_key] = new_id;
-            face_mesh_id = new_id;
-        }
-
-        const auto face_mesh_it = state_->meshes.find(face_mesh_id.value);
-        if (face_mesh_it == state_->meshes.end()) {
-            return detail::failed_result<MeshId>(
-                *state_, StatusCode::OperationFailed, diag_codes::kTesFailure,
-                "壳级BRep转网格失败：面网格记录丢失", "壳级BRep转网格失败",
-                {body_id.value, shell_id.value, face_id.value});
-        }
-        const auto& fm = face_mesh_it->second;
-        const auto base = static_cast<Index>(assembled.vertices.size());
-        assembled.vertices.insert(assembled.vertices.end(), fm.vertices.begin(), fm.vertices.end());
-        if (options.compute_normals && !fm.normals.empty()) {
-            assembled.normals.insert(assembled.normals.end(), fm.normals.begin(), fm.normals.end());
-        }
-        if (!fm.texcoords.empty()) {
-            assembled.texcoords.insert(assembled.texcoords.end(), fm.texcoords.begin(), fm.texcoords.end());
-        }
-        assembled.indices.reserve(assembled.indices.size() + fm.indices.size());
-        for (const auto idx : fm.indices) {
-            assembled.indices.push_back(base + idx);
-        }
-    }
-
-    if (assembled.vertices.empty() || assembled.indices.empty()) {
-        return detail::failed_result<MeshId>(
-            *state_, StatusCode::OperationFailed, diag_codes::kTesFailure,
-            "壳级BRep转网格失败：组装结果为空", "壳级BRep转网格失败",
-            {body_id.value, shell_id.value});
-    }
-
-    detail::weld_mesh_vertices(assembled, options);
-    assembled.tessellation_budget_digest = tess_budget_digest;
-    assembled.tessellation_strategy = "shell_faces_welded";
-
-    const auto out_id = MeshId{state_->allocate_id()};
-    state_->meshes.emplace(out_id.value, std::move(assembled));
-    return ok_result(out_id, state_->create_diagnostic("已完成壳级BRep转网格"));
+    return tessellate_owned_shells(*state_, body_id, std::span<const ShellId>(&shell_id, 1), {},
+                                   options, "shell_faces_welded");
 }
 
 Result<BodyId> RepresentationConversionService::mesh_to_brep(MeshId mesh_id) {

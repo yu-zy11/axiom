@@ -520,6 +520,22 @@ Result<BodyShellAnalysis> analyze_body_shells(detail::KernelState &state,
         state, diag_codes::kCoreInvalidHandle,
         "体闭壳空间关系查询失败：目标体不存在", "体闭壳空间关系查询失败");
   }
+  // Several older body factories own a planar bbox shell even though their
+  // represented geometry is curved or still a modelling placeholder. Such a
+  // shell is not evidence of a real polyhedron. Never integrate or query it as
+  // the represented solid. User-authored Generic topology is checked below.
+  const auto &body = body_it->second;
+  const bool real_polyhedron = body.rep_kind == RepKind::ExactBRep &&
+      (body.kind == detail::BodyKind::Generic || body.kind == detail::BodyKind::Box ||
+       body.kind == detail::BodyKind::Wedge ||
+       (body.kind == detail::BodyKind::Sweep && body.sweep_polyhedral_mass_valid));
+  if (!real_polyhedron) {
+    auto issue = detail::make_error_issue(diag_codes::kCoreOperationUnsupported,
+        "体闭壳查询失败：解析曲面或占位体不具有已声明的真实多面体边界", {body_id.value});
+    issue.stage = "query.body.support_gate";
+    return error_result<BodyShellAnalysis>(StatusCode::NotImplemented,
+        state.create_diagnostic("体闭壳查询失败", {std::move(issue)}));
+  }
   BodyShellAnalysis analysis;
   if (body_it->second.shells.empty()) {
     return ok_result(std::move(analysis),
@@ -698,8 +714,12 @@ std::optional<BodyBoundaryPoint> spatial_triangle_closest(
     const long double t = std::clamp(spatial_dot(to_point, edge) / edge_squared,
                                     0.0L, 1.0L);
     QuerySpatialVector residual{};
+    // Project from the nearer endpoint to preserve a small positive endpoint
+    // gap rather than subtracting two almost equal full edge lengths.
+    const auto from_end = spatial_delta(b, point);
     for (std::size_t axis = 0; axis < 3; ++axis)
-      residual[axis] = to_point[axis] - t * edge[axis];
+      residual[axis] = t <= .5L ? to_point[axis] - t * edge[axis]
+                               : from_end[axis] + (1-t)*edge[axis];
     const long double squared = spatial_dot(residual, residual);
     if (squared < best_squared) {
       best_squared = squared;
@@ -728,7 +748,8 @@ std::optional<BodyBoundaryPoint> spatial_triangle_closest(
           static_cast<Scalar>(static_cast<long double>(triangle[0].z) + projection[2])};
     }
   }
-  const Scalar distance = static_cast<Scalar>(std::sqrt(best_squared));
+  const auto witness_delta = spatial_delta(point,best_point);
+  const Scalar distance = static_cast<Scalar>(std::sqrt(spatial_dot(witness_delta,witness_delta)));
   if (!std::isfinite(distance) || !spatial_finite_point(best_point)) return std::nullopt;
   BodyBoundaryPoint result;
   result.point = best_point;
@@ -789,7 +810,7 @@ struct QueryTriangleSegmentHit {
 // later in the common segment event partition.
 std::optional<QueryTriangleSegmentHit> spatial_triangle_segment(
     const Point3 &start, const Point3 &end, const std::array<Point3, 3> &triangle,
-    bool &numerical_failure) {
+    bool &numerical_failure, bool strict_contact = false) {
   const auto ab = spatial_delta(triangle[0], triangle[1]);
   const auto ac = spatial_delta(triangle[0], triangle[2]);
   auto normal = spatial_cross(ab, ac);
@@ -806,7 +827,10 @@ std::optional<QueryTriangleSegmentHit> spatial_triangle_segment(
   const long double local_scale = std::max({std::sqrt(spatial_dot(ab, ab)),
       std::sqrt(spatial_dot(ac, ac)), std::sqrt(spatial_dot(from_a, from_a)),
       std::sqrt(spatial_dot(to_a, to_a))});
-  const long double roundoff = 128 * std::numeric_limits<long double>::epsilon() * local_scale;
+  // Material distance cannot inherit the clipping roundoff band: even a small
+  // representable positive gap must not acquire a zero-distance witness.
+  const long double roundoff = strict_contact ? 0.0L :
+      128 * std::numeric_limits<long double>::epsilon() * local_scale;
   if (!std::isfinite(ds) || !std::isfinite(de) || !std::isfinite(roundoff)) {
     numerical_failure = true;
     return std::nullopt;
@@ -842,6 +866,96 @@ std::optional<QueryTriangleSegmentHit> spatial_triangle_segment(
   hi = std::clamp(hi, 0.0L, 1.0L);
   if (lo > hi) return std::nullopt;
   return QueryTriangleSegmentHit{{lo, hi}, coplanar};
+}
+
+template <class T>
+Result<T> spatial_failure(detail::KernelState &state, StatusCode status,
+                          std::string_view code, std::string message,
+                          std::string_view stage, std::vector<std::uint64_t> entities) {
+  auto issue = detail::make_error_issue(code, std::move(message), std::move(entities));
+  issue.stage = std::string(stage);
+  return error_result<T>(status, state.create_diagnostic("实体几何查询失败", {std::move(issue)}));
+}
+
+template <class T, class U>
+Result<T> spatial_preflight_failure(detail::KernelState &state, const Result<U> &source,
+                                    std::string_view operation) {
+  std::vector<Issue> issues;
+  const auto diagnostic = state.diagnostics.find(source.diagnostic_id.value);
+  if (diagnostic != state.diagnostics.end()) issues = diagnostic->second.issues;
+  const std::string stage = std::string(operation) +
+      (source.status == StatusCode::NotImplemented ? ".support_gate" :
+       operation == "query.mass_properties" &&
+           (source.status == StatusCode::NumericalInstability || source.status == StatusCode::DegenerateGeometry)
+           ? ".numeric" : ".preflight");
+  for (auto &issue : issues) issue.stage = stage;
+  if (issues.empty()) {
+    auto issue = detail::make_error_issue(diag_codes::kTopoInvariantBroken,
+                                         "实体查询前置检查失败");
+    issue.stage = stage;
+    issues.push_back(std::move(issue));
+  }
+  return error_result<T>(source.status,
+      state.create_diagnostic("实体查询前置检查失败", std::move(issues)));
+}
+
+// Complete triangle distance: crossing edges, six vertex/face projections and
+// nine interior edge/edge projections. End-clamped edge minima are already
+// included by vertex/face projections. All divisions use local long doubles.
+std::optional<BodyDistanceQuery> spatial_triangle_distance(
+    const std::array<Point3, 3> &a, const std::array<Point3, 3> &b) {
+  BodyDistanceQuery best;
+  best.distance = std::numeric_limits<Scalar>::infinity();
+  const auto consider = [&](const Point3 &first, const Point3 &second) {
+    // The public distance must measure the returned world-space witnesses;
+    // local projection residuals can lose a tiny endpoint gap by cancellation.
+    const auto delta = spatial_delta(first,second);
+    const long double distance = std::sqrt(spatial_dot(delta,delta));
+    if (!spatial_finite_point(first) || !spatial_finite_point(second) ||
+        !std::isfinite(distance) || distance > std::numeric_limits<Scalar>::max()) return false;
+    if (distance < best.distance) {
+      best.distance = static_cast<Scalar>(distance);
+      best.first_point = first;
+      best.second_point = second;
+    }
+    return true;
+  };
+  for (std::size_t i = 0; i < 3; ++i) {
+    bool failed = false;
+    const auto ab = spatial_triangle_segment(a[i], a[(i+1)%3], b, failed, true);
+    const auto ba = spatial_triangle_segment(b[i], b[(i+1)%3], a, failed, true);
+    if (failed) return std::nullopt;
+    if (ab || ba) {
+      best.distance = 0;
+      best.first_point = best.second_point = ab
+          ? spatial_interpolate(a[i], a[(i+1)%3], ab->parameters[0])
+          : spatial_interpolate(b[i], b[(i+1)%3], ba->parameters[0]);
+      return spatial_finite_point(best.first_point) ? std::optional{best} : std::nullopt;
+    }
+    const auto from_a = spatial_triangle_closest(a[i], b);
+    const auto from_b = spatial_triangle_closest(b[i], a);
+    if (!from_a || !from_b ||
+        !consider(a[i], from_a->point) ||
+        !consider(from_b->point, b[i])) return std::nullopt;
+  }
+  for (std::size_t i = 0; i < 3; ++i) {
+    const auto u = spatial_delta(a[i], a[(i+1)%3]);
+    for (std::size_t j = 0; j < 3; ++j) {
+      const auto v = spatial_delta(b[j], b[(j+1)%3]);
+      const auto w = spatial_delta(b[j], a[i]);
+      const auto cross = spatial_cross(u, v);
+      const long double determinant = spatial_dot(cross, cross);
+      if (!(determinant > 0)) continue; // parallel: endpoint projections suffice
+      const long double uu = spatial_dot(u,u), uv = spatial_dot(u,v), vv = spatial_dot(v,v);
+      const long double uw = spatial_dot(u,w), vw = spatial_dot(v,w);
+      const long double s = (uv*vw-vv*uw)/determinant;
+      const long double t = (uu*vw-uv*uw)/determinant;
+      if (s < 0 || s > 1 || t < 0 || t > 1) continue;
+      if (!consider(spatial_interpolate(a[i],a[(i+1)%3],s),
+                    spatial_interpolate(b[j],b[(j+1)%3],t))) return std::nullopt;
+    }
+  }
+  return std::isfinite(best.distance) ? std::optional{best} : std::nullopt;
 }
 
 }  // namespace
@@ -2014,17 +2128,23 @@ Result<Scalar> TopologyQueryService::face_area(FaceId face_id) const {
 Result<MassProperties>
 TopologyQueryService::shell_mass_properties(ShellId shell_id) const {
   TopoQueryAuditScope _topo_query_audit{state_};
+  const auto failure = [&](StatusCode status, std::string_view code, std::string message,
+                            std::vector<std::uint64_t> entities = {}) {
+    if (entities.empty()) entities.push_back(shell_id.value);
+    const auto stage = status == StatusCode::NotImplemented ? "query.mass_properties.support_gate" :
+        status == StatusCode::NumericalInstability || status == StatusCode::DegenerateGeometry
+            ? "query.mass_properties.numeric" : "query.mass_properties.preflight";
+    return spatial_failure<MassProperties>(*state_, status, code, std::move(message), stage, std::move(entities));
+  };
   const auto shell_it = state_->shells.find(shell_id.value);
   if (shell_it == state_->shells.end()) {
-    return detail::invalid_input_result<MassProperties>(
-        *state_, diag_codes::kCoreInvalidHandle,
-        "壳质量属性查询失败：目标壳不存在", "壳质量属性查询失败");
+    return failure(StatusCode::InvalidInput, diag_codes::kCoreInvalidHandle,
+        "壳质量属性查询失败：目标壳不存在");
   }
   if (shell_it->second.faces.empty() ||
       !detail::validate_closed_shell_edge_usage_for_materialization(*state_, shell_id)) {
-    return detail::failed_result<MassProperties>(
-        *state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
-        "壳质量属性查询失败：壳为空、未闭合或存在非流形边", "壳质量属性查询失败",
+    return failure(StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
+        "壳质量属性查询失败：壳为空、未闭合或存在非流形边",
         {shell_id.value});
   }
 
@@ -2040,36 +2160,35 @@ TopologyQueryService::shell_mass_properties(ShellId shell_id) const {
 
   for (const auto face_id : shell_it->second.faces) {
     if (!unique_faces.insert(face_id.value).second) {
-      return detail::failed_result<MassProperties>(
-          *state_, StatusCode::InvalidTopology, diag_codes::kTopoInvariantBroken,
-          "壳质量属性查询失败：壳包含重复面引用", "壳质量属性查询失败",
+      return failure(StatusCode::InvalidTopology, diag_codes::kTopoInvariantBroken,
+          "壳质量属性查询失败：壳包含重复面引用",
           {shell_id.value, face_id.value});
     }
     const auto face_it = state_->faces.find(face_id.value);
     if (face_it == state_->faces.end()) {
-      return detail::failed_result<MassProperties>(
-          *state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
-          "壳质量属性查询失败：壳引用的面不存在", "壳质量属性查询失败",
+      return failure(StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
+          "壳质量属性查询失败：壳引用的面不存在",
           {shell_id.value, face_id.value});
+    }
+    if (face_it->second.mass_boundary_proxy) {
+      return failure(StatusCode::NotImplemented, diag_codes::kCoreOperationUnsupported,
+          "壳质量属性查询失败：兼容占位面不是真实材料边界", {shell_id.value, face_id.value});
     }
     const auto surface_it = state_->surfaces.find(face_it->second.surface_id.value);
     if (surface_it == state_->surfaces.end()) {
-      return detail::failed_result<MassProperties>(
-          *state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
-          "壳质量属性查询失败：面引用的曲面不存在", "壳质量属性查询失败",
+      return failure(StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
+          "壳质量属性查询失败：面引用的曲面不存在",
           {shell_id.value, face_id.value, face_it->second.surface_id.value});
     }
     if (surface_it->second.kind != detail::SurfaceKind::Plane) {
-      return detail::failed_result<MassProperties>(
-          *state_, StatusCode::NotImplemented, diag_codes::kCoreOperationUnsupported,
-          "壳质量属性查询暂仅支持平面、直线边闭壳", "壳质量属性查询失败",
+      return failure(StatusCode::NotImplemented, diag_codes::kCoreOperationUnsupported,
+          "壳质量属性查询暂仅支持平面、直线边闭壳",
           {shell_id.value, face_id.value});
     }
     const auto normal_length = detail::norm(surface_it->second.normal);
     if (!(normal_length > 0.0) || !std::isfinite(normal_length)) {
-      return detail::failed_result<MassProperties>(
-          *state_, StatusCode::DegenerateGeometry, diag_codes::kGeoDegenerateGeometry,
-          "壳质量属性查询失败：平面法向退化", "壳质量属性查询失败",
+      return failure(StatusCode::DegenerateGeometry, diag_codes::kGeoDegenerateGeometry,
+          "壳质量属性查询失败：平面法向退化",
           {shell_id.value, face_id.value});
     }
     const auto normal = detail::scale(surface_it->second.normal, 1.0 / normal_length);
@@ -2086,28 +2205,24 @@ TopologyQueryService::shell_mass_properties(ShellId shell_id) const {
       if (loop_it == state_->loops.end() ||
           !validate_loop_record(*state_, loop_it->second, reason) ||
           loop_it->second.coedges.size() < 3) {
-        return detail::failed_result<MassProperties>(
-            *state_, StatusCode::InvalidTopology,
+        return failure(StatusCode::InvalidTopology,
             loop_index == 0 ? diag_codes::kTopoFaceOuterLoopInvalid
                             : diag_codes::kTopoFaceInnerLoopInvalid,
             "壳质量属性查询失败：面边界环无效" +
-                (reason.empty() ? std::string{} : "（" + reason + "）"),
-            "壳质量属性查询失败", {shell_id.value, face_id.value, loop_id.value});
+                (reason.empty() ? std::string{} : "（" + reason + "）"), {shell_id.value, face_id.value, loop_id.value});
       }
       for (const auto coedge_id : loop_it->second.coedges) {
         const auto coedge_it = state_->coedges.find(coedge_id.value);
         if (coedge_it == state_->coedges.end()) {
-          return detail::failed_result<MassProperties>(
-              *state_, StatusCode::InvalidTopology, diag_codes::kTopoInvariantBroken,
-              "壳质量属性查询失败：边界环引用的定向边不存在", "壳质量属性查询失败",
+          return failure(StatusCode::InvalidTopology, diag_codes::kTopoInvariantBroken,
+              "壳质量属性查询失败：边界环引用的定向边不存在",
               {shell_id.value, face_id.value, loop_id.value, coedge_id.value});
         }
         const auto edge_id = coedge_it->second.edge_id;
         const auto oriented = oriented_vertices(*state_, coedge_id);
         if (!oriented) {
-          return detail::failed_result<MassProperties>(
-              *state_, StatusCode::InvalidTopology, diag_codes::kTopoDanglingEdge,
-              "壳质量属性查询失败：边界边端点无效", "壳质量属性查询失败",
+          return failure(StatusCode::InvalidTopology, diag_codes::kTopoDanglingEdge,
+              "壳质量属性查询失败：边界边端点无效",
               {shell_id.value, face_id.value, loop_id.value, edge_id.value});
         }
         const std::array<std::uint64_t, 2> direction{
@@ -2115,11 +2230,9 @@ TopologyQueryService::shell_mass_properties(ShellId shell_id) const {
         const auto [use_it, inserted] = first_edge_use.emplace(edge_id.value, direction);
         if (!inserted &&
             (use_it->second[0] != direction[1] || use_it->second[1] != direction[0])) {
-          return detail::failed_result<MassProperties>(
-              *state_, StatusCode::InvalidTopology,
+          return failure(StatusCode::InvalidTopology,
               diag_codes::kTopoLoopOrientationMismatch,
-              "壳质量属性查询失败：共享边在相邻面中的方向未相反",
-              "壳质量属性查询失败", {shell_id.value, face_id.value, edge_id.value});
+              "壳质量属性查询失败：共享边在相邻面中的方向未相反", {shell_id.value, face_id.value, edge_id.value});
         }
         if (measured_edges.insert(edge_id.value).second) {
           const auto &edge = state_->edges.at(edge_id.value);
@@ -2127,24 +2240,21 @@ TopologyQueryService::shell_mass_properties(ShellId shell_id) const {
           if (curve != state_->curves.end() &&
               curve->second.kind != detail::CurveKind::Line &&
               curve->second.kind != detail::CurveKind::LineSegment) {
-            return detail::failed_result<MassProperties>(
-                *state_, StatusCode::NotImplemented, diag_codes::kCoreOperationUnsupported,
-                "壳质量属性查询失败：曲边不能用端点弦替代为多面体边界",
-                "壳质量属性查询失败", {shell_id.value, face_id.value, edge_id.value});
+            return failure(StatusCode::NotImplemented, diag_codes::kCoreOperationUnsupported,
+                "壳质量属性查询失败：曲边不能用端点弦替代为多面体边界", {shell_id.value, face_id.value, edge_id.value});
           }
           const auto length = edge_length(edge_id);
           if (!length.value) {
-            return error_result<MassProperties>(length.status, length.diagnostic_id);
+            return spatial_preflight_failure<MassProperties>(*state_, length, "query.mass_properties");
           }
         }
       }
       std::vector<Point3> ring;
       if (!loop_vertex_chain_3d(*state_, loop_id, ring, reason) || ring.size() < 3) {
-        return detail::failed_result<MassProperties>(
-            *state_, StatusCode::InvalidTopology,
+        return failure(StatusCode::InvalidTopology,
             loop_index == 0 ? diag_codes::kTopoFaceOuterLoopInvalid
                             : diag_codes::kTopoFaceInnerLoopInvalid,
-            "壳质量属性查询失败：无法提取完整边界顶点", "壳质量属性查询失败",
+            "壳质量属性查询失败：无法提取完整边界顶点",
             {shell_id.value, face_id.value, loop_id.value});
       }
       for (const auto &point : ring) {
@@ -2153,9 +2263,8 @@ TopologyQueryService::shell_mass_properties(ShellId shell_id) const {
             (static_cast<long double>(point.y) - surface_it->second.origin.y) * normal.y +
             (static_cast<long double>(point.z) - surface_it->second.origin.z) * normal.z);
         if (!std::isfinite(plane_distance) || plane_distance > linear_tol) {
-          return detail::failed_result<MassProperties>(
-              *state_, StatusCode::InvalidTopology, diag_codes::kTopoCurveTopologyMismatch,
-              "壳质量属性查询失败：面边界不在支撑平面上", "壳质量属性查询失败",
+          return failure(StatusCode::InvalidTopology, diag_codes::kTopoCurveTopologyMismatch,
+              "壳质量属性查询失败：面边界不在支撑平面上",
               {shell_id.value, face_id.value, loop_id.value});
         }
       }
@@ -2163,17 +2272,15 @@ TopologyQueryService::shell_mass_properties(ShellId shell_id) const {
       const auto ring_normal_length = detail::norm(raw_normal);
       if (!(ring_normal_length > linear_tol * linear_tol) ||
           !std::isfinite(ring_normal_length)) {
-        return detail::failed_result<MassProperties>(
-            *state_, StatusCode::DegenerateGeometry, diag_codes::kGeoDegenerateGeometry,
-            "壳质量属性查询失败：面边界环面积退化", "壳质量属性查询失败",
+        return failure(StatusCode::DegenerateGeometry, diag_codes::kGeoDegenerateGeometry,
+            "壳质量属性查询失败：面边界环面积退化",
             {shell_id.value, face_id.value, loop_id.value});
       }
       const Scalar alignment = detail::dot(raw_normal, normal);
       if ((loop_index == 0 && !(alignment > 0.0)) ||
           (loop_index != 0 && !(alignment < 0.0))) {
-        return detail::failed_result<MassProperties>(
-            *state_, StatusCode::InvalidTopology, diag_codes::kTopoLoopOrientationMismatch,
-            "壳质量属性查询失败：外环/内环绕向与平面法向不一致", "壳质量属性查询失败",
+        return failure(StatusCode::InvalidTopology, diag_codes::kTopoLoopOrientationMismatch,
+            "壳质量属性查询失败：外环/内环绕向与平面法向不一致",
             {shell_id.value, face_id.value, loop_id.value});
       }
       rings.push_back(std::move(ring));
@@ -2187,26 +2294,22 @@ TopologyQueryService::shell_mass_properties(ShellId shell_id) const {
     if (!detail::triangulate_extrude_region(
             rings.front(), holes, normal, linear_tol, face_points, boundary,
             face_triangles) || face_triangles.empty()) {
-      return detail::failed_result<MassProperties>(
-          *state_, StatusCode::InvalidTopology, diag_codes::kTopoFaceOuterLoopInvalid,
-          "壳质量属性查询失败：面区域自交、孔无效、非共面或无法三角化",
-          "壳质量属性查询失败", {shell_id.value, face_id.value});
+      return failure(StatusCode::InvalidTopology, diag_codes::kTopoFaceOuterLoopInvalid,
+          "壳质量属性查询失败：面区域自交、孔无效、非共面或无法三角化", {shell_id.value, face_id.value});
     }
     if (!reference.has_value()) reference = face_points.front();
     if (positions.size() + face_points.size() >
         static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-      return detail::invalid_input_result<MassProperties>(
-          *state_, diag_codes::kCoreParameterOutOfRange,
-          "壳质量属性查询失败：拓扑规模超出可处理范围", "壳质量属性查询失败");
+      return failure(StatusCode::InvalidInput, diag_codes::kCoreParameterOutOfRange,
+          "壳质量属性查询失败：拓扑规模超出可处理范围");
     }
     const int base = static_cast<int>(positions.size());
     for (const auto &point : face_points) {
       const auto local = detail::subtract(point, *reference);
       if (!std::isfinite(local.x) || !std::isfinite(local.y) ||
           !std::isfinite(local.z)) {
-        return detail::invalid_input_result<MassProperties>(
-            *state_, diag_codes::kCoreParameterOutOfRange,
-            "壳质量属性查询失败：顶点坐标非有限或超出数值范围", "壳质量属性查询失败");
+        return failure(StatusCode::InvalidInput, diag_codes::kCoreParameterOutOfRange,
+            "壳质量属性查询失败：顶点坐标非有限或超出数值范围");
       }
       positions.push_back(Point3{local.x, local.y, local.z});
     }
@@ -2235,9 +2338,8 @@ TopologyQueryService::shell_mass_properties(ShellId shell_id) const {
       1e-24L, static_cast<long double>(linear_tol) * linear_tol * linear_tol);
   if (!std::isfinite(signed_volume6) ||
       std::abs(signed_volume6) <= 6.0L * volume_tol) {
-    return detail::failed_result<MassProperties>(
-        *state_, StatusCode::DegenerateGeometry, diag_codes::kGeoDegenerateGeometry,
-        "壳质量属性查询失败：闭壳有向体积退化", "壳质量属性查询失败",
+    return failure(StatusCode::DegenerateGeometry, diag_codes::kGeoDegenerateGeometry,
+        "壳质量属性查询失败：闭壳有向体积退化",
         {shell_id.value});
   }
   if (signed_volume6 < 0.0L) {
@@ -2253,6 +2355,8 @@ TopologyQueryService::shell_mass_properties(ShellId shell_id) const {
   properties.centroid.z += reference->z;
   const auto finite_properties = [&]() {
     if (!(properties.volume > 0.0) || !(properties.area > 0.0) ||
+        !(properties.inertia[0] > 0.0) || !(properties.inertia[4] > 0.0) ||
+        !(properties.inertia[8] > 0.0) ||
         !std::isfinite(properties.volume) || !std::isfinite(properties.area) ||
         !std::isfinite(properties.centroid.x) ||
         !std::isfinite(properties.centroid.y) ||
@@ -2261,10 +2365,9 @@ TopologyQueryService::shell_mass_properties(ShellId shell_id) const {
                        [](Scalar value) { return std::isfinite(value); });
   };
   if (!finite_properties()) {
-    return detail::failed_result<MassProperties>(
-        *state_, StatusCode::NumericalInstability,
+    return failure(StatusCode::NumericalInstability,
         diag_codes::kQueryMassPropertiesFailure,
-        "壳质量属性查询失败：积分结果非有限或不满足正体积", "壳质量属性查询失败",
+        "壳质量属性查询失败：积分结果非有限或体积/惯性对角项非正",
         {shell_id.value});
   }
   return ok_result(properties,
@@ -2290,12 +2393,12 @@ TopologyQueryService::body_mass_properties(BodyId body_id) const {
       *state_, body_id,
       [this](ShellId shell_id) { return shell_mass_properties(shell_id); });
   if (!analysis.value)
-    return error_result<MassProperties>(analysis.status, analysis.diagnostic_id);
+    return spatial_preflight_failure<MassProperties>(*state_, analysis, "query.mass_properties");
   if (analysis.value->regions.empty()) {
-    return detail::failed_result<MassProperties>(
+    return spatial_failure<MassProperties>(
         *state_, StatusCode::InvalidTopology, diag_codes::kTopoShellNotClosed,
         "体拓扑质量属性查询失败：实体不拥有可计算的拓扑壳",
-        "体拓扑质量属性查询失败", {body_id.value});
+        "query.mass_properties.empty_gate", {body_id.value});
   }
 
   long double total_volume = 0.0L;
@@ -2318,11 +2421,11 @@ TopologyQueryService::body_mass_properties(BodyId body_id) const {
       !std::isfinite(total_area) ||
       total_volume > std::numeric_limits<Scalar>::max() ||
       total_area > std::numeric_limits<Scalar>::max()) {
-    return detail::failed_result<MassProperties>(
+    return spatial_failure<MassProperties>(
         *state_, StatusCode::NumericalInstability,
         diag_codes::kQueryMassPropertiesFailure,
         "体拓扑质量属性查询失败：多壳汇总超出数值范围",
-        "体拓扑质量属性查询失败", {body_id.value});
+        "query.mass_properties.numeric", {body_id.value});
   }
 
   MassProperties properties{};
@@ -2360,16 +2463,18 @@ TopologyQueryService::body_mass_properties(BodyId body_id) const {
     properties.inertia[2] += ixz; properties.inertia[6] += ixz;
     properties.inertia[5] += iyz; properties.inertia[7] += iyz;
   }
-  if (!std::isfinite(properties.centroid.x) ||
+  if (!(properties.inertia[0] > 0.0) || !(properties.inertia[4] > 0.0) ||
+      !(properties.inertia[8] > 0.0) ||
+      !std::isfinite(properties.centroid.x) ||
       !std::isfinite(properties.centroid.y) ||
       !std::isfinite(properties.centroid.z) ||
       !std::all_of(properties.inertia.begin(), properties.inertia.end(),
                    [](Scalar value) { return std::isfinite(value); })) {
-    return detail::failed_result<MassProperties>(
+    return spatial_failure<MassProperties>(
         *state_, StatusCode::NumericalInstability,
         diag_codes::kQueryMassPropertiesFailure,
-        "体拓扑质量属性查询失败：质心或惯性张量非有限",
-        "体拓扑质量属性查询失败", {body_id.value});
+        "体拓扑质量属性查询失败：质心/惯性张量非有限或惯性对角项非正",
+        "query.mass_properties.numeric", {body_id.value});
   }
   return ok_result(properties,
                    state_->create_diagnostic("已按材料/空腔闭壳层级查询实体质量属性"));
@@ -2380,30 +2485,30 @@ Result<BodyPointQuery> TopologyQueryService::locate_point(
   TopoQueryAuditScope _topo_query_audit{state_};
   const auto tolerance = spatial_query_tolerance(*state_, options);
   if (!tolerance || !spatial_finite_point(point)) {
-    return detail::invalid_input_result<BodyPointQuery>(
-        *state_, diag_codes::kCoreParameterOutOfRange,
-        "实体点定位失败：坐标、位置容差或三角形预算无效", "实体点定位失败");
+    return spatial_failure<BodyPointQuery>(
+        *state_, StatusCode::InvalidInput, diag_codes::kCoreParameterOutOfRange,
+        "实体点定位失败：坐标、位置容差或三角形预算无效", "query.closest_point.input_gate", {body_id.value});
   }
   const auto analysis = analyze_body_shells(
       *state_, body_id,
       [this](ShellId shell_id) { return shell_mass_properties(shell_id); }, true);
   if (!analysis.value)
-    return error_result<BodyPointQuery>(analysis.status, analysis.diagnostic_id);
+    return spatial_preflight_failure<BodyPointQuery>(*state_, analysis, "query.closest_point");
   BodyPointQuery result;
   result.position_tolerance = *tolerance;
   QuerySpatialWork work{options.max_triangle_tests};
   for (const auto &mesh : analysis.value->meshes) {
     for (std::size_t i = 0; i < mesh.triangles.size(); ++i) {
       if (!work.take()) {
-        return detail::invalid_input_result<BodyPointQuery>(
-            *state_, diag_codes::kCoreParameterOutOfRange,
-            "实体点定位失败：三角形计算预算耗尽，未返回部分最近点", "实体点定位失败");
+        return spatial_failure<BodyPointQuery>(
+            *state_, StatusCode::InvalidInput, diag_codes::kCoreParameterOutOfRange,
+            "实体点定位失败：三角形计算预算耗尽，未返回部分最近点", "query.closest_point.budget", {body_id.value});
       }
       auto nearest = spatial_triangle_closest(point, query_triangle(mesh, mesh.triangles[i]));
       if (!nearest) {
-        return detail::failed_result<BodyPointQuery>(
+        return spatial_failure<BodyPointQuery>(
             *state_, StatusCode::NumericalInstability, diag_codes::kQueryClosestPointFailure,
-            "实体点定位失败：三角形距离计算退化或溢出", "实体点定位失败",
+            "实体点定位失败：三角形距离计算退化或溢出", "query.closest_point.numeric",
             {body_id.value, mesh.shell.value, mesh.triangle_faces[i].value});
       }
       nearest->shell = mesh.shell;
@@ -2423,12 +2528,12 @@ Result<BodyPointQuery> TopologyQueryService::locate_point(
   } else {
     const auto inside = spatial_inside_material(point, analysis.value->meshes, work);
     if (!inside) {
-      return detail::failed_result<BodyPointQuery>(
+      return spatial_failure<BodyPointQuery>(
           *state_, work.exhausted ? StatusCode::InvalidInput : StatusCode::NumericalInstability,
           work.exhausted ? diag_codes::kCoreParameterOutOfRange : diag_codes::kQueryClosestPointFailure,
           work.exhausted ? "实体点定位失败：绕数计算预算耗尽"
                          : "实体点定位失败：闭壳绕数无法可靠判定",
-          "实体点定位失败", {body_id.value});
+          work.exhausted ? "query.closest_point.budget" : "query.closest_point.numeric", {body_id.value});
     }
     result.location = *inside ? BodyPointLocation::Inside : BodyPointLocation::Outside;
   }
@@ -2575,6 +2680,312 @@ Result<BodySegmentQuery> TopologyQueryService::clip_segment(
         "实体线段裁剪失败：材料总长度溢出", "实体线段裁剪失败", {body_id.value});
   }
   return ok_result(std::move(result), state_->create_diagnostic("已查询有限线段材料与边界区间"));
+}
+
+Result<BodyPlaneSection> TopologyQueryService::section(
+    BodyId body_id, const Plane &plane, const BodySpatialQueryOptions &options) const {
+  TopoQueryAuditScope audit{state_};
+  const auto failure = [&](StatusCode status, std::string_view code, std::string message,
+                           std::string_view stage) {
+    return spatial_failure<BodyPlaneSection>(*state_, status, code, std::move(message),
+                                             stage, {body_id.value});
+  };
+  QuerySpatialVector normal{plane.normal.x, plane.normal.y, plane.normal.z};
+  const long double normal_length = std::sqrt(spatial_dot(normal,normal));
+  if (!spatial_query_tolerance(*state_,options) || !spatial_finite_point(plane.origin) ||
+      !std::isfinite(normal_length) || !(normal_length > 0))
+    return failure(StatusCode::InvalidInput, diag_codes::kCoreParameterOutOfRange,
+                   "截面平面、位置容差或预算无效", "query.section.input_gate");
+  for (auto &component : normal) component /= normal_length;
+  const auto analysis = analyze_body_shells(*state_,body_id,
+      [this](ShellId shell) { return shell_mass_properties(shell); },true);
+  if (!analysis.value)
+    return spatial_preflight_failure<BodyPlaneSection>(*state_,analysis,"query.section");
+  BodyPlaneSection result;
+  if (analysis.value->meshes.empty()) return ok_result(std::move(result),analysis.diagnostic_id);
+
+  // A local orthonormal plane frame avoids global-coordinate cancellation.
+  const auto reference = analysis.value->meshes.front().points.front();
+  const long double height = spatial_dot(spatial_delta(plane.origin,reference),normal);
+  QuerySpatialVector origin{static_cast<long double>(reference.x)-height*normal[0],
+                             static_cast<long double>(reference.y)-height*normal[1],
+                             static_cast<long double>(reference.z)-height*normal[2]};
+  QuerySpatialVector seed{};
+  const auto axis = static_cast<std::size_t>(std::min_element(normal.begin(),normal.end(),
+      [](long double a, long double b) { return std::abs(a) < std::abs(b); })-normal.begin());
+  seed[axis] = 1;
+  auto u = spatial_cross(seed,normal);
+  const long double u_length = std::sqrt(spatial_dot(u,u));
+  for (auto &component : u) component /= u_length;
+  auto v = spatial_cross(normal,u);
+  // Avoid aligning the decomposition direction with common polygon edges or
+  // sampled revolution symmetries. Distinct near-coincident events below still
+  // fail explicitly instead of silently deleting thin material cells.
+  const long double cosine = std::cos(1.23456789L), sine = std::sin(1.23456789L);
+  const auto original_u = u;
+  for (std::size_t i = 0; i < 3; ++i) {
+    u[i] = cosine*original_u[i]+sine*v[i];
+    v[i] = cosine*v[i]-sine*original_u[i];
+  }
+  using PlanePoint = std::array<long double,2>;
+  const auto project = [&](const Point3 &point) {
+    const QuerySpatialVector delta{static_cast<long double>(point.x)-origin[0],
+                                    static_cast<long double>(point.y)-origin[1],
+                                    static_cast<long double>(point.z)-origin[2]};
+    return PlanePoint{spatial_dot(delta,u),spatial_dot(delta,v)};
+  };
+  const auto world = [&](const PlanePoint &point) {
+    return Point3{static_cast<Scalar>(origin[0]+point[0]*u[0]+point[1]*v[0]),
+                  static_cast<Scalar>(origin[1]+point[0]*u[1]+point[1]*v[1]),
+                  static_cast<Scalar>(origin[2]+point[0]*u[2]+point[1]*v[2])};
+  };
+  long double scale = 0;
+  for (const auto &mesh : analysis.value->meshes)
+    for (const auto &point : mesh.points) {
+      const auto delta = spatial_delta(reference,point);
+      scale = std::max(scale,std::sqrt(spatial_dot(delta,delta)));
+    }
+  // Caller modelling tolerance is deliberately absent from plane intersection:
+  // it must not turn a near miss into material or fill a resolvable cavity.
+  const long double roundoff = 64*std::numeric_limits<Scalar>::epsilon()*scale;
+  QuerySpatialWork work{options.max_triangle_tests};
+  std::vector<std::array<PlanePoint,2>> segments;
+  std::vector<std::array<Point3,3>> coplanar;
+  std::vector<long double> cuts;
+  const auto add_segment = [&](const Point3 &first, const Point3 &second) {
+    auto a = project(first), b = project(second);
+    if (b < a) std::swap(a,b);
+    segments.push_back({a,b});
+    cuts.push_back(a[0]); cuts.push_back(b[0]);
+    const auto p = world(a), q = world(b);
+    result.boundary_segments.push_back({p,q});
+    extend_query_bbox(result.bbox,p); extend_query_bbox(result.bbox,q);
+  };
+  for (const auto &mesh : analysis.value->meshes) {
+    for (const auto &indices : mesh.triangles) {
+      if (!work.take())
+        return failure(StatusCode::InvalidInput,diag_codes::kCoreParameterOutOfRange,
+                       "截面三角形预算耗尽", "query.section.budget");
+      const auto triangle = query_triangle(mesh,indices);
+      std::array<long double,3> distances{};
+      std::size_t zeros = 0;
+      for (std::size_t i = 0; i < 3; ++i) {
+        // Use the supplied normal for the intersection predicate, avoiding an
+        // extra normalization rounding. Do not snap a nearby exterior plane
+        // onto a face. Cancellation below arithmetic resolution is a failure,
+        // whereas an exact zero retains face/edge/vertex contact semantics.
+        const auto delta = spatial_delta(plane.origin,triangle[i]);
+        const QuerySpatialVector terms{delta[0]*plane.normal.x,
+                                        delta[1]*plane.normal.y,
+                                        delta[2]*plane.normal.z};
+        distances[i] = terms[0]+terms[1]+terms[2];
+        if (!std::isfinite(distances[i]))
+          return failure(StatusCode::NumericalInstability,diag_codes::kQuerySectionFailure,
+                         "截面有向平面距离溢出", "query.section.numeric");
+        const long double predicate_roundoff = 8*std::numeric_limits<long double>::epsilon()*
+            (std::abs(terms[0])+std::abs(terms[1])+std::abs(terms[2]));
+        if (distances[i] == 0) ++zeros;
+        else if (std::abs(distances[i]) <= predicate_roundoff)
+          return failure(StatusCode::NumericalInstability,diag_codes::kQuerySectionFailure,
+                         "截面平面距离符号在舍入尺度内不可可靠分辨", "query.section.numeric");
+      }
+      if (zeros == 3) {
+        coplanar.push_back(triangle);
+        for (std::size_t i = 0; i < 3; ++i) add_segment(triangle[i],triangle[(i+1)%3]);
+        continue;
+      }
+      std::vector<Point3> hits;
+      for (std::size_t i = 0; i < 3; ++i) {
+        const auto j = (i+1)%3;
+        if (distances[i] == 0) hits.push_back(triangle[i]);
+        if ((distances[i] < 0 && distances[j] > 0) ||
+            (distances[i] > 0 && distances[j] < 0)) {
+          // Canonical edge direction gives bit-identical shared-edge events,
+          // independent of the orientation of its two adjacent triangles.
+          const auto key = [](const Point3 &p) { return std::array{p.x,p.y,p.z}; };
+          const bool forward = key(triangle[i]) < key(triangle[j]);
+          const auto first = forward ? i : j, second = forward ? j : i;
+          hits.push_back(spatial_interpolate(triangle[first],triangle[second],
+                                            distances[first]/(distances[first]-distances[second])));
+        }
+      }
+      if (hits.size() == 2) add_segment(hits[0],hits[1]);
+      else if (hits.size() == 1) {
+        const auto point = world(project(hits.front()));
+        result.contact_points.push_back(point);
+        extend_query_bbox(result.bbox,point);
+      }
+    }
+  }
+
+  // Vertical decomposition of the actual intersection segments. Between two
+  // vertex abscissae their order cannot change for an embedded closed boundary.
+  // Classifying each open cell by the same shell parity as locate_point handles
+  // concavity, holes, disjoint material components and nested material islands.
+  // Coplanar triangles contribute filled cells independently of shell winding.
+  std::sort(cuts.begin(),cuts.end());
+  std::vector<long double> unique_cuts;
+  for (const auto cut : cuts) {
+    if (!unique_cuts.empty() && cut != unique_cuts.back() && cut-unique_cuts.back() <= roundoff)
+      return failure(StatusCode::NumericalInstability,diag_codes::kQuerySectionFailure,
+                     "截面不同边界事件在平面坐标中不可可靠分辨", "query.section.numeric");
+    if (unique_cuts.empty() || cut != unique_cuts.back()) unique_cuts.push_back(cut);
+  }
+  long double area = 0;
+  const auto append_triangle = [&](const PlanePoint &a, const PlanePoint &b, const PlanePoint &c) {
+    const long double twice_area = (b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0]);
+    if (twice_area == 0) return true;
+    if (!std::isfinite(twice_area) || twice_area < 0 || result.vertices.size() >
+        static_cast<std::size_t>(std::numeric_limits<int>::max()-3)) return false;
+    const auto p = world(a), q = world(b), r = world(c);
+    if (!spatial_finite_point(p) || !spatial_finite_point(q) || !spatial_finite_point(r)) return false;
+    const auto pq = spatial_delta(p,q), pr = spatial_delta(p,r);
+    const auto cross = spatial_cross(pq,pr);
+    // If casting world positions collapsed a real cell, fail without partial mesh.
+    if (!(spatial_dot(cross,cross) > 0)) return false;
+    const int base = static_cast<int>(result.vertices.size());
+    result.vertices.insert(result.vertices.end(),{p,q,r});
+    result.triangles.push_back({base,base+1,base+2});
+    area += twice_area/2;
+    return true;
+  };
+  for (std::size_t slab = 1; slab < unique_cuts.size(); ++slab) {
+    const long double left = unique_cuts[slab-1], right = unique_cuts[slab];
+    const long double middle = (left+right)/2;
+    struct Crossing { long double y, left_y, right_y; };
+    std::vector<Crossing> crossings;
+    for (const auto &segment : segments) {
+      if (!work.take())
+        return failure(StatusCode::InvalidInput,diag_codes::kCoreParameterOutOfRange,
+                       "截面区域划分预算耗尽", "query.section.budget");
+      const auto &a = segment[0], &b = segment[1];
+      if (!(std::min(a[0],b[0]) < middle && middle < std::max(a[0],b[0]))) continue;
+      const auto ordinate = [&](long double x) { return a[1]+(x-a[0])*(b[1]-a[1])/(b[0]-a[0]); };
+      crossings.push_back({ordinate(middle),ordinate(left),ordinate(right)});
+    }
+    std::sort(crossings.begin(),crossings.end(),
+              [](const Crossing &a, const Crossing &b) { return a.y < b.y; });
+    std::vector<Crossing> unique;
+    for (const auto &crossing : crossings) {
+      if (!unique.empty() && crossing.y != unique.back().y && crossing.y-unique.back().y <= roundoff)
+        return failure(StatusCode::NumericalInstability,diag_codes::kQuerySectionFailure,
+                       "截面不同交段在平面坐标中不可可靠分辨", "query.section.numeric");
+      if (unique.empty() || crossing.y != unique.back().y) unique.push_back(crossing);
+    }
+    for (std::size_t cell = 1; cell < unique.size(); ++cell) {
+      const auto &lower = unique[cell-1], &upper = unique[cell];
+      const auto midpoint = world({middle,(lower.y+upper.y)/2});
+      bool on_boundary = false;
+      for (const auto &triangle : coplanar) {
+        if (!work.take())
+          return failure(StatusCode::InvalidInput,diag_codes::kCoreParameterOutOfRange,
+                         "共面截面分类预算耗尽", "query.section.budget");
+        const auto closest = spatial_triangle_closest(midpoint,triangle);
+        if (!closest)
+          return failure(StatusCode::NumericalInstability,diag_codes::kQuerySectionFailure,
+                         "共面截面距离计算失败", "query.section.numeric");
+        if (closest->distance <= roundoff) { on_boundary = true; break; }
+      }
+      if (!on_boundary) {
+        const auto inside = spatial_inside_material(midpoint,analysis.value->meshes,work);
+        if (!inside)
+          return failure(work.exhausted ? StatusCode::InvalidInput : StatusCode::NumericalInstability,
+                         work.exhausted ? diag_codes::kCoreParameterOutOfRange : diag_codes::kQuerySectionFailure,
+                         "截面材料分类失败或预算耗尽",
+                         work.exhausted ? "query.section.budget" : "query.section.numeric");
+        if (!*inside) continue;
+      }
+      PlanePoint a{left,lower.left_y}, b{right,lower.right_y};
+      PlanePoint c{right,upper.right_y}, d{left,upper.left_y};
+      // Shared-vertex roundoff can reverse a collapsed end of a trapezoid.
+      if (std::abs(a[1]-d[1]) <= roundoff) a[1] = d[1] = (a[1]+d[1])/2;
+      if (std::abs(b[1]-c[1]) <= roundoff) b[1] = c[1] = (b[1]+c[1])/2;
+      if (!append_triangle(a,b,c) || !append_triangle(a,c,d))
+        return failure(StatusCode::NumericalInstability,diag_codes::kQuerySectionFailure,
+                       "截面单元交叉、溢出或世界坐标不可分辨", "query.section.numeric");
+    }
+  }
+  result.area = static_cast<Scalar>(area);
+  result.triangle_tests = work.count;
+  if (!std::isfinite(result.area))
+    return failure(StatusCode::NumericalInstability,diag_codes::kQuerySectionFailure,
+                   "截面面积溢出", "query.section.numeric");
+  return ok_result(std::move(result),state_->create_diagnostic("已查询真实多面体平面截面"));
+}
+
+Result<BodyDistanceQuery> TopologyQueryService::closest_points(
+    BodyId lhs, BodyId rhs, const BodySpatialQueryOptions &options) const {
+  TopoQueryAuditScope audit{state_};
+  const auto failure = [&](StatusCode status, std::string_view code, std::string message,
+                           std::string_view stage) {
+    return spatial_failure<BodyDistanceQuery>(*state_,status,code,std::move(message),
+                                              stage,{lhs.value,rhs.value});
+  };
+  if (!spatial_query_tolerance(*state_,options))
+    return failure(StatusCode::InvalidInput,diag_codes::kCoreParameterOutOfRange,
+                   "实体距离位置容差或预算无效", "query.distance.input_gate");
+  const auto measure = [this](ShellId shell) { return shell_mass_properties(shell); };
+  const auto first = analyze_body_shells(*state_,lhs,measure,true);
+  if (!first.value) return spatial_preflight_failure<BodyDistanceQuery>(*state_,first,"query.distance");
+  const auto second = analyze_body_shells(*state_,rhs,measure,true);
+  if (!second.value) return spatial_preflight_failure<BodyDistanceQuery>(*state_,second,"query.distance");
+  if (first.value->meshes.empty() || second.value->meshes.empty())
+    return failure(StatusCode::DegenerateGeometry,diag_codes::kQueryClosestPointFailure,
+                   "空实体没有有限最近位置", "query.distance.empty_gate");
+  QuerySpatialWork work{options.max_triangle_tests};
+  BodyDistanceQuery best;
+  best.distance = std::numeric_limits<Scalar>::infinity();
+  for (const auto &a : first.value->meshes) {
+    for (const auto &b : second.value->meshes) {
+      for (std::size_t i = 0; i < a.triangles.size(); ++i) {
+        for (std::size_t j = 0; j < b.triangles.size(); ++j) {
+          if (!work.take())
+            return failure(StatusCode::InvalidInput,diag_codes::kCoreParameterOutOfRange,
+                           "实体距离三角形对预算耗尽", "query.distance.budget");
+          auto candidate = spatial_triangle_distance(query_triangle(a,a.triangles[i]),
+                                                       query_triangle(b,b.triangles[j]));
+          if (!candidate)
+            return failure(StatusCode::NumericalInstability,diag_codes::kQueryClosestPointFailure,
+                           "实体距离面/边距离退化或溢出", "query.distance.numeric");
+          candidate->first_face = a.triangle_faces[i]; candidate->first_shell = a.shell;
+          candidate->second_face = b.triangle_faces[j]; candidate->second_shell = b.shell;
+          const std::array key{a.shell.value,a.triangle_faces[i].value,b.shell.value,b.triangle_faces[j].value};
+          const std::array best_key{best.first_shell.value,best.first_face.value,
+                                    best.second_shell.value,best.second_face.value};
+          if (candidate->distance < best.distance ||
+              (candidate->distance == best.distance && key < best_key)) best = *candidate;
+        }
+      }
+    }
+  }
+  // Nonintersecting boundaries do not exclude solid containment. Testing one
+  // boundary representative per shell is sufficient after all boundary pairs
+  // have a strictly positive distance; parity excludes cavities automatically.
+  if (best.distance > 0) {
+    for (int side = 0; side < 2; ++side) {
+      const auto &source = side == 0 ? first.value->meshes : second.value->meshes;
+      const auto &target = side == 0 ? second.value->meshes : first.value->meshes;
+      for (const auto &mesh : source) {
+        const auto point = mesh.points.front();
+        const auto inside = spatial_inside_material(point,target,work);
+        if (!inside)
+          return failure(work.exhausted ? StatusCode::InvalidInput : StatusCode::NumericalInstability,
+                         work.exhausted ? diag_codes::kCoreParameterOutOfRange : diag_codes::kQueryClosestPointFailure,
+                         "实体距离包含分类失败或预算耗尽",
+                         work.exhausted ? "query.distance.budget" : "query.distance.numeric");
+        const auto selected_shell = side == 0 ? best.first_shell : best.second_shell;
+        if (*inside && (best.distance > 0 || mesh.shell.value < selected_shell.value)) {
+          best = {};
+          best.first_point = best.second_point = point;
+          if (side == 0) { best.first_face = mesh.triangle_faces.front(); best.first_shell = mesh.shell; }
+          else { best.second_face = mesh.triangle_faces.front(); best.second_shell = mesh.shell; }
+        }
+      }
+      if (best.distance == 0) break;
+    }
+  }
+  best.triangle_tests = work.count;
+  return ok_result(best,state_->create_diagnostic("已查询真实实体材料最近位置与距离"));
 }
 
 Result<BoundingBox>

@@ -1,6 +1,8 @@
 #include "axiom/internal/rep/representation_internal_utils.h"
 
 #include "axiom/internal/geo/geo_rep_tessellation_link.h"
+#include "axiom/internal/core/topology_materialization.h"
+#include "axiom/internal/topo/topo_service_internal.h"
 
 #include <algorithm>
 #include <array>
@@ -136,13 +138,13 @@ std::size_t tessellation_slices_per_face(const TessellationOptions& options) {
     return std::min<std::size_t>(8, std::max(slices_from_chordal, slices_from_angular));
 }
 
-std::string tessellation_cache_key(const BodyRecord& body, const TessellationOptions& options) {
-    // Stable-enough key: primitive parameters + bbox + tess options.
-    // This is not cryptographic; it is a pragmatic cache key for Stage 1.5.
+std::string tessellation_cache_key(const KernelState& state, BodyId body_id, const TessellationOptions& options) {
+    const auto& body = state.bodies.at(body_id.value);
+    // Include identity and the current owned boundary: equal bboxes and creation
+    // parameters do not imply equal geometry or equal mesh provenance.
     std::ostringstream oss;
-    oss.setf(std::ios::fixed);
-    oss << std::setprecision(12);
-    oss << "kind=" << static_cast<std::uint32_t>(body.kind)
+    oss << std::setprecision(std::numeric_limits<Scalar>::max_digits10);
+    oss << "body=" << body_id.value << "|kind=" << static_cast<std::uint32_t>(body.kind)
         << "|rep=" << static_cast<std::uint32_t>(body.rep_kind)
         << "|o=" << body.origin.x << "," << body.origin.y << "," << body.origin.z
         << "|ax=" << body.axis.x << "," << body.axis.y << "," << body.axis.z
@@ -154,6 +156,15 @@ std::string tessellation_cache_key(const BodyRecord& body, const TessellationOpt
         << "," << (options.generate_texcoords ? 1 : 0)
         << "," << options.weld_shading_split_angle_deg << "," << (options.use_principal_curvature_refinement ? 1 : 0)
         << "," << options.refine_patch_chordal_max_passes << "," << (options.uv_parametric_seam ? 1 : 0);
+    oss << "|analytic=" << body.analytic_mass_valid
+        << "|primitive=" << body.primitive_tessellation_valid;
+    for (const auto shell_id : body.shells) {
+        oss << "|shell=" << shell_id.value;
+        const auto shell = state.shells.find(shell_id.value);
+        if (shell == state.shells.end()) { oss << ":missing"; continue; }
+        for (const auto face : shell->second.faces)
+            oss << "|" << face_tessellation_cache_key(state, face, options);
+    }
     return oss.str();
 }
 
@@ -198,8 +209,7 @@ std::string conversion_error_budget_digest_json(const ConversionErrorBudget& b) 
 
 std::string face_tessellation_cache_key(const KernelState& state, FaceId face_id, const TessellationOptions& options) {
     std::ostringstream oss;
-    oss.setf(std::ios::fixed);
-    oss << std::setprecision(12);
+    oss << std::setprecision(std::numeric_limits<Scalar>::max_digits10);
     oss << "face=" << face_id.value
         << "|tess=" << options.chordal_error << "," << options.angular_error
         << "," << (options.compute_normals ? 1 : 0)
@@ -221,6 +231,34 @@ std::string face_tessellation_cache_key(const KernelState& state, FaceId face_id
                     << "|holes=" << s.trim_uv_holes.size();
             }
         }
+    }
+    if (face_it != state.faces.end()) {
+        const auto append_loop = [&](LoopId loop_id) {
+            oss << "|loop=" << loop_id.value;
+            const auto loop = state.loops.find(loop_id.value);
+            if (loop == state.loops.end()) { oss << ":missing"; return; }
+            for (const auto id : loop->second.coedges) {
+                oss << "|coedge=" << id.value;
+                const auto coedge = state.coedges.find(id.value);
+                if (coedge == state.coedges.end()) { oss << ":missing"; continue; }
+                oss << ":" << coedge->second.edge_id.value << ":" << coedge->second.reversed
+                    << ":pc=" << coedge->second.pcurve_id.value;
+                const auto edge = state.edges.find(coedge->second.edge_id.value);
+                if (edge == state.edges.end()) { oss << ":missing_edge"; continue; }
+                oss << ":curve=" << edge->second.curve_id.value
+                    << ":range=" << edge->second.has_parameter_interval << ","
+                    << edge->second.start_parameter << "," << edge->second.end_parameter;
+                for (const auto vertex_id : {edge->second.v0, edge->second.v1}) {
+                    oss << ":vertex=" << vertex_id.value;
+                    const auto vertex = state.vertices.find(vertex_id.value);
+                    if (vertex == state.vertices.end()) { oss << ":missing"; continue; }
+                    const auto& p = vertex->second.point;
+                    oss << "," << p.x << "," << p.y << "," << p.z;
+                }
+            }
+        };
+        append_loop(face_it->second.outer_loop);
+        for (const auto loop : face_it->second.inner_loops) append_loop(loop);
     }
     return oss.str();
 }
@@ -285,7 +323,7 @@ MeshRecord tessellate_box(const BodyRecord& body, const TessellationOptions& opt
 
     // Emit a face grid by selecting which axis corresponds to (u,v) and holding the third axis constant.
     enum class Axis { X, Y, Z };
-    auto emit_face_grid = [&](Axis u_axis, Axis v_axis, Axis w_axis, Scalar w_value,
+    auto emit_face_grid = [&](Axis u_axis, Axis v_axis, Scalar w_value,
                               const Vec3& n, std::size_t nu, std::size_t nv) {
         const auto base = static_cast<Index>(mesh.vertices.size());
         auto coord = [&](Axis a, std::size_t idx_u, std::size_t idx_v) -> Scalar {
@@ -324,14 +362,14 @@ MeshRecord tessellate_box(const BodyRecord& body, const TessellationOptions& opt
     };
 
     // +Z, -Z
-    emit_face_grid(Axis::X, Axis::Y, Axis::Z, zs.back(), Vec3{0,0,1}, nx, ny);
-    emit_face_grid(Axis::X, Axis::Y, Axis::Z, zs.front(), Vec3{0,0,-1}, nx, ny);
+    emit_face_grid(Axis::X, Axis::Y, zs.back(), Vec3{0,0,1}, nx, ny);
+    emit_face_grid(Axis::X, Axis::Y, zs.front(), Vec3{0,0,-1}, nx, ny);
     // +Y, -Y
-    emit_face_grid(Axis::X, Axis::Z, Axis::Y, ys.back(), Vec3{0,1,0}, nx, nz);
-    emit_face_grid(Axis::X, Axis::Z, Axis::Y, ys.front(), Vec3{0,-1,0}, nx, nz);
+    emit_face_grid(Axis::X, Axis::Z, ys.back(), Vec3{0,1,0}, nx, nz);
+    emit_face_grid(Axis::X, Axis::Z, ys.front(), Vec3{0,-1,0}, nx, nz);
     // +X, -X
-    emit_face_grid(Axis::Y, Axis::Z, Axis::X, xs.back(), Vec3{1,0,0}, ny, nz);
-    emit_face_grid(Axis::Y, Axis::Z, Axis::X, xs.front(), Vec3{-1,0,0}, ny, nz);
+    emit_face_grid(Axis::Y, Axis::Z, xs.back(), Vec3{1,0,0}, ny, nz);
+    emit_face_grid(Axis::Y, Axis::Z, xs.front(), Vec3{-1,0,0}, ny, nz);
 
     weld_mesh_vertices(mesh, options);
     if (!options.generate_texcoords) {
@@ -1351,19 +1389,49 @@ MeshRecord tessellate_face_planar_mesh(const KernelState& state, FaceId face_id,
     mesh.source_body = BodyId{0};
     mesh.label = "mesh_from_face_planar";
 
-    const auto boundary = face_outer_boundary_vertices(state, face_id);
-    if (boundary.size() < 3) {
-        return mesh;
+    const auto face = state.faces.find(face_id.value);
+    if (face == state.faces.end()) return mesh;
+    const auto surface = state.surfaces.find(face->second.surface_id.value);
+    if (surface == state.surfaces.end() || surface->second.kind != SurfaceKind::Plane) return mesh;
+    const auto support_normal = normalize(surface->second.normal);
+    if (!(norm(support_normal) > 0.0)) return mesh;
+    const Scalar tolerance = std::max<Scalar>(1e-12, std::abs(state.config.tolerance.linear));
+    std::vector<LoopId> loops{face->second.outer_loop};
+    loops.insert(loops.end(), face->second.inner_loops.begin(), face->second.inner_loops.end());
+    std::vector<std::vector<Point3>> rings;
+    for (const auto loop_id : loops) {
+        std::vector<Point3> ring;
+        std::string reason;
+        const auto loop_record = state.loops.find(loop_id.value);
+        if (loop_record == state.loops.end() ||
+            !topo_internal::validate_loop_record(state, loop_record->second, reason)) return {};
+        if (!topo_internal::loop_vertex_chain_3d(state, loop_id, ring, reason) || ring.size() < 3) return {};
+        const auto& loop = state.loops.at(loop_id.value);
+        for (const auto coedge_id : loop.coedges) {
+            const auto& edge = state.edges.at(state.coedges.at(coedge_id.value).edge_id.value);
+            const auto curve = state.curves.find(edge.curve_id.value);
+            if (curve == state.curves.end() ||
+                (curve->second.kind != CurveKind::Line && curve->second.kind != CurveKind::LineSegment)) return {};
+        }
+        for (const auto& point : ring) {
+            const Scalar distance = std::abs(dot(subtract(point, surface->second.origin), support_normal));
+            if (!std::isfinite(distance) || distance > tolerance) return {};
+        }
+        rings.push_back(std::move(ring));
     }
-    mesh.vertices = boundary;
+    const auto n = newell_normal(rings.front());
+    std::vector<std::array<int, 3>> triangles;
+    if (rings.size() == 1) {
+        mesh.vertices = rings.front();
+        if (!triangulate_extrude_profile(mesh.vertices, n, triangles)) return {};
+    } else {
+        std::vector<std::pair<int, int>> boundary;
+        const std::vector<std::vector<Point3>> holes(rings.begin() + 1, rings.end());
+        if (!triangulate_extrude_region(rings.front(), holes, n, tolerance,
+                                       mesh.vertices, boundary, triangles)) return {};
+    }
     mesh.bbox = mesh_bbox_from_vertices(mesh.vertices);
-
-    const auto n = newell_normal(mesh.vertices);
-    if (options.compute_normals) {
-        mesh.normals.assign(mesh.vertices.size(), n);
-    }
-    mesh.texcoords.clear();
-    // Face-local UVs preserve seams during welding; only create them when requested.
+    if (options.compute_normals) mesh.normals.assign(mesh.vertices.size(), n);
     if (options.generate_texcoords) {
         mesh.texcoords.reserve(mesh.vertices.size());
         const auto& p0 = mesh.vertices.front();
@@ -1374,14 +1442,9 @@ MeshRecord tessellate_face_planar_mesh(const KernelState& state, FaceId face_id,
             mesh.texcoords.push_back(Point2{dot(d, u_axis), dot(d, v_axis)});
         }
     }
-
-    // Fan triangulation; suitable for convex faces (the current minimal owned topology uses rectangles).
-    mesh.indices.reserve((mesh.vertices.size() - 2) * 3);
-    for (std::size_t i = 1; i + 1 < mesh.vertices.size(); ++i) {
-        mesh.indices.push_back(static_cast<Index>(0));
-        mesh.indices.push_back(static_cast<Index>(i));
-        mesh.indices.push_back(static_cast<Index>(i + 1));
-    }
+    mesh.indices.reserve(triangles.size() * 3);
+    for (const auto& triangle : triangles)
+        for (const auto index : triangle) mesh.indices.push_back(static_cast<Index>(index));
     return mesh;
 }
 
@@ -1392,13 +1455,13 @@ MeshRecord tessellate_face(const KernelState& state, FaceId face_id, const Tesse
     }
     const auto surf_it = state.surfaces.find(face_it->second.surface_id.value);
     if (surf_it == state.surfaces.end()) {
-        return rep_internal::tessellate_face_planar_mesh(state, face_id, options);
+        return MeshRecord {};
     }
     const auto& surf = surf_it->second;
     if (surf.kind == SurfaceKind::Trimmed) {
         const auto base_it = state.surfaces.find(surf.base_surface_id.value);
         if (base_it == state.surfaces.end()) {
-            return rep_internal::tessellate_face_planar_mesh(state, face_id, options);
+            return MeshRecord {};
         }
         auto patch =
             tessellate_surface_patch(&state, surf.base_surface_id, base_it->second, surf.trim_u_min,
@@ -1407,7 +1470,7 @@ MeshRecord tessellate_face(const KernelState& state, FaceId face_id, const Tesse
         if (!patch.vertices.empty() && !patch.indices.empty()) {
             return patch;
         }
-        return rep_internal::tessellate_face_planar_mesh(state, face_id, options);
+        return MeshRecord {};
     }
     if (surf.kind == SurfaceKind::Plane) {
         return rep_internal::tessellate_face_planar_mesh(state, face_id, options);
@@ -1422,7 +1485,7 @@ MeshRecord tessellate_face(const KernelState& state, FaceId face_id, const Tesse
                 return patch;
             }
         }
-        return rep_internal::tessellate_face_planar_mesh(state, face_id, options);
+        return MeshRecord {};
     }
     if (surf.kind == SurfaceKind::Bezier || surf.kind == SurfaceKind::BSpline ||
         surf.kind == SurfaceKind::Nurbs) {
@@ -1434,7 +1497,7 @@ MeshRecord tessellate_face(const KernelState& state, FaceId face_id, const Tesse
                 return patch;
             }
         }
-        return rep_internal::tessellate_face_planar_mesh(state, face_id, options);
+        return MeshRecord {};
     }
     if (surf.kind == SurfaceKind::Revolved || surf.kind == SurfaceKind::Swept ||
         surf.kind == SurfaceKind::Offset) {
@@ -1447,9 +1510,9 @@ MeshRecord tessellate_face(const KernelState& state, FaceId face_id, const Tesse
                 return patch;
             }
         }
-        return rep_internal::tessellate_face_planar_mesh(state, face_id, options);
+        return MeshRecord {};
     }
-    return rep_internal::tessellate_face_planar_mesh(state, face_id, options);
+    return MeshRecord {};
 }
 
 } // namespace rep_internal

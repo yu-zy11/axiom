@@ -313,11 +313,11 @@
 
 | 错误码 | 严重级别 | 含义 |
 |---|---|---|
-| `AXM-QUERY-E-0001` | Error | 最近点查询失败（含实体点定位距离/绕数数值失败） |
+| `AXM-QUERY-E-0001` | Error | 最近点/实体距离查询失败（含距离/绕数数值失败及空实体无有限见证） |
 | `AXM-QUERY-E-0002` | Error | 截面计算失败（含实体线段裁剪/事件分辨率/绕数数值失败） |
-| `AXM-QUERY-E-0003` | Error | 质量属性或解析修剪面积的数值积分失败 |
-| `AXM-QUERY-E-0004` | Error | 距离计算失败 |
-| `AXM-QUERY-E-0005` | Warning | 质量属性基于近似网格计算 |
+| `AXM-QUERY-E-0003` | Error | 质量属性或解析修剪面积的数值积分失败；质量含解析溢出/惯性下溢、非有限结果或非正惯性对角项 |
+| `AXM-QUERY-E-0004` | Error | 距离计算失败（既有保留码；S3-QUERY 体间距离数值失败复用 E-0001） |
+| `AXM-QUERY-E-0005` | Warning | 质量属性基于近似网格计算（既有保留码；S3-MASS 不用此码将 bbox/代理质量作为成功结果） |
 | `AXM-QUERY-E-0006` | Error | 多闭壳相交、重叠或容差接触，无法建立材料/空腔包含层级 |
 
 ## 7.9 `HEAL` 修复模块错误码
@@ -652,12 +652,12 @@
 ### FR-QUERY-001 闭合多面体拓扑质量属性诊断（第 70 批）
 
 - `AXM-CORE-E-0001`：`shell_mass_properties/body_mass_properties` 目标句柄无效、已删除或已回滚；`InvalidInput`，无部分值。
-- `AXM-CORE-E-0004`：壳含曲面或曲边；`NotImplemented`，不使用弦长、网格或 bbox 近似。
+- `AXM-CORE-E-0004`：壳含曲面、曲边或兼容代理面；`NotImplemented`，不使用弦长、网格或 bbox 近似。
 - `AXM-TOPO-E-0005`：壳为空、开放、非流形，或引用的面/曲面缺失；`InvalidTopology`。
 - `AXM-TOPO-E-0015`：共享边在两个相邻面中同向，或外/内环绕向与平面法向不一致；`InvalidTopology`。
 - `AXM-TOPO-E-0003/0004/0006/0009`：面环、定向边、顶点链或重复壳/面引用损坏；`InvalidTopology`。
 - `AXM-GEO-E-0003`：平面法向、面环面积或闭壳有向体积退化；`DegenerateGeometry`。
-- `AXM-QUERY-E-0003`：单壳积分或多壳汇总产生非有限/越界结果；`NumericalInstability`。
+- `AXM-QUERY-E-0003`：单壳积分、多壳汇总或原生解析质量产生非有限/越界结果、惯性下溢或非正惯性对角项；`NumericalInstability`。
 - `AXM-QUERY-E-0006`：`body_shell_regions/body_mass_properties` 发现闭壳相交、重叠、容差接触或矛盾包含关系；`InvalidTopology`，关联 Body 与冲突 Shell，无部分层级或质量属性。
 - `AXM-CORE-E-0002`：顶点坐标或拓扑规模超出可处理范围；`InvalidInput`。
 
@@ -741,6 +741,98 @@ Plane/Cylinder/Cone/规则 Sphere/Torus 及其嵌套 Offset 的成功解析路�
 | `AXM-TOPO-E-0008 / InvalidTopology` | 面边界不位于支撑平面；共享质量属性前置检查同样加严 |
 | `AXM-QUERY-E-0006 / InvalidTopology` | 壳间相交、重叠、建模容差接触或矛盾包含关系 |
 
-其余闭壳/面/环/边/质量失败沿用上文质量属性与包含层级诊断并原样传播，不返回部分最近点、区间或材料长度。无交集、空实体为成功空结果。位置容差不膨胀材料，事件分辨率不足闭合失败；新三角形预算仅覆盖质量/壳关系前置检查之后的距离、求交与绕数，成功公开实际 `triangle_tests`。诊断与一次顶层 Topo 查询审计允许增加；模型、MeshId、缓存、Eval 和活动事务写计数不变。要求无自交的嵌入平面直边双边流形闭壳，本批未新增壳自身全局自交证明。
+其余闭壳/面/环/边/质量失败沿用上文质量属性与包含层级诊断并原样传播，不返回部分最近点、区间或材料长度。线段无交集为成功空结果；内部零壳分支的空结果合同不代表公共 API 可创建空体，cycle-0075 未构造或验收该分支。位置容差不膨胀材料，事件分辨率不足闭合失败；新三角形预算仅覆盖质量/壳关系前置检查之后的距离、求交与绕数，成功公开实际 `triangle_tests`。诊断与一次顶层 Topo 查询审计允许增加；模型、MeshId、缓存、Eval 和活动事务写计数不变。要求无自交的嵌入平面直边双边流形闭壳，本批未新增壳自身全局自交证明。
 
 上述 Ops/Query 失败码、阶段、数值证据、预算及事务/只读回归分别纳入 `axiom_ops_heal_test` 与 `axiom_query_eval_test`；[cycle-0074 门禁日志](../../.axiom-agent/logs/cycle-0074-gates.log) 记录完整 CTest 16/16、0 失败、134.05 s。本轮未重新构建或运行测试。
+
+
+### S3-QUERY 截面与距离诊断（cycle-0075，复用既有错误码）
+
+通用/专用入口共用失败状态、稳定错误码和 Issue.stage；兼容 `section` 与 `min_distance` 沿用详细结果 diagnostic_id。前置检查不能因为平面远离 bbox 而跳过，所有失败无部分结果。
+
+共享体类门禁也用于 `body_shell_regions`，该入口不支持体类返回 `NotImplemented / AXM-CORE-E-0004 / query.body.support_gate`。`body_mass_properties` 将前置失败映射为 `query.mass_properties.support_gate/preflight`；通用未编辑原生 sphere/cylinder/cone/torus 仍有独立解析质量资格；编辑与 metadata 恢复不继承该资格，细节见下文 S3-MASS 合同。
+
+| 错误码 / StatusCode | 稳定 `Issue.stage` | 根因与约定 |
+|---|---|---|
+| `AXM-CORE-E-0002 / InvalidInput` | `query.section.input_gate`、`query.closest_point.input_gate`、`query.distance.input_gate` | 平面法向非有限/零、坐标非有限、负或非有限位置容差、零工作预算（各入口适用的输入） |
+| `AXM-CORE-E-0002 / InvalidInput` | `query.section.budget`、`query.closest_point.budget`、`query.distance.budget` | 前置检查之后实际工作预算耗尽；无部分值，不继续发布网格 |
+| `AXM-CORE-E-0004 / NotImplemented` | `query.section.support_gate`、`query.closest_point.support_gate`、`query.distance.support_gate`、`query.mass_properties.support_gate` | 解析曲面、曲边、旧占位或非 ExactBRep 等不支持真实多面体体类/边界；不允许 bbox 壳代替 |
+| `AXM-CORE-E-0001 / InvalidInput` | `query.section.preflight`、`query.closest_point.preflight`、`query.distance.preflight`、`query.mass_properties.preflight` | 无效、删除或已回滚 BodyId |
+| `AXM-TOPO-E-0005 / InvalidTopology` | 相应 `query.*.preflight` | 删除面后壳不闭合等闭壳前置失败；其他环/边/面根因沿用已有 TOPO/GEO 码 |
+| `AXM-TOPO-E-0008 / InvalidTopology` | 相应 `query.*.preflight` | 当前面边界与支撑平面错配 |
+| `AXM-QUERY-E-0006 / InvalidTopology` | 相应 `query.*.preflight` | 多壳相交、重叠、建模容差接触或包含关系冲突 |
+| `AXM-QUERY-E-0002 / NumericalInstability` | `query.section.numeric` | 平面有向距离符号、不同交段/事件或世界坐标不可分辨，面积溢出；远隔小分量不可静默丢失 |
+| `AXM-QUERY-E-0001 / NumericalInstability` | `query.closest_point.numeric`、`query.distance.numeric` | 三角形/面边距离退化、溢出或材料绕数无法可靠判定 |
+| `AXM-QUERY-E-0003 / NumericalInstability` | `query.mass_properties.numeric` | 当前拓扑质量汇总、质心或惯性不可表示；不恢复编辑前缓存值 |
+| `AXM-QUERY-E-0001 / DegenerateGeometry` | `query.distance.empty_gate` | 内部零壳体分支无有限最近见证；合同保留，但本批未构造/验证该查询分支 |
+| `AXM-TOPO-E-0005 / InvalidTopology` | `query.mass_properties.empty_gate` | 内部零壳体无可积分边界；不是本批零壳查询验收证据 |
+
+公共 `create_body({})` 已回归为 `OperationFailed / AXM-TX-E-0001`、无 value、事务写计数不变；这不能用来声称测试了零壳体查询。真正无交集截面是成功空结果，bbox 无效，兼容入口有 value 的 `MeshId{}`；共面面有面积，线/点相切成功零面积，均无失败 issue。最近体间距离的相交、包含、相切为成功 0；可表示正间隙不被位置容差或裁剪舍入带抹为零。预算默认 1000000，仅计前置之后工作，精确重放与少一预算失败均已回归。
+
+依据 [cycle-0075 最终全量门禁](../../.axiom-agent/logs/cycle-0075-gates.log)，Query/Eval、Ops/Heal、representation/IO 及全量 CTest 已通过；逐项证据见 [测试与验收方案](../quality/AxiomKernel_测试与验收方案.md)。未新增错误码，S3-QUERY 正式验收以调度器文档检查及提交成功为准，FR-QUERY-001 保持进行中。
+
+### cycle-0076 / S3-MASS 统一质量失败合同
+
+本批不新增错误码，公开签名不变；`QueryService::mass_properties`、`shell_mass_properties/body_mass_properties` 使用稳定阶段，失败均无 value，不输出部分体积/面积/重心/惯性。
+
+| 状态 / 根因码 | Issue.stage | 根因与限制 |
+|---|---|---|
+| NotImplemented / `AXM-CORE-E-0004` (`kCoreOperationUnsupported`) | `query.mass_properties.support_gate` | 未知/不支持体类或表示、旧 label-only Sweep、历史占位 thicken 记录、Boolean/Modified、metadata/mesh/implicit 派生记录、曲面/曲边/兼容代理壳；原生解析体成功编辑后资格撤销 |
+| InvalidInput / `AXM-CORE-E-0001` (`kCoreInvalidHandle`) | `query.mass_properties.preflight` | 目标不存在、已删除或已回滚；删除最后壳同时删除 owner Body，不留零壳体 |
+| InvalidTopology / `AXM-TOPO-E-0008` 或 `AXM-TOPO-E-0005` 等既有拓扑根因 | `query.mass_properties.preflight` | 支撑面错配、开壳、损坏引用等；保留既有错误码，不允许热缓存恢复旧值 |
+| InvalidTopology / `AXM-QUERY-E-0006` | `query.mass_properties.preflight` | 多壳相交、重叠、重合、建模容差接触或无法建立一致包含层级 |
+| NumericalInstability / `AXM-QUERY-E-0003` (`kQueryMassPropertiesFailure`) | `query.mass_properties.numeric` | 原生解析或当前拓扑积分/汇总溢出、惯性下溢、非有限属性或非正惯性对角项；r=1e70/1e-70 原生球已回归 |
+| DegenerateGeometry / `AXM-GEO-E-0003` | `query.mass_properties.numeric` | 专用壳积分法向/环面积/闭壳有向体积退化；不是零数值成功 |
+| InvalidTopology / `AXM-TOPO-E-0005` | `query.mass_properties.empty_gate` | 内部零壳支持体防御；公共 API 无该夹具，本批不声称已执行/验收 |
+
+原生解析体失败编辑保持资格，成功替换面/改变 PCurve 绑定/删除撤销资格；保存点和整事务回滚恢复，提交后持续拒绝。代理面标记随克隆/imprint 切分继承，重新组壳/删除原 owner 不允许绕过拒绝。所有质量查询无 bbox、来源 Boolean/Modified 或 Sweep 创建缓存 fallback；查询只增加诊断/Topo 读审计，不发布网格、不改缓存/Eval/事务写计数。实际门禁与三条证据见 [测试与验收 §1.3](../quality/AxiomKernel_测试与验收方案.md#13-cycle-0076--s3-mass-门禁与逐项证据)，体类与单位见 [API §6.1.3](../api/AxiomKernel_详细模块接口清单.md#613-stage-3-质量属性支持矩阵cycle-0076--s3-mass)。
+
+### cycle-0077 / S3-MODELING 建模失败合同
+
+不新增错误码、不改公开签名；以下为本批五条真实主路径的 `Issue.stage` 合同。失败均无 `value`，前置验证/区域物化失败不分配模型或几何对象，不改变活动事务写数、next_id、索引、mesh/求值/三角化缓存及 Eval 状态，诊断可增加；回滚后可重试。
+
+| 状态 / 根因码 | Issue.stage | 根因与支持限制 |
+|---|---|---|
+| InvalidInput / `AXM-CORE-E-0002` (`kCoreParameterOutOfRange`) | `extrude.input_gate` / `extrude.materialization` | 空标签、共线/退化显式轮廓或非法方向/距离；区域物化拒绝外置孔等无效边界 |
+| InvalidInput / `AXM-CORE-E-0002` | `revolve.input_gate` / `revolve.materialization` | 非有限/零/越界角或非法轴；跨轴、无效轮廓或不可物化采样闭壳 |
+| InvalidInput / `AXM-CORE-E-0001` 或 `AXM-CORE-E-0002` | `sweep.input_gate` / `sweep.materialization` | 空轮廓标签或无效 rail 句柄用 0001；无限/切向/退化 rail、其余无效显式轮廓与物化失败用 0002。直线委托 extrude 仍映射为 sweep.* |
+| InvalidInput / `AXM-CORE-E-0002` | `loft.input_gate` / `loft.materialization` | 截面不足或缺显式轮廓；重合、拓扑不兼容、退化/折叠插值拒绝 |
+| InvalidInput / `AXM-CORE-E-0001` (`kCoreInvalidHandle`) | `thicken.input_gate` | FaceId 不存在、删除或无效 |
+| InvalidInput / `AXM-MOD-E-0003` (`kModShellFailure`) | `thicken.input_gate` | 厚度为零、负值、Inf 或 NaN；要求有限正厚度 |
+| InvalidTopology / `AXM-MOD-E-0003` | `thicken.topology_gate` | 无效支撑/环/共边/边/曲线/顶点引用，链断开或未闭合，端点不在支撑直线/平面上，裁剪区间与端点错配 |
+| DegenerateGeometry / `AXM-MOD-E-0003` | `thicken.topology_gate` | 支撑 Plane 法向非有限或退化 |
+| NotImplemented / `AXM-CORE-E-0004` (`kCoreOperationUnsupported`) | `thicken.support_gate` | 曲面、曲边或兼容代理 Face；不以边端点弦或 bbox 替代真实边界 |
+| InvalidInput / `AXM-MOD-E-0003` | `thicken.materialization` | 面区域自交/退化/孔冲突，或正厚度在当前尺度不可分辨，无法形成真实闭壳 |
+
+thicken 失败 issue 关联输入 FaceId；支持正反法向及与其独立的环绕向，读取真实裁剪边。结果曲面编辑后质量查询仍用 `AXM-CORE-E-0004 / query.mass_properties.support_gate` 拒绝且无部分属性，不恢复旧创建质量；回滚恢复当前质量与空间查询。cycle-0077 的真实平面 thicken 不再属于历史占位拒绝夹具；历史代理记录继续拒绝。逐项成功/拒绝/事务证据及真实门禁见 [测试与验收 §1.4](../quality/AxiomKernel_测试与验收方案.md#14-cycle-0077--s3-modeling-门禁与逐项证据)，支持矩阵见 [API §8.1.1](../api/AxiomKernel_详细模块接口清单.md#811-stage-3-五类建模主路径cycle-0077--s3-modeling)。截面律等已有专用阶段名保持原合同。
+
+### cycle-0078 / S3-CONSISTENCY 表示失败与恢复合同
+
+本批没有新增错误码常量或公开签名；owned 表示失败补齐稳定 `Issue.stage` 和关联实体，复用 `AXM-TES-E-0001`（`kTesFailure`）。full/local/shell 转换统一先完成全部面三角化和组装，再发布网格；失败无 value、不分配网格 ID、不遗留部分网格/缓存，禁止以 bbox 或创建参数恢复当前 owned 边界。
+
+| 根因 | status / code | Issue.stage / 实体 | 实际回归边界 |
+|---|---|---|---|
+| 当前面边界不能按支撑三角化（如位移平面错配） | OperationFailed / AXM-TES-E-0001 | rep.tessellation.face；BodyId、ShellId、FaceId | Rep warm/cold/full/local/shell 均拒绝，目标 Face 关联有效，对象/next_id/事务写数/网格及两级缓存计数不增长；编辑 native box 后同样读取当前平面边界，不恢复创建参数 |
+| Stage 3 多面体失去平面支撑，或编辑原生解析体仅剩兼容代理壳 | NotImplemented / AXM-TES-E-0001 | rep.tessellation.support；BodyId、ShellId、FaceId | Rep 明确断言曲面支撑的 status/code/stage；native sphere 编辑断言 TES 拒绝及回滚恢复原网格，不冒称逐 primitive 的 stage 断言覆盖 |
+| owned 组装阶段发现壳/面缺失或空，或建模体缺少当前 owned 边界 | OperationFailed / AXM-TES-E-0001 | rep.tessellation.topology；BodyId，按路径附 ShellId/FaceId | 实现防御合同；本批不声称每个分支均已注入测试。shell 入口的句柄/归属/空壳前置校验仍可返回既有 CORE 错误 |
+| 面网格索引/规模无效或组装为空 | OperationFailed / AXM-TES-E-0001 | rep.tessellation.assembly；BodyId，按路径附 ShellId/FaceId | 同上；主链成功网格索引/连通性已验证 |
+| 无效输入句柄 / tessellation options | InvalidInput / AXM-CORE-E-0001 或 AXM-CORE-E-0002 | 沿用既有 CORE 前置诊断，不新增 TES stage 承诺 | options 失败不改变 next_id、网格及两级缓存计数 |
+
+编辑/删除使 Eval 绑定及下游 dirty；保存点/显式/析构/取消恢复会重新失效已在事务内重算的消费者。移除体在恢复或提交时清理其网格/缓存和体绑定；诊断不回滚，事务 ID 不承诺回收。旧网格是快照，仅当前边界键与正确 source_body 可命中；历史 metadata `bbox_proxy` 显示路径仍保留，不属于 owned 实体 fallback，也不授予质量/实体查询资格。
+
+`stage3_representation_consistency_regression`、`stage3_eval_rollback_consistency_regression`、`stage3_discarded_body_runtime_regression` 及五类 Ops 集成闭环均随调度器完整 CTest **16/16、164.60 s** 通过，详见 [验收 §1.5](../quality/AxiomKernel_测试与验收方案.md#15-cycle-0078--s3-consistency-门禁与逐项证据)。上述为 cycle-0078 历史门禁，当批未记录 Strict warnings 独立门禁；当前 cycle-0079 的配置及残余告警见下文，正式验收条件见当前进度 §5.2.1，Stage 3 保持进行中。
+
+### cycle-0079 / S3-EXIT 统一矩阵拒绝合同
+
+本批复用错误码常量和既有 Issue.stage，不新增/改义错误码；公开接口只补支持边界注释。`tests/eval/query_eval_test.cpp::stage3_exit_support_matrix_regression` 的 17 行已随调度器全量 **16/16、0 失败、163.78 s** 执行，其中四类原生解析体仅通用质量成功，代理体拓扑质量与实体截面/最近点/距离拒绝；占位 Sweep/Boolean 与 mesh 派生全部物理查询拒绝。真实平面 Face thicken 是支持行，不能误写为历史占位。
+
+| 入口族 | 不支持当前物理边界 | 无效 BodyId |
+|---|---|---|
+| Query section_detailed/section、Topo section | NotImplemented / `AXM-CORE-E-0004` / `query.section.support_gate` | InvalidInput / `AXM-CORE-E-0001` / `query.section.preflight` |
+| Query closest_point、Topo locate_point | 同码/状态 / `query.closest_point.support_gate` | 同码/状态 / `query.closest_point.preflight` |
+| Query/Topo closest_points、Query 正反 min_distance | 同码/状态 / `query.distance.support_gate` | 同码/状态 / `query.distance.preflight` |
+| Query mass_properties、Topo body_mass_properties | 同码/状态 / `query.mass_properties.support_gate`；原生未编辑解析体的 Query 入口例外成功 | 同码/状态 / `query.mass_properties.preflight` |
+
+拒绝必须无 value 且 diagnostic_id 可检索对应 Issue.code/stage；稳定阶段不以成功值或 bbox fallback 代替。查询矩阵核对对象/几何数量、next_object_id、网格/体面三角化/曲线曲面求值/交线缓存、Eval invalid/recompute 与事务写计数不变；诊断及 Topo 读审计可增长。成功兼容 section 显式发布网格的语义不变，矩阵仅检查该入口的拒绝路径。预算、数值、当前编辑 preflight 与 rep.tessellation 原子失败合同沿用前述 S3-QUERY/MASS/CONSISTENCY 条目；内部 empty_gate 无公共夹具，不宣称已验收。
+
+API 支持体类、精确/采样范围见 [统一矩阵 §6.1.4](../api/AxiomKernel_详细模块接口清单.md#614-stage-3-统一退出支持矩阵cycle-0079--s3-exit)，三条阶段证据及本批 strict warnings 残余见 [验收 §1.6](../quality/AxiomKernel_测试与验收方案.md#16-cycle-0079--s3-exit-门禁与逐项证据)。本批编译告警为 C++ 初始化告警，不是新 AXM 诊断码；实发 SDK 1 条，未重编译的 helpers 历史 17 条不宣称消除。stage_task_id=S3-EXIT、stage_outcome=ready_for_acceptance，最终文档门禁及调度器提交成功后才记录正式验收，Stage 3 保持进行中。

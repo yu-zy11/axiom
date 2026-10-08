@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include <iostream>
 
+#include "axiom/diag/error_codes.h"
 #include "axiom/sdk/kernel.h"
 
 namespace {
@@ -58,8 +59,27 @@ int main() {
                                 ? boolean_result.value->output
                                 : *box.value;
         auto props = kernel.query().mass_properties(query_target);
-        if (props.status != axiom::StatusCode::Ok) {
-            std::cerr << "perf baseline mass properties failed\n";
+        // Keep the same boolean/query workload and budget. Compatibility boolean
+        // topology now has an explicit unsupported-mass contract, with no numbers.
+        const bool proxy_target = query_target.value != box.value->value;
+        if ((proxy_target && (props.status != axiom::StatusCode::NotImplemented || props.value)) ||
+            (!proxy_target && (props.status != axiom::StatusCode::Ok || !props.value))) {
+            std::cerr << "perf baseline mass properties contract failed\n";
+            return 1;
+        }
+        if (proxy_target) {
+            const auto diagnostic = kernel.diagnostics().get(props.diagnostic_id);
+            bool supported_failure = false;
+            if (diagnostic.value) for (const auto& issue : diagnostic.value->issues)
+                if (issue.code == axiom::diag_codes::kCoreOperationUnsupported &&
+                    issue.stage == "query.mass_properties.support_gate") supported_failure = true;
+            if (!supported_failure) {
+                std::cerr << "perf baseline mass failure diagnostic missing\n";
+                return 1;
+            }
+        }
+        if (proxy_target && !kernel.query().mass_properties(*box.value).value) {
+            std::cerr << "perf baseline supported mass query failed\n";
             return 1;
         }
     }

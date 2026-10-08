@@ -59,6 +59,106 @@ int main() {
     static_assert(std::is_nothrow_destructible_v<axiom::TopologyTransaction>);
     axiom::Kernel kernel;
 
+    // S3-MODELING: planar thicken must reject damaged current topology at
+    // its store boundary, without creating a proxy shell or mutating adjacency.
+    // Public transactions normally prevent these corruptions; inject them here
+    // to lock the materializer's pre-allocation contract as a component regression.
+    {
+        auto state=std::make_shared<axiom::detail::KernelState>(axiom::KernelConfig{});
+        axiom::PrimitiveService primitives{state};
+        axiom::SweepService sweeps{state};
+        axiom::TopologyService topology{state};
+        axiom::DiagnosticService diagnostics{state};
+        axiom::ValidationService validation{state};
+        const auto source=primitives.box({0,0,0},3,4,5);
+        if (!source.value) return 1;
+        auto query=topology.query();
+        const auto source_faces=query.faces_of_body(*source.value);
+        if (!source_faces.value || source_faces.value->empty()) return 1;
+        const auto face=source_faces.value->front();
+        const auto loop=state->faces.at(face.value).outer_loop;
+        const auto coedge=state->loops.at(loop.value).coedges.front();
+        const auto edge=state->coedges.at(coedge.value).edge_id;
+        const auto curve=state->edges.at(edge.value).curve_id;
+        const auto surface=state->faces.at(face.value).surface_id;
+        const auto original_face=state->faces.at(face.value);
+        const auto original_loop=state->loops.at(loop.value);
+        const auto original_coedge=state->coedges.at(coedge.value);
+        const auto original_edge=state->edges.at(edge.value);
+        const auto original_curve=state->curves.at(curve.value);
+        const auto original_surface=state->surfaces.at(surface.value);
+        auto txn=topology.begin_transaction();
+        const auto temporary=txn.create_vertex({90,91,92});
+        const auto next=state->next_id;
+        const auto writes=txn.write_operation_count();
+        const auto vertices=state->vertices.size(), edges=state->edges.size(), faces=state->faces.size();
+        const auto shells=state->shells.size(), bodies=state->bodies.size(), curves=state->curves.size();
+        const auto surfaces=state->surfaces.size(), loops=state->loops.size(), coedges=state->coedges.size();
+        const auto links=state->edge_to_coedges;
+        const auto owners=state->face_to_shells;
+        const auto rejected=[&](axiom::StatusCode status, std::string_view stage, std::string_view code) {
+            const auto result=sweeps.thicken(face,1);
+            const auto report=diagnostics.get(result.diagnostic_id);
+            return !result.value && result.status==status && report.value &&
+                std::any_of(report.value->issues.begin(),report.value->issues.end(),[&](const axiom::Issue& issue) {
+                    return issue.stage==stage && issue.code==code &&
+                        std::find(issue.related_entities.begin(),issue.related_entities.end(),face.value)!=issue.related_entities.end();
+                }) && state->next_id==next && txn.write_operation_count().value==writes.value &&
+                state->vertices.size()==vertices && state->edges.size()==edges && state->faces.size()==faces &&
+                state->shells.size()==shells && state->bodies.size()==bodies && state->curves.size()==curves &&
+                state->surfaces.size()==surfaces && state->loops.size()==loops && state->coedges.size()==coedges &&
+                state->edge_to_coedges==links && state->face_to_shells==owners &&
+                state->curve_eval_cache.empty() && state->surface_eval_cache.empty();
+        };
+        if (!temporary.value) return 1;
+        const auto topology_error=[&] {
+            return rejected(axiom::StatusCode::InvalidTopology,"thicken.topology_gate",axiom::diag_codes::kModShellFailure);
+        };
+        state->coedges.at(coedge.value).reversed=!original_coedge.reversed;
+        if (!topology_error()) { std::cerr << "thicken accepted discontinuous coedge chain\n"; return 1; }
+        state->coedges.at(coedge.value)=original_coedge;
+        state->loops.at(loop.value).coedges.pop_back();
+        if (!topology_error()) return 1;
+        state->loops.at(loop.value)=original_loop;
+        state->edges.at(edge.value).curve_id={};
+        if (!topology_error()) return 1;
+        state->edges.at(edge.value)=original_edge;
+        state->curves.at(curve.value).kind=axiom::detail::CurveKind::Circle;
+        if (!rejected(axiom::StatusCode::NotImplemented,"thicken.support_gate",axiom::diag_codes::kCoreOperationUnsupported)) return 1;
+        state->curves.at(curve.value)=original_curve;
+        // Box edges are axis aligned; displacing all three coordinates changes
+        // the support line regardless of which edge the face enumeration selects.
+        state->curves.at(curve.value).origin.x+=100;
+        state->curves.at(curve.value).origin.y+=100;
+        state->curves.at(curve.value).origin.z+=100;
+        if (!topology_error()) return 1;
+        state->curves.at(curve.value)=original_curve;
+        state->edges.at(edge.value).has_parameter_interval=true;
+        state->edges.at(edge.value).start_parameter=10;
+        state->edges.at(edge.value).end_parameter=11;
+        if (!topology_error()) return 1;
+        state->edges.at(edge.value)=original_edge;
+        state->surfaces.at(surface.value).normal={};
+        if (!rejected(axiom::StatusCode::DegenerateGeometry,"thicken.topology_gate",axiom::diag_codes::kModShellFailure)) return 1;
+        state->surfaces.at(surface.value)=original_surface;
+        // Even an apparently closed chain is not a valid region when the same
+        // boundary is reused as a hole. Region rejection must precede allocation.
+        state->faces.at(face.value).inner_loops={loop};
+        if (!rejected(axiom::StatusCode::InvalidInput,"thicken.materialization",axiom::diag_codes::kModShellFailure)) return 1;
+        state->faces.at(face.value)=original_face;
+        // Rollback restores the pre-existing source and removes the unrelated
+        // pending vertex. The same current Face can then be retried successfully.
+        if (txn.rollback().status!=axiom::StatusCode::Ok) return 1;
+        const auto temporary_exists=query.has_vertex(*temporary.value);
+        const auto retry=sweeps.thicken(face,1);
+        const auto area=query.planar_face_area(face);
+        const auto mass=retry.value ? query.body_mass_properties(*retry.value) : axiom::Result<axiom::MassProperties>{};
+        if (!temporary_exists.value || *temporary_exists.value || !retry.value || !area.value || !mass.value ||
+            std::abs(mass.value->volume-*area.value)>1e-8 ||
+            validation.validate_all(*retry.value,axiom::ValidationMode::Strict).status!=axiom::StatusCode::Ok ||
+            validation.validate_all(*source.value,axiom::ValidationMode::Strict).status!=axiom::StatusCode::Ok) return 1;
+    }
+
     // NFR-REL-001: a body rejected for an incomplete shell must not consume an entity ID.
     // Inject the damaged shell at the store boundary because normal topology creation
     // prevents this state; the transaction must still reject it without side effects.

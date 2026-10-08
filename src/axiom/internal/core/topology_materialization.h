@@ -597,6 +597,7 @@ inline ShellId clone_materialized_shell(KernelState& state, ShellId source_shell
         const auto cloned_face = FaceId {state.allocate_id()};
         FaceRecord face;
         face.surface_id = source_face_it->second.surface_id;
+        face.mass_boundary_proxy = source_face_it->second.mass_boundary_proxy;
         face.outer_loop = cloned_outer;
         face.inner_loops = std::move(cloned_inner_loops);
         if (source_face_it->second.source_faces.empty()) {
@@ -656,6 +657,7 @@ inline ShellId clone_materialized_shell_with_faces(KernelState& state,
         const auto cloned_face = FaceId {state.allocate_id()};
         FaceRecord face;
         face.surface_id = source_face_it->second.surface_id;
+        face.mass_boundary_proxy = source_face_it->second.mass_boundary_proxy;
         face.outer_loop = cloned_outer;
         face.inner_loops = std::move(cloned_inner_loops);
         if (source_face_it->second.source_faces.empty()) {
@@ -1018,7 +1020,7 @@ inline void materialize_body_wedge_shell(KernelState& state, BodyRecord& record)
     {
         const std::array<std::pair<int, bool>, 4> refs {{{1, false}, {8, false}, {4, true}, {7, true}}};
         faces.push_back(create_materialized_polygon_face(state, edges, std::span<const std::pair<int, bool>>(refs),
-                                                         Vec3 {1.0, 1.0, 0.0}, source_faces));
+                                                         Vec3 {dy, dx, 0.0}, source_faces));
     }
 
     const auto shell_id = ShellId {state.allocate_id()};
@@ -1710,7 +1712,7 @@ inline bool validate_materialization_triangle_contacts(const std::vector<Point3>
     return true;
 }
 
-/// 简单平面多边形（可凹、可带孔）直线/至平面/扭转拉伸、等比变截面拉伸或折线平移扫掠：三角端盖 + 平面侧壁。
+/// 简单平面多边形（可凹、可带孔）直线/至平面/扭转拉伸、平面面片加厚、等比变截面拉伸或折线平移扫掠：三角端盖 + 平面侧壁。
 /// 所有可失败检查在对象分配前完成，禁止失败时留下部分拓扑。
 inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRecord& record) {
     if (record.kind != BodyKind::Sweep || record.rep_kind != RepKind::ExactBRep || !record.bbox.is_valid ||
@@ -1718,7 +1720,7 @@ inline bool try_materialize_sweep_extrude_prism_body(KernelState& state, BodyRec
         return false;
     }
     if (record.sweep_station_offsets.empty() &&
-        (record.label.size() < 8 || record.label.compare(0, 8, "extrude:") != 0)) {
+        (record.label.compare(0, 8, "extrude:") != 0 && record.label != "thicken:planar")) {
         return false;
     }
     const auto& poly_in = record.extrude_profile_xyz;
@@ -3195,7 +3197,13 @@ inline bool try_materialize_sweep_revolve_meridian_body(KernelState& state, Body
             const int b = vertex_at[static_cast<std::size_t>(station * n + next_i)];
             const int c = vertex_at[static_cast<std::size_t>((station + 1) * n + next_i)];
             const int d = vertex_at[static_cast<std::size_t>((station + 1) * n + i)];
-            if (!append_triangle(a, b, c) || !append_triangle(a, c, d)) return false;
+            // Reversing angular travel reverses the side-wall orientation as
+            // well as the caps. Keep every shared edge oppositely directed.
+            if (signed_angle > 0.0) {
+                if (!append_triangle(a, b, c) || !append_triangle(a, c, d)) return false;
+            } else {
+                if (!append_triangle(a, c, b) || !append_triangle(a, d, c)) return false;
+            }
         }
     }
     for (const auto& triangle : cap_triangles) {
@@ -3214,16 +3222,18 @@ inline bool try_materialize_sweep_revolve_meridian_body(KernelState& state, Body
     }
     if (tris.empty()) return false;
 
-    std::map<std::pair<int, int>, int> edge_use_count;
+    std::map<std::pair<int, int>, std::array<int, 2>> edge_use_count;
     for (const auto& triangle : tris) {
         for (int i = 0; i < 3; ++i) {
             const int a = triangle[static_cast<std::size_t>(i)];
             const int b = triangle[static_cast<std::size_t>((i + 1) % 3)];
-            ++edge_use_count[{std::min(a, b), std::max(a, b)}];
+            auto& uses = edge_use_count[{std::min(a, b), std::max(a, b)}];
+            ++uses[0];
+            uses[1] += a < b ? 1 : -1;
         }
     }
     if (edge_use_count.empty() || std::any_of(edge_use_count.begin(), edge_use_count.end(),
-        [](const auto& item) { return item.second != 2; })) return false;
+        [](const auto& item) { return item.second[0] != 2 || item.second[1] != 0; })) return false;
 
     Scalar vol_chk = 0.0;
     Point3 cm_tmp {};

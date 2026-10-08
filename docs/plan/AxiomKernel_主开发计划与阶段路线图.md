@@ -115,9 +115,17 @@
 
 ## 4.4 `Stage 3` 基础建模与查询分析
 
-**状态：进行中，当前主线。** 已验收子路径包括显式凸/凹及带孔 polygon 拉伸、轴分离有向区间旋转、开放/周期采样曲线扫掠、拓扑兼容 polygon 放样、受限 `thicken/draft/section`、解析体与平面直边闭壳质量属性。cycle-0074 补齐 `extrude_with_law`、`sweep_with_scale_law`、`sweep_with_law` 的分段正比例/有向扭转采样多面体，以及 `locate_point/clip_segment` 的平面直边实体空间查询；调度器完整构建后 CTest 16/16 通过（134.05 s），详见[当前进度](AxiomKernel_当前开发进度.md)。这些仍以“可证明子集 + 前置拒绝 + 回滚不污染”为主，Stage 3 完整退出标准尚未收口。
+**状态：进行中，当前主线。** 已验收子路径包括显式凸/凹及带孔 polygon 拉伸、轴分离有向区间旋转、开放/周期采样曲线扫掠、拓扑兼容 polygon 放样、受限 `draft/section`、原生解析体与平面直边闭壳质量属性（历史占位 thicken 不计主路径，cycle-0077 已补齐真实平面 Face thicken）。cycle-0074 补齐 `extrude_with_law`、`sweep_with_scale_law`、`sweep_with_law` 的分段正比例/有向扭转采样多面体，以及 `locate_point/clip_segment` 的平面直边实体空间查询；调度器完整构建后 CTest 16/16 通过（134.05 s），详见[当前进度](AxiomKernel_当前开发进度.md)。这些仍以“可证明子集 + 前置拒绝 + 回滚不污染”为主；cycle-0079 已将退出标准逐项映射回归并通过代码全量门禁，正式退出仍须文档门禁及调度器提交成功。
 
-cycle-0074 是升级前检查点，按原范围验收并同步文档；下一批开始围绕本阶段目标调度任务。FR-OPS-001 / FR-QUERY-001 继续进行中，不因本批通过而标记需求或阶段完成。
+cycle-0074 是升级前检查点。cycle-0075 / S3-QUERY 收敛真实多面体截面/最近位置/距离，repair 后完整 CTest 16/16（148.44 s）；cycle-0076 / S3-MASS 统一当前拓扑与未编辑原生解析质量资格、删除 bbox/来源/创建缓存恢复，完整 CTest 16/16（147.97 s），历史矩阵与证据保留。
+
+cycle-0077 / S3-MODELING 核验五类真实主路径并补齐平面直边 Face thicken，完整构建及 CTest **16/16、0 失败、153.89 s**，历史矩阵与三条证据保留。thicken 支持凹形/分离非嵌套孔、有限正厚度、沿支撑法向单侧加厚；曲面/曲边/代理面拒绝。棱柱及共面侧壁 loft 夹具在浮点容差内精确，revolve 仍为采样弦面多面体。
+
+cycle-0078 / S3-CONSISTENCY 已形成建模→Strict→截面/最近点/距离/质量→表示/来源/Eval 闭环，体身份/当前边界/source_body 缓存核验、owned 原子失败无 bbox/创建参数 fallback、primitive 编辑资格、Eval dirty 与移除体清理的历史全量 **16/16、164.60 s** 和 [三条证据](../quality/AxiomKernel_测试与验收方案.md#15-cycle-0078--s3-consistency-门禁与逐项证据) 保留。
+
+当前唯一退出任务 **cycle-0079 / S3-EXIT** 已收口 [17 行统一支持矩阵](../api/AxiomKernel_详细模块接口清单.md#614-stage-3-统一退出支持矩阵cycle-0079--s3-exit) 和 [三条验收证据及五项退出映射](../quality/AxiomKernel_测试与验收方案.md#16-cycle-0079--s3-exit-门禁与逐项证据)。调度器独立完整构建成功，全量 CTest **16/16、0 失败、163.78 s**，五个必需回归及原 Boolean/性能门禁均通过；本批未新增接口签名/错误码或工业能力。`stage_outcome=ready_for_acceptance`，状态见 [当前进度 §5.2.1](AxiomKernel_当前开发进度.md#521-stage-3-当前退出任务)。文档已同步，本地文档检查 **35 个 Markdown、0 错误、0 警告**，链接锚点/矩阵映射及 diff 检查通过；正式验收仍须调度器核验最终文档门禁及提交成功，不提前标记 Stage 3 已退出。
+
+Strict warnings 配置 ON；本批重编译 Topo/Rep 的 3 条所涉告警未再出现，实际日志剩 SDK `kernel_plugin.cpp:122` 的 1 条 Issue::numeric_evidence 初始化告警。历史 helpers 17 条同类告警所属编译单元未重编译，不能宣称清零；构建总耗时未记录。Eval recompute 只管理图，旧网格是快照，metadata bbox_proxy 仅显示。FR-OPS-001 / FR-QUERY-001 继续进行中；不以工业需求全满足作为 Stage 3 完成前提，不自动扩展后续阶段。
 
 目标：
 
@@ -133,12 +141,13 @@ cycle-0074 是升级前检查点，按原范围验收并同步文档；下一批
 - `section`、最近点/最近距离、`mass_properties` 在 Stage 3 已声明支持的体类上保持一致语义，失败路径具备稳定 `Issue.stage`
 - topology / rep / provenance / eval 对 Stage 3 主链结果保持一致，不因失败回滚或 fallback 漂移
 
-**本阶段退出前仍需收口的事项**：
+**退出证据与剩余验收条件**：
 
-- 把当前分散在 `ops_heal`、`query_eval`、`representation_io`、`geometry` 中的 Stage 3 frontier 证据整理为统一支持矩阵
-- 收敛查询分析的 fallback 语义，避免 `section_bbox_plane`、局部解析截面与质量属性恢复在不同体类上口径不一
-- 对已声明支持的建模路径补齐跨模块一致性断言，而不只验证单点成功
-- 维持全量 `ctest` 绿并继续压缩 `AXM_ENABLE_STRICT_WARNINGS=ON` 下的历史告警
+- S3-QUERY / S3-MASS / S3-MODELING / S3-CONSISTENCY 专项矩阵与历史证据保留；当前统一口径以 [API §6.1.4](../api/AxiomKernel_详细模块接口清单.md#614-stage-3-统一退出支持矩阵cycle-0079--s3-exit) 为准，后续声明新支持路径时同步维护。
+- S3-EXIT 三条验收要求和五项退出标准均已映射集成回归，完整构建/CTest 已通过；文档检查结果见 [验收 §1.6](../quality/AxiomKernel_测试与验收方案.md#16-cycle-0079--s3-exit-门禁与逐项证据)。剩余为调度器核验最终文档门禁、提交成功及正式 Stage 3 退出记录，不重复安排已通过的代码验收。
+- 平面 polygon extrude、有限直线 sweep、兼容共面侧壁 loft、平面直边 Face 单侧正厚度 thicken 夹具在浮点容差内精确；revolve/曲线 sweep/比例扭转律测实际采样多面体，无通用连续曲面误差保证。仅未编辑原生 sphere/cylinder/cone/torus 有通用解析质量资格，代理壳及 metadata/mesh/implicit 派生不取得物理查询资格。
+- 通用曲面/曲边积分与实体空间查询、曲面/曲边 thicken、任意 loft 环匹配、相交多壳、壳自身全局嵌入证明、空间加速、完整 trim/标准交换、工业 Boolean 和 Eval 自动算法重算保留为工业限制，不构成 Stage 3 继续扩展条件。
+- 维持完整 CTest 绿；所涉 strict warnings 已压缩，实发及未重编译历史残余如上，不将无关 Plugin 告警清理扩展为功能包。旧网格仅当前边界键及正确 owner 可命中，不承诺 ID 回收。
 
 ## 4.5 `Stage 4` 布尔与验证器第一代
 
@@ -286,7 +295,7 @@ cycle-0074 是升级前检查点，按原范围验收并同步文档；下一批
 
 ## 7. 当前立即执行顺序
 
-以[近期迭代与 Backlog](AxiomKernel_近期迭代与Backlog.md)为选取顺序真源：实际回归阻断优先；其次 S3-01 支持矩阵、S3-02 建模跨模块闭环、S3-03 查询语义、S3-04 阶段验收。任务状态只在进度 §5.2.1 维护。
+以[近期迭代与 Backlog](AxiomKernel_近期迭代与Backlog.md)为选取顺序真源：实际回归阻断优先；本批唯一退出任务为 cycle-0079 / S3-EXIT，独立完整构建及全量 CTest **16/16、0 失败、163.78 s** 已通过，17 行统一矩阵、五项退出回归映射、三条验收证据及 API/诊断/样例/进度/需求/Backlog 已同步，`stage_outcome=ready_for_acceptance`。S3-QUERY/MASS/MODELING/CONSISTENCY 保留历史证据；正式任务状态只在 [当前进度 §5.2.1](AxiomKernel_当前开发进度.md#521-stage-3-当前退出任务) 维护。Strict warnings 配置 ON，所涉 Topo/Rep 告警未再出现，SDK 实发 1 条/历史 helpers 未重编译残余保留；文档检查结果见验收 §1.6，调度器最终文档门禁及提交成功后才正式退出 Stage 3。不得依据历史 remaining 或需求权重追加无关功能，不以工业需求全部满足作为 §4.4 阶段退出前提，不自动开启后续阶段。
 
 不重复立项已经完成的骨架、公共存储和基础诊断建设。Geo/Topo/Math/Heal 本轮优先服务上述链路的明确缺口；工业布尔仍是 Stage 4，标准交换是 Stage 5。专题计划中的优先级是专题内部顺序。
 

@@ -23,7 +23,7 @@ std::uint64_t mesh_connected_components(const std::vector<Index>& indices, std::
 
 // --- Industrial tessellation scaffolding (Stage 1.5) ---
 
-std::string tessellation_cache_key(const BodyRecord& body, const TessellationOptions& options);
+std::string tessellation_cache_key(const KernelState& state, BodyId body_id, const TessellationOptions& options);
 std::string tessellation_budget_digest_json(const TessellationOptions& options);
 std::string face_tessellation_cache_key(const KernelState& state, FaceId face_id, const TessellationOptions& options);
 
@@ -41,7 +41,8 @@ MeshRecord tessellate_torus(const BodyRecord& body, const TessellationOptions& o
 // Face-level tessellation (Topo-driven). Uses face boundary (outer loop) to generate a planar triangulation.
 MeshRecord tessellate_face_planar(const KernelState& state, FaceId face_id, const TessellationOptions& options);
 
-// Topo-driven face tessellation: analytic / trimmed parameter patches when possible, else planar fan.
+// Topo-driven face tessellation: supported curved patches or current planar
+// straight-edge regions (including holes). Failed patches never flatten to a fan.
 MeshRecord tessellate_face(const KernelState& state, FaceId face_id, const TessellationOptions& options);
 
 // Weld vertices by quantized position to improve connectivity across faces.
@@ -57,4 +58,3 @@ ConversionErrorBudget conversion_error_budget_from_tessellation(const Tessellati
 std::string conversion_error_budget_digest_json(const ConversionErrorBudget& budget);
 
 }  // namespace axiom::detail
-

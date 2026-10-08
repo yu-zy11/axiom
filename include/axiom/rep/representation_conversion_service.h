@@ -32,10 +32,16 @@ class RepresentationConversionService {
 public:
     explicit RepresentationConversionService(std::shared_ptr<detail::KernelState> state);
 
+    /// Cache identity includes the body and current owned boundary. Owned-face
+    /// failure returns AXM-TES-E-0001 / rep.tessellation.* without publishing a
+    /// partial mesh or replacing the boundary with a bbox/creation-parameter mesh.
+    /// Primitive tessellation applies only to unedited native primitives.
+    /// Stage 3 polyhedra require their current planar, straight-edge boundary.
     Result<MeshId> brep_to_mesh(BodyId body_id, const TessellationOptions& options);
     /// 仅对指定壳上的拓扑面做面片三角化并焊接（工业验证：壳级网格/自交分析入口；不含其它壳的面）。
     Result<MeshId> brep_to_mesh_shell(BodyId body_id, ShellId shell_id, const TessellationOptions& options);
-    // Local re-tessellation: only the provided faces are recomputed (Topo-driven) when body has owned topology.
+    // Local re-tessellation: dirty faces are recomputed; all other faces reuse
+    // only a cache matching the current boundary. Publication is atomic as above.
     Result<MeshId> brep_to_mesh_local(BodyId body_id, std::span<const FaceId> dirty_faces, const TessellationOptions& options);
     /// 创建 `MeshRep` 体，并把该网格记录的 `source_body` 指向新体，供后续 `brep_to_mesh` 嵌入返回同一网格。
     Result<BodyId> mesh_to_brep(MeshId mesh_id);

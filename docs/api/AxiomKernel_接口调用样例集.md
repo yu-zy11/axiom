@@ -495,6 +495,54 @@ if (loft.value) {
 
 各截面必须提供显式共面多边形；外环及同索引孔环在所有站保持相同顶点数，顶点顺序定义直纹侧壁对应关系。允许凹外环、分离孔洞、独立环绕向和倾斜截面；不同环拓扑、自动顶点匹配、分支或坍塌截面会在分配前拒绝。
 
+## 6.5 平面直边 Face 加厚（cycle-0077 / S3-MODELING）
+
+以下构造独立矩形 Face，再沿其支撑 Plane 的单位法向单侧加厚；示例在使用 `axiom` 类型的上下文中，失败可用 `diagnostic_id` 查询。
+
+```cpp
+Kernel kernel;
+const std::array<Point3, 4> points {{{0,0,0}, {6,0,0}, {6,4,0}, {0,4,0}}};
+auto plane = kernel.surfaces().make_plane({0,0,0}, {0,0,1});
+if (!plane.value) return 1;
+
+auto setup = kernel.topology().begin_transaction();
+std::vector<VertexId> vertices;
+for (const auto& point : points) {
+  auto vertex = setup.create_vertex(point);
+  if (!vertex.value) return 1;
+  vertices.push_back(*vertex.value);
+}
+std::vector<CoedgeId> coedges;
+for (std::size_t i = 0; i < points.size(); ++i) {
+  const auto next = (i + 1) % points.size();
+  auto curve = kernel.curves().make_line_segment(points[i], points[next]);
+  if (!curve.value) return 1;
+  auto edge = setup.create_edge(*curve.value, vertices[i], vertices[next]);
+  if (!edge.value) return 1;
+  auto coedge = setup.create_coedge(*edge.value, false);
+  if (!coedge.value) return 1;
+  coedges.push_back(*coedge.value);
+}
+auto loop = setup.create_loop(coedges);
+if (!loop.value) return 1;
+auto face = setup.create_face(*plane.value, *loop.value, {});
+if (!face.value || setup.commit().status != StatusCode::Ok) return 1;
+
+auto thickened = kernel.sweeps().thicken(*face.value, 2.0);
+if (!thickened.value) {
+  auto diagnostic = kernel.diagnostics().get(thickened.diagnostic_id);
+  return 1;  // 读取 Issue.stage：input_gate/topology_gate/support_gate/materialization
+}
+auto strict = kernel.validate().validate_all(*thickened.value, ValidationMode::Strict);
+auto mass = kernel.query().mass_properties(*thickened.value);
+auto section = kernel.query().section_detailed(*thickened.value, {{0,0,1}, {0,0,1}});
+if (strict.status != StatusCode::Ok || !mass.value || !section.value) return 1;
+// 单位密度：V=48，A=88，C=(3,2,1)，截面面积=24。
+// 独立 Face 无源壳/体；结果仍记录源 Face，拥有独立闭壳拓扑。
+```
+
+支撑法向反号会使结果移到 z∈[-2,0]，反转环绕向不改变加厚方向；不是双侧或对称偏置。支持简单凹轮廓、分离非嵌套孔与有效 Line/LineSegment 裁剪边；全部环周长计入侧壁面积。当前实际拓扑用于通用/体/壳质量与截面/最近边界查询，平面棱柱在浮点容差内精确，曲面/曲边/代理输入拒绝。活动事务内失败不污染，回滚后可重试；结果编辑为曲面即拒绝旧质量，回滚恢复。完整五类范围和回归见 [API §8.1.1](AxiomKernel_详细模块接口清单.md#811-stage-3-五类建模主路径cycle-0077--s3-modeling) 与 [验收 §1.4](../quality/AxiomKernel_测试与验收方案.md#14-cycle-0077--s3-modeling-门禁与逐项证据)。本样例未单独编译，实际门禁证据来自对应测试。
+
 ## 7. 布尔操作样例
 
 ## 7.1 差集
@@ -614,33 +662,122 @@ if (fillet.status != StatusCode::Ok) {
 
 ## 10. 查询与分析样例
 
-## 10.1 质量属性
+## 10.1 质量属性（cycle-0076 / S3-MASS）
 
 ```cpp
-auto mp = kernel.query().mass_properties(body_id);
-if (mp.status == StatusCode::Ok) {
-  print("volume", mp.value->volume);
-  print("area", mp.value->area);
-  print("centroid", mp.value->centroid);
+auto box = kernel.primitives().box({10,20,30}, 2,3,4);
+if (!box.value) { handle_error(box); return; }
+auto mp = kernel.query().mass_properties(*box.value);
+if (!mp.value) {
+  handle_error(mp);  // diagnostic_id → Issue.code / query.mass_properties.*
+  return;           // 失败无部分数值，不用 bbox 或来源记录代算
 }
+print("volume", mp.value->volume);      // 24
+print("area", mp.value->area);          // 52
+print("centroid", mp.value->centroid);  // (11,21.5,32)
+print("inertia", mp.value->inertia);    // diag(50,40,26)，质心世界张量
 ```
+
+密度为 1；体积/面积/重心/惯性单位分别为模型长度的 3/2/1/5 次方。惯性是关于质心的世界坐标系行主序张量，非对角项是负积惯量；若另有均匀物理密度 ρ，质量为 `ρ*volume`、物理惯性为 `ρ*inertia`。
+
+真实 ExactBRep box/wedge、已物化 Sweep 与用户 Generic 平面直边闭壳每次从当前拓扑积分，通用/专用体质量一致。独立材料壳相加、奇数深度空腔相减、偶数深度岛相加，面积含所有内外边界；壳顺序不决定材料角色，相交/重合/建模容差接触多壳拒绝。采样 revolve/曲线 sweep/截面律返回实际多面体属性，光滑解析极限只作误差对照。
+
+```cpp
+auto sphere = kernel.primitives().sphere({0,0,0}, 2);
+if (!sphere.value) { handle_error(sphere); return; }
+auto native_mass = kernel.query().mass_properties(*sphere.value); // V=32π/3，A=16π
+// 这是未编辑原生记录的解析质量；其兼容壳不是球的物理边界。
+auto faces = kernel.topology().query().faces_of_body(*sphere.value);
+if (!faces.value || faces.value->empty()) { handle_error(faces); return; }
+auto replacement = kernel.surfaces().make_plane({0,0,0}, {0,0,1});
+if (!replacement.value) { handle_error(replacement); return; }
+auto txn = kernel.topology().begin_transaction();
+auto changed = txn.replace_surface(faces.value->front(), *replacement.value);
+if (changed.status != StatusCode::Ok) { handle_error(changed); return; }
+auto edited_mass = kernel.query().mass_properties(*sphere.value);
+// NotImplemented / AXM-CORE-E-0004 / query.mass_properties.support_gate；无 value。
+auto rolled_back = txn.rollback();
+if (rolled_back.status != StatusCode::Ok) { handle_error(rolled_back); return; }
+auto restored_mass = kernel.query().mass_properties(*sphere.value); // 恢复原解析质量
+```
+
+原生球/柱/锥/环仅 ExactBRep 且未编辑时有解析资格；专用体/壳质量拒绝代理边界。成功面替换或改变 PCurve 绑定/删除会撤销资格，失败编辑保留，保存点/回滚恢复，提交后仍拒绝。圆锥横向质心惯性为 `V*(3r²/20+3h²/80)`，重心距 apex 为 `3h/4`。
+
+metadata-only STEP 恢复与 mesh/implicit 派生 BRep 不继承解析资格；Boolean/Modified、旧 label-only extrude 与历史占位 thicken 记录、未知体类/表示或兼容代理壳均 support_gate 拒绝。真实 box 改为曲面 support_gate 拒绝，支撑平面错配/开壳 preflight 拒绝，回滚恢复；热网格、来源或创建缓存不能恢复旧值。数值溢出/惯性下溢为 `AXM-QUERY-E-0003 / numeric`，无部分属性。查询不创建网格或改变缓存/Eval/事务写计数。完整范围、采样误差和独立参考见 [质量支持矩阵](AxiomKernel_详细模块接口清单.md#613-stage-3-质量属性支持矩阵cycle-0076--s3-mass) 与 [三条验收证据](../quality/AxiomKernel_测试与验收方案.md#13-cycle-0076--s3-mass-门禁与逐项证据)；cycle-0077 的真实平面 Face thicken 已支持，见 §6.5。
 
 ## 10.2 最短距离
 
 ```cpp
-auto dist = kernel.query().min_distance(body_a, body_b);
+// body_a/body_b 必须为支持的真实 ExactBRep 多面体。
+auto nearest = kernel.query().closest_points(body_a, body_b);
+if (!nearest.value) {
+  handle_error(nearest);  // 诊断含 query.distance.support_gate/preflight/budget/numeric
+  return;
+}
+print(nearest.value->distance, nearest.value->first_point, nearest.value->second_point);
+// distance 为模型长度单位，等于见证点欧氏距离；相交/包含/相切为 0。
+// 正距离时两侧均有真实 FaceId/ShellId；内部见证归属句柄可为零。
+auto dist = kernel.query().min_distance(body_a, body_b);  // 同一主链，使用默认预算
+```
+
+点到体的最近位置采用最近边界语义，返回 `BodyPointQuery`：
+
+```cpp
+auto wedge = kernel.primitives().wedge({0,0,0}, 1,1,1);
+if (!wedge.value) {
+  handle_error(wedge);
+  return;
+}
+auto point_result = kernel.query().closest_point(*wedge.value, {1,1,0.5});
+if (!point_result.value) {
+  handle_error(point_result);
+  return;
+}
+if (point_result.value->nearest_boundary) {
+  const auto& boundary = *point_result.value->nearest_boundary;
+  print(boundary.point, boundary.distance, boundary.face, boundary.shell);
+  // 实际边界见证 (0.5,0.5,0.5)，距离 1/sqrt(2)，单位为模型长度单位。
+}
 ```
 
 ## 10.3 截面
 
 ```cpp
-Plane section_plane{
-  .origin = {0,0,10},
-  .normal = {0,0,1}
-};
+auto unit_box = kernel.primitives().box({0,0,0}, 1,1,1);
+if (!unit_box.value) {
+  handle_error(unit_box);
+  return;
+}
+Plane section_plane{.origin = {1,0,0}, .normal = {1,1,1}};  // x+y+z=1
+BodySpatialQueryOptions options;
+options.max_triangle_tests = 1000000;  // 前置检查之后工作；0 非法
+// 详细查询只读，不发布 MeshId，不写缓存/Eval/事务。
+auto detailed = kernel.query().section_detailed(*unit_box.value, section_plane, options);
+if (!detailed.value) {
+  handle_error(detailed);
+  return;
+}
+print(detailed.value->area);  // sqrt(3)/2，模型长度单位平方
+// vertices 世界坐标；triangles 为索引；boundary_segments/contact_points 保留接触。
+auto dedicated = kernel.topology().query().section(*unit_box.value, section_plane, options);
 
-auto sec = kernel.query().section(body_id, section_plane);
+// 兼容入口：成功有面积时显式发布一个真实结果网格，不填三角化缓存。
+auto sec = kernel.query().section(*unit_box.value, section_plane);
+if (!sec.value) {
+  handle_error(sec);
+} else if (sec.value->value != 0) {
+  auto count = kernel.convert().mesh_triangle_count(*sec.value);
+}
+auto empty = kernel.query().section(*unit_box.value, {{0,0,2}, {0,0,1}});
+// empty 成功且有 value，但 *empty.value == MeshId{}；不创建/消费网格。
+auto edge_contact = kernel.query().section_detailed(*unit_box.value, {{0,0,0}, {1,1,0}});
+// 成功时 area=0、无面积三角形，boundary_segments 保留真实线接触。
+// 此时 bbox 可有效；area=0 或兼容 MeshId{} 不能区分无交集与接触。
 ```
+
+通用 `closest_point(body, point, options)` 返回与 `TopologyQueryService::locate_point` 相同的 `BodyPointQuery`，即使点在材料内部也返回最近边界距离。只支持 ExactBRep box/wedge、已物化真实 Sweep（含 cycle-0077 平面 Face thicken）与用户 Generic 平面直边嵌入闭壳（凹/孔/空腔/材料岛）；旋转/曲线扫掠返回采样多面体结果。解析曲面体和旧占位 thicken 为 `NotImplemented / AXM-CORE-E-0004 / query.*.support_gate`，不生成 bbox 伪截面/距离。无交集、纯线/点相切是成功，兼容入口返回零网格句柄；接触细节使用详细入口。
+
+真实多面体 `mass_properties` 与专用体质量共用当前拓扑；编辑支撑面或删面失败不会恢复旧 Sweep 质量。预算耗尽及数值不可分辨失败无部分值，位置容差不吸附近邻平面、不抹去可表示正间隙。完整合同、限制与本批门禁见 [Stage 3 支持矩阵](AxiomKernel_详细模块接口清单.md#612-stage-3-截面最近点与距离支持矩阵cycle-0075--s3-query)。
 
 ## 11. 导入导出样例
 
@@ -751,12 +888,90 @@ tess.compute_normals = true;
 auto mesh = kernel.convert().brep_to_mesh(body_id, tess);
 ```
 
-## 12.2 局部修改后重新取网格
+## 12.2 当前 owned 边界、提交与失败回滚（cycle-0078 / S3-CONSISTENCY）
+
+以下片段接续一个已成功建模的平面直边实体 `body_id` 和 §12.1 的 `tess`；完整独立闭环夹具见 §12.3。所有调用先检查 Result 再使用句柄。等价 Plane 替换仍改变支撑身份，提交后必须使用新当前网格；之后失败回滚恢复的是已提交支撑和网格。
 
 ```cpp
-auto updated = kernel.modify().offset_body(body_id, 1.0, tol);
-auto mesh = kernel.convert().brep_to_mesh(updated.value->output, tess);
+auto& topo = kernel.topology().query();
+auto& eval = kernel.eval_graph();
+auto faces = topo.faces_of_body(body_id);
+auto baseline = kernel.convert().brep_to_mesh(body_id, tess);
+if (!faces.value || faces.value->empty() || !baseline.value) return;
+const auto face = faces.value->front();
+auto support = topo.surface_of_face(face);
+if (!support.value) return;
+auto sample = kernel.surface_service().eval(*support.value, 0, 0, 1);
+if (!sample.value) return;
+auto equivalent = kernel.surfaces().make_plane(sample.value->point, sample.value->normal);
+auto bound = eval.register_node(NodeKind::Analysis, "body:" + std::to_string(body_id.value));
+auto consumer = eval.register_node(NodeKind::Analysis, "consistency:query_rep");
+if (!equivalent.value || !bound.value || !consumer.value) return;
+if (eval.add_dependency(*consumer.value, *bound.value).status != StatusCode::Ok) return;
+
+MeshId committed_mesh{};
+{
+    auto txn = kernel.topology().begin_transaction();
+    if (txn.replace_surface(face, *equivalent.value).status != StatusCode::Ok) return;
+    const std::array dirty_faces{face};
+    auto local = kernel.convert().brep_to_mesh_local(body_id, dirty_faces, tess);
+    auto full = kernel.convert().brep_to_mesh(body_id, tess);
+    if (!local.value || !full.value || *full.value == *baseline.value) return;
+    if (kernel.validate().validate_all(body_id, ValidationMode::Strict).status != StatusCode::Ok) return;
+    if (txn.commit().status != StatusCode::Ok) return;
+    committed_mesh = *full.value;
+}
+if (eval.recompute(*consumer.value).status != StatusCode::Ok) return;
+
+auto displaced = kernel.surfaces().make_plane({0,0,100}, {0,0,1});
+if (!displaced.value) return;
+auto txn = kernel.topology().begin_transaction();
+if (txn.replace_surface(face, *displaced.value).status != StatusCode::Ok) return;
+auto rejected = kernel.convert().brep_to_mesh(body_id, tess);
+if (rejected.status == StatusCode::Ok || rejected.value) return;
+auto diagnostic = kernel.diagnostics().get(rejected.diagnostic_id);
+// 当前支撑错配：AXM-TES-E-0001 / rep.tessellation.face；
+// 日志或 UI 读取 diagnostic.value->issues 中的 stage、related_entities。
+if (!diagnostic.value) return;
+if (eval.recompute(*consumer.value).status != StatusCode::Ok) return;
+if (txn.rollback().status != StatusCode::Ok) return;
+auto restored = kernel.convert().brep_to_mesh(body_id, tess);
+auto restored_support = topo.surface_of_face(face);
+auto dirty_after_restore = eval.is_invalid(*consumer.value);
+if (!restored.value || *restored.value != committed_mesh ||
+    restored_support.value != equivalent.value ||
+    !dirty_after_restore.value || !*dirty_after_restore.value) return;
 ```
+
+旧 MeshId 是不可变快照；存活体可以保留历史缓存，只有当前边界键且 `source_body` 正确才命中。`mesh_to_brep` 会把网格 source_body 重绑定到新 MeshRep 体，原体须重新生成网格。owned 失败不发布部分网格/缓存，也不回退 bbox/创建参数；编辑 native primitive 撤销创建参数资格，回滚恢复。Eval recompute 仅管理图状态，实际查询/表示仍需显式调用；恢复后消费者再次 dirty，不保证自动重算。移除体在恢复或提交后清理关联网格/缓存/体绑定，源体及共享源壳保留。
+
+## 12.3 基础零件建模到查询与表示闭环
+
+```cpp
+ProfileRef profile{"consistency_rectangle",
+    {{0,0,0}, {2,0,0}, {2,3,0}, {0,3,0}}};
+auto body = kernel.sweeps().extrude(profile, {0,0,1}, 4);
+auto remote = kernel.primitives().box({50,50,50}, 1, 1, 1);
+if (!body.value || !remote.value) return;
+const auto body_id = *body.value;
+if (kernel.validate().validate_all(body_id, ValidationMode::Strict).status != StatusCode::Ok) return;
+auto mass = kernel.query().mass_properties(body_id);
+auto boundary_mass = kernel.topology().query().body_mass_properties(body_id);
+auto section = kernel.query().section_detailed(body_id, {{0,0,2}, {0,0,1}});
+auto nearest = kernel.query().closest_point(body_id, {60,60,2});
+auto pair = kernel.topology().query().closest_points(body_id, *remote.value);
+auto sources = kernel.topology().query().source_faces_of_body(body_id);
+auto mesh = kernel.convert().brep_to_mesh(body_id, TessellationOptions{});
+if (!mass.value || !boundary_mass.value || !section.value || !nearest.value ||
+    !nearest.value->nearest_boundary || !pair.value || !sources.value || !mesh.value) return;
+// 独立参考：V=24，A=52，C=(1,1.5,2)，水平截面积=6；
+// 最近边界=(2,3,2)，远端盒双侧见证=(2,3,4)/(50,50,50)，
+// 体间距离=sqrt(48²+47²+46²)，外点到最近边界距离=sqrt(58²+57²)。
+// 来源句柄可通过 has_face 核对，见证 FaceId/ShellId 应属于各自实体；
+// inspect_mesh 可核对三角形/连通分量及非法索引，不能只比较 bbox。
+```
+
+五类路径及凹形/孔 OBJ 三角形独立积分均已随调度器全量 **16/16、164.60 s** 执行通过；上述片段是同一公开调用合同的示例，本轮未单独编译片段。revolve 查询对应采样弦面、thicken 为真实平面 Face 单侧正厚度；原生解析体实体截面/距离仍拒绝，metadata 显示代理和 Rep bbox 辅助分类/距离不能替代此闭环。逐项文件/断言和参考见 [验收 §1.5](../quality/AxiomKernel_测试与验收方案.md#15-cycle-0078--s3-consistency-门禁与逐项证据)，API 合同见 [§7.3.1](AxiomKernel_详细模块接口清单.md#731-stage-3-表示来源与-eval-一致性合同cycle-0078--s3-consistency)。
 
 ## 13. 事务与版本样例
 
@@ -1107,7 +1322,7 @@ if (box.value) {
 }
 ```
 
-这两个入口仅支持平面、Line/LineSegment 边组成的双边流形闭壳，面可凹且可带孔。实体壳按严格包含深度判定材料、空腔及材料岛，并以平行轴定理汇总；`body_shell_regions` 可查询深度、角色与直接父壳。相交/重叠/建模容差接触多壳不在支持范围。曲面、曲边（含显式 trim）、开壳、非流形或零体积壳失败且无部分值，面边界必须位于支撑平面。查询每次从当前拓扑重算，不分配网格、不写缓存或改变 Eval 状态。
+这两个入口仅支持实际物理边界的平面、Line/LineSegment 边双边流形闭壳；原生解析体兼容代理面即使重新组壳也拒绝，面可凹且可带孔。实体壳按严格包含深度判定材料、空腔及材料岛，并以平行轴定理汇总；`body_shell_regions` 可查询深度、角色与直接父壳。相交/重叠/建模容差接触多壳不在支持范围。曲面、曲边（含显式 trim）、开壳、非流形或零体积壳失败且无部分值，面边界必须位于支撑平面。查询每次从当前拓扑重算，不分配网格、不写缓存或改变 Eval 状态。
 
 ### 实体点定位与有限线段裁剪（cycle-0074，已通过完整门禁）
 
@@ -1147,6 +1362,41 @@ if (spatial_box.value) {
 }
 ```
 
-Inside/Outside 按闭壳包含奇偶判断，支持空腔和材料岛；非空实体总给最近面内/边/顶点边界，等距按稳定 ShellId、FaceId 选择，空实体返回 Outside 和空最近边界。Boundary 点定位是距离容差带；线段裁剪不按该容差膨胀材料或合并可分辨薄层，长度不大于容差的线段失败。裁剪区间按参数排序、内部不重叠，省略 Outside，孤立相切点不与已覆盖区间重复，Boundary 段不计材料长度。
+Inside/Outside 按闭壳包含奇偶判断，支持空腔和材料岛；非空实体总给最近面内/边/顶点边界，等距按稳定 ShellId、FaceId 选择，内部零壳实体合同为 Outside 和空最近边界；公共 `create_body({})` 拒绝，本批未构造/验证该零壳查询分支。Boundary 点定位是距离容差带；线段裁剪不按该容差膨胀材料或合并可分辨薄层，长度不大于容差的线段失败。裁剪区间按参数排序、内部不重叠，省略 Outside，孤立相切点不与已覆盖区间重复，Boundary 段不计材料长度。
 
 仅支持无自交的嵌入平面直边双边流形闭壳，曲面/显式裁剪曲边拒绝，面边界须在支撑平面上；壳间相交/重叠/建模容差接触失败。本批未新增壳自身全局自交证明或大规模空间加速。预算仅计前置检查之后的新三角形计算；耗尽或事件数值分辨率不足时无部分值。查询增加诊断和只读审计，不发布 MeshId，不写缓存、Eval 或事务；当前编辑即时可见，回滚后恢复。门禁和完整失败码见 [接口合同](AxiomKernel_详细模块接口清单.md#611-实体空间查询cycle-0074已通过完整门禁) 与 [错误码字典](../diagnostics/AxiomKernel_错误码与诊断码字典.md)。
+
+## 16. Stage 3 退出主链样例（cycle-0079 / S3-EXIT）
+
+以下沿用 `tests/sdk/smoke_test.cpp::main` 的公开门面夹具：三角形底面积 6、高 3、终端比例 0.5，中点比例 0.75，结果为当前真实多面体。文档片段未单独编译；实际 smoke 已随调度器完整 CTest **16/16、163.78 s** 通过（smoke 0.02 s）。
+
+```cpp
+axiom::Kernel kernel;
+axiom::ProfileRef profile{"exit_scaled_triangle", {{0,0,0},{4,0,0},{0,3,0}}};
+auto solid = kernel.sweeps().extrude_scaled(profile, {0,0,2}, 3.0, {0,0,0}, 0.5);
+if (!solid.value) return 1;  // 用 diagnostic_id 检索诊断
+
+auto mass = kernel.query().mass_properties(*solid.value);              // V=10.5
+// mass: 单位密度，面积 L²、体积 L³、质心 L、世界坐标质心惯性 L⁵。
+auto section = kernel.query().section_detailed(
+    *solid.value, {{0,0,1.5},{0,0,1}});                                // S=3.375
+// 材料内部的 closest_point 仍返回最近边界；本例为外点，距离=1。
+auto nearest = kernel.query().closest_point(*solid.value, {0,0,4});
+auto remote = kernel.primitives().box({0,0,4}, 1, 1, 1);
+if (!remote.value) return 1;
+auto distance = kernel.query().min_distance(*solid.value, *remote.value); // 1
+if (!mass.value || !section.value || !nearest.value || !distance.value)
+    return 1;  // 失败无部分值；读取 query.*.support_gate/preflight/budget/numeric
+
+auto mesh = kernel.convert().brep_to_mesh(*solid.value, {});
+if (!mesh.value) return 1;
+auto report = kernel.convert().inspect_mesh(*mesh.value);
+if (!report.value || report.value->triangle_count == 0 ||
+    report.value->tessellation_strategy != "owned_topo_welded") return 1;
+auto strict = kernel.validate().validate_all(*solid.value, axiom::ValidationMode::Strict);
+if (strict.status != axiom::StatusCode::Ok) return 1;
+```
+
+此链不使用 bbox 截面或来源/创建缓存质量。详细 section 不发布 MeshId，兼容 `query().section` 的有面积成功分支会发布结果网格；空集/纯线点相切成功返回零句柄，不能与无 value 失败混淆。表示转换成功会发布网格并填缓存；owned 失败原子拒绝，不回退 bbox/创建参数。来源及 Face/Shell 见证、缓存 BodyId/当前边界/source_body、primitive 编辑资格和事务/Eval 合同沿用 §12.2；保存点/显式/析构/取消回滚会恢复当前边界并传播 dirty，合法提交之后的失败恢复已提交状态。旧 MeshId 是快照，Eval recompute 不自动运行质量/表示算法；metadata bbox_proxy 仅显示，不取得物理查询资格。
+
+五类真实建模及 box/wedge/Generic/原生解析质量资格/占位和派生拒绝的完整范围、独立参考与 17 行自动化映射见 [API §6.1.4](AxiomKernel_详细模块接口清单.md#614-stage-3-统一退出支持矩阵cycle-0079--s3-exit)，本批三条证据及五项退出映射见 [验收 §1.6](../quality/AxiomKernel_测试与验收方案.md#16-cycle-0079--s3-exit-门禁与逐项证据)。平面多面体仅在浮点容差内精确，旋转/曲线扫掠/截面律查询实际采样多面体；四类未编辑原生解析体仅通用质量成功，实体截面/最近点/距离与代理壳积分拒绝。通用曲面/曲边积分及实体查询、曲面 thicken、任意 loft 匹配、相交多壳/全局嵌入证明、空间加速、完整 trim/标准交换、工业 Boolean 和 Eval 自动算法重算仍有限制，不作为 Stage 3 完成前提；最终文档门禁及调度器提交成功前保持 ready_for_acceptance，不提前宣布阶段退出。
