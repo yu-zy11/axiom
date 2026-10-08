@@ -3,14 +3,14 @@
 > 状态：已接受
 > 责任域：Project
 > 维护者：项目负责人
-> 最后核验：2026-09-30
-> 核验依据：`scripts/agent_autodev.py`、`automation/agent_autodev.json`
+> 最后核验：2026-10-08
+> 核验依据：`scripts/agent_autodev.py`、`automation/agent_autodev.json`、`automation/agent_stage_plans.json`
 
 ## 1. 目标与边界
 
 `scripts/agent_autodev.py` 默认以主路线图的当前阶段退出要求安排任务。`automation/agent_autodev.json` 的 `stage_plan` 固定当前阶段、任务顺序、依赖和逐项验收要求；完整构建、测试、文档检查与提交成功后才记录阶段任务已验收。历史报告的下一步只作参考，不得覆盖阶段任务。失败保留现场并修复，不能绕过验收。
 
-当前配置为 **Stage 3**，顺序为：真实截面/最近点/距离 → 质量属性 → 五类建模主路径验收 → 跨模块一致性 → 支持矩阵与阶段退出检查。依据为 [主路线图 §4.4](../plan/AxiomKernel_主开发计划与阶段路线图.md)。阶段任务可以在工业 FR/NFR 仍为“进行中”或“受限可用”时通过，不虚构全需求已满足。基础层修改限于当前退出任务的直接阻断项。
+默认配置以 **Stage 3** 为起点，已验收任务由运行状态保存，顺序为：真实截面/最近点/距离 → 质量属性 → 五类建模主路径验收 → 跨模块一致性 → 支持矩阵与阶段退出检查。依据为 [主路线图 §4.4](../plan/AxiomKernel_主开发计划与阶段路线图.md)。 默认启用 `auto_advance_stage`，后续清单来自 [阶段任务目录](../../automation/agent_stage_plans.json)，逐阶段对应路线图 §4.5～§4.9：Stage 4 布尔与验证、Stage 5 修复/IO/三角化、Stage 6 高级特征/直接编辑、Stage 7 增量更新/缓存/性能、Stage 8 混合表示/插件与服务。清单固定目标、依赖、逐项验收和必需测试，Agent 不自行制定或修改质量门禁。阶段任务可以在工业 FR/NFR 仍为“进行中”或“受限可用”时通过，不虚构全需求已满足。基础层修改限于当前退出任务的直接阻断项。
 
 每个阶段任务内可连续开发功能包。报告 `ready_for_acceptance` 后立即统一验收；报告 `progress` 时累计至少 `batch_min_packages` 包再验收，不要求生产代码行数。验收型任务允许只修改回归测试，不为行数或包数扩展功能。只有未配置 `stage_plan` 时才使用原加权轮转与至少 3 包、约 1000 行的批次规则。
 
@@ -21,7 +21,7 @@
 3. 阶段模式在任务报告就绪或累计 `batch_min_packages` 个进展包时进入 `gates`；兼容模式须同时达到包数与代码规模。统一增量构建，执行完整 CTest（包括性能基线），阶段任务还核对必需测试实际注册。失败进入 `repair`，整批修复后重跑完整门禁，不重复计为新功能包。
 4. `docs`：读取实际 diff、批次报告和门禁日志，同步 API、错误码字典、样例、需求矩阵、当前进度和 Backlog，清理本批已验收能力的旧状态。只允许修改 `docs/` 下的 Markdown。文档失败仅重试文档阶段；若越界修改代码，之前的验收失效，必须修复并重新验收。
 5. `commit`：追加自动开发台账、检查文档并提交整批，再更新交付计数与阶段验收证据。提交失败撤回台账追加，不重复开发或编译。最终开发/修复报告为 `ready_for_acceptance` 才关闭该任务；修复报告为 `progress` 时保留未验收状态。`--no-commit` 调试不关闭阶段任务。
-6. 开发报告只接受 `completed_slice`，不能自行宣称项目完成。当前阶段全部退出任务验收后停止并报告阶段边界，不自动启动下一阶段；后续阶段须配置明确的退出清单。未配置阶段计划时，按需求矩阵继续兼容流程。行数和次数不能用作完成证据。
+6. 开发报告只接受 `completed_slice`，不能自行宣称项目完成。当前阶段全部退出任务验收并成功提交后，启用 `auto_advance_stage` 时自动加载目录中的下一阶段清单并继续运行；关闭此开关时仍在当前阶段边界停止。目录必须连续且遵循同一主路线图，目录末尾（默认 Stage 8）停止，仅报告阶段验收，不宣称全项目完成。未配置阶段计划时，按需求矩阵继续兼容流程。行数和次数不能用作完成证据。
 
 ## 2. 前置条件
 
@@ -56,7 +56,7 @@ python3 scripts/agent_autodev.py \
   --max-cycles 0
 ```
 
-`--max-cycles 0` 表示连续模式，不表示绕过验收。默认失败会转入修复循环，重试等待从 10 秒递增到最多 60 秒。显式设置非零失败上限、启动检查失败、外部定时停止或项目完成仍会结束运行。
+`--max-cycles 0` 表示连续模式；默认会从已验收的 Stage 3 自动进入 Stage 4 并逐阶段推进到目录末尾。`--max-cycles N` 仍只交付 N 个成功批次，时限到达时不会额外启动下一阶段；`--dry-run` 可以预览下一阶段任务，但不保存切换、不调用 Agent。默认失败会转入修复循环，重试等待从 10 秒递增到最多 60 秒。显式设置非零失败上限、启动检查失败、外部定时停止或项目完成仍会结束运行。
 
 指定时限运行时，推荐 `python3 -u scripts/agent_autodev.py --stop-after-seconds 7200 --max-cycles 0`；恢复追加 `--resume-failed`。批次模式在每次 Agent 调用或门禁阶段结束后保存检查点并检查时限，因此可以保存未满批次或待更新文档的批次，不必提前编译或提交；实际退出可能晚于时限。外部硬截止 `.axiom-agent/timed_run.py` 可能中断编辑，留下尚未记录指纹的改动，不推荐用于正常批次运行。`max_consecutive_failures=0` 表示持续修复；`--allow-dirty --no-commit` 仅用于人工监督调试。
 
@@ -70,7 +70,9 @@ python3 scripts/agent_autodev.py \
 | `build_dir` | 自动开发专用构建目录 |
 | `build_parallel_jobs` | 构建并发数，正整数，默认 4；提示词与独立门禁使用相同目录和并发数，复用增量编译产物 |
 | `batch_enabled` | 默认 `true`；启用多功能包批次。`false` 仅保留旧单包流程供兼容调试 |
-| `stage_plan` | 当前阶段 `stage`（0..8）、仓库路线图 `roadmap` 与有序 `tasks`。任务须包含同阶段唯一 `id`、有效 `requirement_id`、`goal`、非空 `acceptance` 与已知 `tests`；`depends_on` 只能引用前面的任务，禁止循环。`kind=acceptance` 允许只补回归；默认 implementation 要求生产代码变更。必须启用 batch 模式 |
+| `stage_plan` | 初始阶段 `stage`（0..8）、仓库路线图 `roadmap` 与有序 `tasks`。任务须包含同阶段唯一 `id`、有效 `requirement_id`、`goal`、非空 `acceptance` 与已知 `tests`；`depends_on` 只能引用前面的任务，禁止循环。`kind=acceptance` 允许只补回归；默认 implementation 要求生产代码变更。必须启用 batch 模式 |
+| `auto_advance_stage` | 布尔值；仓库默认配置为 `true`，旧自定义配置未设置时为 `false`。全部当前任务验收且没有待恢复批次时，按目录顺序进入下一阶段；不跳阶段、不改变需求完成度 |
+| `stage_catalog` | 仓库内 `automation/` 下的 JSON 文件路径；默认 `automation/agent_stage_plans.json`。数组保存连续后续阶段计划，复用 `stage_plan` 校验，要求同一路线图、有效需求/测试与向前任务依赖。缺失/错误目录在启动时拒绝，不让 Agent 临时编造清单 |
 | `batch_min_packages` | 默认 3；阶段模式中 `progress` 累计包数达到此值后统一验收，就绪任务可提前验收；兼容模式为最低包数 |
 | `batch_min_code_lines` | 默认 1000，仅兼容模式作为规模下限；阶段模式只记录统计、不阻止验收。统计 `src/`、`include/` 下 C/C++ 与 `.inc` 新增，含暂存/未跟踪，不计删除、测试、文档、空行、纯注释或单独括号 |
 | `batch_max_packages` | 默认 8，且不得低于最少包数；达到上限仍不足规模时保存现场并停止，不强行构建或凑行数。审查后可提高上限再恢复 |
@@ -121,7 +123,8 @@ Agent 不得修改该台账；发现历史遗留内容时应在报告中说明�
 - 查看 `.axiom-agent/state.json` 获取成功轮次、最近提交和最后错误。
 - 批次检查点的 `pending.batch_version`、`phase`、`reports`、`code_lines` 记录模式、阶段、已缓冲功能包和规模；`files` 保护整个工作树，`validated_code` 保护已验收代码。`history[].packages` 保存整批各包报告，`history[].code_lines` 保存批次规模。成功轮次在新模式下按整批计数，需求计数仍按功能包计。
 - 阶段批次的 `pending.stage`、`stage_task_id`、`stage_plan_fingerprint` 固定当前任务；未结束批次变更阶段计划会拒绝恢复。`state.stage_tasks[阶段][任务]` 只在成功提交后保存 commit、cycle、逐项 evidence、任务指纹和依赖提交。验收条件变化会重新打开任务，上游重新验收后下游旧证据也失效。
-- 升级前没有阶段字段的批次按原检查点结束；下一新批次自动切换阶段任务。运行时自定义配置（例如 `.axiom-agent/config.json`）也必须同步 `stage_plan`；脚本在启动时加载配置。
+- `state.active_stage` 保存自动切换后的阶段，`stage_transitions` 记录前后阶段、计划指纹和上一阶段验收提交。重启会恢复当前阶段并重新核对先前阶段验收；已变更/缺失的上游验收会拒绝继续，防止跳过未完成任务。切换不改写配置文件或需求矩阵。
+- 升级前没有阶段字段的批次按原检查点结束；下一新批次自动切换阶段任务。运行时自定义配置（例如 `.axiom-agent/config.json`）如需自动推进，设置 `auto_advance_stage: true`、`stage_catalog: "automation/agent_stage_plans.json"`，并将 `axiom_perf_baseline_test` 加入 `module_tests`（默认 `Performance` 条目）；保留原 Agent 命令和其他参数。
 - `state.json` 的 `next_steps` 保留各需求最近一次报告的下一验收点；提示词只提供目标需求的矩阵条目和该下一步，引导 Agent 按需阅读相关文档。
 - 旧单包 `history` 保留 Agent、门禁和运行耗时；`focus_cycles` 按实际已提交功能包计数。比较前后效率时应结合功能范围、批次规模及日志，不能仅用总轮次数代替功能验收。
 - 查看 `.axiom-agent/logs/cycle-NNNN-gates.log` 获取调度器实际执行的门禁输出。
@@ -139,4 +142,4 @@ Agent 不得修改该台账；发现历史遗留内容时应在报告中说明�
 
 ## 8. 调度器回归验证
 
-运行 `python3 tests/tooling/agent_autodev_test.py`。阶段回归覆盖任务顺序优先于权重/历史计数/工业需求状态、真实路线图上下文、阶段边界停止、验收条件与依赖变更重开、错误计划/证据拒绝、缺少必需测试拒绝、少量代码或仅回归测试验收、进展包不关闭任务、门禁/提交重试不提前验收、修复后未就绪保持开放、文档检查点恢复与计划指纹保护。兼容回归仍覆盖包数/行数、上限保留、整批修复、文档/提交重试、dry-run 无写入和真实 Git 差异统计。
+运行 `python3 tests/tooling/agent_autodev_test.py`。阶段回归覆盖任务顺序优先于权重/历史计数/工业需求状态、真实路线图上下文、跨阶段连续交付、切换持久化与重启恢复、dry-run 下一阶段预览无写入、未验收/待恢复/未提交禁止切换、目录缺口/重复/非法测试拒绝、Stage 8 停机、旧配置阶段边界停止、验收条件与依赖变更重开、错误计划/证据拒绝、缺少必需测试拒绝、少量代码或仅回归测试验收、进展包不关闭任务、门禁/提交重试不提前验收、修复后未就绪保持开放、文档检查点恢复与计划指纹保护。兼容回归仍覆盖包数/行数、上限保留、整批修复、文档/提交重试、dry-run 无写入和真实 Git 差异统计。

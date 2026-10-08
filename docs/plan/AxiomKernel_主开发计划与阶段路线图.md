@@ -56,7 +56,7 @@
 
 ## 4. 总体开发阶段
 
-建议把完整项目分成 9 个大阶段。
+建议把完整项目分成 9 个大阶段。 自动开发调度器以阶段退出证据和成功提交为切换条件，默认使用 `automation/agent_stage_plans.json` 的 Stage 4～8 清单自动配置后续任务；关闭 `auto_advance_stage` 可保留阶段边界停机。开始下一阶段不改变已交付能力声明，目录末尾验收也不等于全部工业需求和发布要求已满足。
 
 ## 4.1 `Stage 0` 文档与骨架
 
@@ -295,7 +295,7 @@ Strict warnings 配置 ON；本批重编译 Topo/Rep 的 3 条所涉告警未再
 
 ## 7. 当前立即执行顺序
 
-以[近期迭代与 Backlog](AxiomKernel_近期迭代与Backlog.md)为选取顺序真源：实际回归阻断优先；本批唯一退出任务为 cycle-0079 / S3-EXIT，独立完整构建及全量 CTest **16/16、0 失败、163.78 s** 已通过，17 行统一矩阵、五项退出回归映射、三条验收证据及 API/诊断/样例/进度/需求/Backlog 已同步，`stage_outcome=ready_for_acceptance`。S3-QUERY/MASS/MODELING/CONSISTENCY 保留历史证据；正式任务状态只在 [当前进度 §5.2.1](AxiomKernel_当前开发进度.md#521-stage-3-当前退出任务) 维护。Strict warnings 配置 ON，所涉 Topo/Rep 告警未再出现，SDK 实发 1 条/历史 helpers 未重编译残余保留；文档检查结果见验收 §1.6，调度器最终文档门禁及提交成功后才正式退出 Stage 3。不得依据历史 remaining 或需求权重追加无关功能，不以工业需求全部满足作为 §4.4 阶段退出前提，不自动开启后续阶段。
+以[近期迭代与 Backlog](AxiomKernel_近期迭代与Backlog.md)为选取顺序真源：实际回归阻断优先；本批唯一退出任务为 cycle-0079 / S3-EXIT，独立完整构建及全量 CTest **16/16、0 失败、163.78 s** 已通过，17 行统一矩阵、五项退出回归映射、三条验收证据及 API/诊断/样例/进度/需求/Backlog 已同步，`stage_outcome=ready_for_acceptance`。S3-QUERY/MASS/MODELING/CONSISTENCY 保留历史证据；正式任务状态只在 [当前进度 §5.2.1](AxiomKernel_当前开发进度.md#521-stage-3-当前退出任务) 维护。Strict warnings 配置 ON，所涉 Topo/Rep 告警未再出现，SDK 实发 1 条/历史 helpers 未重编译残余保留；文档检查结果见验收 §1.6，调度器最终文档门禁及提交成功后才正式退出 Stage 3。不得依据历史 remaining 或需求权重追加无关功能，不以工业需求全部满足作为 §4.4 阶段退出前提，后续阶段由调度器在当前阶段验收提交后按明确清单开启；默认自动推进规则见 [Agent 自动开发指南](../guides/AxiomKernel_Agent自动开发指南.md)。
 
 不重复立项已经完成的骨架、公共存储和基础诊断建设。Geo/Topo/Math/Heal 本轮优先服务上述链路的明确缺口；工业布尔仍是 Stage 4，标准交换是 Stage 5。专题计划中的优先级是专题内部顺序。
 
