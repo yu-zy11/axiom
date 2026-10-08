@@ -1,4 +1,6 @@
 #include <array>
+#include <cmath>
+#include <vector>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -7,7 +9,191 @@
 #include "axiom/diag/error_codes.h"
 #include "axiom/sdk/kernel.h"
 
+namespace {
+
+// The compatibility workflow consumes polygon-trimmed wires. Count/topology
+// checks alone cannot establish that its final BooleanResult is a material solid.
+bool check_geometric_preparation_workflow() {
+    axiom::Kernel kernel;
+    const auto a = kernel.primitives().box({0,0,0},2,2,2);
+    const auto b = kernel.primitives().box({1,1,1},2,2,2);
+    const auto wedge = kernel.primitives().wedge({0,0,0},2,2,2);
+    const auto gap = kernel.primitives().box({1.2,1.2,0.25},0.4,0.4,0.5);
+    if (!a.value || !b.value || !wedge.value || !gap.value) return false;
+    const auto real = kernel.booleans().prepare_intersections(*a.value,*b.value);
+    const auto separated = kernel.booleans().prepare_intersections(*wedge.value,*gap.value);
+    if (!real.value || real.value->segments.size() != 6 || !separated.value ||
+        separated.value->candidates.empty() || !separated.value->segments.empty()) return false;
+    for (const bool phantom : {false,true}) {
+        const auto before = kernel.intersection_count();
+        const auto result = kernel.booleans().run(axiom::BooleanOp::Union,
+            phantom ? *wedge.value : *a.value,phantom ? *gap.value : *b.value,{});
+        const auto after = kernel.intersection_count();
+        if (!result.value || !before.value || !after.value ||
+            *after.value != *before.value+(phantom ? 0 : 1)) return false;
+        const auto diagnostic = kernel.diagnostics().get(result.diagnostic_id);
+        if (!diagnostic.value) return false;
+        bool found_trim = false, found_store = false;
+        for (const auto& issue : diagnostic.value->issues) {
+            if (issue.code == axiom::diag_codes::kBoolIntersectionWiresStored) found_store = true;
+            if (issue.code == axiom::diag_codes::kBoolIntersectionSegmentsBuilt) {
+                if (issue.stage != "bool.intersect.trim") return false;
+                for (const auto& evidence : issue.numeric_evidence)
+                    if (evidence.name == "segments" && evidence.value == (phantom ? 0 : 6)) found_trim = true;
+            }
+        }
+        if (!found_trim || found_store == phantom) return false;
+    }
+    return true;
+}
+
+// Invalid real face boundaries must fail before compatibility run creates an
+// output body or intersection geometry, including while the caller owns a writer.
+bool check_trim_failure_isolation() {
+    for (const int model : {0,1,2}) for (const bool active_writer : {false,true}) {
+        axiom::Kernel kernel;
+        const double offset = model == 2 ? 1e12 : 0;
+        const auto a = kernel.primitives().box({offset,offset,offset},2,2,2);
+        // This compatibility input is a real planar face in a Generic shell.
+        // Explicit topology avoids primitive bbox expansion of small extents.
+        auto fixture = kernel.topology().begin_transaction();
+        std::vector<axiom::Point3> points {{1,1,1},{1+5e-7,1,1},{2,1,1},{2,2,1},{1,2,1}};
+        if (model == 1) {
+            points.clear();
+            for (std::size_t i = 0; i < 257; ++i) {
+                const double angle = 2*std::acos(-1.0)*i/257;
+                points.push_back({1+2*std::cos(angle),1+2*std::sin(angle),1});
+            }
+        } else if (model == 2) {
+            points = {{offset+1,offset+1,offset+1},{offset+2,offset+1,offset+1},
+                      {offset+2,offset+2,offset+1},{offset+1,offset+2,offset+1}};
+        }
+        std::vector<axiom::VertexId> vertices(points.size());
+        std::vector<axiom::CoedgeId> coedges;
+        for (std::size_t i = 0; i < points.size(); ++i) {
+            const auto vertex = fixture.create_vertex(points[i]);
+            if (!vertex.value) return false;
+            vertices[i] = *vertex.value;
+        }
+        for (std::size_t i = 0; i < points.size(); ++i) {
+            const auto j = (i+1)%points.size();
+            const auto p = points[i], q = points[j];
+            const double length = std::hypot(q.x-p.x,q.y-p.y,q.z-p.z);
+            const auto curve = kernel.curves().make_line(p,{(q.x-p.x)/length,(q.y-p.y)/length,(q.z-p.z)/length});
+            const auto edge = curve.value ? fixture.create_edge(*curve.value,vertices[i],vertices[j])
+                                          : axiom::Result<axiom::EdgeId>{};
+            const auto coedge = edge.value ? fixture.create_coedge(*edge.value,false) : axiom::Result<axiom::CoedgeId>{};
+            if (!coedge.value) return false;
+            coedges.push_back(*coedge.value);
+        }
+        const auto plane = kernel.surfaces().make_plane({offset+1,offset+1,offset+1},{0,0,1});
+        const auto loop = fixture.create_loop(coedges);
+        const auto face = plane.value && loop.value ? fixture.create_face(*plane.value,*loop.value,{})
+                                                    : axiom::Result<axiom::FaceId>{};
+        const auto shell = face.value ? fixture.create_shell(std::array{*face.value}) : axiom::Result<axiom::ShellId>{};
+        const auto thin = shell.value ? fixture.create_body(std::array{*shell.value}) : axiom::Result<axiom::BodyId>{};
+        if (!thin.value || fixture.commit().status != axiom::StatusCode::Ok) return false;
+        if (!a.value || !thin.value) return false;
+        const auto query = kernel.topology().query();
+        const auto source_edges = query.edges_of_body(*thin.value);
+        if (!source_edges.value || source_edges.value->size() != points.size()) return false;
+        if (model == 0) {
+            bool short_reference = false;
+            for (const auto edge : *source_edges.value) {
+                const auto length = query.edge_length(edge);
+                if (!length.value) return false;
+                if (std::abs(*length.value-5e-7) < 1e-14) short_reference = true;
+            }
+            if (!short_reference) return false;
+        }
+        const auto counts = [&] {
+            return std::array{kernel.body_count().value,kernel.geometry_count().value,kernel.topology_count().value,
+                              kernel.intersection_count().value,kernel.eval_node_count().value,kernel.cache_entry_count().value};
+        };
+        auto transaction = kernel.topology().begin_transaction();
+        if (!active_writer && transaction.rollback().status != axiom::StatusCode::Ok) return false;
+        const auto sentinel = active_writer ? transaction.create_vertex({99,98,97}) : axiom::Result<axiom::VertexId>{};
+        if (active_writer && !sentinel.value) return false;
+        const auto writes = active_writer ? transaction.write_operation_count().value : std::optional<std::uint64_t>{};
+        const auto bridge = [&] {
+            const auto metrics = kernel.eval_graph_metrics();
+            if (!metrics.value) return std::array<std::uint64_t,5>{};
+            const auto& item = metrics.value->invalidation_bridge;
+            return std::array{item.for_body_entries,item.for_faces_entries,item.for_bodies_batches,
+                              item.for_bodies_list_size_total,item.downstream_invalidation_steps};
+        };
+        const auto topology = [&] {
+            std::pair<std::vector<std::uint64_t>,std::vector<double>> snapshot;
+            for (const auto body : {*a.value,*thin.value}) {
+                const auto faces = query.faces_of_body(body);
+                if (!faces.value) return decltype(snapshot){};
+                snapshot.first.push_back(body.value);
+                for (const auto face : *faces.value) {
+                    const auto loops = query.loops_of_face(face);
+                    const auto bbox = query.bbox_of_face(face);
+                    if (!loops.value || !bbox.value || !bbox.value->is_valid) return decltype(snapshot){};
+                    const auto& box = *bbox.value;
+                    snapshot.first.insert(snapshot.first.end(),{face.value,loops.value->size()});
+                    snapshot.second.insert(snapshot.second.end(),{box.min.x,box.min.y,box.min.z,box.max.x,box.max.y,box.max.z});
+                    for (const auto loop : *loops.value) {
+                        const auto edges = query.edges_of_loop(loop);
+                        if (!edges.value) return decltype(snapshot){};
+                        snapshot.first.insert(snapshot.first.end(),{loop.value,edges.value->size()});
+                        for (const auto edge : *edges.value) {
+                            const auto vertices = query.vertices_of_edge(edge);
+                            if (!vertices.value) return decltype(snapshot){};
+                            snapshot.first.insert(snapshot.first.end(),{edge.value,(*vertices.value)[0].value,(*vertices.value)[1].value});
+                        }
+                    }
+                }
+            }
+            return snapshot;
+        };
+        const auto topology_baseline = topology();
+        if (topology_baseline.first.empty()) return false;
+        const auto bridge_baseline = bridge();
+        const auto baseline = counts();
+        const auto result = kernel.booleans().run(axiom::BooleanOp::Union,*a.value,*thin.value,{});
+        const auto diagnostic = kernel.diagnostics().get(result.diagnostic_id);
+        const auto active = kernel.topology().has_active_write_transaction();
+        const auto expected_status = model == 0 ? axiom::StatusCode::DegenerateGeometry :
+                                     model == 1 ? axiom::StatusCode::OperationFailed : axiom::StatusCode::NumericalInstability;
+        const auto expected_code = model == 0 ? axiom::diag_codes::kBoolInvalidInput :
+                                   model == 1 ? axiom::diag_codes::kBoolPreparationBudgetExceeded : axiom::diag_codes::kBoolNumericalFailure;
+        bool found = false;
+        if (diagnostic.value) for (const auto& issue : diagnostic.value->issues)
+            if (issue.code == expected_code && issue.stage == "bool.intersect.trim" &&
+                issue.severity == axiom::IssueSeverity::Error && !issue.numeric_evidence.empty() &&
+                issue.related_entities.size() >= 2 && issue.related_entities[0] == a.value->value &&
+                issue.related_entities[1] == thin.value->value) found = true;
+        if (result.status != expected_status || result.value || result.diagnostic_id.value == 0 || !found || counts() != baseline ||
+            !active.value || *active.value != active_writer || bridge() != bridge_baseline || topology() != topology_baseline ||
+            (active_writer && (transaction.write_operation_count().value != writes ||
+                              !transaction.has_created_vertex(*sentinel.value).value.value_or(false)))) {
+            std::cerr << "compatibility trim failure: model=" << model << " writer=" << active_writer
+                      << " status=" << static_cast<int>(result.status) << " value=" << bool(result.value)
+                      << " unchanged=" << (counts() == baseline) << "\n";
+            if (diagnostic.value) for (const auto& issue : diagnostic.value->issues)
+                std::cerr << "issue code=" << issue.code << " stage=" << issue.stage << "\n";
+            return false;
+        }
+        if (active_writer && (!transaction.create_vertex({96,95,94}).value ||
+            transaction.rollback().status != axiom::StatusCode::Ok)) return false;
+    }
+    return true;
+}
+
+}  // namespace
+
 int main() {
+    if (!check_trim_failure_isolation()) {
+        std::cerr << "boolean workflow trim failure isolation regression\n";
+        return 1;
+    }
+    if (!check_geometric_preparation_workflow()) {
+        std::cerr << "boolean workflow geometric wire regression\n";
+        return 1;
+    }
     axiom::Kernel kernel;
     const auto unsupported_mass = [&](axiom::BodyId body) {
         const auto result = kernel.query().mass_properties(body);

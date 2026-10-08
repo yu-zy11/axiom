@@ -214,6 +214,29 @@ public:
     explicit BooleanService(std::shared_ptr<detail::KernelState> state);
 
     Result<OpReport> run(BooleanOp op, BodyId lhs, BodyId rhs, const BooleanOptions& options);
+    /// Read-only geometric preparation for closed, oriented planar ExactBRep
+    /// bodies (boxes, wedges and polygon prisms, including concavity/holes).
+    /// Every face/edge is checked; proxy, curved, open or malformed inputs are
+    /// rejected. Linear tolerance bounds boundary snapping; angular tolerance
+    /// rejects unresolved near-parallel planes. ExactCritical is unsupported.
+    /// Input shells must be embedded; local boundary checks do not certify
+    /// global shell self-intersection or material containment among shells.
+    /// Tolerances must be finite and positive, linear within min_local/max_local,
+    /// angular < 1 radian. Coordinate roundoff must resolve the linear tolerance.
+    /// The solved line and its distances to every face vertex must also resolve
+    /// that tolerance before trimming; unresolved pairs fail even if remote.
+    /// FastFloat/AdaptiveCertified use analytic double arithmetic with residual
+    /// checks, not exact predicates or a continuous curved-surface certificate.
+    /// Coplanar candidate faces are rejected explicitly, including tangencies
+    /// requiring a 2-D overlap solver. Transverse point contacts are returned.
+    /// Limits cap Cartesian face comparisons, per-face edges (at most 256),
+    /// and output segments. Empty intersections succeed, including containment.
+    /// Results own coordinates plus source face/edge IDs for subsequent split;
+    /// no model objects, eval changes or transaction writes are made, on success
+    /// or failure. Failures always have a diagnostic and bool.prep.candidates
+    /// or bool.intersect stage. This does not certify run()'s rebuilt solid.
+    Result<BooleanIntersectionPreparation> prepare_intersections(
+        BodyId lhs, BodyId rhs, const BooleanIntersectionOptions& options = {}) const;
     Result<void> export_boolean_prep_stats(BodyId lhs, BodyId rhs, std::string_view path) const;
 
 private:

@@ -13,7 +13,7 @@
 
 当前阶段可定义为：
 
-`Stage 1 已达成；Stage 2 可测基线已达成；当前主线为 Stage 3：基础建模与查询分析（进行中）`
+`Stage 1 已达成；Stage 2 可测基线已达成；当前主线为 Stage 4：布尔与验证器第一代（进行中）`
 
 **说明**：原 **Stage 1.5 / Stage 2 过渡** 所承载的 backlog 批次已在《当前开发进度》**§5.2 归档表**全部闭合；**不等于**工业级引擎完成（工业布尔等见 Stage 4 与进度文档 §3.4）。**进行中 backlog** 以《当前开发进度》**§5.2.1** 为唯一入口。这里描述的是**阶段定位**，不是“当前分支此刻全量测试已绿”的声明。
 
@@ -115,7 +115,7 @@
 
 ## 4.4 `Stage 3` 基础建模与查询分析
 
-**状态：进行中，当前主线。** 已验收子路径包括显式凸/凹及带孔 polygon 拉伸、轴分离有向区间旋转、开放/周期采样曲线扫掠、拓扑兼容 polygon 放样、受限 `draft/section`、原生解析体与平面直边闭壳质量属性（历史占位 thicken 不计主路径，cycle-0077 已补齐真实平面 Face thicken）。cycle-0074 补齐 `extrude_with_law`、`sweep_with_scale_law`、`sweep_with_law` 的分段正比例/有向扭转采样多面体，以及 `locate_point/clip_segment` 的平面直边实体空间查询；调度器完整构建后 CTest 16/16 通过（134.05 s），详见[当前进度](AxiomKernel_当前开发进度.md)。这些仍以“可证明子集 + 前置拒绝 + 回滚不污染”为主；cycle-0079 已将退出标准逐项映射回归并通过代码全量门禁，正式退出仍须文档门禁及调度器提交成功。
+**状态：历史阶段记录，当前主线见 §4.5。** 已验收子路径包括显式凸/凹及带孔 polygon 拉伸、轴分离有向区间旋转、开放/周期采样曲线扫掠、拓扑兼容 polygon 放样、受限 `draft/section`、原生解析体与平面直边闭壳质量属性（历史占位 thicken 不计主路径，cycle-0077 已补齐真实平面 Face thicken）。cycle-0074 补齐 `extrude_with_law`、`sweep_with_scale_law`、`sweep_with_law` 的分段正比例/有向扭转采样多面体，以及 `locate_point/clip_segment` 的平面直边实体空间查询；调度器完整构建后 CTest 16/16 通过（134.05 s），详见[当前进度](AxiomKernel_当前开发进度.md)。这些仍以“可证明子集 + 前置拒绝 + 回滚不污染”为主；cycle-0079 已将退出标准逐项映射回归并通过代码全量门禁，正式退出仍须文档门禁及调度器提交成功。
 
 cycle-0074 是升级前检查点。cycle-0075 / S3-QUERY 收敛真实多面体截面/最近位置/距离，repair 后完整 CTest 16/16（148.44 s）；cycle-0076 / S3-MASS 统一当前拓扑与未编辑原生解析质量资格、删除 bbox/来源/创建缓存恢复，完整 CTest 16/16（147.97 s），历史矩阵与证据保留。
 
@@ -123,7 +123,7 @@ cycle-0077 / S3-MODELING 核验五类真实主路径并补齐平面直边 Face t
 
 cycle-0078 / S3-CONSISTENCY 已形成建模→Strict→截面/最近点/距离/质量→表示/来源/Eval 闭环，体身份/当前边界/source_body 缓存核验、owned 原子失败无 bbox/创建参数 fallback、primitive 编辑资格、Eval dirty 与移除体清理的历史全量 **16/16、164.60 s** 和 [三条证据](../quality/AxiomKernel_测试与验收方案.md#15-cycle-0078--s3-consistency-门禁与逐项证据) 保留。
 
-当前唯一退出任务 **cycle-0079 / S3-EXIT** 已收口 [17 行统一支持矩阵](../api/AxiomKernel_详细模块接口清单.md#614-stage-3-统一退出支持矩阵cycle-0079--s3-exit) 和 [三条验收证据及五项退出映射](../quality/AxiomKernel_测试与验收方案.md#16-cycle-0079--s3-exit-门禁与逐项证据)。调度器独立完整构建成功，全量 CTest **16/16、0 失败、163.78 s**，五个必需回归及原 Boolean/性能门禁均通过；本批未新增接口签名/错误码或工业能力。`stage_outcome=ready_for_acceptance`，状态见 [当前进度 §5.2.1](AxiomKernel_当前开发进度.md#521-stage-3-当前退出任务)。文档已同步，本地文档检查 **35 个 Markdown、0 错误、0 警告**，链接锚点/矩阵映射及 diff 检查通过；正式验收仍须调度器核验最终文档门禁及提交成功，不提前标记 Stage 3 已退出。
+历史退出任务 **cycle-0079 / S3-EXIT** 已收口 [17 行统一支持矩阵](../api/AxiomKernel_详细模块接口清单.md#614-stage-3-统一退出支持矩阵cycle-0079--s3-exit) 和 [三条验收证据及五项退出映射](../quality/AxiomKernel_测试与验收方案.md#16-cycle-0079--s3-exit-门禁与逐项证据)。调度器独立完整构建成功，全量 CTest **16/16、0 失败、163.78 s**，五个必需回归及原 Boolean/性能门禁均通过；本批未新增接口签名/错误码或工业能力。历史报告 `stage_outcome=ready_for_acceptance`；当前任务状态见 [当前进度 §5.2.1](AxiomKernel_当前开发进度.md#521-stage-4-当前退出任务)。文档已同步，本地文档检查 **35 个 Markdown、0 错误、0 警告**，链接锚点/矩阵映射及 diff 检查通过；正式验收仍须调度器核验最终文档门禁及提交成功，不提前标记 Stage 3 已退出。
 
 Strict warnings 配置 ON；本批重编译 Topo/Rep 的 3 条所涉告警未再出现，实际日志剩 SDK `kernel_plugin.cpp:122` 的 1 条 Issue::numeric_evidence 初始化告警。历史 helpers 17 条同类告警所属编译单元未重编译，不能宣称清零；构建总耗时未记录。Eval recompute 只管理图，旧网格是快照，metadata bbox_proxy 仅显示。FR-OPS-001 / FR-QUERY-001 继续进行中；不以工业需求全满足作为 Stage 3 完成前提，不自动扩展后续阶段。
 
@@ -150,6 +150,12 @@ Strict warnings 配置 ON；本批重编译 Topo/Rep 的 3 条所涉告警未再
 - 维持完整 CTest 绿；所涉 strict warnings 已压缩，实发及未重编译历史残余如上，不将无关 Plugin 告警清理扩展为功能包。旧网格仅当前边界键及正确 owner 可命中，不承诺 ID 回收。
 
 ## 4.5 `Stage 4` 布尔与验证器第一代
+
+**状态：进行中，当前主线；唯一退出任务为 cycle-0080 / S4-INTERSECTION。** 本批冻结 [第一代支持矩阵与固定参考模型](../api/AxiomKernel_详细模块接口清单.md#821-stage-4-第一代求交准备支持矩阵cycle-0080--s4-intersection)：真实嵌入、平面直边 ExactBRep 闭壳的只读 face/edge 候选与解析交线，按外环/孔环裁剪并保留源拓扑/边参数；bbox 仅用于筛候选。容差/预算、double 解析与无采样/精确谓词认证边界、不支持输入及共面保守拒绝均已固定。
+
+调度器 repair 后完整构建和最终 CTest **16/16、0 失败、172.43 s**，必需 prep **0.17 s**、workflow **0.12 s**；[三条验收证据](../quality/AxiomKernel_测试与验收方案.md#17-cycle-0080--s4-intersection-门禁与逐项证据) 按支持/参考/拒绝、真实候选/交段完整性、稳定阶段诊断/输入及活动事务隔离排列。`stage_outcome=ready_for_acceptance`，正式状态见 [当前进度 §5.2.1](AxiomKernel_当前开发进度.md#521-stage-4-当前退出任务)；调度器最终文档门禁及提交成功后才记任务已验收，本轮不提交。
+
+准备包只证明固定平面参考集的求交完整性和已回归的兼容 run 读取拒绝；不证明完整工业布尔实体闭环。精确切分/分类/重建实体正确性、二维共面区域、曲面/曲边求交及全局壳嵌入证明仍属后续独立工作。Stage 4 与 FR-BOOL-001 保持进行中；主线切换按本批阶段指令，不追认 Stage 3 历史提交或验收。
 
 目标：
 
@@ -295,9 +301,9 @@ Strict warnings 配置 ON；本批重编译 Topo/Rep 的 3 条所涉告警未再
 
 ## 7. 当前立即执行顺序
 
-以[近期迭代与 Backlog](AxiomKernel_近期迭代与Backlog.md)为选取顺序真源：实际回归阻断优先；本批唯一退出任务为 cycle-0079 / S3-EXIT，独立完整构建及全量 CTest **16/16、0 失败、163.78 s** 已通过，17 行统一矩阵、五项退出回归映射、三条验收证据及 API/诊断/样例/进度/需求/Backlog 已同步，`stage_outcome=ready_for_acceptance`。S3-QUERY/MASS/MODELING/CONSISTENCY 保留历史证据；正式任务状态只在 [当前进度 §5.2.1](AxiomKernel_当前开发进度.md#521-stage-3-当前退出任务) 维护。Strict warnings 配置 ON，所涉 Topo/Rep 告警未再出现，SDK 实发 1 条/历史 helpers 未重编译残余保留；文档检查结果见验收 §1.6，调度器最终文档门禁及提交成功后才正式退出 Stage 3。不得依据历史 remaining 或需求权重追加无关功能，不以工业需求全部满足作为 §4.4 阶段退出前提，后续阶段由调度器在当前阶段验收提交后按明确清单开启；默认自动推进规则见 [Agent 自动开发指南](../guides/AxiomKernel_Agent自动开发指南.md)。
+以[近期迭代与 Backlog](AxiomKernel_近期迭代与Backlog.md)为选取顺序真源：本批唯一退出任务为 cycle-0080 / S4-INTERSECTION，支持范围/固定参考、真实候选对与几何求交、稳定阶段诊断及隔离三条要求均有 [执行证据](../quality/AxiomKernel_测试与验收方案.md#17-cycle-0080--s4-intersection-门禁与逐项证据)，repair 后独立完整构建及全量 CTest **16/16、0 失败、172.43 s** 已通过。`stage_outcome=ready_for_acceptance`；正式状态只在 [当前进度 §5.2.1](AxiomKernel_当前开发进度.md#521-stage-4-当前退出任务) 维护，调度器最终文档门禁及提交成功后才记任务已验收。不得依据历史 remaining、需求权重或新增行数追加无关功能；基础层修复限本任务直接阻断项，不自行启动后续阶段。
 
-不重复立项已经完成的骨架、公共存储和基础诊断建设。Geo/Topo/Math/Heal 本轮优先服务上述链路的明确缺口；工业布尔仍是 Stage 4，标准交换是 Stage 5。专题计划中的优先级是专题内部顺序。
+不重复立项已经完成的骨架、公共存储和基础诊断建设。Geo/Topo/Math/Heal 本轮仅服务 S4-INTERSECTION 的直接阻断项；完整工业布尔仍待 Stage 4 整阶段证据，标准交换为 Stage 5 后续工作。专题计划中的优先级是专题内部顺序。
 
 阶段可以有提前实现的子路径；开始阶段工作不等于宣布该阶段完成。只有对应退出标准逐条具有证据，才提升完成状态。
 

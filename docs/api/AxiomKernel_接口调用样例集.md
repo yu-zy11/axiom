@@ -545,6 +545,8 @@ if (strict.status != StatusCode::Ok || !mass.value || !section.value) return 1;
 
 ## 7. 布尔操作样例
 
+本批第一代支持边界见 [§7.5](#75-只读平面几何求交准备cycle-0080--s4-intersection)。§7.1～7.4 展示兼容 run 调用形态；圆柱代理与自动修复不构成连续曲面布尔或重建实体正确性认证。
+
 ## 7.1 差集
 
 ```cpp
@@ -603,6 +605,46 @@ if (check.status != StatusCode::Ok) {
   handle_optional_repair(repaired);
 }
 ```
+
+## 7.5 只读平面几何求交准备（cycle-0080 / S4-INTERSECTION）
+
+```cpp
+using namespace axiom;
+auto a = kernel.primitives().box({0,0,0}, 2, 2, 2);
+auto b = kernel.primitives().box({1,1,1}, 2, 2, 2);
+if (!a.value || !b.value) return;
+
+BooleanIntersectionOptions options;  // 默认线/角容差 1e-6，独立于全局策略
+options.tolerance = kernel.tolerance().global_policy();  // 沿用全局策略时显式复制
+// 预算限制全部面比较及输出；此夹具 36 次面比较，6 个候选，6 条交段。
+options.max_face_pairs = 36;
+options.max_segments = 6;
+options.max_edges_per_face = 256;
+auto prepared = kernel.booleans().prepare_intersections(*a.value, *b.value, options);
+if (prepared.status != StatusCode::Ok || !prepared.value) {
+  auto report = kernel.diagnostics().get(prepared.diagnostic_id);
+  if (report.value) {
+    for (const auto& issue : report.value->issues) {
+      // issue.code / issue.stage / related_entities / numeric_evidence
+      // bool.prep.candidates 或 bool.intersect；没有可用的部分交段。
+      show_issue(issue);
+    }
+  }
+  return;
+}
+for (const auto& segment : prepared.value->segments) {
+  // segment.begin/end 为坐标；lhs_face/rhs_face 是输入真实面 ID。
+  // point_contact 表示点接触。begin_hits/end_hits 关联真实边：
+  // hit.edge_fraction 沿 edge 的 v0 -> v1，不随 coedge 反转。
+  consume_intersection_for_later_split(segment);
+}
+```
+
+本样例片段未单独编译；实际执行证据来自对应回归与调度器门禁日志。`show_issue` 与 `consume_intersection_for_later_split` 是应用侧示意函数。prepare 不分配模型对象或写事务，成功后也不在内核交线存储中新增集合。该重叠盒的六条单位边来自一坐标=2、另一坐标=1、第三坐标∈[1,2] 的解析参考；固定回归逐条检查覆盖、源边集合和比例。分离/包含的边界空交成功，不能由此推断布尔实体的体积或材料分类。
+
+共面面接触/相同体返回 NotImplemented/E-0014/bool.intersect；曲面/曲边/代理及 ExactCritical 返回 E-0011/bool.prep.candidates；预算耗尽 E-0012，数值不可分辨 E-0013。所有失败可查 diagnostic_id。候选 bbox 只是筛选；斜楔与位于 x+y>2 的盒即使候选非空也必须零交段。凹形/孔洞的完整 16 区间、RxRz 旋转及相切参考见 [固定参考模型集](AxiomKernel_详细模块接口清单.md#固定参考模型集与独立结果)；三条证据和真实门禁见 [验收 §1.7](../quality/AxiomKernel_测试与验收方案.md#17-cycle-0080--s4-intersection-门禁与逐项证据)。
+
+兼容 run 已按真实面边界裁剪；读取短边、超 256 边或大坐标失败在 bool.intersect.trim 结构化返回，所有局部读取完成后才物化交线与结果体。Generic 单面壳的 run 失败夹具不属于 prepare 的闭壳支持认证。精确切分/分类/重建、二维共面区域求交、连续曲面/曲边求交和全局壳嵌入证明仍未认证。
 
 ## 8. 修改操作样例
 

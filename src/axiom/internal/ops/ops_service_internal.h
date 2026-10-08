@@ -161,6 +161,8 @@ struct IntersectionCurve {
     CurveId curve {};
     FaceId lhs_face {};
     FaceId rhs_face {};
+    Point3 origin {};
+    Vec3 direction {};
 };
 
 struct IntersectionSegment {
@@ -168,6 +170,9 @@ struct IntersectionSegment {
     FaceId lhs_face {};
     FaceId rhs_face {};
 };
+
+Result<BooleanIntersectionPreparation> prepare_planar_boolean_intersections(
+    detail::KernelState& state, BodyId lhs, BodyId rhs, const BooleanIntersectionOptions& options);
 
 std::vector<FaceId> faces_for_body_boolean(const detail::KernelState& state, BodyId body_id);
 
@@ -183,11 +188,11 @@ bool plane_plane_intersection_line(const detail::KernelState& state,
                                    Point3& out_origin,
                                    Vec3& out_dir);
 
-std::vector<IntersectionCurve> compute_intersection_curves_for_candidates(detail::KernelState& state,
+std::vector<IntersectionCurve> compute_intersection_curves_for_candidates(const detail::KernelState& state,
                                                                           std::span<const FaceCandidatePair> candidates);
 
-std::vector<IntersectionSegment> clip_intersection_lines_to_face_overlap(detail::KernelState& state,
-                                                                         std::span<const IntersectionCurve> curves);
+Result<std::vector<IntersectionSegment>> clip_intersection_lines_to_face_boundaries(
+    detail::KernelState& state, std::span<IntersectionCurve> curves, BodyId lhs, BodyId rhs);
 
 CurveId longest_intersection_segment_curve(const detail::KernelState& state,
                                            std::span<const IntersectionSegment> segments);

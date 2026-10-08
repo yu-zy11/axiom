@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -545,6 +546,44 @@ struct BooleanOptions {
   TolerancePolicy tolerance{};
   bool diagnostics{true};
   bool auto_repair{false};
+};
+
+/// First-generation intersection preparation: analytic planes with bounded,
+/// straight polygon boundaries only. No curve/surface sampling is performed.
+struct BooleanIntersectionOptions {
+  TolerancePolicy tolerance{};
+  std::size_t max_face_pairs{2000000};
+  std::size_t max_segments{100000};
+  std::size_t max_edges_per_face{256};
+};
+
+struct BooleanFaceCandidate {
+  FaceId lhs_face{};
+  FaceId rhs_face{};
+  std::vector<EdgeId> lhs_edges;
+  std::vector<EdgeId> rhs_edges;
+};
+
+struct BooleanBoundaryHit {
+  FaceId face{};
+  EdgeId edge{};
+  /// Fraction along the edge's v0 -> v1 chord, independent of coedge reversal.
+  Scalar edge_fraction{};
+};
+
+struct BooleanIntersectionSegment {
+  FaceId lhs_face{};
+  FaceId rhs_face{};
+  Point3 begin{};
+  Point3 end{};
+  std::vector<BooleanBoundaryHit> begin_hits;
+  std::vector<BooleanBoundaryHit> end_hits;
+  bool point_contact{false};
+};
+
+struct BooleanIntersectionPreparation {
+  std::vector<BooleanFaceCandidate> candidates;
+  std::vector<BooleanIntersectionSegment> segments;
 };
 
 struct OpReport {

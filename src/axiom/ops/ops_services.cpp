@@ -1744,6 +1744,11 @@ Result<BodyId> SweepService::thicken(FaceId face_id, Scalar distance) {
 
 BooleanService::BooleanService(std::shared_ptr<detail::KernelState> state) : state_(std::move(state)) {}
 
+Result<BooleanIntersectionPreparation> BooleanService::prepare_intersections(
+    BodyId lhs, BodyId rhs, const BooleanIntersectionOptions& options) const {
+    return prepare_planar_boolean_intersections(*state_, lhs, rhs, options);
+}
+
 Result<OpReport> BooleanService::run(BooleanOp op, BodyId lhs, BodyId rhs, const BooleanOptions& boolean_options) {
     if (op != BooleanOp::Union && op != BooleanOp::Subtract &&
         op != BooleanOp::Intersect && op != BooleanOp::Split) {
@@ -1835,17 +1840,22 @@ Result<OpReport> BooleanService::run(BooleanOp op, BodyId lhs, BodyId rhs, const
     record.has_boolean_op = true;
     record.boolean_op = op;
 
+    // Check all real face boundaries before materializing an output or touching
+    // Eval. A rejected trim must leave the caller's model and writer intact.
+    const auto face_candidates = build_face_candidates_for_boolean(*state_, lhs, rhs);
+    auto intersection_curves = compute_intersection_curves_for_candidates(*state_, face_candidates);
+    const auto trimmed = clip_intersection_lines_to_face_boundaries(*state_, intersection_curves, lhs, rhs);
+    if (!trimmed.value) return error_result<OpReport>(trimmed.status, trimmed.diagnostic_id);
+    const auto& intersection_segments = *trimmed.value;
+
     BodyId output = make_body(state_, record, "已完成布尔操作");
     detail::invalidate_eval_for_bodies(*state_, {lhs, rhs});
     const auto diag = boolean_options.diagnostics ? state_->create_diagnostic("布尔操作完成") : DiagnosticId {};
     append_boolean_stage_issue(*state_, diag, diag_codes::kBoolStageCandidates,
                                "布尔候选构建阶段开始：已进入壳/区域级候选统计流程",
                                {lhs.value, rhs.value});
-    const auto face_candidates = build_face_candidates_for_boolean(*state_, lhs, rhs);
     append_boolean_face_candidate_issue(*state_, diag, lhs, rhs, face_candidates.size());
-    const auto intersection_curves = compute_intersection_curves_for_candidates(*state_, face_candidates);
     append_boolean_intersection_curve_issue(*state_, diag, lhs, rhs, intersection_curves);
-    const auto intersection_segments = clip_intersection_lines_to_face_overlap(*state_, intersection_curves);
     append_boolean_intersection_segment_issue(*state_, diag, lhs, rhs, intersection_segments);
     if (diag.value != 0 && !intersection_segments.empty()) {
         append_boolean_stage_issue(*state_, diag, diag_codes::kBoolStageSplit,

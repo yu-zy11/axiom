@@ -1,8 +1,12 @@
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <iostream>
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <utility>
+#include <vector>
 
 #include "axiom/diag/error_codes.h"
 #include "axiom/sdk/kernel.h"
@@ -170,9 +174,590 @@ bool check_prep_export_failures() {
     return true;
 }
 
+// Keep the caps as single faces with actual inner loops, rather than relying
+// only on the sweep materializer's triangulated representation of a hole.
+axiom::Result<axiom::BodyId> make_reference_holed_prism(
+    axiom::Kernel& kernel, double x_scale = 1,
+    std::vector<std::pair<axiom::VertexId,axiom::Point3>>* reference_vertices = nullptr) {
+    std::array<axiom::Point3,8> points {{{0,0,0},{4,0,0},{4,4,0},{0,4,0},
+                                       {1,1,0},{1,3,0},{3,3,0},{3,1,0}}};
+    for (auto& point : points) point.x *= x_scale;
+    auto transaction = kernel.topology().begin_transaction();
+    std::array<axiom::VertexId,16> vertices {};
+    for (std::size_t i = 0; i < vertices.size(); ++i) {
+        auto p = points[i%8];
+        if (i >= 8) p.z = 2;
+        const auto vertex = transaction.create_vertex(p);
+        if (!vertex.value) return {};
+        vertices[i] = *vertex.value;
+        if (reference_vertices) reference_vertices->push_back({*vertex.value,p});
+    }
+    const auto next = [](std::size_t i) { return (i/4)*4+(i+1)%4; };
+    std::array<axiom::EdgeId,24> edges {};
+    for (std::size_t i = 0; i < edges.size(); ++i) {
+        const std::size_t index = i%8;
+        const std::size_t a = i < 16 ? index+(i >= 8 ? 8 : 0) : index;
+        const std::size_t b = i < 16 ? next(index)+(i >= 8 ? 8 : 0) : index+8;
+        auto p = points[a%8], q = points[b%8];
+        if (a >= 8) p.z = 2;
+        if (b >= 8) q.z = 2;
+        const double length = std::hypot(q.x-p.x,q.y-p.y,q.z-p.z);
+        const auto curve = kernel.curves().make_line(p,{(q.x-p.x)/length,(q.y-p.y)/length,(q.z-p.z)/length});
+        const auto edge = curve.value ? transaction.create_edge(*curve.value,vertices[a],vertices[b])
+                                     : axiom::Result<axiom::EdgeId>{};
+        if (!edge.value) return {};
+        edges[i] = *edge.value;
+    }
+    const auto make_loop = [&](const std::vector<std::pair<std::size_t,bool>>& refs) {
+        std::vector<axiom::CoedgeId> coedges;
+        for (const auto& [edge,reversed] : refs) {
+            const auto coedge = transaction.create_coedge(edges[edge],reversed);
+            if (!coedge.value) return axiom::Result<axiom::LoopId>{};
+            coedges.push_back(*coedge.value);
+        }
+        return transaction.create_loop(coedges);
+    };
+    std::vector<axiom::FaceId> faces;
+    for (std::size_t i = 0; i < 8; ++i) {
+        const auto j = next(i);
+        const auto loop = make_loop({{i,false},{16+j,false},{8+i,true},{16+i,true}});
+        const auto p = points[i], q = points[j];
+        const auto plane = kernel.surfaces().make_plane(p,{q.y-p.y,p.x-q.x,0});
+        const auto face = loop.value && plane.value ? transaction.create_face(*plane.value,*loop.value,{})
+                                                   : axiom::Result<axiom::FaceId>{};
+        if (!face.value) return {};
+        faces.push_back(*face.value);
+    }
+    for (const bool top : {false,true}) {
+        std::array<axiom::LoopId,2> loops {};
+        for (std::size_t ring = 0; ring < 2; ++ring) {
+            std::vector<std::pair<std::size_t,bool>> refs;
+            for (std::size_t i = 0; i < 4; ++i)
+                refs.push_back({(top ? 8 : 0)+4*ring+(top ? i : 3-i),!top});
+            const auto loop = make_loop(refs);
+            if (!loop.value) return {};
+            loops[ring] = *loop.value;
+        }
+        const auto plane = kernel.surfaces().make_plane({0,0,top ? 2.0 : 0.0},{0,0,top ? 1.0 : -1.0});
+        const auto face = plane.value ? transaction.create_face(*plane.value,loops[0],std::array{loops[1]})
+                                      : axiom::Result<axiom::FaceId>{};
+        if (!face.value) return {};
+        faces.push_back(*face.value);
+    }
+    const auto shell = transaction.create_shell(faces);
+    const auto body = shell.value ? transaction.create_body(std::array{*shell.value}) : axiom::Result<axiom::BodyId>{};
+    if (!body.value || transaction.commit().status != axiom::StatusCode::Ok) return {};
+    return body;
+}
+
+// Frozen analytic references for the planar preparation slice. Expectations
+// come from half-space equations and polygon intervals, never kernel bboxes or
+// a second invocation of the production intersection routine.
+bool planar_failure(int line) {
+    std::cerr << "planar boolean preparation check failed at line " << line << "\n";
+    return false;
+}
+
+bool check_planar_intersection_references() {
+    axiom::Kernel kernel;
+    const auto a = kernel.primitives().box({0,0,0},2,2,2);
+    const auto b = kernel.primitives().box({1,1,1},2,2,2);
+    if (!a.value || !b.value) return planar_failure(__LINE__);
+    const auto counts = [&]() {
+        return std::array{kernel.body_count().value,kernel.geometry_count().value,
+                          kernel.topology_count().value,kernel.intersection_count().value,
+                          kernel.eval_node_count().value,kernel.cache_entry_count().value};
+    };
+    const auto baseline = counts();
+    const auto reference = kernel.booleans().prepare_intersections(*a.value,*b.value);
+    if (!reference.value || reference.status != axiom::StatusCode::Ok || counts() != baseline ||
+        reference.value->candidates.size() != 6 || reference.value->segments.size() != 6) return planar_failure(__LINE__);
+
+    // Six independent edges: one A coordinate = 2, one B coordinate = 1,
+    // and the third coordinate ranges from 1 to 2. Check completeness by
+    // interval coverage, allowing triangulated faces to partition an edge.
+    const auto check_cube_reference = [&](const axiom::BooleanIntersectionPreparation& preparation,
+                                          const auto& inverse) {
+        for (const auto& candidate : preparation.candidates) {
+            for (const bool lhs : {false,true}) {
+                const auto loops = kernel.topology().query().loops_of_face(lhs ? candidate.lhs_face : candidate.rhs_face);
+                if (!loops.value || loops.value->empty()) return planar_failure(__LINE__);
+                std::vector<axiom::EdgeId> actual;
+                for (const auto loop : *loops.value) {
+                    const auto edges = kernel.topology().query().edges_of_loop(loop);
+                    if (!edges.value) return planar_failure(__LINE__);
+                    actual.insert(actual.end(),edges.value->begin(),edges.value->end());
+                }
+                auto declared = lhs ? candidate.lhs_edges : candidate.rhs_edges;
+                const auto less = [](axiom::EdgeId a,axiom::EdgeId b) { return a.value < b.value; };
+                std::sort(actual.begin(),actual.end(),less);
+                std::sort(declared.begin(),declared.end(),less);
+                if (actual != declared) return planar_failure(__LINE__);
+            }
+        }
+        std::array<std::vector<std::array<double,2>>,9> intervals;
+        for (const auto& segment : preparation.segments) {
+            if (segment.begin_hits.empty() || segment.end_hits.empty()) return planar_failure(__LINE__);
+            const auto p = inverse(segment.begin), q = inverse(segment.end);
+            const std::array<double,3> x {p.x,p.y,p.z}, y {q.x,q.y,q.z};
+            bool found = false;
+            for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) {
+                if (i == j || std::abs(x[i]-2) > 1e-8 || std::abs(y[i]-2) > 1e-8 ||
+                    std::abs(x[j]-1) > 1e-8 || std::abs(y[j]-1) > 1e-8) continue;
+                const int k = 3-i-j;
+                const double low = std::min(x[k],y[k]), high = std::max(x[k],y[k]);
+                if (low < 1-1e-8 || high > 2+1e-8) return planar_failure(__LINE__);
+                if (!segment.point_contact) intervals[3*i+j].push_back({low,high});
+                found = true;
+                break;
+            }
+            if (!found) return planar_failure(__LINE__);
+            const auto pair = std::find_if(preparation.candidates.begin(),preparation.candidates.end(),
+                [&](const auto& candidate) {
+                    return candidate.lhs_face == segment.lhs_face && candidate.rhs_face == segment.rhs_face;
+                });
+            if (pair == preparation.candidates.end()) return planar_failure(__LINE__);
+            for (const auto* hits : {&segment.begin_hits,&segment.end_hits}) for (const auto& hit : *hits) {
+                if (hit.edge_fraction < 0 || hit.edge_fraction > 1) return planar_failure(__LINE__);
+                const auto* edges = hit.face == pair->lhs_face ? &pair->lhs_edges :
+                                    hit.face == pair->rhs_face ? &pair->rhs_edges : nullptr;
+                if (!edges || std::find(edges->begin(),edges->end(),hit.edge) == edges->end()) return planar_failure(__LINE__);
+                const auto owners = kernel.topology().query().faces_of_edge(hit.edge);
+                if (!owners.value || std::find(owners.value->begin(),owners.value->end(),hit.face) == owners.value->end())
+                    return planar_failure(__LINE__);
+            }
+        }
+        for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) if (i != j) {
+            auto& edge = intervals[3*i+j];
+            std::sort(edge.begin(),edge.end());
+            double end = 1, length = 0;
+            for (const auto interval : edge) {
+                if (interval[0] > end+1e-8) return planar_failure(__LINE__);
+                end = std::max(end,interval[1]);
+                length += interval[1]-interval[0];
+            }
+            if (std::abs(end-2) > 1e-8 || std::abs(length-1) > 1e-8) return planar_failure(__LINE__);
+        }
+        return true;
+    };
+    if (!check_cube_reference(*reference.value,[](axiom::Point3 p) { return p; })) return planar_failure(__LINE__);
+    const auto reversed = kernel.booleans().prepare_intersections(*b.value,*a.value);
+    if (!reversed.value || reversed.value->candidates.size() != 6 || reversed.value->segments.size() != 6 || counts() != baseline ||
+        !check_cube_reference(*reversed.value,[](axiom::Point3 p) { return p; })) return planar_failure(__LINE__);
+
+    // A fixed orthogonal rotation: Rz has cos=3/5, sin=4/5;
+    // Rx has cos=12/13, sin=5/13, and R = Rx Rz.
+    // This moves all face frames away from the world axes; R^T is the oracle.
+    const auto rotate = [](axiom::Point3 p) -> axiom::Point3 {
+        const double x = 0.6*p.x-0.8*p.y, y = 0.8*p.x+0.6*p.y;
+        return {x,(12*y-5*p.z)/13,(5*y+12*p.z)/13};
+    };
+    const auto inverse = [](axiom::Point3 p) -> axiom::Point3 {
+        const double y = (12*p.y+5*p.z)/13, z = (-5*p.y+12*p.z)/13;
+        return {0.6*p.x+0.8*y,-0.8*p.x+0.6*y,z};
+    };
+    const auto make_rotated_cube = [&](double offset) {
+        axiom::ProfileRef profile;
+        profile.label = "s4-reference-rotated-cube";
+        for (const axiom::Point3 p : {axiom::Point3{offset,offset,offset},
+            axiom::Point3{offset+2,offset,offset},axiom::Point3{offset+2,offset+2,offset},
+            axiom::Point3{offset,offset+2,offset}}) profile.polygon_xyz.push_back(rotate(p));
+        return kernel.sweeps().extrude(profile,{0,-5.0/13,12.0/13},2);
+    };
+    const auto ra = make_rotated_cube(0), rb = make_rotated_cube(1);
+    if (!ra.value || !rb.value) return planar_failure(__LINE__);
+    const auto rotated = kernel.booleans().prepare_intersections(*ra.value,*rb.value);
+    if (!rotated.value || !check_cube_reference(*rotated.value,inverse)) return planar_failure(__LINE__);
+
+    // Wedge material: x>=0, y>=0, x+y<=2, 0<=z<=2. A box
+    // entirely beyond x+y=2 overlaps its bbox but has no geometric intersection.
+    const auto wedge = kernel.primitives().wedge({0,0,0},2,2,2);
+    const auto gap = kernel.primitives().box({1.2,1.2,0.25},0.4,0.4,0.5);
+    const auto cutter = kernel.primitives().box({0.5,0.5,-0.5},1,1,1);
+    if (!wedge.value || !gap.value || !cutter.value) return planar_failure(__LINE__);
+    const auto phantom = kernel.booleans().prepare_intersections(*wedge.value,*gap.value);
+    if (!phantom.value || phantom.value->candidates.empty() || !phantom.value->segments.empty()) return planar_failure(__LINE__);
+    const auto diagonal = kernel.booleans().prepare_intersections(*wedge.value,*cutter.value);
+    if (!diagonal.value) return planar_failure(__LINE__);
+    double diagonal_length = 0;
+    for (const auto& segment : diagonal.value->segments) {
+        for (const auto p : {segment.begin,segment.end,
+            axiom::Point3{(segment.begin.x+segment.end.x)/2,(segment.begin.y+segment.end.y)/2,
+                          (segment.begin.z+segment.end.z)/2}}) {
+            if (p.x < 0.5-1e-8 || p.y < 0.5-1e-8 || p.x+p.y > 2+1e-8 || p.z < -1e-8 || p.z > 0.5+1e-8)
+                return planar_failure(__LINE__);
+        }
+        if (std::abs(segment.begin.z-0.5) < 1e-8 && std::abs(segment.end.z-0.5) < 1e-8 &&
+            std::abs(segment.begin.x+segment.begin.y-2) < 1e-8 &&
+            std::abs(segment.end.x+segment.end.y-2) < 1e-8)
+            diagonal_length += std::hypot(segment.end.x-segment.begin.x,segment.end.y-segment.begin.y);
+    }
+    if (std::abs(diagonal_length-std::sqrt(2.0)) > 1e-8) return planar_failure(__LINE__);
+    // A box beyond the wedge's sloping face touches it only along one vertical
+    // edge. Horizontal box faces yield genuine transverse single-point hits.
+    const auto tangent = kernel.primitives().box({0.75,1.25,0.25},0.5,0.5,0.5);
+    if (!tangent.value) return planar_failure(__LINE__);
+    const auto contact = kernel.booleans().prepare_intersections(*wedge.value,*tangent.value);
+    if (!contact.value || std::none_of(contact.value->segments.begin(),contact.value->segments.end(),
+                                     [](const auto& segment) { return segment.point_contact; })) return planar_failure(__LINE__);
+    for (const auto& segment : contact.value->segments) for (const auto p : {segment.begin,segment.end})
+        if (std::abs(p.x-0.75) > 1e-8 || std::abs(p.y-1.25) > 1e-8 || p.z < 0.25-1e-8 || p.z > 0.75+1e-8)
+            return planar_failure(__LINE__);
+
+    // Both a concave U and a square with a square hole have the independent
+    // cross-section [0,1] union [3,4] at y=2. Cutter faces at y=1.5/2.5
+    // intersect the z=0 cap in those two intervals, total length exactly 2.
+    const auto section_cutter = kernel.primitives().box({-1,1.5,-0.5},6,1,1);
+    if (!section_cutter.value) return planar_failure(__LINE__);
+    for (const int model : {0,1,2}) {
+        const bool holed = model != 0;
+        axiom::ProfileRef profile;
+        profile.label = holed ? "s4-reference-square-hole" : "s4-reference-concave-U";
+        if (holed) {
+            profile.polygon_xyz = {{0,0,0},{4,0,0},{4,4,0},{0,4,0}};
+            profile.holes_xyz = {{{1,1,0},{3,1,0},{3,3,0},{1,3,0}}};
+        } else profile.polygon_xyz = {{0,0,0},{4,0,0},{4,4,0},{3,4,0},
+                                      {3,1,0},{1,1,0},{1,4,0},{0,4,0}};
+        std::vector<std::pair<axiom::VertexId,axiom::Point3>> reference_vertices;
+        const auto prism = model == 2 ? make_reference_holed_prism(kernel,1,&reference_vertices)
+                                     : kernel.sweeps().extrude(profile,{0,0,1},2);
+        if (!prism.value) return planar_failure(__LINE__);
+        const auto preparation = kernel.booleans().prepare_intersections(*prism.value,*section_cutter.value);
+        if (!preparation.value || preparation.value->segments.empty()) return planar_failure(__LINE__);
+        // Full boundary-intersection oracle, not only the two cap sections:
+        // four z=0 cap intervals, four z=0.5 side intervals, and eight vertical
+        // intervals. The U and holed square have the same material in this band.
+        std::vector<std::array<axiom::Point3,2>> expected;
+        for (const double y : {1.5,2.5}) for (const double x : {0.0,3.0})
+            expected.push_back({axiom::Point3{x,y,0},axiom::Point3{x+1,y,0}});
+        for (const double x : {0.0,1.0,3.0,4.0}) {
+            expected.push_back({axiom::Point3{x,1.5,0.5},axiom::Point3{x,2.5,0.5}});
+            for (const double y : {1.5,2.5})
+                expected.push_back({axiom::Point3{x,y,0},axiom::Point3{x,y,0.5}});
+        }
+        std::vector<std::vector<std::array<double,2>>> coverage(expected.size());
+        std::array<int,2> segment_counts {};
+        std::size_t checked_source_hits = 0, checked_inner_hits = 0;
+        const auto source_faces = kernel.topology().query().faces_of_body(*prism.value);
+        if (!source_faces.value) return planar_failure(__LINE__);
+        for (const auto& segment : preparation.value->segments) {
+            if (model == 2) {
+                for (const bool begin : {false,true}) {
+                    const auto& hits = begin ? segment.begin_hits : segment.end_hits;
+                    const auto actual = begin ? segment.begin : segment.end;
+                    for (const auto& hit : hits) {
+                        if (std::find(source_faces.value->begin(),source_faces.value->end(),hit.face) == source_faces.value->end())
+                            continue;
+                        const auto endpoints = kernel.topology().query().vertices_of_edge(hit.edge);
+                        if (!endpoints.value || !std::isfinite(hit.edge_fraction) || hit.edge_fraction < 0 || hit.edge_fraction > 1)
+                            return planar_failure(__LINE__);
+                        std::array<axiom::Point3,2> points {};
+                        for (std::size_t i = 0; i < 2; ++i) {
+                            const auto vertex = std::find_if(reference_vertices.begin(),reference_vertices.end(),
+                                [&](const auto& item) { return item.first == (*endpoints.value)[i]; });
+                            if (vertex == reference_vertices.end()) return planar_failure(__LINE__);
+                            points[i] = vertex->second;
+                        }
+                        const auto p = points[0], q = points[1];
+                        const axiom::Point3 expected {p.x+hit.edge_fraction*(q.x-p.x),
+                            p.y+hit.edge_fraction*(q.y-p.y),p.z+hit.edge_fraction*(q.z-p.z)};
+                        if (std::hypot(expected.x-actual.x,expected.y-actual.y,expected.z-actual.z) > 1e-8)
+                            return planar_failure(__LINE__);
+                        ++checked_source_hits;
+                        const auto loops = kernel.topology().query().loops_of_face(hit.face);
+                        if (!loops.value) return planar_failure(__LINE__);
+                        for (std::size_t i = 1; i < loops.value->size(); ++i) {
+                            const auto edges = kernel.topology().query().edges_of_loop((*loops.value)[i]);
+                            if (!edges.value) return planar_failure(__LINE__);
+                            if (std::find(edges.value->begin(),edges.value->end(),hit.edge) != edges.value->end()) ++checked_inner_hits;
+                        }
+                    }
+                }
+            }
+            bool matched = false;
+            for (std::size_t i = 0; i < expected.size(); ++i) {
+                const auto p = expected[i][0], q = expected[i][1];
+                const std::array<double,3> start {p.x,p.y,p.z}, end {q.x,q.y,q.z};
+                const std::array<double,3> a {segment.begin.x,segment.begin.y,segment.begin.z};
+                const std::array<double,3> b {segment.end.x,segment.end.y,segment.end.z};
+                int varying = -1;
+                bool on_reference = true;
+                for (int axis = 0; axis < 3; ++axis) {
+                    if (start[axis] != end[axis]) varying = axis;
+                    else if (std::abs(a[axis]-start[axis]) > 1e-8 ||
+                             std::abs(b[axis]-start[axis]) > 1e-8) on_reference = false;
+                }
+                if (!on_reference || varying < 0) continue;
+                const double low = (std::min(a[varying],b[varying])-start[varying]) /
+                                   (end[varying]-start[varying]);
+                const double high = (std::max(a[varying],b[varying])-start[varying]) /
+                                    (end[varying]-start[varying]);
+                if (low < -1e-8 || high > 1+1e-8) continue;
+                if (!segment.point_contact) coverage[i].push_back({low,high});
+                matched = true;
+                break;
+            }
+            if (!matched || segment.begin_hits.empty() || segment.end_hits.empty()) return planar_failure(__LINE__);
+            for (std::size_t side = 0; side < 2; ++side) {
+                const double y = side == 0 ? 1.5 : 2.5;
+                if (std::abs(segment.begin.z) < 1e-8 && std::abs(segment.end.z) < 1e-8 &&
+                    std::abs(segment.begin.y-y) < 1e-8 && std::abs(segment.end.y-y) < 1e-8 && !segment.point_contact) {
+                    ++segment_counts[side];
+                }
+            }
+        }
+        for (auto& intervals : coverage) {
+            std::sort(intervals.begin(),intervals.end());
+            double end = 0, length = 0;
+            for (const auto interval : intervals) {
+                if (interval[0] > end+1e-8) return planar_failure(__LINE__);
+                end = std::max(end,interval[1]);
+                length += interval[1]-interval[0];
+            }
+            if (std::abs(end-1) > 1e-8 || std::abs(length-1) > 1e-8) return planar_failure(__LINE__);
+        }
+        if (model == 2 && (segment_counts[0] != 2 || segment_counts[1] != 2 ||
+                           checked_source_hits == 0 || checked_inner_hits == 0)) return planar_failure(__LINE__);
+    }
+    const auto far = kernel.primitives().box({10,10,10},1,1,1);
+    const auto inner = kernel.primitives().box({0.5,0.5,0.5},0.5,0.5,0.5);
+    if (!far.value || !inner.value) return planar_failure(__LINE__);
+    for (const auto other : {*far.value,*inner.value}) {
+        const auto empty = kernel.booleans().prepare_intersections(*a.value,other);
+        if (!empty.value || !empty.value->candidates.empty() || !empty.value->segments.empty()) return planar_failure(__LINE__);
+    }
+    return true;
+}
+
+bool check_planar_preparation_failure_isolation() {
+    axiom::Kernel kernel;
+    const auto a = kernel.primitives().box({0,0,0},2,2,2);
+    const auto b = kernel.primitives().box({1,1,1},2,2,2);
+    const auto touching = kernel.primitives().box({2,0,0},2,2,2);
+    const auto sphere = kernel.primitives().sphere({1,1,1},1);
+    const auto cylinder = kernel.primitives().cylinder({1,1,1},{0,0,1},1,2);
+    const auto unresolved = kernel.primitives().box({1e12,1e12,1e12},2,2,2);
+    // Build valid explicit topology under 1e-9, then restore the declared
+    // preparation policy 1e-6. The inner-ring horizontal edges are exactly 5e-7.
+    if (kernel.set_linear_tolerance(1e-9).status != axiom::StatusCode::Ok) return planar_failure(__LINE__);
+    const auto thin = make_reference_holed_prism(kernel,2.5e-7);
+    if (!thin.value || kernel.set_linear_tolerance(1e-6).status != axiom::StatusCode::Ok)
+        return planar_failure(__LINE__);
+    const auto thin_edges = kernel.topology().query().edges_of_body(*thin.value);
+    if (!thin_edges.value) return planar_failure(__LINE__);
+    bool has_short_reference = false;
+    for (const auto edge : *thin_edges.value) {
+        const auto length = kernel.topology().query().edge_length(edge);
+        if (!length.value) return planar_failure(__LINE__);
+        if (std::abs(*length.value-5e-7) < 1e-14) has_short_reference = true;
+    }
+    if (!has_short_reference) return planar_failure(__LINE__);
+    axiom::ProfileRef near_profile;
+    near_profile.label = "s4-reference-near-parallel";
+    constexpr double angle = 5e-7;
+    for (const auto xy : {std::array{0.0,0.0},std::array{1.0,0.0},std::array{1.0,1.0},std::array{0.0,1.0}})
+        near_profile.polygon_xyz.push_back({2-2.5e-7+std::cos(angle)*xy[0]-std::sin(angle)*xy[1],
+                                           0.5+std::sin(angle)*xy[0]+std::cos(angle)*xy[1],0.5});
+    const auto near_parallel = kernel.sweeps().extrude(near_profile,{0,0,1},1);
+    // Two almost equally rotated cubes have overlapping face envelopes for
+    // parallel-looking faces separated by one model unit. Their analytic line
+    // is about 1e8 units away. Inputs resolve 1e-6, but that solve does not;
+    // it must fail before an empty trim can silently claim no intersection.
+    const auto make_oblique_cube = [&](double offset, double twist) {
+        axiom::ProfileRef profile;
+        profile.label = "s4-reference-unresolved-line";
+        for (const axiom::Point3 p : {axiom::Point3{offset,offset,offset},
+            axiom::Point3{offset+2,offset,offset},axiom::Point3{offset+2,offset+2,offset},
+            axiom::Point3{offset,offset+2,offset}}) {
+            const double x = std::cos(twist)*p.x-std::sin(twist)*p.y;
+            const double y = std::sin(twist)*p.x+std::cos(twist)*p.y;
+            const double rx = 0.6*x-0.8*y, ry = 0.8*x+0.6*y;
+            profile.polygon_xyz.push_back({rx,(12*ry-5*p.z)/13,(5*ry+12*p.z)/13});
+        }
+        return kernel.sweeps().extrude(profile,{0,-5.0/13,12.0/13},2);
+    };
+    const auto oblique_a = make_oblique_cube(0,0), oblique_b = make_oblique_cube(1,1e-8);
+    if (!a.value || !b.value || !touching.value || !sphere.value || !cylinder.value || !unresolved.value || !thin.value)
+        return planar_failure(__LINE__);
+    if (!near_parallel.value || !oblique_a.value || !oblique_b.value) return planar_failure(__LINE__);
+    auto transaction = kernel.topology().begin_transaction();
+    const auto sentinel = transaction.create_vertex({99,98,97});
+    if (!sentinel.value) return planar_failure(__LINE__);
+    const auto a_faces = kernel.topology().query().faces_of_body(*a.value);
+    if (!a_faces.value || a_faces.value->empty()) return planar_failure(__LINE__);
+    const auto open_shell = transaction.create_shell(std::array{a_faces.value->front()});
+    const auto open_body = open_shell.value ? transaction.create_body(std::array{*open_shell.value})
+                                           : axiom::Result<axiom::BodyId>{};
+    if (!open_body.value) return planar_failure(__LINE__);
+    const auto transaction_writes = transaction.write_operation_count().value;
+    if (!transaction_writes) return planar_failure(__LINE__);
+    const auto counts = [&]() {
+        return std::array{kernel.body_count().value,kernel.geometry_count().value,kernel.topology_count().value,
+                          kernel.intersection_count().value,kernel.eval_node_count().value,kernel.cache_entry_count().value};
+    };
+    // Capture public topology relations plus per-face coordinate extrema. This
+    // detects in-place changes that store counts and transaction counters miss.
+    const auto input_snapshot = [&]() {
+        std::pair<std::vector<std::uint64_t>,std::vector<double>> snapshot;
+        const auto query = kernel.topology().query();
+        for (const auto body : {*a.value,*b.value,*touching.value,*sphere.value,*cylinder.value,
+                               *unresolved.value,*thin.value,*near_parallel.value,*oblique_a.value,*oblique_b.value}) {
+            const auto faces = query.faces_of_body(body);
+            const auto shells = query.shells_of_body(body);
+            if (!faces.value || !shells.value) return decltype(snapshot){};
+            snapshot.first.push_back(body.value);
+            snapshot.first.push_back(shells.value->size());
+            for (const auto shell : *shells.value) snapshot.first.push_back(shell.value);
+            snapshot.first.push_back(faces.value->size());
+            for (const auto face : *faces.value) {
+                const auto surface = query.surface_of_face(face);
+                const auto loops = query.loops_of_face(face);
+                const auto bbox = query.bbox_of_face(face);
+                if (!surface.value || !loops.value || !bbox.value || !bbox.value->is_valid) return decltype(snapshot){};
+                snapshot.first.insert(snapshot.first.end(),{face.value,surface.value->value,loops.value->size()});
+                const auto& box = *bbox.value;
+                snapshot.second.insert(snapshot.second.end(),{box.min.x,box.min.y,box.min.z,box.max.x,box.max.y,box.max.z});
+                for (const auto loop : *loops.value) {
+                    const auto edges = query.edges_of_loop(loop);
+                    const auto vertices = query.vertices_of_loop(loop);
+                    if (!edges.value || !vertices.value) return decltype(snapshot){};
+                    snapshot.first.insert(snapshot.first.end(),{loop.value,edges.value->size(),vertices.value->size()});
+                    for (const auto vertex : *vertices.value) snapshot.first.push_back(vertex.value);
+                    for (const auto edge : *edges.value) {
+                        const auto endpoints = query.vertices_of_edge(edge);
+                        if (!endpoints.value) return decltype(snapshot){};
+                        snapshot.first.insert(snapshot.first.end(),{edge.value,(*endpoints.value)[0].value,(*endpoints.value)[1].value});
+                    }
+                }
+            }
+        }
+        return snapshot;
+    };
+    const auto bridge_snapshot = [&] {
+        const auto metrics = kernel.eval_graph_metrics();
+        if (!metrics.value) return std::array<std::uint64_t,5>{};
+        const auto& bridge = metrics.value->invalidation_bridge;
+        return std::array{bridge.for_body_entries,bridge.for_faces_entries,bridge.for_bodies_batches,
+                          bridge.for_bodies_list_size_total,bridge.downstream_invalidation_steps};
+    };
+    const auto input_baseline = input_snapshot();
+    if (input_baseline.first.empty()) return planar_failure(__LINE__);
+    const auto bridge_baseline = bridge_snapshot();
+    const auto baseline = counts();
+    const auto expect = [&](axiom::BodyId lhs, axiom::BodyId rhs, const axiom::BooleanIntersectionOptions& options,
+                             axiom::StatusCode status, std::string_view code, std::string_view stage) {
+        const auto result = kernel.booleans().prepare_intersections(lhs,rhs,options);
+        const auto report = kernel.diagnostics().get(result.diagnostic_id);
+        const auto active = kernel.topology().has_active_write_transaction();
+        const auto kept_sentinel = transaction.has_created_vertex(*sentinel.value);
+        if (result.status != status || result.value || !report.value || !active.value || !*active.value ||
+            !kept_sentinel.value || !*kept_sentinel.value || baseline != counts() ||
+            input_snapshot() != input_baseline || bridge_snapshot() != bridge_baseline ||
+            transaction.write_operation_count().value != transaction_writes) {
+            std::cerr << "expected status=" << static_cast<int>(status) << " code=" << code << " stage=" << stage
+                      << " lhs=" << lhs.value << " rhs=" << rhs.value
+                      << " actual status=" << static_cast<int>(result.status) << " value=" << bool(result.value)
+                      << " active=" << (active.value && *active.value) << " sentinel="
+                      << (kept_sentinel.value && *kept_sentinel.value) << " counts=" << (baseline == counts())
+                      << " writes=" << (transaction.write_operation_count().value == transaction_writes) << "\n";
+            if (report.value) for (const auto& item : report.value->issues)
+                std::cerr << "actual code=" << item.code << " stage=" << item.stage << " message=" << item.message << "\n";
+            return planar_failure(__LINE__);
+        }
+        const auto* issue = find_issue(*report.value,code);
+        if (!issue || issue->stage != stage || issue->numeric_evidence.empty() || issue->related_entities.size() < 2 ||
+            issue->related_entities[0] != lhs.value || issue->related_entities[1] != rhs.value) {
+            std::cerr << "expected code=" << code << " stage=" << stage << " lhs=" << lhs.value
+                      << " rhs=" << rhs.value << " actual status=" << static_cast<int>(result.status) << "\n";
+            for (const auto& item : report.value->issues) {
+                std::cerr << "actual code=" << item.code << " stage=" << item.stage << " entities=";
+                for (const auto id : item.related_entities) std::cerr << id << ",";
+                std::cerr << " evidence=" << item.numeric_evidence.size() << " message=" << item.message << "\n";
+            }
+            return planar_failure(__LINE__);
+        }
+        for (const auto& evidence : issue->numeric_evidence) if (!std::isfinite(evidence.value)) return planar_failure(__LINE__);
+        const auto stages = kernel.diagnostics().find_by_issue_stage(stage,1000);
+        if (!stages.value || std::find(stages.value->begin(),stages.value->end(),result.diagnostic_id) == stages.value->end())
+            return planar_failure(__LINE__);
+        const auto path = std::filesystem::temp_directory_path()/"axiom_planar_boolean_failure.json";
+        if (kernel.diagnostics().export_report_json(result.diagnostic_id,path.string()).status != axiom::StatusCode::Ok)
+            return planar_failure(__LINE__);
+        std::ifstream input {path};
+        const std::string json((std::istreambuf_iterator<char>(input)),std::istreambuf_iterator<char>());
+        input.close();
+        std::filesystem::remove(path);
+        return json.find("\"code\":\""+std::string(code)+"\"") != std::string::npos &&
+            json.find("\"stage\":\""+std::string(stage)+"\"") != std::string::npos && counts() == baseline;
+    };
+    axiom::BooleanIntersectionOptions options;
+    if (!expect({},*a.value,options,axiom::StatusCode::InvalidInput,axiom::diag_codes::kBoolInvalidInput,"bool.prep.candidates"))
+        return planar_failure(__LINE__);
+    for (const auto unsupported : {*sphere.value,*cylinder.value})
+        if (!expect(*a.value,unsupported,options,axiom::StatusCode::NotImplemented,
+                    axiom::diag_codes::kBoolUnsupportedInput,"bool.prep.candidates")) return planar_failure(__LINE__);
+    if (!expect(*a.value,*touching.value,options,axiom::StatusCode::NotImplemented,
+                axiom::diag_codes::kBoolCoplanarUnsupported,"bool.intersect") ||
+        !expect(*a.value,*a.value,options,axiom::StatusCode::NotImplemented,
+                axiom::diag_codes::kBoolCoplanarUnsupported,"bool.intersect") ||
+        !expect(*a.value,*unresolved.value,options,axiom::StatusCode::NumericalInstability,
+                axiom::diag_codes::kBoolNumericalFailure,"bool.prep.candidates") ||
+        !expect(*a.value,*thin.value,options,axiom::StatusCode::DegenerateGeometry,
+                axiom::diag_codes::kBoolInvalidInput,"bool.prep.candidates") ||
+        !expect(*a.value,*near_parallel.value,options,axiom::StatusCode::NumericalInstability,
+                axiom::diag_codes::kBoolNumericalFailure,"bool.intersect") ||
+        !expect(*a.value,*open_body.value,options,axiom::StatusCode::InvalidTopology,
+                axiom::diag_codes::kBoolInvalidInput,"bool.prep.candidates")) return planar_failure(__LINE__);
+    options.max_face_pairs = 1;
+    if (!expect(*a.value,*b.value,options,axiom::StatusCode::OperationFailed,
+                axiom::diag_codes::kBoolPreparationBudgetExceeded,"bool.prep.candidates")) return planar_failure(__LINE__);
+    options = {};
+    options.max_segments = 1;
+    if (!expect(*a.value,*b.value,options,axiom::StatusCode::OperationFailed,
+                axiom::diag_codes::kBoolPreparationBudgetExceeded,"bool.intersect")) return planar_failure(__LINE__);
+    options = {};
+    options.max_edges_per_face = 3;
+    if (!expect(*a.value,*b.value,options,axiom::StatusCode::OperationFailed,
+                axiom::diag_codes::kBoolPreparationBudgetExceeded,"bool.prep.candidates")) return planar_failure(__LINE__);
+    options = {};
+    options.tolerance.angular = 1e-10;
+    for (const bool reversed : {false,true})
+        if (!expect(reversed ? *oblique_b.value : *oblique_a.value,
+                    reversed ? *oblique_a.value : *oblique_b.value,options,
+                    axiom::StatusCode::NumericalInstability,
+                    axiom::diag_codes::kBoolNumericalFailure,"bool.intersect")) return planar_failure(__LINE__);
+    options = {};
+    options.tolerance.precision_mode = axiom::PrecisionMode::ExactCritical;
+    if (!expect(*a.value,*b.value,options,axiom::StatusCode::NotImplemented,
+                axiom::diag_codes::kBoolUnsupportedInput,"bool.prep.candidates")) return planar_failure(__LINE__);
+    for (const auto invalid : {0.0,std::numeric_limits<double>::infinity(),std::numeric_limits<double>::quiet_NaN()}) {
+        options = {};
+        options.tolerance.linear = invalid;
+        if (!expect(*a.value,*b.value,options,axiom::StatusCode::InvalidInput,
+                    axiom::diag_codes::kBoolInvalidInput,"bool.prep.candidates")) return planar_failure(__LINE__);
+    }
+    const auto success = kernel.booleans().prepare_intersections(*a.value,*b.value);
+    const auto success_active = kernel.topology().has_active_write_transaction();
+    if (!success.value || success.value->segments.size() != 6 || counts() != baseline ||
+        input_snapshot() != input_baseline || bridge_snapshot() != bridge_baseline ||
+        !success_active.value || !*success_active.value ||
+        !transaction.has_created_vertex(*sentinel.value).value.value_or(false) ||
+        transaction.write_operation_count().value != transaction_writes) return planar_failure(__LINE__);
+    // The caller still owns the writer, and can continue writing and roll back.
+    if (!transaction.create_vertex({96,95,94}).value || transaction.rollback().status != axiom::StatusCode::Ok) return planar_failure(__LINE__);
+    const auto active = kernel.topology().has_active_write_transaction();
+    return active.value && !*active.value &&
+        kernel.validate().validate_topology(*a.value,axiom::ValidationMode::Strict).status == axiom::StatusCode::Ok &&
+        kernel.validate().validate_topology(*b.value,axiom::ValidationMode::Strict).status == axiom::StatusCode::Ok;
+}
+
 }  // namespace
 
 int main() {
+    if (!check_planar_intersection_references() || !check_planar_preparation_failure_isolation()) {
+        std::cerr << "planar boolean preparation reference/isolation regression\n";
+        return 1;
+    }
     if (!check_prep_export_failures()) {
         std::cerr << "boolean prep export failure contract regression\n";
         return 1;

@@ -267,7 +267,7 @@
 
 | 错误码 | 严重级别 | 含义 |
 |---|---|---|
-| `AXM-BOOL-E-0001` | Error | 输入实体或布尔运算类型无效；预处理统计导出输入无效或路径为空 |
+| `AXM-BOOL-E-0001` | Error | 输入实体或布尔运算类型无效；预处理统计导出输入无效或路径为空；求交准备参数/拓扑/退化边失败及兼容 run 真实边界读取拒绝 |
 | `AXM-BOOL-E-0002` | Error | 候选相交对生成失败 |
 | `AXM-BOOL-E-0003` | Error | 曲面求交失败 |
 | `AXM-BOOL-E-0004` | Error | 交线切分失败 |
@@ -277,6 +277,29 @@
 | `AXM-BOOL-E-0008` | Warning | 检测到近切触退化情形 |
 | `AXM-BOOL-E-0009` | Error | 自动修复后仍不合法 |
 | `AXM-BOOL-E-0010` | Error | 运算结果为空且不符合预期 |
+| `AXM-BOOL-E-0011` | Error | `kBoolUnsupportedInput`：求交准备不支持的表示/曲面/曲边/代理输入、无真实壳或 ExactCritical；NotImplemented |
+| `AXM-BOOL-E-0012` | Error | `kBoolPreparationBudgetExceeded`：合法面比较、每面边数或交段输出预算耗尽；OperationFailed；兼容 run 读取每面超过 256 边亦复用 |
+| `AXM-BOOL-E-0013` | Error | `kBoolNumericalFailure`：坐标、近平行平面、解析交线或端点无法在声明容差内可靠分辨；NumericalInstability；兼容 run 真实边界数值拒绝复用 |
+| `AXM-BOOL-E-0014` | Error | `kBoolCoplanarUnsupported`：prepare 的共面候选（含共面接触/相同体）需要二维区域求交；NotImplemented |
+
+cycle-0080 / S4-INTERSECTION 已通过调度器最终完整 CTest（16/16）；新增 E-0011..E-0014 定义见 `include/axiom/diag/error_codes.h`，不新增诊断码。无交段的 prepare 成功，不使用 E-0010 把分离/包含当错误。
+
+| 入口 / 根因 | status / 错误码 | Issue.stage |
+|---|---|---|
+| prepare 无效句柄、非法容差/预算 | InvalidInput / E-0001 | `bool.prep.candidates` |
+| prepare 开壳/损坏环边、短边≤线容差 | InvalidTopology 或 DegenerateGeometry / E-0001 | `bool.prep.candidates` |
+| prepare 曲面/曲边/代理/表示不支持或 ExactCritical | NotImplemented / E-0011 | `bool.prep.candidates` |
+| prepare 面比较 / 每面边预算耗尽 | OperationFailed / E-0012 | `bool.prep.candidates` |
+| prepare 坐标舍入不可分辨 | NumericalInstability / E-0013 | `bool.prep.candidates` |
+| prepare 交段输出预算耗尽 | OperationFailed / E-0012 | `bool.intersect` |
+| prepare 近平行、远交线舍入/残差不可分辨或端点关联失败 | NumericalInstability / E-0013 | `bool.intersect` |
+| prepare 共面候选 | NotImplemented / E-0014 | `bool.intersect` |
+| 兼容 run 真实面边界读取不支持/损坏/退化、超 256 边或数值失稳 | NotImplemented / E-0011，InvalidTopology 或 DegenerateGeometry / E-0001，OperationFailed / E-0012，NumericalInstability / E-0013 | `bool.intersect.trim` |
+
+上表 E-* 均为 AXM-BOOL-E-*。prepare 失败无部分 Result.value，始终有非零可查询 diagnostic_id、输入体/已知 face 上下文及有限 numeric_evidence（无效非有限选项不原样写入证据）；可用 find_by_issue_stage 检索和 export_report_json 导出。兼容 run 裁剪读取失败即使成功诊断选项关闭也返回失败诊断，在模型物化/Eval 失效前传播，禁止 continue 静默吞错。成功诊断 D-0008 的 `bool.intersect.trim` 描述真实面域裁剪，不能视为后续实体重建认证。
+
+只读 prepare 成功/失败以及已回归的 run 局部读取拒绝保持输入、存储、Eval bridge 与活动事务不变，允许新增诊断；run 全部后续重建/修复事务行为不在本包认证。[支持矩阵](../api/AxiomKernel_详细模块接口清单.md#821-stage-4-第一代求交准备支持矩阵cycle-0080--s4-intersection) 与 [三条阶段证据](../quality/AxiomKernel_测试与验收方案.md#17-cycle-0080--s4-intersection-门禁与逐项证据) 列明参考与限制。
+
 
 推荐文案示例：
 
