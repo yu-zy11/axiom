@@ -1,5 +1,7 @@
 #include <array>
+#include <algorithm>
 #include <cmath>
+#include <limits>
 #include <vector>
 #include <filesystem>
 #include <fstream>
@@ -183,9 +185,393 @@ bool check_trim_failure_isolation() {
     return true;
 }
 
+// A successful read-only split package and every rejected phase must preserve
+// both the existing model and the caller's active writer, including provenance.
+bool check_split_classification_isolation() {
+    const auto failure = [](int line) {
+        std::cerr << "split/classification isolation failure at line " << line << "\n";
+        return false;
+    };
+    for (const bool active_writer : {false,true}) {
+        axiom::Kernel kernel;
+        const auto a = kernel.primitives().box({0,0,0},2,2,2);
+        const auto b = kernel.primitives().box({1,1,1},2,2,2);
+        const auto touching = kernel.primitives().box({2,0,0},2,2,2);
+        const auto wedge = kernel.primitives().wedge({0,0,0},2,2,2);
+        const auto tangent = kernel.primitives().box({0.75,1.25,0.25},0.5,0.5,0.5);
+        const auto sphere = kernel.primitives().sphere({0,0,0},1);
+        if (!a.value || !b.value || !touching.value || !wedge.value || !tangent.value || !sphere.value) {
+            for (const auto* result : {&a,&b,&touching,&wedge,&tangent,&sphere}) {
+                if (result->value) continue;
+                std::cerr << "isolation fixture construction status=" << static_cast<int>(result->status) << "\n";
+                const auto report = kernel.diagnostics().get(result->diagnostic_id);
+                if (report.value) for (const auto& issue : report.value->issues)
+                    std::cerr << issue.stage << " " << issue.code << " " << issue.message << "\n";
+            }
+            return failure(__LINE__);
+        }
+        const auto query = kernel.topology().query();
+        const auto counts = [&] {
+            return std::array{kernel.body_count().value,kernel.geometry_count().value,kernel.topology_count().value,
+                              kernel.intersection_count().value,kernel.eval_node_count().value,kernel.cache_entry_count().value};
+        };
+        const auto bridge = [&] {
+            const auto metrics = kernel.eval_graph_metrics();
+            if (!metrics.value) return std::array<std::uint64_t,5>{};
+            const auto& item = metrics.value->invalidation_bridge;
+            return std::array{item.for_body_entries,item.for_faces_entries,item.for_bodies_batches,
+                              item.for_bodies_list_size_total,item.downstream_invalidation_steps};
+        };
+        const auto cache_stats = [&] {
+            const auto stats = kernel.tessellation_cache_stats();
+            if (!stats.value) return std::array<std::uint64_t,6>{};
+            const auto& item = *stats.value;
+            return std::array{item.body_cache_hits,item.body_cache_misses,item.body_cache_stale_evictions,
+                              item.face_cache_hits,item.face_cache_misses,item.face_cache_stale_evictions};
+        };
+        const auto input_snapshot = [&] {
+            std::pair<std::vector<std::uint64_t>,std::vector<double>> snapshot;
+            const auto check_query = [&](std::string_view label, const auto& result) {
+                if (result.value) return;
+                std::cerr << "input snapshot " << label << " status=" << static_cast<int>(result.status) << "\n";
+                const auto report = kernel.diagnostics().get(result.diagnostic_id);
+                if (report.value) for (const auto& issue : report.value->issues)
+                    std::cerr << issue.stage << " " << issue.code << " " << issue.message << "\n";
+            };
+            for (const auto body : {*a.value,*b.value,*touching.value,*wedge.value,*tangent.value}) {
+                const auto shells = query.shells_of_body(body);
+                const auto faces = query.faces_of_body(body);
+                const auto source_bodies = query.source_bodies_of_body(body);
+                const auto source_shells = query.source_shells_of_body(body);
+                const auto source_faces = query.source_faces_of_body(body);
+                const auto representation = kernel.representation().kind_of_body(body);
+                const auto representation_box = kernel.representation().bbox_of_body(body);
+                check_query("shells",shells);
+                check_query("faces",faces);
+                check_query("source_bodies",source_bodies);
+                check_query("source_shells",source_shells);
+                check_query("source_faces",source_faces);
+                check_query("representation",representation);
+                check_query("representation_box",representation_box);
+                if (!shells.value || !faces.value || !source_bodies.value || !source_shells.value || !source_faces.value ||
+                    !representation.value || !representation_box.value || !representation_box.value->is_valid)
+                    return decltype(snapshot){};
+                snapshot.first.insert(snapshot.first.end(),{body.value,shells.value->size(),faces.value->size(),
+                    static_cast<std::uint64_t>(*representation.value)});
+                const auto& body_box = *representation_box.value;
+                snapshot.second.insert(snapshot.second.end(),{body_box.min.x,body_box.min.y,body_box.min.z,
+                                                              body_box.max.x,body_box.max.y,body_box.max.z});
+                snapshot.first.push_back(source_faces.value->size());
+                for (const auto source : *source_faces.value) snapshot.first.push_back(source.value);
+                snapshot.first.push_back(source_bodies.value->size());
+                for (const auto source : *source_bodies.value) snapshot.first.push_back(source.value);
+                snapshot.first.push_back(source_shells.value->size());
+                for (const auto source : *source_shells.value) snapshot.first.push_back(source.value);
+                for (const auto shell : *shells.value) {
+                    const auto shell_faces = query.faces_of_shell(shell);
+                    const auto shell_sources = query.source_shells_of_shell(shell);
+                    const auto shell_face_sources = query.source_faces_of_shell(shell);
+                    check_query("shell_faces",shell_faces);
+                    check_query("shell_sources",shell_sources);
+                    check_query("shell_face_sources",shell_face_sources);
+                    if (!shell_faces.value || !shell_sources.value || !shell_face_sources.value) return decltype(snapshot){};
+                    snapshot.first.insert(snapshot.first.end(),{shell.value,shell_faces.value->size(),shell_sources.value->size(),
+                                                               shell_face_sources.value->size()});
+                    for (const auto face : *shell_faces.value) snapshot.first.push_back(face.value);
+                    for (const auto source : *shell_sources.value) snapshot.first.push_back(source.value);
+                    for (const auto source : *shell_face_sources.value) snapshot.first.push_back(source.value);
+                }
+                for (const auto face : *faces.value) {
+                    const auto loops = query.loops_of_face(face);
+                    const auto surface = query.surface_of_face(face);
+                    const auto sources = query.source_faces_of_face(face);
+                    const auto bbox = query.bbox_of_face(face);
+                    const auto face_area = query.planar_face_area(face);
+                    check_query("face_area",face_area);
+                    if (!face_area.value) return decltype(snapshot){};
+                    snapshot.second.push_back(*face_area.value);
+                    check_query("loops",loops);
+                    check_query("surface",surface);
+                    check_query("sources",sources);
+                    check_query("bbox",bbox);
+                    if (!loops.value || !surface.value || !sources.value || !bbox.value || !bbox.value->is_valid)
+                        return decltype(snapshot){};
+                    snapshot.first.insert(snapshot.first.end(),{face.value,surface.value->value,loops.value->size(),sources.value->size()});
+                    for (const auto source : *sources.value) snapshot.first.push_back(source.value);
+                    const auto& box = *bbox.value;
+                    snapshot.second.insert(snapshot.second.end(),{box.min.x,box.min.y,box.min.z,box.max.x,box.max.y,box.max.z});
+                    for (const auto loop : *loops.value) {
+                        const auto vertices = query.vertices_of_loop(loop);
+                        const auto edges = query.edges_of_loop(loop);
+                        check_query("vertices",vertices);
+                        check_query("edges",edges);
+                        if (!vertices.value || !edges.value) return decltype(snapshot){};
+                        snapshot.first.insert(snapshot.first.end(),{loop.value,vertices.value->size(),edges.value->size()});
+                        for (const auto vertex : *vertices.value) snapshot.first.push_back(vertex.value);
+                        // Primitive faces may legitimately have no PCurve. Capture every
+                        // incident binding, including zero, and retain UV coordinates when
+                        // the corresponding public trim query has its complete input.
+                        bool complete_pcurves = true;
+                        for (const auto edge : *edges.value) {
+                            const auto coedges = query.coedges_of_edge(edge);
+                            check_query("coedges",coedges);
+                            if (!coedges.value || coedges.value->empty()) return decltype(snapshot){};
+                            auto incident_coedges = *coedges.value;
+                            std::sort(incident_coedges.begin(),incident_coedges.end(),
+                                      [](auto a, auto b) { return a.value < b.value; });
+                            snapshot.first.push_back(incident_coedges.size());
+                            for (const auto coedge : incident_coedges) {
+                                const auto pcurve = query.pcurve_of_coedge(coedge);
+                                check_query("pcurve",pcurve);
+                                if (!pcurve.value) return decltype(snapshot){};
+                                snapshot.first.insert(snapshot.first.end(),{coedge.value,pcurve.value->value});
+                                complete_pcurves = complete_pcurves && pcurve.value->value != 0;
+                            }
+                        }
+                        snapshot.first.push_back(complete_pcurves);
+                        if (complete_pcurves) {
+                            const auto uv = query.face_loop_uv_polyline(face,loop);
+                            check_query("uv",uv);
+                            if (!uv.value) return decltype(snapshot){};
+                            snapshot.first.push_back(uv.value->size());
+                            for (const auto point : *uv.value) {
+                                snapshot.second.push_back(point.x); snapshot.second.push_back(point.y);
+                            }
+                        }
+                        for (const auto edge : *edges.value) {
+                            const auto endpoints = query.vertices_of_edge(edge);
+                            const auto owners = query.faces_of_edge(edge);
+                            const auto length = query.edge_length(edge);
+                            check_query("endpoints",endpoints);
+                            check_query("owners",owners);
+                            check_query("length",length);
+                            if (!endpoints.value || !owners.value || !length.value) return decltype(snapshot){};
+                            snapshot.first.insert(snapshot.first.end(),{edge.value,(*endpoints.value)[0].value,
+                                (*endpoints.value)[1].value,owners.value->size()});
+                            auto incident_faces = *owners.value;
+                            std::sort(incident_faces.begin(),incident_faces.end(),
+                                      [](auto a, auto b) { return a.value < b.value; });
+                            for (const auto owner : incident_faces) snapshot.first.push_back(owner.value);
+                            snapshot.second.push_back(*length.value);
+                        }
+                    }
+                }
+            }
+            return snapshot;
+        };
+        const auto committed_counts = counts();
+        const auto committed_bridge = bridge();
+        const auto committed_cache = cache_stats();
+        const auto committed_input = input_snapshot();
+        if (committed_input.first.empty()) return failure(__LINE__);
+        auto transaction = kernel.topology().begin_transaction();
+        if (!active_writer && transaction.rollback().status != axiom::StatusCode::Ok) return failure(__LINE__);
+        const auto sentinel = active_writer ? transaction.create_vertex({99,98,97}) : axiom::Result<axiom::VertexId>{};
+        if (active_writer && !sentinel.value) return failure(__LINE__);
+        const auto writes = active_writer ? transaction.write_operation_count().value : std::optional<std::uint64_t>{};
+        const auto baseline_counts = counts();
+        const auto baseline_bridge = bridge();
+        const auto baseline_cache = cache_stats();
+        const auto unchanged = [&] {
+            const auto active = kernel.topology().has_active_write_transaction();
+            const auto current_counts = counts();
+            const auto current_bridge = bridge();
+            const auto current_cache = cache_stats();
+            const auto current_input = input_snapshot();
+            const bool count_ok = current_counts == baseline_counts, bridge_ok = current_bridge == baseline_bridge,
+                       cache_ok = current_cache == baseline_cache, input_ok = current_input == committed_input,
+                       active_ok = active.value && *active.value == active_writer,
+                       writes_ok = !active_writer || transaction.write_operation_count().value == writes,
+                       sentinel_ok = !active_writer || transaction.has_created_vertex(*sentinel.value).value.value_or(false);
+            if (!count_ok || !bridge_ok || !cache_ok || !input_ok || !active_ok || !writes_ok || !sentinel_ok) {
+                std::cerr << "isolation unchanged writer=" << active_writer << " counts=" << count_ok
+                          << " bridge=" << bridge_ok << " cache=" << cache_ok << " input=" << input_ok
+                          << " active=" << active_ok << " writes=" << writes_ok << " sentinel=" << sentinel_ok << "\n";
+                const auto differences = [](std::string_view label, const auto& current, const auto& baseline) {
+                    for (std::size_t i = 0; i < current.size() && i < baseline.size(); ++i)
+                        if (current[i] != baseline[i])
+                            std::cerr << label << "[" << i << "] baseline=" << baseline[i] << " current=" << current[i] << "\n";
+                };
+                for (std::size_t i = 0; i < current_counts.size(); ++i)
+                    if (current_counts[i] != baseline_counts[i]) {
+                        std::cerr << "counts[" << i << "] baseline=";
+                        if (baseline_counts[i]) std::cerr << *baseline_counts[i];
+                        else std::cerr << "missing";
+                        std::cerr << " current=";
+                        if (current_counts[i]) std::cerr << *current_counts[i];
+                        else std::cerr << "missing";
+                        std::cerr << "\n";
+                    }
+                differences("bridge",current_bridge,baseline_bridge);
+                differences("cache",current_cache,baseline_cache);
+                if (!input_ok) {
+                    std::cerr << "input sizes IDs=" << current_input.first.size() << "/" << committed_input.first.size()
+                              << " geometry=" << current_input.second.size() << "/" << committed_input.second.size() << "\n";
+                    differences("input IDs",current_input.first,committed_input.first);
+                    differences("input geometry",current_input.second,committed_input.second);
+                }
+            }
+            return count_ok && bridge_ok && cache_ok && input_ok && active_ok && writes_ok && sentinel_ok;
+        };
+        if (!unchanged()) return failure(__LINE__);
+        const auto print_result = [&](std::string_view label, const auto& result) {
+            std::cerr << label << " status=" << static_cast<int>(result.status)
+                      << " writer=" << active_writer << "\n";
+            const auto report = kernel.diagnostics().get(result.diagnostic_id);
+            if (report.value) for (const auto& issue : report.value->issues)
+                std::cerr << issue.stage << " " << issue.code << " " << issue.message << "\n";
+        };
+        const auto expect_failure = [&](const auto& result, axiom::StatusCode status,
+                                         std::string_view code, std::string_view stage) {
+            if (result.status != status || result.value || result.diagnostic_id.value == 0 || !unchanged()) {
+                print_result(stage,result);
+                return failure(__LINE__);
+            }
+            const auto report = kernel.diagnostics().get(result.diagnostic_id);
+            bool found = false;
+            if (report.value) for (const auto& issue : report.value->issues)
+                if (issue.code == code && issue.stage == stage && issue.severity == axiom::IssueSeverity::Error &&
+                    !issue.related_entities.empty() && !issue.numeric_evidence.empty()) {
+                    for (const auto& evidence : issue.numeric_evidence) if (!std::isfinite(evidence.value)) return failure(__LINE__);
+                    found = true;
+                }
+            if (!found) {
+                std::cerr << "split/classify expected code=" << code << " stage=" << stage
+                          << " status=" << static_cast<int>(result.status) << "\n";
+                if (report.value) for (const auto& issue : report.value->issues)
+                    std::cerr << "actual code=" << issue.code << " stage=" << issue.stage << "\n";
+                return failure(__LINE__);
+            }
+            const auto by_stage = kernel.diagnostics().find_by_issue_stage(stage,1000);
+            const auto by_code = kernel.diagnostics().find_by_issue_code(code,1000);
+            for (const auto* ids : {&by_stage,&by_code})
+                if (!ids->value || std::find(ids->value->begin(),ids->value->end(),result.diagnostic_id) == ids->value->end())
+                    return failure(__LINE__);
+            const auto path = std::filesystem::temp_directory_path()/"axiom_split_classification_failure.json";
+            if (kernel.diagnostics().export_report_json(result.diagnostic_id,path.string()).status != axiom::StatusCode::Ok)
+                return failure(__LINE__);
+            std::ifstream input {path};
+            const std::string json((std::istreambuf_iterator<char>(input)),std::istreambuf_iterator<char>());
+            input.close();
+            std::filesystem::remove(path);
+            return json.find("\"code\":\""+std::string(code)+"\"") != std::string::npos &&
+                json.find("\"stage\":\""+std::string(stage)+"\"") != std::string::npos && unchanged();
+        };
+        axiom::BooleanSplitClassificationOptions split;
+        split.max_fragments = 1;
+        if (!expect_failure(kernel.booleans().prepare_split_classification(*a.value,*b.value,split),
+                            axiom::StatusCode::OperationFailed,axiom::diag_codes::kBoolPreparationBudgetExceeded,"bool.split"))
+            return failure(__LINE__);
+        split = {};
+        split.intersection.max_edges_per_face = 3;
+        if (!expect_failure(kernel.booleans().prepare_split_classification(*a.value,*b.value,split),
+                            axiom::StatusCode::OperationFailed,axiom::diag_codes::kBoolPreparationBudgetExceeded,
+                            "bool.prep.candidates")) return failure(__LINE__);
+        for (const auto pair : {std::array{*a.value,*touching.value},std::array{*a.value,*a.value}}) {
+            if (!expect_failure(kernel.booleans().prepare_split_classification(pair[0],pair[1]),
+                                axiom::StatusCode::NotImplemented,axiom::diag_codes::kBoolCoplanarUnsupported,
+                                "bool.intersect")) return failure(__LINE__);
+        }
+        // This noncoplanar tangent contact has no material volume. The point
+        // contacts and common edge remain real constraints while every open
+        // source-face fragment is outside the opposite body.
+        const auto tangent_split = kernel.booleans().prepare_split_classification(*wedge.value,*tangent.value);
+        if (!tangent_split.value) print_result("tangent split",tangent_split);
+        if (!tangent_split.value || !unchanged() ||
+            std::none_of(tangent_split.value->intersection.segments.begin(),tangent_split.value->intersection.segments.end(),
+                         [](const auto& segment) { return segment.point_contact; })) return failure(__LINE__);
+        for (const auto& fragment : tangent_split.value->fragments)
+            if (fragment.classification.location != axiom::BooleanPointLocation::Outside) return failure(__LINE__);
+        for (const auto& segment : tangent_split.value->intersection.segments) for (const bool lhs : {false,true}) {
+            const auto face = lhs ? segment.lhs_face : segment.rhs_face;
+            const auto body = lhs ? *wedge.value : *tangent.value;
+            bool point_found = false;
+            std::vector<std::array<double,2>> intervals;
+            const axiom::Vec3 d {segment.end.x-segment.begin.x,segment.end.y-segment.begin.y,
+                                segment.end.z-segment.begin.z};
+            const double squared = d.x*d.x+d.y*d.y+d.z*d.z;
+            for (const auto& fragment : tangent_split.value->fragments) {
+                if (fragment.source_body != body || fragment.source_face != face) continue;
+                for (std::size_t side = 0; side < 3; ++side) {
+                    const auto p = fragment.vertices[side], q = fragment.vertices[(side+1)%3];
+                    if (std::hypot(p.x-segment.begin.x,p.y-segment.begin.y,p.z-segment.begin.z) < 1e-8)
+                        point_found = true;
+                    if (segment.point_contact) continue;
+                    const double a = ((p.x-segment.begin.x)*d.x+(p.y-segment.begin.y)*d.y+
+                                      (p.z-segment.begin.z)*d.z)/squared;
+                    const double b = ((q.x-segment.begin.x)*d.x+(q.y-segment.begin.y)*d.y+
+                                      (q.z-segment.begin.z)*d.z)/squared;
+                    if (std::hypot(p.x-segment.begin.x-a*d.x,p.y-segment.begin.y-a*d.y,p.z-segment.begin.z-a*d.z) > 1e-8 ||
+                        std::hypot(q.x-segment.begin.x-b*d.x,q.y-segment.begin.y-b*d.y,q.z-segment.begin.z-b*d.z) > 1e-8)
+                        continue;
+                    const std::array<double,2> range {std::max(0.0,std::min(a,b)),std::min(1.0,std::max(a,b))};
+                    if (range[1]-range[0] > 1e-8) intervals.push_back(range);
+                }
+            }
+            if (segment.point_contact) {
+                if (!point_found) return failure(__LINE__);
+            } else {
+                std::sort(intervals.begin(),intervals.end());
+                double end = 0;
+                for (const auto range : intervals) {
+                    if (range[0] > end+1e-8) return failure(__LINE__);
+                    end = std::max(end,range[1]);
+                }
+                if (std::abs(end-1) > 1e-8) return failure(__LINE__);
+            }
+        }
+        const std::array<axiom::Point3,1> ordinary {{{1,1,1}}};
+        const std::array<axiom::Point3,1> uncertain {{{2+5e-7,1,1}}};
+        if (!expect_failure(kernel.booleans().classify_points(*a.value,uncertain),
+                            axiom::StatusCode::NumericalInstability,axiom::diag_codes::kBoolNumericalFailure,
+                            "bool.classify")) return failure(__LINE__);
+        const std::array<axiom::Point3,2> invalid {{{1,1,1},{std::numeric_limits<double>::quiet_NaN(),1,1}}};
+        if (!expect_failure(kernel.booleans().classify_points(*a.value,invalid),
+                            axiom::StatusCode::InvalidInput,axiom::diag_codes::kBoolInvalidInput,"bool.classify") ||
+            !expect_failure(kernel.booleans().classify_points({},ordinary),
+                            axiom::StatusCode::InvalidInput,axiom::diag_codes::kBoolInvalidInput,"bool.classify") ||
+            !expect_failure(kernel.booleans().classify_points(*sphere.value,ordinary),
+                            axiom::StatusCode::NotImplemented,axiom::diag_codes::kBoolUnsupportedInput,"bool.classify"))
+            return failure(__LINE__);
+        axiom::BooleanIntersectionOptions classify;
+        classify.max_segments = 1;
+        const std::array<axiom::Point3,2> too_many {{{1,1,1},{3,3,3}}};
+        if (!expect_failure(kernel.booleans().classify_points(*a.value,too_many,classify),
+                            axiom::StatusCode::OperationFailed,axiom::diag_codes::kBoolPreparationBudgetExceeded,
+                            "bool.classify")) return failure(__LINE__);
+        const auto success = kernel.booleans().prepare_split_classification(*a.value,*b.value);
+        const auto classified = kernel.booleans().classify_points(*a.value,ordinary);
+        const std::array<axiom::Point3,1> bbox_phantom {{{1.8,1.8,0.5}}};
+        const auto wedge_classified = kernel.booleans().classify_points(*wedge.value,bbox_phantom);
+        if (!success.value) print_result("ordinary split",success);
+        if (!classified.value) print_result("ordinary classify",classified);
+        if (!wedge_classified.value) print_result("wedge classify",wedge_classified);
+        if (!success.value || success.value->fragments.empty() || !classified.value || classified.value->size() != 1 ||
+            classified.value->front().location != axiom::BooleanPointLocation::Inside ||
+            !wedge_classified.value || wedge_classified.value->size() != 1 ||
+            wedge_classified.value->front().location != axiom::BooleanPointLocation::Outside || !unchanged()) return failure(__LINE__);
+        if (active_writer) {
+            if (!transaction.create_vertex({96,95,94}).value || transaction.rollback().status != axiom::StatusCode::Ok)
+                return failure(__LINE__);
+        }
+        const auto active = kernel.topology().has_active_write_transaction();
+        if (!active.value || *active.value || counts() != committed_counts || bridge() != committed_bridge ||
+            cache_stats() != committed_cache ||
+            input_snapshot() != committed_input ||
+            kernel.validate().validate_topology(*a.value,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok ||
+            kernel.validate().validate_topology(*b.value,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok)
+            return failure(__LINE__);
+    }
+    return true;
+}
+
 }  // namespace
 
 int main() {
+    if (!check_split_classification_isolation()) {
+        std::cerr << "boolean split/classification isolation regression\n";
+        return 1;
+    }
     if (!check_trim_failure_isolation()) {
         std::cerr << "boolean workflow trim failure isolation regression\n";
         return 1;

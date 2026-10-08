@@ -545,7 +545,7 @@ if (strict.status != StatusCode::Ok || !mass.value || !section.value) return 1;
 
 ## 7. 布尔操作样例
 
-本批第一代支持边界见 [§7.5](#75-只读平面几何求交准备cycle-0080--s4-intersection)。§7.1～7.4 展示兼容 run 调用形态；圆柱代理与自动修复不构成连续曲面布尔或重建实体正确性认证。
+第一代求交边界见 [§7.5](#75-只读平面几何求交准备cycle-0080--s4-intersection)，本批只读切分与实体分类见 [§7.6](#76-只读真实切分与实体分类cycle-0081--s4-split-classify)。§7.1～7.4 展示兼容 run 调用形态；圆柱代理与自动修复不构成连续曲面布尔或重建实体正确性认证。
 
 ## 7.1 差集
 
@@ -644,7 +644,48 @@ for (const auto& segment : prepared.value->segments) {
 
 共面面接触/相同体返回 NotImplemented/E-0014/bool.intersect；曲面/曲边/代理及 ExactCritical 返回 E-0011/bool.prep.candidates；预算耗尽 E-0012，数值不可分辨 E-0013。所有失败可查 diagnostic_id。候选 bbox 只是筛选；斜楔与位于 x+y>2 的盒即使候选非空也必须零交段。凹形/孔洞的完整 16 区间、RxRz 旋转及相切参考见 [固定参考模型集](AxiomKernel_详细模块接口清单.md#固定参考模型集与独立结果)；三条证据和真实门禁见 [验收 §1.7](../quality/AxiomKernel_测试与验收方案.md#17-cycle-0080--s4-intersection-门禁与逐项证据)。
 
-兼容 run 已按真实面边界裁剪；读取短边、超 256 边或大坐标失败在 bool.intersect.trim 结构化返回，所有局部读取完成后才物化交线与结果体。Generic 单面壳的 run 失败夹具不属于 prepare 的闭壳支持认证。精确切分/分类/重建、二维共面区域求交、连续曲面/曲边求交和全局壳嵌入证明仍未认证。
+兼容 run 已按真实面边界裁剪；读取短边、超 256 边或大坐标失败在 bool.intersect.trim 结构化返回，所有局部读取完成后才物化交线与结果体。Generic 单面壳的 run 失败夹具不属于 prepare 的闭壳支持认证。有限平面只读切分/分类见 §7.6；精确谓词认证、布尔实体重建、二维共面区域求交、连续曲面/曲边求交和全局壳嵌入证明仍未认证。
+
+## 7.6 只读真实切分与实体分类（cycle-0081 / S4-SPLIT-CLASSIFY）
+
+```cpp
+using namespace axiom;
+auto a = kernel.primitives().box({0,0,0}, 2, 2, 2);
+auto b = kernel.primitives().box({1,1,1}, 2, 2, 2);
+if (!a.value || !b.value) return;
+
+BooleanSplitClassificationOptions options;  // 使用默认累计工作与片数预算
+options.intersection.tolerance = kernel.tolerance().global_policy();
+auto prepared = kernel.booleans().prepare_split_classification(*a.value, *b.value, options);
+if (prepared.status != StatusCode::Ok || !prepared.value) {
+  auto report = kernel.diagnostics().get(prepared.diagnostic_id);
+  if (report.value) for (const auto& issue : report.value->issues) show_issue(issue);
+  return;  // 失败没有部分切分/分类结果
+}
+for (const auto& fragment : prepared.value->fragments) {
+  // source_body/source_face 是输入实体；vertices 为真实三角分片。
+  // source_edges=0 为内部细分边；非零边参数沿原 v0->v1，可递减。
+  // intersection_segments / adjacent_fragments 为本结果内的索引。
+  consume_face_fragment(fragment);
+}
+for (const auto& edge : prepared.value->edge_fragments) {
+  // begin_fraction < end_fraction，沿源边 v0->v1，保留原 incident faces。
+  consume_edge_fragment(edge);
+}
+std::array<Point3, 3> points{{{0.5,0.5,0.5}, {3,0.5,0.5}, {0,1,1}}};
+auto classified = kernel.booleans().classify_points(*a.value, points, options.intersection);
+if (classified.status != StatusCode::Ok || !classified.value) {
+  auto report = kernel.diagnostics().get(classified.diagnostic_id);
+  if (report.value) for (const auto& issue : report.value->issues) show_issue(issue);
+  return;
+}
+// 与 points 顺序一致：Inside、Outside、Boundary；最后一项含真实 boundary_faces。
+consume_point_classifications(*classified.value);
+```
+
+`show_issue` 与 `consume_*` 是应用侧示意函数，本样例未单独编译；执行证据来自 [回归与最终门禁 §1.8](../quality/AxiomKernel_测试与验收方案.md#18-cycle-0081--s4-split-classify-门禁与逐项证据)。默认容差独立于全局设置，上例显式复制；参考预期基于默认 1e-6 策略。不要照搬 §7.5 的 36 次面比较预算，split 后续累计边界读取/细分/邻接/分类另需工作预算。max_fragments 限 face+edge 总片数，max_segments 也限独立分类输入点数。
+
+盒总面积各24、对方内部面积各3；结果供后续实体重建使用，不新建模型、交线集合或写事务。分类使用实际裁剪边界和至少两条一致有效射线。真实舍入尺度边界返回 Boundary；5e-7 近边界不确定点返回 E-0013/bool.classify。非共面相切已回归；共面候选/面接触/相同体仍由 bool.intersect/E-0014 保守拒绝。稳定切分失败为 bool.split/E-0004，预算为 E-0012；先行求交阶段原样传播。全部支持范围、来源和邻接语义见 [API §8.2.2](AxiomKernel_详细模块接口清单.md#822-stage-4-第一代切分与实体分类支持矩阵cycle-0081--s4-split-classify)。兼容 run 仍含 bbox 实体语义，不由此声明精确实体重建、二维共面区域、曲面/曲边或全局嵌入认证。
 
 ## 8. 修改操作样例
 

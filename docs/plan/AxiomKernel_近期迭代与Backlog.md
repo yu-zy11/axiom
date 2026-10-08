@@ -8,21 +8,23 @@
 
 `Stage 1 已达成；Stage 2 可测基线已达成；当前主线为 Stage 4：布尔与验证器第一代（进行中）`
 
-当前唯一退出任务为 **cycle-0080 / S4-INTERSECTION**，`stage_outcome=ready_for_acceptance`。修复后独立完整构建及 CTest **16/16、0 失败、172.43 s**，必需 prep **0.17 s**、workflow **0.12 s**。范围/固定参考集、真实 face/edge 候选及源边参数、结构化拒绝/阶段诊断/输入和事务隔离均有 [三条证据](../quality/AxiomKernel_测试与验收方案.md#17-cycle-0080--s4-intersection-门禁与逐项证据)，详见 [支持矩阵](../api/AxiomKernel_详细模块接口清单.md#821-stage-4-第一代求交准备支持矩阵cycle-0080--s4-intersection)。正式状态仅在 [当前进度 §5.2.1](AxiomKernel_当前开发进度.md#521-stage-4-当前退出任务) 维护；任务仅在调度器最终文档门禁及提交成功后记已验收。FR-BOOL-001 与 Stage 4 仍进行中；S3-EXIT 等 Stage 3 历史证据保留，不反推历史提交。阶段任务优先于需求权重、历史 remaining 与新增变体，基础层修复限直接阻断项。
+当前唯一退出任务为 **cycle-0081 / S4-SPLIT-CLASSIFY**，`stage_outcome=ready_for_acceptance`。repair后完整构建成功、最终 CTest **16/16、0失败、173.96 s**，必需prep/workflow/topology **0.45/0.61/0.18 s**。真实切分与来源/整边邻接、实体内外与边界不确定性拒绝、稳定阶段与失败/rollback隔离均有 [三条证据](../quality/AxiomKernel_测试与验收方案.md#18-cycle-0081--s4-split-classify-门禁与逐项证据)；[支持矩阵](../api/AxiomKernel_详细模块接口清单.md#822-stage-4-第一代切分与实体分类支持矩阵cycle-0081--s4-split-classify) 限真实嵌入平面直边闭壳、double、奇偶材料约定与只读几何分片。正式状态仅在 [当前进度 §5.2.1](AxiomKernel_当前开发进度.md#521-stage-4-当前退出任务) 维护，调度器最终文档门禁及提交成功后记已验收。Stage4 / FR-BOOL-001 进行中，兼容run仍含bbox实体语义，不认证后续重建；cycle-0080和Stage3历史证据保留，不追认提交。阶段任务优先于历史remaining、需求权重和新增变体，基础层仅修直接阻断项。
 
 ## 2. 当前迭代焦点
 
 ### 2.1 `diag + ops`
 
-- **cycle-0080 / S4-INTERSECTION（当前唯一任务，ready_for_acceptance）**：冻结真实嵌入平面直边闭壳范围、容差/预算与 double 解析边界；固定旋转盒、斜楔 bbox 伪交、凹 U、两种孔洞、分离/包含/相切/共面参考。真实候选/交段及源 face/edge/fraction 可供后续切分，prepare 不物化模型或写事务。兼容 run 改真实面边界裁剪，读取失败在 bool.intersect.trim 结构化传播；不认证后续重建实体物理正确性。[三条证据](../quality/AxiomKernel_测试与验收方案.md#17-cycle-0080--s4-intersection-门禁与逐项证据) 与 [矩阵/参考集](../api/AxiomKernel_详细模块接口清单.md#821-stage-4-第一代求交准备支持矩阵cycle-0080--s4-intersection) 已同步。
-- **cycle-0080 门禁事实**：[日志](../../.axiom-agent/logs/cycle-0080-gates.log) 两轮配置/并发 4 完整构建成功；首轮 15/16、185.75 s，prep 失败；repair 修正真实短边夹具并补源边插值/隔离，修复 run 读取失败静默吞错。最终全量 **16/16、0 失败、172.43 s**，prep 0.17 s、workflow 0.12 s、性能 1.72 s。首轮实发 SDK/helpers 初始化告警 18 条，最终未重编译这些单元不能声称清零；构建总耗时未记录。代码门禁已闭合；文档检查见验收 §1.7，提交尚未记录，本轮未重建测试或提交。
+- **cycle-0081 / S4-SPLIT-CLASSIFY（当前唯一任务，ready_for_acceptance）**：新增只读 prepare_split_classification/classify_points；实际外/孔环切分、有限交段两源面完整覆盖、来源边v0→v1参数、唯一反向整边邻接与真实实体分类。旋转盒、凹U/显式孔、包含/间隙/非共面相切及近边界拒绝都有 [逐项证据](../quality/AxiomKernel_测试与验收方案.md#18-cycle-0081--s4-split-classify-门禁与逐项证据)，范围见 [API矩阵](../api/AxiomKernel_详细模块接口清单.md#822-stage-4-第一代切分与实体分类支持矩阵cycle-0081--s4-split-classify)；共面二维区域、曲面/曲边、ExactCritical、精确谓词、全局嵌入及实体重建不认证。
+- **cycle-0081 门禁事实**：[日志](../../.axiom-agent/logs/cycle-0081-gates.log) 首轮配置成功而完整构建失败（Math声明缺失），无该轮CTest；repair后第二轮配置/并发4完整构建成功，最终 **16/16、0失败、173.96 s**；prep/workflow/topology **0.45/0.61/0.18 s**，性能 **2.26 s**。repair定向3/3、0.83s单列，不替代最终全量；日志未记录构建总耗时/文档检查/提交，增量无告警不证明全仓清零。本轮只读日志并同步文档，没有重建测试或提交。
+- **cycle-0080 / S4-INTERSECTION（历史代码门禁，ready_for_acceptance）**：冻结真实嵌入平面直边闭壳范围、容差/预算与 double 解析边界；固定旋转盒、斜楔 bbox 伪交、凹 U、两种孔洞、分离/包含/相切/共面参考。真实候选/交段及源 face/edge/fraction 可供后续切分，prepare 不物化模型或写事务。兼容 run 改真实面边界裁剪，读取失败在 bool.intersect.trim 结构化传播；不认证后续重建实体物理正确性。[三条证据](../quality/AxiomKernel_测试与验收方案.md#17-cycle-0080--s4-intersection-门禁与逐项证据) 与 [矩阵/参考集](../api/AxiomKernel_详细模块接口清单.md#821-stage-4-第一代求交准备支持矩阵cycle-0080--s4-intersection) 已同步。
+- **cycle-0080 门禁事实（历史）**：[日志](../../.axiom-agent/logs/cycle-0080-gates.log) 两轮配置/并发 4 完整构建成功；首轮 15/16、185.75 s，prep 失败；repair 修正真实短边夹具并补源边插值/隔离，修复 run 读取失败静默吞错。最终全量 **16/16、0 失败、172.43 s**，prep 0.17 s、workflow 0.12 s、性能 1.72 s。首轮实发 SDK/helpers 初始化告警 18 条，最终未重编译这些单元不能声称清零；构建总耗时未记录。代码门禁已闭合；文档检查见验收 §1.7，提交尚未记录，本轮未重建测试或提交。
 
 - **cycle-0079 / S3-EXIT（Stage 3 历史记录，ready_for_acceptance）**：统一 box/wedge、五类真实建模、Generic 闭壳/空腔/岛、四类原生解析质量资格、占位 Sweep/Boolean、mesh 派生及无效句柄共 17 行；截面/最近点/双侧距离/质量的独立参考、稳定拒绝及只读不污染已锁定。smoke 的缩放拉伸 V=10.5、截面=3.375、最近边界/远盒距离=1、owned 网格与 Strict 闭环通过。三条证据和五项退出映射见 [验收 §1.6](../quality/AxiomKernel_测试与验收方案.md#16-cycle-0079--s3-exit-门禁与逐项证据)，范围见 [API §6.1.4](../api/AxiomKernel_详细模块接口清单.md#614-stage-3-统一退出支持矩阵cycle-0079--s3-exit)。
 - **cycle-0079 门禁事实（历史）**：[日志](../../.axiom-agent/logs/cycle-0079-gates.log) 独立配置/并发 4 完整构建成功，串行全量 **16/16、163.78 s**；必需 Ops 137.10 s、Query 1.41 s、Rep 9.01 s、Runtime/smoke 各 0.02 s，保留 Topology 0.17 s、Boolean workflow/prep 0.03/0.04 s、性能 1.71 s。Strict warnings 配置 ON，Topo 2 条和 Rep 1 条所涉历史告警本批未再出现，实发残余 SDK 1 条；helpers 历史 17 条未重编译不宣称清零；构建时长未记录。本地文档检查 **35 个 Markdown、0 错误、0 警告**，新增/更新链接锚点、矩阵映射及 diff 检查通过，细目见验收 §1.6；仍须调度器核验及提交成功。无 repair，本轮不重建测试或提交。
 - **cycle-0078 / S3-CONSISTENCY（历史代码全量门禁）**：五类建模→Strict→截面/最近点/距离/质量→full/local/shell 表示，独立质心/距离/见证和 OBJ 三角积分通过；来源及关联实体有效、重复几何/相同 bbox 不混用缓存。owned 面先完整三角化/组装再发布，失败无新 MeshId/部分缓存/bbox 或创建参数回退；primitive 编辑资格随修改撤销/恢复，Eval dirty 传播、成功提交与后续失败回滚、保存点/取消/删除清理一致。见 [一致性合同](../api/AxiomKernel_详细模块接口清单.md#731-stage-3-表示来源与-eval-一致性合同cycle-0078--s3-consistency) 和 [三条验收证据](../quality/AxiomKernel_测试与验收方案.md#15-cycle-0078--s3-consistency-门禁与逐项证据)。
 - **cycle-0078 门禁事实（历史）**：[日志](../../.axiom-agent/logs/cycle-0078-gates.log) 一轮测试/示例开启配置、并发 4 完整构建成功，完整 CTest **16/16、0 失败、164.60 s**；四个必需回归 Ops **137.40 s**、Query **0.95 s**、Rep **9.44 s**、Runtime **0.02 s**，保留 Topology **0.23 s**、性能 **1.74 s**。无 repair，仍有初始化/未使用参数告警，未记录独立 Strict warnings、文档门禁或提交成功；本轮仅同步文档，没有重建测试/提交。旧 MeshId 为快照，历史边界缓存可保留；Eval recompute 只管理图，metadata 显示代理不授予物理查询资格，不扩展曲面/曲边/全局嵌入或后续阶段。
 - **cycle-0077 / S3-MODELING（历史代码门禁）**：核验 extrude/revolve/sweep/loft 并补齐真实平面直边 Face thicken；当前定向外/内环与裁剪边沿支撑法向生成独立 owned 闭壳，支持凹形/分离非嵌套孔/有限正厚度，拒绝曲面/曲边/代理面，无 bbox fallback。五类公开面/边/壳查询、ExactBRep/owned_topo_welded、独立全质量/Strict、阶段诊断、活动事务不污染与回滚重试已执行通过。平面棱柱及共面侧壁 loft 夹具在浮点容差内精确，revolve 仍为采样多面体。见 [五类主路径矩阵](../api/AxiomKernel_详细模块接口清单.md#811-stage-3-五类建模主路径cycle-0077--s3-modeling) 与 [三条证据](../quality/AxiomKernel_测试与验收方案.md#14-cycle-0077--s3-modeling-门禁与逐项证据)。
-- **cycle-0077 门禁事实（历史）**：[日志](../../.axiom-agent/logs/cycle-0077-gates.log) 一轮测试/示例开启配置、并发 4 完整构建成功，CTest **16/16、0 失败、153.89 s**；必需 Ops **126.52 s**、Topology **0.13 s**，关联 Query **0.95 s**、Rep **9.79 s**、性能 **1.60 s**。无 repair，仍有初始化/未使用参数告警，未记录独立 Strict warnings、文档检查或提交成功；回归的 Strict 拓扑验证通过。历史报告为 ready_for_acceptance，不由本批反推正式验收；当前唯一任务以 §1 的 S4-INTERSECTION 为准。
+- **cycle-0077 门禁事实（历史）**：[日志](../../.axiom-agent/logs/cycle-0077-gates.log) 一轮测试/示例开启配置、并发 4 完整构建成功，CTest **16/16、0 失败、153.89 s**；必需 Ops **126.52 s**、Topology **0.13 s**，关联 Query **0.95 s**、Rep **9.79 s**、性能 **1.60 s**。无 repair，仍有初始化/未使用参数告警，未记录独立 Strict warnings、文档检查或提交成功；回归的 Strict 拓扑验证通过。历史报告为 ready_for_acceptance，不由本批反推正式验收；当前唯一任务以 §1 的 S4-SPLIT-CLASSIFY 为准。
 
 
 - **cycle-0076 / S3-MASS（历史代码门禁）**：真实多面体从当前拓扑积分全部质量，未编辑原生球/柱/锥/环保留解析资格，成功拓扑/PCurve 编辑撤销，保存点/回滚恢复。删除 bbox、Boolean/Modified 来源与 Sweep 创建缓存 fallback；代理面重组/克隆/imprint/删除 owner 不改变拒绝，metadata/mesh/implicit 派生不继承资格。独立 primitive/建模全量质量参考、矩形子午面旋转采样误差、材料/空腔/岛与偏心积惯量、热缓存编辑拒绝/回滚/只读及稳定阶段/无部分值均随完整门禁通过，见 [质量矩阵](../api/AxiomKernel_详细模块接口清单.md#613-stage-3-质量属性支持矩阵cycle-0076--s3-mass) 与 [三条证据](../quality/AxiomKernel_测试与验收方案.md#13-cycle-0076--s3-mass-门禁与逐项证据)。该批当时的 thicken 质量拒绝已在 cycle-0077 更新为真实平面 Face 主路径；不因代码门禁通过自动退出 Stage 3。
@@ -198,7 +200,7 @@
 
 | 优先级 | 状态 | 模块 | 交付物（摘要） | 建议 `ctest` | 依赖 |
 |--------|------|------|----------------|--------------|------|
-| P0 | ready_for_acceptance（cycle-0080，正式状态见当前进度 §5.2.1） | ops/diag | S4-INTERSECTION：支持范围/固定模型与独立参考、真实候选/交段/源边参数、稳定拒绝及阶段诊断/输入和事务隔离、文档收口 | `axiom_boolean_prep_test`、`axiom_boolean_workflow_test`；完整 CTest | geo/topo |
+| P0 | ready_for_acceptance（cycle-0081，正式状态见当前进度 §5.2.1） | ops/diag | S4-SPLIT-CLASSIFY：真实面/边切分、来源/方向/整边邻接、实体分类与边界不确定性拒绝、稳定 split/classify 诊断、失败/rollback 隔离、文档收口 | `axiom_boolean_prep_test`、`axiom_boolean_workflow_test`、`axiom_topology_test`；完整 CTest | geo/topo |
 | P0 | 已闭合（门禁） | core/io | 门面 IO 能力与 `IOService` 一致 | `axiom_smoke_test` | — |
 | P0～P1 | 已闭合（首批） | diag/ops/io/heal | 工作流 `Issue.stage` + JSON 导出可聚合 | `axiom_diagnostics_test`、`axiom_boolean_workflow_test`、`axiom_heal_test`、`axiom_ops_heal_test` | core |
 | P0～P1 | 已闭合（第 69 批） | diag/ops | 结构化数值证据、覆盖审计与 BOOL 受覆盖失败门禁 | `axiom_diagnostics_test`、`axiom_boolean_prep_test` | core |
@@ -217,20 +219,20 @@
 | P1 | 已闭合（cycle-0074 子域） | topo/query | 平面直边实体点定位、真实最近边界与线段材料/共面/相切裁剪，多壳奇偶/薄层/预算及只读合同 | `axiom_query_eval_test` | geo/topo |
 | P1～P2 | 进行中 | topo/query | 曲面/曲边闭壳质量与空间定位、相交多壳、自身全局嵌入证明及大规模加速 | `axiom_query_eval_test` | geo/topo |
 | P1～P2 | 进行中 | ops | 带孔尖顶/触轴旋转、零或负扫掠比例、一般非线性解析比例/扭转律、任意截面匹配、分支/坍塌放样、逐壁恒角拔模、嵌套复合导轨、解析圆弧/样条扫掠、精确旋转/解析螺旋面及显式轮廓历史 | `axiom_ops_heal_test` | geo/topo |
-| P2 | 后续独立工作，非本包扩展 | ops | 精确切分/分类/重建实体正确性、二维共面区域及连续曲面/曲边求交；准备包固定参考已通过 | `axiom_boolean_*` | geo/topo |
+| P2 | 后续独立工作，非本包扩展 | ops | 精确谓词认证与布尔实体重建、二维共面区域及连续曲面/曲边求交；只读切分/分类固定参考已通过 | `axiom_boolean_*` | geo/topo |
 | P2～P3 | 进行中 | eval/rep | 重算指标、Rep 误差预算 | `axiom_query_eval_test`、`axiom_representation_io_test` | ops（部分） |
 
 - **FR-QUERY-001 第 68/70/71/74 批（已通过完整门禁）**：第 68 批 `face_area` 支持 Plane/Cylinder/Cone/Sphere/Torus 及 Trimmed/Offset 的折线 PCurve 修剪面积；第 70/71 批 `shell_mass_properties/body_shell_regions/body_mass_properties` 补齐平面直边双边流形闭壳的质量属性、多实体壳、嵌套空腔和材料岛；第 71 批 `intersect_curve_curve` 闭合一般有界 3D 曲线离散求交与可证明连续重合子域；第 74 批把该有限区间求交流程接入显式 trim 跨环门禁，并补齐解析无界面与高阶有理曲面最近点证书。仍不支持高阶/派生曲面修剪面积、曲面/曲边闭壳质量积分、相交/重叠多壳、壳自身全局嵌入证明、大规模加速和一般高阶异参连续重合；cycle-0074 已新增平面直边实体点定位、真实最近边界及线段材料/共面/相切裁剪，空腔与材料岛按严格包含奇偶处理。
 
 ## 4. 下一未闭合批次
 
-当前唯一任务 S4-INTERSECTION 的三条要求已有执行证据，最终完整构建/全量 CTest 通过，API/诊断/样例/矩阵/进度/Backlog 已同步，文档检查结果见 [验收 §1.7](../quality/AxiomKernel_测试与验收方案.md#17-cycle-0080--s4-intersection-门禁与逐项证据)。剩余正式条件为调度器最终文档门禁及提交成功；本轮不提交或再扩展功能包。Stage 4 / FR-BOOL-001 仍进行中，后续实体切分/分类/重建、二维共面区域、曲面/曲边求交及全局嵌入证明须独立排期，不作为本包继续新增变体的理由。下列仅为长期候选，不优先于阶段任务，不自动启动后续阶段。
+当前唯一任务 S4-SPLIT-CLASSIFY 的三条要求已有运行证据，最终完整构建/全量CTest通过，API/诊断/样例/矩阵/进度/Backlog已同步，本轮文档检查见 [验收 §1.8](../quality/AxiomKernel_测试与验收方案.md#18-cycle-0081--s4-split-classify-门禁与逐项证据)。剩余正式条件为调度器最终文档门禁及提交成功；本轮不提交或扩展功能包。Stage4 / FR-BOOL-001 仍进行中，只读切分/分类不证明布尔实体重建；精确谓词、二维共面区域、曲面/曲边及全局嵌入另行排期。下列仅为长期候选，不优先于阶段任务，也不自动启动后续阶段。
 
 1. FR-GEO-001 / FR-QUERY-001：继续极端尺度、通用退化曲面、通用无限派生面自动有限化、旋转/扫掠专用局部界与大模型共享空间证书；无限曲线仍须显式有限窗口，一般高阶异参连续重合证明仍待闭合。
 2. FR-TOPO-001：在已交付的显式 trim 真曲线跨环门禁之上，推进 3D edge trim 与 PCurve/曲面参数域双向一致性、周期缝、奇点和持久命名。
 3. FR-DIAG-001：保留 cycle-0073 HEAL/IO 重量级数值证据及模块审计门禁，扩充普通文本/目录辅助接口与更广泛失败注入语料。
 4. NFR-REL-001：在长耗时 BOOL/HEAL/IO 内部阶段轮询取消，推进增量/结构共享保存点、真正嵌套子事务及更细粒度隔离语义。
-5. BOOL 准备包已有固定平面参考，后续需精确切分/分类/重建实体正确性、二维共面区域及曲面/曲边求交；HEAL 自交/流形性/容差冲突的可回放修复。
+5. BOOL 只读切分/分类已有固定平面参考，后续需精确谓词认证与布尔实体重建正确性、二维共面区域及曲面/曲边求交；HEAL 自交/流形性/容差冲突的可回放修复。
 6. IO 标准 IGES/STEP 实体交换（不是已验收的 Axiom 元数据子集）或通用 3MF 下一里程碑；EvalGraph 成本门禁与 Plugin 隔离继续按长期树推进。
 7. FR-OPS-001：在已验收的有向区间旋转与分段正比例/扭转律上，继续解析圆弧/样条扫掠曲面、精确旋转或一般非线性解析律；零/负扫掠比例、带孔尖顶/触轴、任意截面匹配、嵌套复合导轨和显式轮廓历史仍不支持。
 8. FR-QUERY-001：在平面直边 `locate_point/clip_segment` 上继续曲面/曲边闭壳质量与空间定位、壳自身全局嵌入证明、相交多壳及大规模加速；质量前置检查仍不纳入新三角形预算。

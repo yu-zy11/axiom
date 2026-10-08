@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <map>
 #include <utility>
 #include <vector>
 
@@ -751,9 +752,428 @@ bool check_planar_preparation_failure_isolation() {
         kernel.validate().validate_topology(*b.value,axiom::ValidationMode::Strict).status == axiom::StatusCode::Ok;
 }
 
+// Independently integrate the returned triangles and recover each finite cut
+// from subdivision edges. A bbox shell cannot satisfy these area/material oracles.
+bool check_split_classification_references() {
+    axiom::Kernel kernel;
+    using Location = axiom::BooleanPointLocation;
+    const auto distance = [](axiom::Point3 p, axiom::Point3 q) {
+        return std::hypot(p.x-q.x,p.y-q.y,p.z-q.z);
+    };
+    const auto area = [](const std::array<axiom::Point3,3>& p) {
+        const axiom::Vec3 a {p[1].x-p[0].x,p[1].y-p[0].y,p[1].z-p[0].z};
+        const axiom::Vec3 b {p[2].x-p[0].x,p[2].y-p[0].y,p[2].z-p[0].z};
+        return std::hypot(a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x)/2;
+    };
+    // Return overlap parameters only when an actual triangular edge lies along
+    // the finite intersection, independently of the production associations.
+    const auto overlap = [&](axiom::Point3 p, axiom::Point3 q,
+                             const axiom::BooleanIntersectionSegment& segment) {
+        const axiom::Vec3 d {segment.end.x-segment.begin.x,segment.end.y-segment.begin.y,
+                            segment.end.z-segment.begin.z};
+        const double squared = d.x*d.x+d.y*d.y+d.z*d.z;
+        if (squared <= 1e-18) return std::array<double,2>{1,0};
+        const auto parameter = [&](axiom::Point3 point) {
+            return ((point.x-segment.begin.x)*d.x+(point.y-segment.begin.y)*d.y+
+                    (point.z-segment.begin.z)*d.z)/squared;
+        };
+        const auto on_line = [&](axiom::Point3 point, double t) {
+            return distance(point,{segment.begin.x+t*d.x,segment.begin.y+t*d.y,segment.begin.z+t*d.z}) < 1e-8;
+        };
+        const double a = parameter(p), b = parameter(q);
+        if (!on_line(p,a) || !on_line(q,b)) return std::array<double,2>{1,0};
+        return std::array<double,2>{std::max(0.0,std::min(a,b)),std::min(1.0,std::max(a,b))};
+    };
+    const auto check = [&](axiom::BodyId lhs, axiom::BodyId rhs,
+                           double lhs_area, double rhs_area, double lhs_inside, double rhs_inside,
+                           const auto& lhs_location, const auto& rhs_location,
+                           const auto& inverse, bool cube_winding,
+                           const std::vector<std::pair<axiom::VertexId,axiom::Point3>>& known_vertices) {
+        const auto result = kernel.booleans().prepare_split_classification(lhs,rhs);
+        if (!result.value || result.status != axiom::StatusCode::Ok || result.value->fragments.empty()) {
+            std::cerr << "split reference lhs=" << lhs.value << " rhs=" << rhs.value
+                      << " status=" << static_cast<int>(result.status) << "\n";
+            const auto report = kernel.diagnostics().get(result.diagnostic_id);
+            if (report.value) for (const auto& issue : report.value->issues)
+                std::cerr << issue.stage << " " << issue.code << " " << issue.message << "\n";
+            return planar_failure(__LINE__);
+        }
+        const auto& preparation = *result.value;
+        const auto query = kernel.topology().query();
+        const auto lhs_faces = query.faces_of_body(lhs), rhs_faces = query.faces_of_body(rhs);
+        if (!lhs_faces.value || !rhs_faces.value) return planar_failure(__LINE__);
+        std::array<double,2> totals {}, insides {};
+        std::map<std::uint64_t,double> face_areas;
+        std::map<std::array<long long,8>,std::vector<std::array<std::size_t,3>>> subdivision_edges;
+        std::size_t checked_source_interpolation = 0;
+        for (std::size_t index = 0; index < preparation.fragments.size(); ++index) {
+            const auto& fragment = preparation.fragments[index];
+            const bool left = fragment.source_body == lhs;
+            if (!left && fragment.source_body != rhs) return planar_failure(__LINE__);
+            const auto& faces = left ? *lhs_faces.value : *rhs_faces.value;
+            if (std::find(faces.begin(),faces.end(),fragment.source_face) == faces.end())
+                return planar_failure(__LINE__);
+            const double triangle_area = area(fragment.vertices);
+            if (!std::isfinite(triangle_area) || triangle_area <= 1e-12) return planar_failure(__LINE__);
+            face_areas[fragment.source_face.value] += triangle_area;
+            totals[left ? 0 : 1] += triangle_area;
+            axiom::Point3 centroid {};
+            for (const auto p : fragment.vertices) {
+                centroid.x += p.x/3; centroid.y += p.y/3; centroid.z += p.z/3;
+            }
+            if ((left ? lhs_location(inverse(centroid)) : rhs_location(inverse(centroid))) != Location::Boundary)
+                return planar_failure(__LINE__);
+            const auto location = left ? rhs_location(inverse(centroid)) : lhs_location(inverse(centroid));
+            if (fragment.classification.location != location || location == Location::Boundary ||
+                !fragment.classification.boundary_faces.empty()) return planar_failure(__LINE__);
+            if (location == Location::Inside) insides[left ? 0 : 1] += triangle_area;
+            // Interior samples toward every corner must remain in the same
+            // material class; checking just a triangle centroid misses straddles.
+            for (const auto p : fragment.vertices) {
+                const axiom::Point3 sample {0.2*centroid.x+0.8*p.x,0.2*centroid.y+0.8*p.y,
+                                           0.2*centroid.z+0.8*p.z};
+                const auto sample_location = left ? rhs_location(inverse(sample)) : lhs_location(inverse(sample));
+                if (sample_location != location) return planar_failure(__LINE__);
+            }
+            if (cube_winding) {
+                const auto p = inverse(fragment.vertices[0]), q = inverse(fragment.vertices[1]),
+                           r = inverse(fragment.vertices[2]);
+                const std::array<double,3> normal {(q.y-p.y)*(r.z-p.z)-(q.z-p.z)*(r.y-p.y),
+                    (q.z-p.z)*(r.x-p.x)-(q.x-p.x)*(r.z-p.z),
+                    (q.x-p.x)*(r.y-p.y)-(q.y-p.y)*(r.x-p.x)};
+                const auto c = inverse(centroid);
+                const std::array<double,3> coords {c.x,c.y,c.z};
+                const double low = left ? 0 : 1, high = low+2;
+                bool outward = false;
+                for (std::size_t axis = 0; axis < 3; ++axis) {
+                    if (std::abs(coords[axis]-low) < 1e-8 && normal[axis] < -1e-12) outward = true;
+                    if (std::abs(coords[axis]-high) < 1e-8 && normal[axis] > 1e-12) outward = true;
+                }
+                if (!outward) return planar_failure(__LINE__);
+            }
+            for (std::size_t side = 0; side < 3; ++side) if (fragment.source_edges[side].value != 0) {
+                const auto owners = query.faces_of_edge(fragment.source_edges[side]);
+                if (!owners.value || std::find(owners.value->begin(),owners.value->end(),fragment.source_face) ==
+                    owners.value->end()) return planar_failure(__LINE__);
+                for (const auto fraction : {fragment.source_edge_begin[side],fragment.source_edge_end[side]})
+                    if (!std::isfinite(fraction) || fraction < -1e-8 || fraction > 1+1e-8)
+                        return planar_failure(__LINE__);
+                if (left && !known_vertices.empty()) {
+                    const auto endpoints = query.vertices_of_edge(fragment.source_edges[side]);
+                    if (!endpoints.value) return planar_failure(__LINE__);
+                    std::array<axiom::Point3,2> points {};
+                    for (std::size_t end = 0; end < 2; ++end) {
+                        const auto found = std::find_if(known_vertices.begin(),known_vertices.end(),
+                            [&](const auto& vertex) { return vertex.first == (*endpoints.value)[end]; });
+                        if (found == known_vertices.end()) return planar_failure(__LINE__);
+                        points[end] = found->second;
+                    }
+                    for (const bool begin : {false,true}) {
+                        const auto fraction = begin ? fragment.source_edge_begin[side] : fragment.source_edge_end[side];
+                        const auto p = points[0], q = points[1];
+                        const axiom::Point3 expected {p.x+fraction*(q.x-p.x),p.y+fraction*(q.y-p.y),p.z+fraction*(q.z-p.z)};
+                        if (distance(expected,fragment.vertices[begin ? side : (side+1)%3]) > 1e-8)
+                            return planar_failure(__LINE__);
+                        ++checked_source_interpolation;
+                    }
+                }
+            }
+            for (std::size_t side = 0; side < 3; ++side) {
+                const auto p = fragment.vertices[side], q = fragment.vertices[(side+1)%3];
+                auto a = std::array{std::llround(p.x*1e8),std::llround(p.y*1e8),std::llround(p.z*1e8)};
+                auto b = std::array{std::llround(q.x*1e8),std::llround(q.y*1e8),std::llround(q.z*1e8)};
+                const bool reversed = b < a;
+                if (reversed) std::swap(a,b);
+                subdivision_edges[{static_cast<long long>(fragment.source_body.value),
+                    static_cast<long long>(fragment.source_face.value),a[0],a[1],a[2],b[0],b[1],b[2]}]
+                    .push_back({index,side,static_cast<std::size_t>(reversed)});
+            }
+            for (const auto adjacent : fragment.adjacent_fragments) {
+                if (adjacent >= preparation.fragments.size() || adjacent == index) return planar_failure(__LINE__);
+                const auto& other = preparation.fragments[adjacent];
+                if (other.source_body != fragment.source_body ||
+                    std::find(other.adjacent_fragments.begin(),other.adjacent_fragments.end(),index) ==
+                    other.adjacent_fragments.end()) return planar_failure(__LINE__);
+                bool whole_edge = false;
+                for (std::size_t a = 0; a < 3; ++a) for (std::size_t b = 0; b < 3; ++b)
+                    if (distance(fragment.vertices[a],other.vertices[(b+1)%3]) < 1e-8 &&
+                        distance(fragment.vertices[(a+1)%3],other.vertices[b]) < 1e-8) whole_edge = true;
+                if (!whole_edge) return planar_failure(__LINE__);
+            }
+            for (const auto segment_index : fragment.intersection_segments) {
+                if (segment_index >= preparation.intersection.segments.size()) return planar_failure(__LINE__);
+                const auto& segment = preparation.intersection.segments[segment_index];
+                if (fragment.source_face != (left ? segment.lhs_face : segment.rhs_face))
+                    return planar_failure(__LINE__);
+                bool touches = false;
+                for (std::size_t side = 0; side < 3; ++side) {
+                    const auto range = overlap(fragment.vertices[side],fragment.vertices[(side+1)%3],segment);
+                    if (range[1]-range[0] > 1e-8) touches = true;
+                    for (const auto p : {fragment.vertices[side],fragment.vertices[(side+1)%3]}) {
+                        const axiom::Vec3 d {segment.end.x-segment.begin.x,segment.end.y-segment.begin.y,
+                                            segment.end.z-segment.begin.z};
+                        const double squared = d.x*d.x+d.y*d.y+d.z*d.z;
+                        if (squared <= 1e-18) {
+                            if (distance(p,segment.begin) < 1e-8) touches = true;
+                        } else {
+                            const double parameter = ((p.x-segment.begin.x)*d.x+(p.y-segment.begin.y)*d.y+
+                                                      (p.z-segment.begin.z)*d.z)/squared;
+                            const axiom::Point3 projected {segment.begin.x+parameter*d.x,segment.begin.y+parameter*d.y,
+                                                           segment.begin.z+parameter*d.z};
+                            if (parameter >= -1e-8 && parameter <= 1+1e-8 && distance(p,projected) < 1e-8)
+                                touches = true;
+                        }
+                    }
+                }
+                if (!touches) {
+                    std::cerr << "fragment " << index << " segment " << segment_index << " finite contact reference\n";
+                    for (const auto p : fragment.vertices) std::cerr << "triangle " << p.x << " " << p.y << " " << p.z << "\n";
+                    for (const auto p : {segment.begin,segment.end}) std::cerr << "segment " << p.x << " " << p.y << " " << p.z << "\n";
+                    return planar_failure(__LINE__);
+                }
+            }
+        }
+        for (const auto& [edge,owners] : subdivision_edges) {
+            if (owners.size() == 1) {
+                if (preparation.fragments[owners[0][0]].source_edges[owners[0][1]].value == 0)
+                    return planar_failure(__LINE__);
+            } else if (owners.size() == 2) {
+                if (owners[0][2] == owners[1][2]) return planar_failure(__LINE__);
+                for (const bool first : {false,true}) {
+                    const auto owner = owners[first ? 0 : 1][0], neighbor = owners[first ? 1 : 0][0];
+                    const auto& adjacent = preparation.fragments[owner].adjacent_fragments;
+                    if (std::find(adjacent.begin(),adjacent.end(),neighbor) == adjacent.end())
+                        return planar_failure(__LINE__);
+                }
+            } else return planar_failure(__LINE__);
+        }
+        if (std::abs(totals[0]-lhs_area) > 1e-7 || std::abs(totals[1]-rhs_area) > 1e-7 ||
+            std::abs(insides[0]-lhs_inside) > 1e-7 || std::abs(insides[1]-rhs_inside) > 1e-7)
+            return planar_failure(__LINE__);
+        for (const auto* faces : {&*lhs_faces.value,&*rhs_faces.value}) for (const auto face : *faces) {
+            const auto original = query.planar_face_area(face);
+            if (!original.value || std::abs(face_areas[face.value]-*original.value) > 1e-7)
+                return planar_failure(__LINE__);
+        }
+        if (!known_vertices.empty() && checked_source_interpolation == 0) return planar_failure(__LINE__);
+        for (std::size_t segment_index = 0; segment_index < preparation.intersection.segments.size(); ++segment_index) {
+            const auto& segment = preparation.intersection.segments[segment_index];
+            if (segment.point_contact) continue;
+            for (const bool left : {false,true}) {
+                std::vector<std::array<double,2>> intervals;
+                for (const auto& fragment : preparation.fragments) {
+                    if (fragment.source_body != (left ? lhs : rhs) ||
+                        fragment.source_face != (left ? segment.lhs_face : segment.rhs_face)) continue;
+                    for (std::size_t side = 0; side < 3; ++side) {
+                        const auto range = overlap(fragment.vertices[side],fragment.vertices[(side+1)%3],segment);
+                        if (range[1]-range[0] > 1e-8) {
+                            if (std::find(fragment.intersection_segments.begin(),fragment.intersection_segments.end(),segment_index) ==
+                                fragment.intersection_segments.end()) return planar_failure(__LINE__);
+                            intervals.push_back(range);
+                        }
+                    }
+                }
+                std::sort(intervals.begin(),intervals.end());
+                double end = 0;
+                for (const auto interval : intervals) {
+                    if (interval[0] > end+1e-8) return planar_failure(__LINE__);
+                    end = std::max(end,interval[1]);
+                }
+                if (std::abs(end-1) > 1e-8) return planar_failure(__LINE__);
+            }
+        }
+        for (const auto body : {lhs,rhs}) {
+            const auto edges = query.edges_of_body(body);
+            if (!edges.value) return planar_failure(__LINE__);
+            for (const auto edge : *edges.value) {
+                std::vector<std::array<double,2>> intervals;
+                const auto expected_owners = query.faces_of_edge(edge);
+                if (!expected_owners.value) return planar_failure(__LINE__);
+                for (const auto& fragment : preparation.edge_fragments) {
+                    if (fragment.source_body != body || fragment.source_edge != edge) continue;
+                    if (fragment.begin_fraction < 0 || fragment.end_fraction > 1 ||
+                        fragment.end_fraction <= fragment.begin_fraction ||
+                        distance(fragment.begin,fragment.end) <= 1e-9) return planar_failure(__LINE__);
+                    auto owners = fragment.adjacent_faces, expected = *expected_owners.value;
+                    const auto less = [](axiom::FaceId a, axiom::FaceId b) { return a.value < b.value; };
+                    std::sort(owners.begin(),owners.end(),less); std::sort(expected.begin(),expected.end(),less);
+                    if (owners != expected) return planar_failure(__LINE__);
+                    if (body == lhs && !known_vertices.empty()) {
+                        const auto endpoints = query.vertices_of_edge(edge);
+                        if (!endpoints.value) return planar_failure(__LINE__);
+                        std::array<axiom::Point3,2> points {};
+                        for (std::size_t end = 0; end < 2; ++end) {
+                            const auto found = std::find_if(known_vertices.begin(),known_vertices.end(),
+                                [&](const auto& vertex) { return vertex.first == (*endpoints.value)[end]; });
+                            if (found == known_vertices.end()) return planar_failure(__LINE__);
+                            points[end] = found->second;
+                        }
+                        for (const bool begin : {false,true}) {
+                            const auto fraction = begin ? fragment.begin_fraction : fragment.end_fraction;
+                            const auto p = points[0], q = points[1];
+                            const axiom::Point3 interpolated {p.x+fraction*(q.x-p.x),p.y+fraction*(q.y-p.y),
+                                                             p.z+fraction*(q.z-p.z)};
+                            if (distance(interpolated,begin ? fragment.begin : fragment.end) > 1e-8)
+                                return planar_failure(__LINE__);
+                        }
+                    }
+                    intervals.push_back({fragment.begin_fraction,fragment.end_fraction});
+                }
+                std::sort(intervals.begin(),intervals.end());
+                double end = 0;
+                for (const auto interval : intervals) {
+                    if (std::abs(interval[0]-end) > 1e-8) return planar_failure(__LINE__);
+                    end = interval[1];
+                }
+                if (std::abs(end-1) > 1e-8) return planar_failure(__LINE__);
+            }
+        }
+        for (const auto& segment : preparation.intersection.segments) for (const bool begin : {false,true}) {
+            const auto& hits = begin ? segment.begin_hits : segment.end_hits;
+            const auto point = begin ? segment.begin : segment.end;
+            for (const auto& hit : hits) {
+                bool knot_found = false;
+                for (const auto& edge : preparation.edge_fragments) {
+                    if (edge.source_edge != hit.edge) continue;
+                    if (std::abs(edge.begin_fraction-hit.edge_fraction) < 1e-8 && distance(edge.begin,point) < 1e-8)
+                        knot_found = true;
+                    if (std::abs(edge.end_fraction-hit.edge_fraction) < 1e-8 && distance(edge.end,point) < 1e-8)
+                        knot_found = true;
+                }
+                if (!knot_found) return planar_failure(__LINE__);
+            }
+        }
+        return true;
+    };
+    const auto box_location = [](axiom::Point3 p, double low, double high) {
+        const std::array<double,3> coordinates {p.x,p.y,p.z};
+        bool boundary = false;
+        for (const auto coordinate : coordinates) {
+            if (coordinate < low-1e-8 || coordinate > high+1e-8) return Location::Outside;
+            if (std::abs(coordinate-low) < 1e-8 || std::abs(coordinate-high) < 1e-8) boundary = true;
+        }
+        return boundary ? Location::Boundary : Location::Inside;
+    };
+    const auto lhs_location = [&](axiom::Point3 p) { return box_location(p,0,2); };
+    const auto rhs_location = [&](axiom::Point3 p) { return box_location(p,1,3); };
+    const auto identity = [](axiom::Point3 p) { return p; };
+    const auto a = kernel.primitives().box({0,0,0},2,2,2), b = kernel.primitives().box({1,1,1},2,2,2);
+    if (!a.value || !b.value ||
+        !check(*a.value,*b.value,24,24,3,3,lhs_location,rhs_location,identity,true,{}))
+        return planar_failure(__LINE__);
+    const auto rotate = [](axiom::Point3 p) -> axiom::Point3 {
+        const double x = 0.6*p.x-0.8*p.y, y = 0.8*p.x+0.6*p.y;
+        return {x,(12*y-5*p.z)/13,(5*y+12*p.z)/13};
+    };
+    const auto inverse = [](axiom::Point3 p) -> axiom::Point3 {
+        const double y = (12*p.y+5*p.z)/13, z = (-5*p.y+12*p.z)/13;
+        return {0.6*p.x+0.8*y,-0.8*p.x+0.6*y,z};
+    };
+    const auto make_rotated = [&](double low) {
+        axiom::ProfileRef profile;
+        profile.label = "s4-split-rotated-reference-box";
+        for (const auto p : {axiom::Point3{low,low,low},axiom::Point3{low+2,low,low},
+                            axiom::Point3{low+2,low+2,low},axiom::Point3{low,low+2,low}})
+            profile.polygon_xyz.push_back(rotate(p));
+        return kernel.sweeps().extrude(profile,{0,-5.0/13,12.0/13},2);
+    };
+    const auto ra = make_rotated(0), rb = make_rotated(1);
+    if (!ra.value || !rb.value) {
+        for (const auto* result : {&ra,&rb}) {
+            std::cerr << "rotated reference construction status=" << static_cast<int>(result->status) << "\n";
+            const auto report = kernel.diagnostics().get(result->diagnostic_id);
+            if (report.value) for (const auto& issue : report.value->issues)
+                std::cerr << issue.stage << " " << issue.code << " " << issue.message << "\n";
+        }
+    }
+    if (!ra.value || !rb.value ||
+        !check(*ra.value,*rb.value,24,24,3,3,lhs_location,rhs_location,inverse,true,{}))
+        return planar_failure(__LINE__);
+    const auto cutter = kernel.primitives().box({-1,1.5,-0.5},6,1,1);
+    if (!cutter.value) return planar_failure(__LINE__);
+    for (const bool holed : {false,true}) {
+        axiom::ProfileRef profile;
+        profile.label = "s4-split-reference-concave-U";
+        profile.polygon_xyz = {{0,0,0},{4,0,0},{4,4,0},{3,4,0},{3,1,0},{1,1,0},{1,4,0},{0,4,0}};
+        std::vector<std::pair<axiom::VertexId,axiom::Point3>> known;
+        const auto prism = holed ? make_reference_holed_prism(kernel,1,&known)
+                                  : kernel.sweeps().extrude(profile,{0,0,1},2);
+        if (!prism.value) return planar_failure(__LINE__);
+        const auto prism_location = [holed](axiom::Point3 p) {
+            if (p.x < -1e-8 || p.x > 4+1e-8 || p.y < -1e-8 || p.y > 4+1e-8 ||
+                p.z < -1e-8 || p.z > 2+1e-8) return Location::Outside;
+            if (p.x > 1+1e-8 && p.x < 3-1e-8 && p.y > 1+1e-8 && (!holed || p.y < 3-1e-8))
+                return Location::Outside;
+            const bool notch_side = (std::abs(p.x-1) < 1e-8 || std::abs(p.x-3) < 1e-8) &&
+                                     p.y >= 1-1e-8 && (!holed || p.y <= 3+1e-8);
+            const bool notch_bottom = std::abs(p.y-1) < 1e-8 && p.x >= 1-1e-8 && p.x <= 3+1e-8;
+            const bool hole_top = holed && std::abs(p.y-3) < 1e-8 && p.x >= 1-1e-8 && p.x <= 3+1e-8;
+            if (p.x < 1e-8 || p.x > 4-1e-8 || p.y < 1e-8 || p.y > 4-1e-8 ||
+                p.z < 1e-8 || p.z > 2-1e-8 || notch_side || notch_bottom || hole_top)
+                return Location::Boundary;
+            return Location::Inside;
+        };
+        const auto cutter_location = [](axiom::Point3 p) {
+            if (p.x < -1-1e-8 || p.x > 5+1e-8 || p.y < 1.5-1e-8 || p.y > 2.5+1e-8 ||
+                p.z < -0.5-1e-8 || p.z > 0.5+1e-8) return Location::Outside;
+            if (std::abs(p.x+1) < 1e-8 || std::abs(p.x-5) < 1e-8 || std::abs(p.y-1.5) < 1e-8 ||
+                std::abs(p.y-2.5) < 1e-8 || std::abs(p.z+0.5) < 1e-8 || std::abs(p.z-0.5) < 1e-8)
+                return Location::Boundary;
+            return Location::Inside;
+        };
+        if (!check(*prism.value,*cutter.value,holed ? 72 : 64,26,4,4,
+                   prism_location,cutter_location,identity,false,known)) return planar_failure(__LINE__);
+        const std::array<axiom::Point3,5> points {{{0.5,2,1},{2,2,1},{2,0.5,1},{1,2,1},{5,2,1}}};
+        const std::array<Location,5> expected {Location::Inside,Location::Outside,Location::Inside,
+                                              Location::Boundary,Location::Outside};
+        const auto classified = kernel.booleans().classify_points(*prism.value,points);
+        if (!classified.value || classified.value->size() != points.size()) return planar_failure(__LINE__);
+        for (std::size_t i = 0; i < points.size(); ++i) {
+            if ((*classified.value)[i].location != expected[i] ||
+                ((*classified.value)[i].boundary_faces.empty() != (expected[i] != Location::Boundary)))
+                return planar_failure(__LINE__);
+        }
+    }
+    // Containment has no intersection wire; source triangles still classify
+    // from the actual opposite boundary.
+    const auto inner = kernel.primitives().box({0.25,0.25,0.25},0.5,0.5,0.5);
+    if (!inner.value) return planar_failure(__LINE__);
+    const auto contained = kernel.booleans().prepare_split_classification(*a.value,*inner.value);
+    if (!contained.value || !contained.value->intersection.segments.empty()) return planar_failure(__LINE__);
+    std::array<double,2> areas {};
+    for (const auto& fragment : contained.value->fragments) {
+        const bool outer = fragment.source_body == *a.value;
+        if (fragment.classification.location != (outer ? Location::Outside : Location::Inside))
+            return planar_failure(__LINE__);
+        areas[outer ? 0 : 1] += area(fragment.vertices);
+    }
+    if (std::abs(areas[0]-24) > 1e-8 || std::abs(areas[1]-1.5) > 1e-8) return planar_failure(__LINE__);
+    const auto gap = kernel.primitives().box({2.0001,0.25,0.25},1,0.5,0.5);
+    if (!gap.value) return planar_failure(__LINE__);
+    const auto separated = kernel.booleans().prepare_split_classification(*a.value,*gap.value);
+    if (!separated.value || !separated.value->intersection.segments.empty()) return planar_failure(__LINE__);
+    for (const auto& fragment : separated.value->fragments)
+        if (fragment.classification.location != Location::Outside) return planar_failure(__LINE__);
+    const std::array<axiom::Point3,5> points {{{1,1,1},{2.0001,1,1},{1.9999,1,1},{2,1,1},{2,2,2}}};
+    const auto classified = kernel.booleans().classify_points(*a.value,points);
+    const std::array<Location,5> expected {Location::Inside,Location::Outside,Location::Inside,
+                                          Location::Boundary,Location::Boundary};
+    if (!classified.value || classified.value->size() != points.size()) return planar_failure(__LINE__);
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        if ((*classified.value)[i].location != expected[i] ||
+            (expected[i] == Location::Boundary && (*classified.value)[i].boundary_faces.empty()))
+            return planar_failure(__LINE__);
+    }
+    return true;
+}
+
 }  // namespace
 
 int main() {
+    if (!check_split_classification_references()) {
+        std::cerr << "planar boolean split/classification analytic regression\n";
+        return 1;
+    }
     if (!check_planar_intersection_references() || !check_planar_preparation_failure_isolation()) {
         std::cerr << "planar boolean preparation reference/isolation regression\n";
         return 1;

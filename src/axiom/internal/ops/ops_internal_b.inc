@@ -1,14 +1,3 @@
-namespace {
-
-struct BooleanPlanarFace {
-    FaceId id {};
-    Point3 origin {};
-    Vec3 normal {}, u {}, v {};
-    BoundingBox bbox {};
-    std::vector<std::vector<Point3>> rings;
-    std::vector<std::vector<EdgeId>> edges;
-};
-
 bool boolean_finite_point(const Point3& point) {
     return std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z);
 }
@@ -17,7 +6,7 @@ bool boolean_finite_point(const Point3& point) {
 // also serves the compatibility run's line trimmer; all working data is local.
 bool read_boolean_planar_face(const detail::KernelState& state, FaceId id, Scalar tolerance,
                               std::size_t edge_limit, BooleanPlanarFace& out, StatusCode& failure,
-                              bool allow_proxy = false) {
+                              bool allow_proxy) {
     failure = StatusCode::InvalidTopology;
     const auto fit = state.faces.find(id.value);
     if (fit == state.faces.end()) return false;
@@ -255,8 +244,6 @@ bool boolean_boxes_overlap(const BoundingBox& a, const BoundingBox& b, Scalar to
         a.min.y <= b.max.y+tolerance && b.min.y <= a.max.y+tolerance &&
         a.min.z <= b.max.z+tolerance && b.min.z <= a.max.z+tolerance;
 }
-
-}  // namespace
 
 Result<BooleanIntersectionPreparation> prepare_planar_boolean_intersections(
     detail::KernelState& state, BodyId lhs, BodyId rhs, const BooleanIntersectionOptions& options) {

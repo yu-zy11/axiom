@@ -237,6 +237,26 @@ public:
     /// or bool.intersect stage. This does not certify run()'s rebuilt solid.
     Result<BooleanIntersectionPreparation> prepare_intersections(
         BodyId lhs, BodyId rhs, const BooleanIntersectionOptions& options = {}) const;
+    /// Read-only planar split/classification preparation under the same input
+    /// contract as prepare_intersections. Real intersection lines subdivide
+    /// trimmed faces (including concavities/holes) and source edge intervals.
+    /// Single-ring face winding must agree with its support plane normal, as
+    /// required by the existing planar preparation gate.
+    /// Triangulation may introduce extra subdivision edges; these are identified
+    /// by zero source-edge IDs. Returns provenance and geometric adjacency,
+    /// never a bbox substitute or a rebuilt Boolean solid. Coplanar candidates
+    /// and unresolved numerical/boundary cases fail explicitly. All failures
+    /// have a diagnostic stage; no model, Eval or transaction writes occur.
+    Result<BooleanSplitClassificationPreparation> prepare_split_classification(
+        BodyId lhs, BodyId rhs, const BooleanSplitClassificationOptions& options = {}) const;
+    /// Classify finite points against the real closed planar body boundary.
+    /// Uses the intersection preparation's embedded-shell precondition and
+    /// parity material convention (nested odd-depth shells are cavities).
+    /// Boundary points retain their source faces; unresolved near-boundary or
+    /// ray degeneracy cases fail with bool.classify instead of guessing.
+    Result<std::vector<BooleanPointClassification>> classify_points(
+        BodyId body, std::span<const Point3> points,
+        const BooleanIntersectionOptions& options = {}) const;
     Result<void> export_boolean_prep_stats(BodyId lhs, BodyId rhs, std::string_view path) const;
 
 private:

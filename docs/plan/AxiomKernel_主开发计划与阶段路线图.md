@@ -151,11 +151,11 @@ Strict warnings 配置 ON；本批重编译 Topo/Rep 的 3 条所涉告警未再
 
 ## 4.5 `Stage 4` 布尔与验证器第一代
 
-**状态：进行中，当前主线；唯一退出任务为 cycle-0080 / S4-INTERSECTION。** 本批冻结 [第一代支持矩阵与固定参考模型](../api/AxiomKernel_详细模块接口清单.md#821-stage-4-第一代求交准备支持矩阵cycle-0080--s4-intersection)：真实嵌入、平面直边 ExactBRep 闭壳的只读 face/edge 候选与解析交线，按外环/孔环裁剪并保留源拓扑/边参数；bbox 仅用于筛候选。容差/预算、double 解析与无采样/精确谓词认证边界、不支持输入及共面保守拒绝均已固定。
+**状态：进行中，当前主线；唯一退出任务为 cycle-0081 / S4-SPLIT-CLASSIFY。** 在历史候选/求交准备上接入 [第一代真实切分/分类支持矩阵与固定参考](../api/AxiomKernel_详细模块接口清单.md#822-stage-4-第一代切分与实体分类支持矩阵cycle-0081--s4-split-classify)：真实外/孔环三角化，有限交段切分面与源边并同步切点，保留来源/参数/整边邻接；真实裁剪实体边界至少两条有效一致射线分类，未解析容差带明确拒绝。bbox 仅用于候选筛选，不生成切分替代面。
 
-调度器 repair 后完整构建和最终 CTest **16/16、0 失败、172.43 s**，必需 prep **0.17 s**、workflow **0.12 s**；[三条验收证据](../quality/AxiomKernel_测试与验收方案.md#17-cycle-0080--s4-intersection-门禁与逐项证据) 按支持/参考/拒绝、真实候选/交段完整性、稳定阶段诊断/输入及活动事务隔离排列。`stage_outcome=ready_for_acceptance`，正式状态见 [当前进度 §5.2.1](AxiomKernel_当前开发进度.md#521-stage-4-当前退出任务)；调度器最终文档门禁及提交成功后才记任务已验收，本轮不提交。
+repair 后调度器完整构建成功、最终 CTest **16/16、0失败、173.96 s**；必需 prep/workflow/topology **0.45/0.61/0.18 s**。[三条证据](../quality/AxiomKernel_测试与验收方案.md#18-cycle-0081--s4-split-classify-门禁与逐项证据) 按真实切分、实体分类、稳定诊断与失败/rollback隔离排列。`stage_outcome=ready_for_acceptance`；正式状态见 [当前进度 §5.2.1](AxiomKernel_当前开发进度.md#521-stage-4-当前退出任务)，调度器最终文档门禁及提交成功后才记任务已验收，本轮不提交。
 
-准备包只证明固定平面参考集的求交完整性和已回归的兼容 run 读取拒绝；不证明完整工业布尔实体闭环。精确切分/分类/重建实体正确性、二维共面区域、曲面/曲边求交及全局壳嵌入证明仍属后续独立工作。Stage 4 与 FR-BOOL-001 保持进行中；主线切换按本批阶段指令，不追认 Stage 3 历史提交或验收。
+认证限嵌入平面直边 ExactBRep 闭壳固定参考、double/奇偶材料约定和只读几何分片，允许过切分。兼容run仍含bbox实体语义，不证明完整工业布尔闭环；精确谓词、实体重建、二维共面区域、曲面/曲边及全局壳嵌入证明为后续独立工作。Stage4 / FR-BOOL-001 继续进行中；不追认 cycle-0080 或 Stage3 历史提交/验收。
 
 目标：
 
@@ -301,9 +301,9 @@ Strict warnings 配置 ON；本批重编译 Topo/Rep 的 3 条所涉告警未再
 
 ## 7. 当前立即执行顺序
 
-以[近期迭代与 Backlog](AxiomKernel_近期迭代与Backlog.md)为选取顺序真源：本批唯一退出任务为 cycle-0080 / S4-INTERSECTION，支持范围/固定参考、真实候选对与几何求交、稳定阶段诊断及隔离三条要求均有 [执行证据](../quality/AxiomKernel_测试与验收方案.md#17-cycle-0080--s4-intersection-门禁与逐项证据)，repair 后独立完整构建及全量 CTest **16/16、0 失败、172.43 s** 已通过。`stage_outcome=ready_for_acceptance`；正式状态只在 [当前进度 §5.2.1](AxiomKernel_当前开发进度.md#521-stage-4-当前退出任务) 维护，调度器最终文档门禁及提交成功后才记任务已验收。不得依据历史 remaining、需求权重或新增行数追加无关功能；基础层修复限本任务直接阻断项，不自行启动后续阶段。
+以[近期迭代与 Backlog](AxiomKernel_近期迭代与Backlog.md)为选取顺序真源：当前唯一退出任务为 cycle-0081 / S4-SPLIT-CLASSIFY，真实切分/实体分类/稳定诊断及隔离三条要求均有 [执行证据](../quality/AxiomKernel_测试与验收方案.md#18-cycle-0081--s4-split-classify-门禁与逐项证据)，repair后完整构建成功、最终全量 **16/16、0失败、173.96 s**。`stage_outcome=ready_for_acceptance`；正式状态只在 [当前进度 §5.2.1](AxiomKernel_当前开发进度.md#521-stage-4-当前退出任务) 维护，调度器最终文档门禁及提交成功后记已验收。不得依据历史remaining、需求权重或新增行数追加无关功能；基础层修复仅限直接阻断项，不自行启动后续阶段。
 
-不重复立项已经完成的骨架、公共存储和基础诊断建设。Geo/Topo/Math/Heal 本轮仅服务 S4-INTERSECTION 的直接阻断项；完整工业布尔仍待 Stage 4 整阶段证据，标准交换为 Stage 5 后续工作。专题计划中的优先级是专题内部顺序。
+不重复立项已经完成的骨架、公共存储和基础诊断建设。Geo/Topo/Math/Heal 本轮仅服务 S4-SPLIT-CLASSIFY 的直接阻断项；完整工业布尔仍待 Stage 4 整阶段证据，标准交换为 Stage 5 后续工作。专题计划中的优先级是专题内部顺序。
 
 阶段可以有提前实现的子路径；开始阶段工作不等于宣布该阶段完成。只有对应退出标准逐条具有证据，才提升完成状态。
 
