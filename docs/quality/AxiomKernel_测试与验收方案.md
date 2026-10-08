@@ -35,7 +35,7 @@
 
 ### 1.2 cycle-0075 / S3-QUERY 门禁与逐项证据
 
-历史 develop/repair 报告记录 `stage_task_id: S3-QUERY`、`stage_outcome: ready_for_acceptance`；当前唯一任务为 cycle-0084 / S5-HEAL（§1.11），本节保留历史证据。该批关闭已声明真实多面体的截面、最近边界和实体距离主链，未扩展后续阶段。依据 [cycle-0075-gates.log](../../.axiom-agent/logs/cycle-0075-gates.log) 与实际 diff：调度器两轮独立配置/完整构建（测试与示例开启、并发 4）；首次 CTest **14/16 通过、2 失败、141.18 s**，Ops 在有向区间旋转验证失败，Query 在实际截面/距离回归失败。repair 翻转负向旋转侧壁并在分配前验证共享边双边反向，修正非等边楔体斜面法向 `(dy,dx,0)`，修正把拒绝创建空体当有效空体的夹具。
+历史 develop/repair 报告记录 `stage_task_id: S3-QUERY`、`stage_outcome: ready_for_acceptance`；当前唯一任务为 cycle-0085 / S5-IO（§1.12），本节保留历史证据。该批关闭已声明真实多面体的截面、最近边界和实体距离主链，未扩展后续阶段。依据 [cycle-0075-gates.log](../../.axiom-agent/logs/cycle-0075-gates.log) 与实际 diff：调度器两轮独立配置/完整构建（测试与示例开启、并发 4）；首次 CTest **14/16 通过、2 失败、141.18 s**，Ops 在有向区间旋转验证失败，Query 在实际截面/距离回归失败。repair 翻转负向旋转侧壁并在分配前验证共享边双边反向，修正非等边楔体斜面法向 `(dy,dx,0)`，修正把拒绝创建空体当有效空体的夹具。
 
 repair 报告另记录三项目标定向构建/并发 CTest **3/3 通过、130.72 s**（Query 2.41 s、Ops 130.71 s、representation/IO 17.52 s）；最终结论采用调度器日志的修复后全量结果，不以定向测试替代完整门禁。
 
@@ -91,7 +91,7 @@ cycle-0076 文档阶段曾完成静态检查：当时 9 个已修改 Markdown �
 
 ### 1.4 cycle-0077 / S3-MODELING 门禁与逐项证据
 
-历史报告记录 `stage_task_id: S3-MODELING`、`stage_outcome: ready_for_acceptance`；当前唯一任务为 cycle-0084 / S5-HEAL（§1.11）。依据实际 diff 与调度器 [cycle-0077-gates.log](../../.axiom-agent/logs/cycle-0077-gates.log)，既有 extrude/revolve/sweep/loft 主路径验收断言补齐，新增真实平面直边 Face thicken。develop 的“尚未执行”只描述开发阶段；以下采用调度器实际结果，无 repair 报告，本轮仅同步文档，没有重建或运行测试。
+历史报告记录 `stage_task_id: S3-MODELING`、`stage_outcome: ready_for_acceptance`；当前唯一任务为 cycle-0085 / S5-IO（§1.12）。依据实际 diff 与调度器 [cycle-0077-gates.log](../../.axiom-agent/logs/cycle-0077-gates.log)，既有 extrude/revolve/sweep/loft 主路径验收断言补齐，新增真实平面直边 Face thicken。develop 的“尚未执行”只描述开发阶段；以下采用调度器实际结果，无 repair 报告，本轮仅同步文档，没有重建或运行测试。
 
 | 调度器门禁 | 实际结果 |
 |---|---|
@@ -142,11 +142,11 @@ cycle-0077 文档阶段曾完成静态检查：9 个当时已修改 Markdown 的
 | 2. topology/rep/provenance/eval 对同一主链结果一致，关联实体有效 | Ops 同函数：owned 壳/面、ExactBRep、面唯一 owner、有效支撑句柄，source_bodies/source_shells/source_faces 及逐面来源存在且区别于新 owned 实体；thicken 来源精确为输入 Face 和原 owner Body；最近点/距离 FaceId/ShellId 属于对应体，`nodes_of_body` 精确绑定，只读查询/转换不改变 dirty/recompute_count。Rep 同函数：相同 bbox/面积/高度的不同三角棱柱及重复几何不同 BodyId 不混用 MeshId；mesh_to_brep 重绑定后原体缓存不能返回重绑定网格。`tests/sdk/kernel_runtime_invariant_test.cpp::stage3_discarded_body_runtime_regression` 核对共享源壳派生体来源与源 owned 面/Strict/网格保留 | 两同 bbox 棱柱 OBJ 质心为 (4/3,1,1) 与 (8/3,2,1)，V=12/A=36；重复体仍有独立 MeshId。五类来源/面归属及 Eval 绑定均通过断言；查询与表示不会主动重算 Eval | Eval recompute 仅为图管理动作，不执行质量/表示算法；metadata/mesh 派生不取得物理查询或解析质量资格。旧 metadata 显示 bbox 代理保留，不属于本批 owned 主链；Rep 的 bbox 分类/距离辅助入口不等同实体精确查询 |
 | 3. 修改/失败/回滚后的拓扑、表示、来源与 Eval 状态一致并有回归 | `tests/eval/query_eval_test.cpp::stage3_eval_rollback_consistency_regression`：非法修改零写入/不脏化，换面/PCurve 绑定传播 bound/downstream 而 unrelated clean；事务内 recompute 后保存点/显式/析构/取消恢复再次 dirty，面/壳/体删除恢复面集/来源/Strict/原网格和查询；成功提交等价 Plane 生成新当前网格，随后失败回滚恢复已提交支撑/网格并再次 dirty。Rep 同函数：warm/cold/full/local/shell 位移支撑拒绝且对象数/next_id/写数/mesh/两级缓存计数不增长，曲面支持拒绝、保存点/整回滚、非法 options、编辑 native box/sphere 无创建参数 fallback。SDK 同函数：保存点/整事务/取消回滚及删除提交移除派生体网格与 Eval 绑定、消费者 dirty、源体保留、mesh/cache 回基线且运行时/Eval 映射不变量成立；Ops 既有 `test_stage3_modeling_failures/test_planar_face_thicken` 保留活动事务原子性与重试 | 恢复棱柱 V=24/A=52、九项惯性等于原值，截面=6、外点最近边界=1、重叠体距离=0。位移支撑 OperationFailed/AXM-TES-E-0001/rep.tessellation.face 且关联目标 FaceId；曲面 NotImplemented/同码/rep.tessellation.support；非法 options InvalidInput/AXM-CORE-E-0002。移除体网格不可查询、绑定不再存在，源网格仍命中 | 旧网格是不可变快照，存活体可保留历史边界缓存，仅当前边界键且 source_body 正确可命中；不承诺事务 ID 回收或 Eval 自动重算。重复保存点无新增写入时不要求再次 dirty；诊断轨迹可增长。topology/assembly 防御阶段已在实现提供，本批不宣称逐分支失败注入穷举 |
 
-公开签名与错误码常量均未新增，仅补合同注释。缓存身份、发布原子性、primitive 编辑资格与事务/Eval 语义见 [API §7.3.1](../api/AxiomKernel_详细模块接口清单.md#731-stage-3-表示来源与-eval-一致性合同cycle-0078--s3-consistency)；质量/查询矩阵及五类主路径边界保持有效。当前S5-HEAL任务正式状态见 [当前进度 §5.2.1](../plan/AxiomKernel_当前开发进度.md#521-stage-5-当前退出任务)。通用曲面/曲边闭壳、相交多壳、全局嵌入证明、大规模加速和后续阶段均不扩展。
+公开签名与错误码常量均未新增，仅补合同注释。缓存身份、发布原子性、primitive 编辑资格与事务/Eval 语义见 [API §7.3.1](../api/AxiomKernel_详细模块接口清单.md#731-stage-3-表示来源与-eval-一致性合同cycle-0078--s3-consistency)；质量/查询矩阵及五类主路径边界保持有效。当前S5-IO任务正式状态见 [当前进度 §5.2.1](../plan/AxiomKernel_当前开发进度.md#521-stage-5-当前退出任务)。通用曲面/曲边闭壳、相交多壳、全局嵌入证明、大规模加速和后续阶段均不扩展。
 
 ### 1.6 cycle-0079 / S3-EXIT 门禁与逐项证据
 
-本节为 Stage 3 历史批次记录，保留当时的门禁及验收条件；当前主线和唯一任务为 Stage 5 / S5-HEAL（§1.11），不由此追认历史提交成功。
+本节为 Stage 3 历史批次记录，保留当时的门禁及验收条件；当前主线和唯一任务为 Stage 5 / S5-IO（§1.12），不由此追认历史提交成功。
 
 `stage_task_id: S3-EXIT`；`stage_outcome: ready_for_acceptance`。依据 [cycle-0079-gates.log](../../.axiom-agent/logs/cycle-0079-gates.log) 与实际 diff：本批增加 17 行统一可执行支持矩阵、门面 smoke 闭环和公开支持边界注释，补强成功/拒绝查询的对象/几何/下一 ID 只读断言，并清理所涉 Topo/Rep 告警。没有新增公开签名、错误码或工业能力；无 repair。develop 报告 tests=[] 是开发阶段未执行，以下为调度器独立执行的实际结果；本次 docs 阶段未重新构建或运行 CTest。
 
@@ -184,7 +184,7 @@ cycle-0077 文档阶段曾完成静态检查：9 个当时已修改 Markdown 的
 
 ### 1.7 cycle-0080 / S4-INTERSECTION 门禁与逐项证据
 
-`stage_task_id=S4-INTERSECTION`，`stage_outcome=ready_for_acceptance`，需求 FR-BOOL-001（进行中），模块 Ops；阶段主线为 [主路线图 §4.5 Stage 4](../plan/AxiomKernel_主开发计划与阶段路线图.md#45-stage-4-布尔与验证器第一代)。这是 cycle-0080 历史退出任务；当前唯一任务为 cycle-0084 / S5-HEAL（§1.11）。本历史包冻结第一代平面直边闭壳的候选/求交准备范围，不认证完整布尔实体闭环。
+`stage_task_id=S4-INTERSECTION`，`stage_outcome=ready_for_acceptance`，需求 FR-BOOL-001（进行中），模块 Ops；阶段主线为 [主路线图 §4.5 Stage 4](../plan/AxiomKernel_主开发计划与阶段路线图.md#45-stage-4-布尔与验证器第一代)。这是 cycle-0080 历史退出任务；当前唯一任务为 cycle-0085 / S5-IO（§1.12）。本历史包冻结第一代平面直边闭壳的候选/求交准备范围，不认证完整布尔实体闭环。
 
 实际依据为 [cycle-0080-gates.log](../../.axiom-agent/logs/cycle-0080-gates.log)、本批实际 diff 与 develop/repair 报告。develop 的 tests=[]/“未执行”已由调度器最终门禁取代；repair 的两个定向回归通过不能代替全量门禁。本次 docs 阶段只读取这些结果，不重新构建或运行测试。
 
@@ -256,7 +256,7 @@ E-0004 各生产拒绝分支已静态核对；本批 workflow 的切分失败注
 
 ### 1.9 cycle-0082 / S4-REBUILD 门禁与逐项证据
 
-`stage_task_id=S4-REBUILD`，`stage_outcome=ready_for_acceptance`；Stage 4 历史重建任务，当前唯一退出任务为 cycle-0084 / S5-HEAL（§1.11），需求FR-BOOL-001 / 模块Ops，阶段与需求保持进行中。目标为受支持模型并/差/交的真实重建、Strict验证及受限可选Safe修复闭环。依据 [cycle-0082-gates.log](../../.axiom-agent/logs/cycle-0082-gates.log)、实际diff（含boolean_rebuild.cpp）与develop/repair报告，三个开发包“尚未运行/继续缓冲”已被最终实际门禁取代。本轮仅同步文档，没有构建或运行测试。
+`stage_task_id=S4-REBUILD`，`stage_outcome=ready_for_acceptance`；Stage 4 历史重建任务，当前唯一退出任务为 cycle-0085 / S5-IO（§1.12），需求FR-BOOL-001 / 模块Ops，阶段与需求保持进行中。目标为受支持模型并/差/交的真实重建、Strict验证及受限可选Safe修复闭环。依据 [cycle-0082-gates.log](../../.axiom-agent/logs/cycle-0082-gates.log)、实际diff（含boolean_rebuild.cpp）与develop/repair报告，三个开发包“尚未运行/继续缓冲”已被最终实际门禁取代。本轮仅同步文档，没有构建或运行测试。
 
 | 门禁 / 回归 | 实际结果 |
 |---|---|
@@ -287,7 +287,7 @@ E-0004 各生产拒绝分支已静态核对；本批 workflow 的切分失败注
 
 ### 1.10 cycle-0083 / S4-EXIT 门禁与逐项证据
 
-`stage_task_id=S4-EXIT`，`stage_outcome=ready_for_acceptance`；Stage 4 历史退出任务，需求 FR-BOOL-001 / 模块 Ops；当前 Stage 5 / S5-HEAL 见 §1.11。依据 [主路线图 §4.5](../plan/AxiomKernel_主开发计划与阶段路线图.md#45-stage-4-布尔与验证器第一代)，本包收口第一代固定工业模型集的稳定布尔、全链路诊断与支持矩阵。本批实际代码 diff 仅修改 `tests/ops/boolean_workflow_test.cpp`、`tests/ops/boolean_prep_test.cpp`；生产代码、公开 API、既有错误码、性能门槛及测试注册均未变，无 repair 报告。开发报告中的“尚未执行/等待统一构建”已由 [cycle-0083-gates.log](../../.axiom-agent/logs/cycle-0083-gates.log) 的实际结果取代，cycle-0082 的 184.89 s 保留为 §1.9 历史结果。本轮文档同步没有重新构建或运行测试。
+`stage_task_id=S4-EXIT`，`stage_outcome=ready_for_acceptance`；Stage 4 历史退出任务，需求 FR-BOOL-001 / 模块 Ops；当前 Stage 5 / S5-IO 见 §1.12。依据 [主路线图 §4.5](../plan/AxiomKernel_主开发计划与阶段路线图.md#45-stage-4-布尔与验证器第一代)，本包收口第一代固定工业模型集的稳定布尔、全链路诊断与支持矩阵。本批实际代码 diff 仅修改 `tests/ops/boolean_workflow_test.cpp`、`tests/ops/boolean_prep_test.cpp`；生产代码、公开 API、既有错误码、性能门槛及测试注册均未变，无 repair 报告。开发报告中的“尚未执行/等待统一构建”已由 [cycle-0083-gates.log](../../.axiom-agent/logs/cycle-0083-gates.log) 的实际结果取代，cycle-0082 的 184.89 s 保留为 §1.9 历史结果。本轮文档同步没有重新构建或运行测试。
 
 | 门禁 / 回归 | 本批实际结果 |
 |---|---|
@@ -318,6 +318,8 @@ E-0004 各生产拒绝分支已静态核对；本批 workflow 的切分失败注
 
 ### 1.11 cycle-0084 / S5-HEAL 门禁与逐项证据
 
+本节保留 S5-HEAL 历史代码门禁及范围；当前唯一退出任务为 cycle-0085 / S5-IO，见 §1.12，不追认本节历史正式验收或提交。
+
 `stage_task_id=S5-HEAL`、`stage_outcome=ready_for_acceptance`；当前主线按 [主路线图 §4.6](../plan/AxiomKernel_主开发计划与阶段路线图.md#46-stage-5-修复导入导出三角化) 为 Stage 5。本节采用 [调度器日志](../../.axiom-agent/logs/cycle-0084-gates.log) 中 repair 后最终全量结果，不沿用 develop 的“未运行”或 repair 定向耗时。日志记录两轮测试/示例开启配置与完整并发 4 构建成功；首轮 **11/16、5 失败、26.25 s**，失败为 Heal、Ops/Heal、IO workflow、Diagnostics、Topology。repair 补 canonical 端点 PCurve 和既有 Generic 真实输出资格，保留子阶段/回滚证据，纠正闭合查询口径及非法 bbox/单面开壳旧成功预期；最终 **16/16、0 失败、214.19 s**。
 
 | 最终调度器门禁 | 真实结果 |
@@ -343,6 +345,34 @@ E-0004 各生产拒绝分支已静态核对；本批 workflow 的切分失败注
 三个只读子 Agent 已全部结束：`/root/api_review` 确认公开签名、受限支持域、观察报告状态与导入样例变化；`/root/diagnostic_review` 确认既有码复用、Heal 子阶段保留/IO 外层阶段映射及回滚/ID 差异；`/root/evidence_review` 确认两轮日志、最终 16/16、两条独立验收证据与矩阵/进度/Backlog 对齐。三者未修改文件、运行构建测试、写 result.json、提交推送或派生 Agent；主 Agent 为唯一文档写者。
 
 本轮主 Agent 静态文档检查：`python3 scripts/check_docs.py` 检查 **35 个 Markdown、0 错误、0 警告**；补充检查 **9 个修改 Markdown、227 个本地链接、168 个标题锚点及代码围栏，0 错误**，`git diff --check` 通过。此为本轮实际文档检查，不是构建/CTest，也不补记为调度器最终文档门禁或提交成功。
+
+### 1.12 cycle-0085 / S5-IO 门禁与逐项证据
+
+`stage_task_id=S5-IO`、`stage_outcome=ready_for_acceptance`；当前主线为 Stage 5，唯一退出任务为本包。依据 [调度器独立门禁日志](../../.axiom-agent/logs/cycle-0085-gates.log) 和实际实现/测试 diff，一轮测试与示例开启的配置、并发 4 完整构建成功，完整 CTest **16/16 通过、0 失败、227.56 s**，无 repair。本轮文档同步未重新构建或运行测试。develop 报告中的“未运行/待统一构建”是旧状态；代码门禁已通过，最终文档门禁及调度器提交成功尚未记录，不能记为正式已验收。
+
+| 调度器门禁 | 真实结果 |
+|---|---|
+| 完整构建 | 成功；实发 SDK `Issue::numeric_evidence` 缺失初始化告警 1 条，不宣称全仓告警清零；构建总耗时未记录 |
+| `axiom_io_workflow_test`（必需） | 通过，14.77 s |
+| `axiom_io_dataset_test`（必需） | 通过，0.70 s |
+| `axiom_representation_io_test`（必需） | 通过，12.23 s |
+| `axiom_ops_heal_test` / `axiom_heal_test` | 通过，182.48 / 0.91 s |
+| `axiom_perf_baseline_test` | 通过，2.00 s；CTest 墙钟，非新增 IO 专用性能认证 |
+| 完整 CTest | 16/16、0 失败、227.56 s |
+
+以下 `stage_evidence` 数组按三条验收要求逐条排列，三项必需回归及保留回归均随上述全量通过：
+
+1. **固定格式闭环、实际几何/拓扑、单位与误差**。`tests/io/io_dataset_test.cpp::check_stage5_fixed_precision_corpus` 使用 `tests/data/io/s5_io_precision_subset.step/.iges/.brep` 与 `s5_io_precision_tetra.stl`，覆盖导入→Standard 验证及可选 auto_repair→导出→再导入；独立文本解析对 double 参数/坐标及 STL 36 个 facet 坐标作精确比较，comma locale 由 RAII 恢复。前三格式固定 origin=(123456.123456789,-1.2345678901234567,3.456789012345679)、params=(2.345678901234568,3.456789012345679,4.567890123456789)，ExactBRep 标签但 **零 owned shells**，不授予真实实体交换资格。`tests/rep/representation_io_test.cpp::stage5_stl_geometry_reference_regression` 对导入及再导入的实际三角形独立积分：边长 2/3/4 的平移四面体 **V=4、A=13+sqrt(244)/2、C=origin+(0.5,0.75,1)**，绝对误差 **1e-12**；4 三角形/12 顶点、`io_import_stl` / MeshRep，与 bbox 体积 24 区分。IO workflow 保留 `check_stage5_import_repair_loop` 和 dirty STEP Aggressive 验证→修复→再验证。**限制**：前三格式为 Axiom 元数据子集，owned 缺陷由测试物化/注入；坐标保留模型单位，未证明标准单位转换、一般工业几何或全实体交换。网格验证不证明闭合/自交，固定积分不泛化到所有 STL。
+
+2. **默认路径与可选标准桥接分开**。当前 `CMakeLists.txt/cmake` 未定义或启用 `AXM_ENABLE_STEP_IGES_BRIDGE`，不新增外部依赖；默认行为等同未启用桥接，不能描述成实际配置了 `BRIDGE=OFF`。本轮不适用 [标准交换路线](../plan/AxiomKernel_STEP_IGES_标准交换实施路线.md) 里程碑 1～4 的 ON 路线 DoD。dataset 保留 `standard_step_express_stub.step` / `standard_iges_deck_stub.iges` 的 NotImplemented、`AXM-IO-E-0010/0011` 与 `AXM-IO-D-0016/0017` 扫描摘要；workflow `check_stage5_io_rejection_boundaries` 核对标准数据混入 Axiom 标记仍优先拒绝、根因/scan 诊断与暖模型不污染；dataset 的合法 IGES Hollerith 长标签不误拒。**限制**：标准检测是启发式物理扫描，Axiom schema/entity 名称、文件容器和代理 bbox 不等于 EXPRESS 或 DE/PD 实体解析；默认完整 16 项门禁保持通过，不强制引入桥接。
+
+3. **损坏/不支持、读写/预算失败阶段诊断及回滚**。workflow `check_stage5_io_rejection_boundaries` 覆盖空/随机/字段截断 STEP、NaN、STEP/IGES/BREP/STL 四格式 **64 MiB+1** sparse 预读预算（`.read`）、STL 缺 endsolid/闭合后垃圾、独立 134 字节 binary NaN 及 1e200 面积溢出（均为 `.validation` / AXM-VAL-E-0010）；核对无 value、阶段/根因码/实体令牌/有限数值、stores/Eval/暖缓存/统计/next_id 不污染及合法固定文件重试。保留 `check_exact_brep_import_failure_package` 和既有读取/损坏/导入回滚。`check_mesh_export_failure_package` 的冷/暖缓存及策略组合证明侧车失败不新建主文件、已有主文件逐字节保留、临时目录清理、mesh/cache/stats/ID/Eval 恢复；边界包为 STEP/IGES/BREP 补目录 `.open`、设备 `.write`、旧目标保护和成功覆盖重试。八格式实现同目录独占临时文件，finish（检查写入/关闭）→请求侧车→rename publish，发布失败复用 `AXM-IO-E-0005 / io.export.<format>.publish` 并回滚本次模型状态；未发布主文件不报成功。**限制**：publish 失败分支由实现静态核验，测试没有独立 rename 竞态失败注入，不单独宣称该分支已运行；侧车沿用 REP 出口，侧车/主文件及全批无跨文件事务，rename 不承诺掉电持久性或并发目录修改安全。
+
+三个只读子 Agent 已全部结束：`/root/api_review` 核实签名/选项冻结、元数据零 owned shells 与 STL 实际参考、模型单位及调用样例范围；`/root/diagnostic_review` 核实稳定根因/阶段、单主文件保护与侧车/全批限制，并指出 publish 无直接失败注入；`/root/evidence_review` 核实一轮真实门禁、三个必需回归时间及阶段/矩阵/进度/Backlog 一致性。三者未修改文件、运行构建测试、写 result.json、提交推送或派生 Agent；主 Agent 是唯一文档写者。
+
+本轮静态文档检查：`python3 scripts/check_docs.py` 检查 **35 个 Markdown、0 错误、0 警告**；补充检查 **12 个修改 Markdown、251 个本地链接、181 个标题锚点及代码围栏，0 错误**；`git diff --check` 通过。此为本轮文档检查，不替代调度器最终文档门禁或提交成功，不是重新构建/CTest。
+
+公开 API 签名及选项冻结，既有错误码复用；支持合同见 [API §11.1.1](../api/AxiomKernel_详细模块接口清单.md#1111-stage-5-受限-io-主链路cycle-0085--s5-io)，文件发布策略见 [IO 矩阵](AxiomKernel_IO_导出策略矩阵.md)。FR-IO-001 保持受限可用，Stage 5 进行中；本轮不反推历史阶段的提交或正式验收，不修改自动开发台账或 `.axiom-agent/`，不写 result.json、不提交推送。
 
 ## 2. 测试总体原则
 

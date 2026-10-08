@@ -170,7 +170,9 @@ Strict warnings 配置 ON；本批重编译 Topo/Rep 的 3 条所涉告警未再
 
 ## 4.6 `Stage 5` 修复、导入导出、三角化
 
-**当前主线：Stage 5；唯一退出任务 cycle-0084 / S5-HEAL。** `stage_task_id=S5-HEAL`、`stage_outcome=ready_for_acceptance`；受限真实平面单壳的导入模型验证→修复→再验证、固定缺陷独立参考与事务回滚重试已有 [两条逐项证据](../quality/AxiomKernel_测试与验收方案.md#111-cycle-0084--s5-heal-门禁与逐项证据)，范围见 [API §9.2.1](../api/AxiomKernel_详细模块接口清单.md#921-stage-5-第一代导入修复闭环cycle-0084--s5-heal)。调度器最终完整构建成功、CTest 16/16、0 失败、214.19 s，必需 Heal/Ops-Heal/IO 1.05/172.05/15.07 s、性能 2.01 s；代码门禁已通过，文档已同步，最终文档门禁及提交成功后才记正式验收。本轮不据此宣称 Stage 5 全工业能力完成，也不反推历史阶段提交/验收。新真实规则仅 Standard 失败的至少六唯一面平面直边单壳外环，无曲面/孔洞/多壳/代理面；标准交换与通用工业修复限制保留。
+**当前主线：Stage 5；唯一退出任务 cycle-0085 / S5-IO。** `stage_task_id=S5-IO`、`stage_outcome=ready_for_acceptance`。固定 STEP/IGES/BREP/STL 的导入→验证/可选修复→导出→再导入、独立数值/实际 STL 几何参考、默认标准拒绝与阶段诊断/失败原子性已有 [三条逐项证据](../quality/AxiomKernel_测试与验收方案.md#112-cycle-0085--s5-io-门禁与逐项证据)及[IO 支持矩阵](../api/AxiomKernel_详细模块接口清单.md#1111-stage-5-受限-io-主链路cycle-0085--s5-io)。调度器完整构建成功，CTest **16/16、0 失败、227.56 s**；必需 IO workflow/dataset/representation_io **14.77/0.70/12.23 s**，性能 **2.00 s**。代码完整门禁已通过、文档本轮同步，清理 develop 的“尚未运行/待统一构建”旧状态；最终文档门禁及调度器提交成功尚未记录，不能记为正式已验收，本轮不提交。FR-IO-001 受限可用，Stage 5 进行中；不反推历史 Stage 3/4 或 S5-HEAL 的提交/验收。阶段任务优先于需求权重、历史 remaining 和新增变体，基础层仅限本任务直接阻断项。
+
+默认 STEP/IGES/BREP 是 Axiom 元数据子集，ExactBRep 标签但零 owned shells；STL 是实际三角网格，固定参考 V=4 而 bbox 体积=24，误差≤1e-12。坐标保留模型单位，不证明标准单位转换或全实体交换。CMake 未定义或启用标准桥接，里程碑 1～4 ON 路线本轮不适用。四格式 64 MiB 读取预算、严格 STEP/STL 损坏拒绝、八格式 classic locale/max_digits10 及同目录临时文件→关闭→请求侧车→rename 发布已落地，失败保护旧主文件并恢复本次 mesh/cache/统计/next_id；glTF float32 等固有限制保留。侧车/全批无跨文件事务，不承诺掉电持久性或并发目录修改安全，publish 失败无直接注入回归。
 
 目标：
 
@@ -303,9 +305,9 @@ Strict warnings 配置 ON；本批重编译 Topo/Rep 的 3 条所涉告警未再
 
 ## 7. 当前立即执行顺序
 
-以[近期迭代与Backlog](AxiomKernel_近期迭代与Backlog.md)为选取顺序真源：当前唯一退出任务 **cycle-0084 / S5-HEAL**，stage_outcome=ready_for_acceptance。固定缺陷与独立几何/位移参考、策略容差/稳定阶段/失败原子性和重试两条证据均随最终16/16、214.19s通过；文档同步后仍须调度器最终文档门禁和提交成功才记正式验收。阶段任务优先于需求权重/历史remaining与新增变体，本轮不提交、不启动后续阶段。
+以[近期迭代与Backlog](AxiomKernel_近期迭代与Backlog.md)为选取顺序真源：当前唯一退出任务为 **cycle-0085 / S5-IO**，`stage_task_id=S5-IO`、`stage_outcome=ready_for_acceptance`。固定 STEP/IGES/BREP/STL 的导入→验证/可选修复→导出→再导入、独立数值/实际 STL 几何参考、默认标准拒绝与阶段诊断/失败原子性已有 [三条逐项证据](../quality/AxiomKernel_测试与验收方案.md#112-cycle-0085--s5-io-门禁与逐项证据)及[IO 支持矩阵](../api/AxiomKernel_详细模块接口清单.md#1111-stage-5-受限-io-主链路cycle-0085--s5-io)。调度器完整构建成功，CTest **16/16、0 失败、227.56 s**；必需 IO workflow/dataset/representation_io **14.77/0.70/12.23 s**，性能 **2.00 s**。代码完整门禁已通过、文档本轮同步，清理 develop 的“尚未运行/待统一构建”旧状态；最终文档门禁及调度器提交成功尚未记录，不能记为正式已验收，本轮不提交。FR-IO-001 受限可用，Stage 5 进行中；不反推历史 Stage 3/4 或 S5-HEAL 的提交/验收。阶段任务优先于需求权重、历史 remaining 和新增变体，基础层仅限本任务直接阻断项。
 
-不重复立项已经完成的骨架、公共存储和基础诊断建设。Geo/Topo/Math/Heal 本轮仅服务 S5-HEAL 直接阻断项；第一代受限平面闭环已有代码退出证据，标准全实体交换、通用曲面/多壳/孔洞修复等仍为独立后续范围。专题计划中的优先级是专题内部顺序。
+不重复立项已经完成的骨架、公共存储和基础诊断建设。Geo/Topo/Math/Heal 本轮仅服务 S5-IO 直接阻断项；第一代受限平面闭环已有代码退出证据，标准全实体交换、通用曲面/多壳/孔洞修复等仍为独立后续范围。专题计划中的优先级是专题内部顺序。
 
 阶段可以有提前实现的子路径；开始阶段工作不等于宣布该阶段完成。只有对应退出标准逐条具有证据，才提升完成状态。
 

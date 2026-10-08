@@ -939,6 +939,41 @@ opts.embed_metadata = true;
 auto exported = kernel.io().export_step(body_id, "/data/out.step", opts);
 ```
 
+### 11.2.1 S5-IO 四格式受限往返与失败处理
+
+`part.step` 必须是 Axiom 元数据子集；标准 STEP 实体仍返回 NotImplemented。IGES/BREP 同样只支持各自 Axiom 子集，STL 为实际三角网格；本例坐标保留模型单位，不执行标准单位转换。以下为调用片段，未单独编译；验证依据是调度器运行的固定数据及 workflow/representation 回归，见 [验收 §1.12](../quality/AxiomKernel_测试与验收方案.md#112-cycle-0085--s5-io-门禁与逐项证据)。
+
+```cpp
+ImportOptions import_opts;
+import_opts.run_validation = true;
+import_opts.auto_repair = true;
+import_opts.repair_mode = RepairMode::Safe;
+ExportOptions export_opts;
+export_opts.embed_metadata = true;
+export_opts.compatibility_mode = false;
+// 对 step/iges/brep/stl 分别提供对应输入与输出路径。
+auto imported = kernel.io().import_auto(input_path, import_opts);
+if (imported.status != StatusCode::Ok || !imported.value) {
+  handle_error(imported); // io.import.* / io.post_import.*；无本次模型残留。
+  return;
+}
+auto exported = kernel.io().export_auto(*imported.value, output_path, export_opts);
+if (exported.status != StatusCode::Ok) {
+  auto report = kernel.diagnostics().get(exported.diagnostic_id);
+  handle_query_error(report); // open/write/sidecar/publish；原主文件受保护。
+  return;
+}
+auto reimported = kernel.io().import_auto(output_path, import_opts);
+if (reimported.status != StatusCode::Ok || !reimported.value) {
+  handle_error(reimported);
+  return;
+}
+auto valid = kernel.validate().validate_all(*reimported.value, ValidationMode::Standard);
+use_if_valid(valid);
+```
+
+四格式读取预算为 64 MiB，超限在 `.read` 失败，STEP 严格容器/字段与 STL 闭合/非有限/溢出拒绝均可由 diagnostic_id 检索。固定三元数据文件证明参数/坐标精确 double 往返及零 owned shells；固定 STL 实际积分 V=4（非 bbox 的24）、面积/质心误差≤1e-12，详见 API §11.1.1。导出文本使用 classic locale/max_digits10，但 glTF float32 等格式能力不因此扩大。四网格格式开启 `write_mesh_validation_report` 时先成功写侧车再发布主文件；侧车可能保留，侧车/主文件及全批不承诺跨文件事务、掉电持久性或并发目录修改安全。发布失败有 `.publish` 合同，但该失败分支未单独注入回归。
+
 ### 精确 B-Rep 文本子集的失败诊断
 
 ```cpp
@@ -956,7 +991,7 @@ if (!imported.value) {
 }
 ```
 
-AXMJSON、Axiom IGES 元数据子集与 Axiom BREP JSON 子集均限 64 MiB，且在分配 `BodyId` 前完成文件、结构、格式、有限数值、包围盒和轴校验。失败不写 Body/Mesh store，修复原文件后可原位重试。AXMJSON 兼容早期仅身份与 bbox 字段的文件，但扩展几何字段一旦出现就必须成组完整。标准 IGES DE 实体仍返回 `NotImplemented`，不会被当成 Axiom 子集物化。
+STEP/STL（cycle-0085）及 AXMJSON、Axiom IGES 元数据子集与 Axiom BREP JSON 子集均限 64 MiB，且在分配 `BodyId` 前完成文件、结构、格式、有限数值、包围盒和轴校验。失败不写 Body/Mesh store，修复原文件后可原位重试。AXMJSON 兼容早期仅身份与 bbox 字段的文件，但扩展几何字段一旦出现就必须成组完整。标准 IGES DE 实体仍返回 `NotImplemented`，不会被当成 Axiom 子集物化。
 
 ## 11.3 导入后修复
 
@@ -999,7 +1034,7 @@ if (!imported_batch.value) {
 }
 ```
 
-`import_many_step` 和 `import_many_auto` 具有相同模型存储原子性；单项实际失败触发整批回滚，诊断证据仍保留。八个具体格式入口的后验验证、自动修复及修复后复验 Error/Fatal 阶段映射为 `io.post_import.validation/repair/post_validate`，保留有限数值证据且不改源 HEAL 报告。`run_validation=true` 的未修复验证失败或修复/再验证失败返回失败且无 value，单项也回滚本次模型/缓存统计/Eval/next_id；ReportOnly/SuggestOnly 不升级为修改策略。`false` 显式跳过闭环，不承诺有效。批量导出不回滚已写文件，普通文本/目录辅助接口尚未纳入本批证据门禁。
+`import_many_step` 和 `import_many_auto` 具有相同模型存储原子性；单项实际失败触发整批回滚，诊断证据仍保留。八个具体格式入口的后验验证、自动修复及修复后复验 Error/Fatal 阶段映射为 `io.post_import.validation/repair/post_validate`，保留有限数值证据且不改源 HEAL 报告。`run_validation=true` 的未修复验证失败或修复/再验证失败返回失败且无 value，单项也回滚本次模型/缓存统计/Eval/next_id；ReportOnly/SuggestOnly 不升级为修改策略。`false` 显式跳过闭环，不承诺有效。批量导出不回滚已成功前项或已写侧车；cycle-0085 八主格式的失败项主文件受单文件发布保护，普通文本/目录辅助接口尚未纳入本批证据门禁。
 
 ### HEAL 修复失败与批量原子性
 

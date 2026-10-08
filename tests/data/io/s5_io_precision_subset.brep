@@ -1,0 +1,21 @@
+# AXIOM_BREP_INTERCHANGE v1
+{
+  "format": "AXIOM_BREP",
+  "label": "s5_io_fixed_model_units",
+  "body_kind": "Box",
+  "origin_x": 123456.123456789,
+  "origin_y": -1.2345678901234567,
+  "origin_z": 3.456789012345679,
+  "axis_x": 0,
+  "axis_y": 0,
+  "axis_z": 1,
+  "param_a": 2.345678901234568,
+  "param_b": 3.456789012345679,
+  "param_c": 4.567890123456789,
+  "bbox_min_x": 123456.123456789,
+  "bbox_min_y": -1.2345678901234567,
+  "bbox_min_z": 3.456789012345679,
+  "bbox_max_x": 123458.46913569025,
+  "bbox_max_y": 2.222221122222222,
+  "bbox_max_z": 8.024679135802469
+}

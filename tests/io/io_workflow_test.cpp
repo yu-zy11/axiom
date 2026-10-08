@@ -346,6 +346,10 @@ bool check_mesh_export_failure_package(const std::filesystem::path& root) {
             const auto face_cache = state->face_tessellation_cache;
             const auto stats = state->tessellation_cache_stats;
             const auto meshes = state->meshes;
+            const auto eval_invalid = state->eval_invalid;
+            const auto eval_recompute = state->eval_recompute_count;
+            const bool target_existed = std::filesystem::is_regular_file(path);
+            const auto original_target = target_existed ? read_text(path) : std::string{};
             const auto counts = std::array {state->bodies.size(), state->shells.size(), state->faces.size(),
                 state->loops.size(), state->coedges.size(), state->edges.size(), state->vertices.size(),
                 state->curves.size(), state->surfaces.size(), state->curve_eval_cache.size(),
@@ -392,9 +396,18 @@ bool check_mesh_export_failure_package(const std::filesystem::path& root) {
                 after.body_cache_stale_evictions != stats.body_cache_stale_evictions ||
                 after.face_cache_hits != stats.face_cache_hits || after.face_cache_misses != stats.face_cache_misses ||
                 after.face_cache_stale_evictions != stats.face_cache_stale_evictions ||
-                read_text(sentinel_path) != sentinel) {
+                state->eval_invalid != eval_invalid || state->eval_recompute_count != eval_recompute ||
+                read_text(sentinel_path) != sentinel ||
+                (target_existed && read_text(path) != original_target) ||
+                (!target_existed && !path.empty() && std::filesystem::is_regular_file(path))) {
                 std::cerr << format.name << " export failure polluted model/cache/file at " << stage << '\n';
                 return false;
+            }
+            for (const auto& entry : std::filesystem::directory_iterator(root)) {
+                if (entry.path().filename().string().rfind(".axiom_export_tmp_",0)==0) {
+                    std::cerr << format.name << " failed export left a temporary payload directory\n";
+                    return false;
+                }
             }
             for (const auto& [id, before] : meshes) {
                 const auto it = state->meshes.find(id);
@@ -448,9 +461,12 @@ bool check_mesh_export_failure_package(const std::filesystem::path& root) {
                     std::filesystem::create_directory(sidecar);
                     if (!check_failure(body, output, axiom::StatusCode::OperationFailed,
                                        axiom::diag_codes::kIoExportFailure, prefix + "sidecar")) return false;
-                    axiom::Kernel reader;
-                    const auto primary = (reader.io().*format.import_file)(output.string(), axiom::ImportOptions {});
-                    if (primary.status != axiom::StatusCode::Ok || !primary.value) return false;
+                    if (std::filesystem::exists(output)) return false;
+                    // An existing output survives the same sidecar failure byte-for-byte.
+                    { std::ofstream existing {output}; existing << sentinel; }
+                    if (!check_failure(body, output, axiom::StatusCode::OperationFailed,
+                                       axiom::diag_codes::kIoExportFailure, prefix + "sidecar") ||
+                        read_text(output) != sentinel) return false;
                     std::filesystem::remove(sidecar);
 #ifdef __linux__
                     std::filesystem::create_symlink("/dev/full", sidecar);
@@ -534,6 +550,190 @@ bool check_mesh_export_failure_package(const std::filesystem::path& root) {
         }
         std::filesystem::remove(output);
         std::filesystem::remove(sidecar);
+    }
+    std::filesystem::remove_all(root);
+    return true;
+}
+
+
+// Reject corrupt subsets and disguised standard entities before materializing
+// a body. The warmed destination detects rollback defects in IDs, Eval and QA
+// caches that an empty-kernel rejection test would miss.
+bool check_stage5_io_rejection_boundaries(const std::filesystem::path& root) {
+    std::filesystem::create_directories(root);
+    const auto data=std::filesystem::path(__FILE__).parent_path().parent_path()/"data"/"io";
+    const auto read=[](const std::filesystem::path& path) {
+        std::ifstream input {path,std::ios::binary};
+        return std::string {std::istreambuf_iterator<char>(input),std::istreambuf_iterator<char>()};
+    };
+    const auto write=[](const std::filesystem::path& path,const std::string& text) {
+        std::ofstream output {path,std::ios::binary}; output<<text;
+    };
+    auto state=std::make_shared<axiom::detail::KernelState>(axiom::KernelConfig{});
+    axiom::IOService io {state};
+    axiom::DiagnosticService diagnostics {state};
+    axiom::PrimitiveService primitives {state};
+    axiom::RepresentationConversionService convert {state};
+    axiom::EvalGraphService eval {state};
+    const auto sentinel=primitives.box({10,20,30},2,3,4);
+    if (!sentinel.value || !convert.brep_to_mesh(*sentinel.value,{}).value ||
+        !eval.register_node(axiom::NodeKind::Analysis,"body:"+std::to_string(sentinel.value->value)).value) return false;
+    const auto sizes=[&] {
+        return std::array {state->bodies.size(),state->shells.size(),state->faces.size(),state->loops.size(),
+            state->coedges.size(),state->edges.size(),state->vertices.size(),state->curves.size(),state->surfaces.size(),
+            state->pcurves.size(),state->meshes.size(),state->curve_eval_cache.size(),state->surface_eval_cache.size()};
+    };
+    const auto before=sizes();
+    const auto next=state->next_id;
+    const auto body_cache=state->tessellation_cache;
+    const auto face_cache=state->face_tessellation_cache;
+    const auto stats=state->tessellation_cache_stats;
+    const auto invalid=state->eval_invalid;
+    const auto recompute=state->eval_recompute_count;
+    const auto unchanged=[&] {
+        const auto& after=state->tessellation_cache_stats;
+        return sizes()==before && state->next_id==next && state->tessellation_cache==body_cache &&
+            state->face_tessellation_cache==face_cache && state->eval_invalid==invalid &&
+            state->eval_recompute_count==recompute && after.body_cache_hits==stats.body_cache_hits &&
+            after.body_cache_misses==stats.body_cache_misses && after.face_cache_hits==stats.face_cache_hits &&
+            after.face_cache_misses==stats.face_cache_misses &&
+            after.body_cache_stale_evictions==stats.body_cache_stale_evictions &&
+            after.face_cache_stale_evictions==stats.face_cache_stale_evictions;
+    };
+    const auto check=[&](const axiom::Result<axiom::BodyId>& result,std::string_view code,std::string_view stage) {
+        const auto report=diagnostics.get(result.diagnostic_id);
+        if (result.status==axiom::StatusCode::Ok || result.value || !report.value || !unchanged()) return false;
+        return std::any_of(report.value->issues.begin(),report.value->issues.end(),[&](const axiom::Issue& issue) {
+            return issue.code==code && issue.stage==stage && issue.severity==axiom::IssueSeverity::Error &&
+                issue.related_entities==std::vector<std::uint64_t>{0} && !issue.numeric_evidence.empty() &&
+                std::all_of(issue.numeric_evidence.begin(),issue.numeric_evidence.end(),[](const auto& item) {
+                    return std::isfinite(item.value);
+                });
+        });
+    };
+    const auto path=root/"damaged.step";
+    axiom::ImportOptions options;
+    options.run_validation=false;
+    const std::string malformed_step[] {
+        "", "plain text is not a STEP file\n",
+        "ISO-10303-21;\nHEADER;\nAXIOM_PARAMS 2 3\nENDSEC;\nDATA;\nENDSEC;\nEND-ISO-10303-21;\n",
+        "ISO-10303-21;\nHEADER;\nAXIOM_PARAMS nope 3 4\nENDSEC;\nDATA;\nENDSEC;\nEND-ISO-10303-21;\n",
+    };
+    for (const auto& text : malformed_step) {
+        write(path,text);
+        for (int retry=0;retry<2;++retry)
+            if (!check(io.import_step(path.string(),options),axiom::diag_codes::kIoCorruptFile,"io.import.step.parse"))
+                return false;
+    }
+    write(path,"ISO-10303-21;\nHEADER;\nAXIOM_BBOX nan 0 0 2 3 4\nENDSEC;\nDATA;\nENDSEC;\nEND-ISO-10303-21;\n");
+    if (!check(io.import_step(path.string(),options),axiom::diag_codes::kValNonFiniteGeometry,
+               "io.import.step.validation")) return false;
+    const auto large=root/"over_budget.step";
+    write(large,"");
+    std::filesystem::resize_file(large,64ULL*1024*1024+1);
+    using Importer = axiom::Result<axiom::BodyId> (axiom::IOService::*)(
+        std::string_view,const axiom::ImportOptions&);
+    struct Format { const char* name; Importer read; const char* fixture; };
+    const Format formats[] {
+        {"step",&axiom::IOService::import_step,"s5_io_precision_subset.step"},
+        {"iges",&axiom::IOService::import_iges,"s5_io_precision_subset.iges"},
+        {"brep",&axiom::IOService::import_brep,"s5_io_precision_subset.brep"},
+        {"stl",&axiom::IOService::import_stl,"s5_io_precision_tetra.stl"},
+    };
+    for (const auto& format : formats)
+        if (!check((io.*format.read)(large.string(),options),axiom::diag_codes::kIoImportFailure,
+                   std::string("io.import.")+format.name+".read")) return false;
+    // Actual standard entities must win over marker strings in both formats.
+    // The fixed reference contains one CARTESIAN_POINT and two IGES D cards.
+    for (const bool step : {true,false}) {
+        const auto source=data/(step ? "standard_step_express_stub.step" : "standard_iges_deck_stub.iges");
+        const auto mixed=root/(step ? "mixed.step" : "mixed.iges");
+        for (const auto* marker : {"AXIOM_LABEL fake subset\n", "/* AxiomKernel export */\n"}) {
+            write(mixed,read(source)+marker);
+            const auto result=step ? io.import_step(mixed.string(),options) : io.import_iges(mixed.string(),options);
+            const auto code=step ? axiom::diag_codes::kIoStepStandardEntitiesUnsupported
+                                 : axiom::diag_codes::kIgesStandardEntitiesUnsupported;
+            const auto scan=step ? axiom::diag_codes::kIoStepStandardFileScanSummary
+                                 : axiom::diag_codes::kIgesStandardFileScanSummary;
+            if (result.status!=axiom::StatusCode::NotImplemented ||
+                !check(result,code,step ? "io.import.step" : "io.import.iges")) return false;
+            const auto report=diagnostics.get(result.diagnostic_id);
+            if (!report.value || !has_issue_code(*report.value,scan)) return false;
+        }
+    }
+    const auto stl=root/"damaged.stl";
+    const auto fixed_stl=read(data/"s5_io_precision_tetra.stl");
+    const auto ending=fixed_stl.rfind("endsolid");
+    if (ending==std::string::npos) return false;
+    for (const auto& text : {fixed_stl.substr(0,ending),fixed_stl+"garbage after closure\n"}) {
+        write(stl,text);
+        if (!check(io.import_stl(stl.string(),options),axiom::diag_codes::kIoImportFailure,"io.import.stl.parse"))
+            return false;
+    }
+    // One little-endian binary facet with a quiet NaN coordinate. Build its
+    // 134 bytes directly so this reference does not call the production writer.
+    std::string binary_stl(134,'\0');
+    const auto put_u32=[&](std::size_t offset,std::uint32_t bits) {
+        for (std::size_t i=0;i<4;++i) binary_stl[offset+i]=static_cast<char>((bits>>(8*i))&0xffU);
+    };
+    put_u32(80,1);       // triangle count
+    put_u32(96,0x7fc00000U);  // first vertex x = quiet NaN
+    put_u32(108,0x3f800000U); // second vertex x = 1
+    put_u32(124,0x3f800000U); // third vertex y = 1
+    write(stl,binary_stl);
+    if (!check(io.import_stl(stl.string(),options),axiom::diag_codes::kValNonFiniteGeometry,
+               "io.import.stl.validation")) return false;
+    write(stl,"solid overflow\nfacet normal 0 0 1\nouter loop\n"
+              "vertex 0 0 0\nvertex 1e200 0 0\nvertex 0 1e200 0\n"
+              "endloop\nendfacet\nendsolid overflow\n");
+    if (!check(io.import_stl(stl.string(),options),axiom::diag_codes::kValNonFiniteGeometry,
+               "io.import.stl.validation")) return false;
+    // Metadata exporters obey the same single-file publication contract as
+    // mesh exporters, including preservation of an already published target.
+    using Exporter = axiom::Result<void> (axiom::IOService::*)(
+        axiom::BodyId,std::string_view,const axiom::ExportOptions&);
+    const std::pair<const char*,Exporter> exporters[] {
+        {"step",&axiom::IOService::export_step},
+        {"iges",&axiom::IOService::export_iges},
+        {"brep",&axiom::IOService::export_brep},
+    };
+    const std::string original="previous published model\n";
+    for (const auto& [name,export_file] : exporters) {
+        const auto target=root/(std::string("preserved.")+name);
+        const auto occupied=root/(std::string("directory.")+name);
+        write(target,original);
+        std::filesystem::create_directory(occupied);
+        write(occupied/"sentinel",original);
+        const auto failure=[&](axiom::BodyId body,const std::filesystem::path& destination,const char* stage) {
+            const auto result=(io.*export_file)(body,destination.string(),{});
+            const auto report=diagnostics.get(result.diagnostic_id);
+            if (result.status==axiom::StatusCode::Ok || !report.value || !unchanged() || read(target)!=original ||
+                read(occupied/"sentinel")!=original) return false;
+            for (const auto& entry : std::filesystem::directory_iterator(root))
+                if (entry.path().filename().string().rfind(".axiom_export_tmp_",0)==0) return false;
+            return std::any_of(report.value->issues.begin(),report.value->issues.end(),[&](const axiom::Issue& issue) {
+                return issue.code==axiom::diag_codes::kIoExportFailure &&
+                    issue.stage==std::string("io.export.")+name+"."+stage &&
+                    issue.related_entities==std::vector<std::uint64_t>{body.value} && !issue.numeric_evidence.empty();
+            });
+        };
+        if (!failure({99999999},target,"input") || !failure(*sentinel.value,occupied,"open")) return false;
+#ifdef __linux__
+        const auto full=root/(std::string("full_metadata.")+name);
+        std::filesystem::create_symlink("/dev/full",full);
+        if (!failure(*sentinel.value,full,"write") || !std::filesystem::is_symlink(full)) return false;
+        std::filesystem::remove(full);
+#endif
+        if ((io.*export_file)(*sentinel.value,target.string(),{}).status!=axiom::StatusCode::Ok ||
+            read(target)==original) return false;
+    }
+    options.run_validation=true;
+    for (const auto& format : formats) {
+        const auto retry_id=state->next_id;
+        const auto bodies=state->bodies.size();
+        const auto retry=(io.*format.read)((data/format.fixture).string(),options);
+        if (!retry.value || retry.status!=axiom::StatusCode::Ok || retry.value->value!=retry_id ||
+            state->bodies.size()!=bodies+1) return false;
     }
     std::filesystem::remove_all(root);
     return true;
@@ -926,6 +1126,11 @@ int main() {
     const auto evidence_root = std::filesystem::temp_directory_path() /
         ("axiom_io_failure_evidence_" + std::to_string(
             std::chrono::steady_clock::now().time_since_epoch().count()));
+    if (!check_stage5_io_rejection_boundaries(evidence_root/"s5_io_rejections")) {
+        std::cerr << "Stage 5 IO subset/standard rejection and rollback regression failed\n";
+        std::filesystem::remove_all(evidence_root);
+        return 1;
+    }
     if (!check_io_failure_evidence_and_batch_rollback(evidence_root)) {
         std::cerr << "IO failure evidence or batch rollback regression\n";
         std::filesystem::remove_all(evidence_root);
