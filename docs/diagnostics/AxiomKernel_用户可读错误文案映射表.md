@@ -177,6 +177,9 @@ cycle-0083 / S4-EXIT冻结既有码和文案语义，重建/验证/修复固定�
 | `AXM-MOD-E-0013` | 直接编辑边界验证失败 | 源或暂存结果未通过Strict，未发布。 | 查看source_validate/validate阶段并核对当前支撑、修剪与索引。 |
 | `AXM-MOD-I-0001` | 真实修改已完成 | 偏置/抽壳/移动面/替换面真实边界通过Strict后发布。 | 从结果当前owned边界查询质量/位置；抽壳保留壁厚按真实Plane间距确定。 |
 
+cycle-0091 / S6-EXIT沿用以上文案和稳定码：固定盒域move→replace→offset后，从同一完整毛坯分别做圆角/倒角/闭腔或单开口抽壳；保留完整祖先，结果终点不能继续六面盒域编辑。终点offset/shell/move为MOD-E-0009/support_gate，再倒角为BLEND-E-0003/blend.chamfer.support_gate；直接拒绝循环覆盖倒角、圆角及单开口抽壳，其他组合不记为逐项注入。圆角Strict与采样OBJ可用，但质量为CORE-E-0004/query.mass_properties.support_gate，无结果，通用实体空间查询仍不支持。建议回到保留的完整毛坯选择独立分支，按诊断检查参数；失败保留源/此前结果、Eval及暖缓存，事务回滚清派生结果并保留源暖网格。[完整支持矩阵](../api/AxiomKernel_详细模块接口清单.md#833-stage-6-固定机械夹具退出支持矩阵cycle-0091--s6-exit)与[诊断证据](AxiomKernel_错误码与诊断码字典.md#cycle-0091--s6-exit-固定机械夹具诊断与隔离证据)保留限制；没有新增文案码或外部工业内核认证。
+
+
 阶段为 `modify.offset.* / modify.shell.* / modify.move_face.* / modify.replace_face.* / modify.delete_face.*`，状态与稳定码见 [字典 §7.7](AxiomKernel_错误码与诊断码字典.md#77-mod-修改模块错误码)。失败没有结果，保留 live ID、源拓扑/来源/索引、Eval 与暖缓存；成功通知输入体及下游 Eval 失效。活动事务回滚清理派生模型、表示与缓存，成功分配 ID 允许空档，诊断可增加。自交拒绝只覆盖认证盒域内塌缩/接触，不提示通过分区域操作即可支持一般曲面。
 
 ## 5.7 查询分析错误

@@ -872,6 +872,91 @@ assert(deleted.status == StatusCode::NotImplemented && !deleted.value);
 
 失败不发布、不消耗live模型ID，源拓扑/来源/索引、Eval和暖缓存保持；成功追加独立Generic/ExactBRep、全部六面逐面对应立即源并通知输入Eval及下游失效。活动事务保存点/完整回滚清派生几何/拓扑/表示/缓存和体绑定，保留源暖Mesh身份，成功ID允许空档、诊断可增加。详细范围和阶段见[API§8.3.2](AxiomKernel_详细模块接口清单.md#832-stage-6-真实直接编辑支持矩阵cycle-0090--s6-direct-edit)及[MOD字典](../diagnostics/AxiomKernel_错误码与诊断码字典.md#77-mod-修改模块错误码)。片段未独立编译；执行证据来自已通过调度器完整16/16门禁的[两条验收证据](../quality/AxiomKernel_测试与验收方案.md#117-cycle-0090--s6-direct-edit-门禁与逐项证据)，参考为解析公式/公开OBJ积分，无外部工业内核认证。本轮文档工作未构建或运行测试。
 
+## 8.4 Stage 6 固定机械夹具（cycle-0091 / S6-EXIT）
+
+以下片段延续已有`kernel`与`handle_error`；使用`axiom`命名空间及`<array>/<optional>/<cmath>/<cassert>`。与实际`stage6_mechanical_fixture`相同，保留原盒、各编辑结果及完整来源祖先，每次从当前结果选择面/边；高级特征是同一最终毛坯的独立终点。片段未独立编译，执行证据来自[调度器完整门禁及两条验收证据](../quality/AxiomKernel_测试与验收方案.md#118-cycle-0091--s6-exit-门禁与逐项证据)，本轮没有重建或运行测试。
+
+```cpp
+auto& topo = kernel.topology().query();
+auto plane_face = [&](BodyId body, int axis, double coordinate) -> FaceId {
+  auto faces = topo.faces_of_body(body);
+  if (!faces.value) return {};
+  for (auto face : *faces.value) {
+    auto bounds = topo.bbox_of_face(face);
+    if (!bounds.value) return {};
+    std::array<double, 3> low {bounds.value->min.x, bounds.value->min.y, bounds.value->min.z};
+    std::array<double, 3> high {bounds.value->max.x, bounds.value->max.y, bounds.value->max.z};
+    if (std::abs(low[axis]-coordinate) < 1e-9 &&
+        std::abs(high[axis]-coordinate) < 1e-9) return face;
+  }
+  return {};
+};
+auto stock = kernel.primitives().box({0,0,0}, 8,5,3);
+auto replacement = kernel.surfaces().make_plane({0,0,4}, {0,0,-1});
+if (!stock.value) { handle_error(stock); return; }
+if (!replacement.value) { handle_error(replacement); return; }
+// 用活动事务覆盖全部派生体；原盒和替换Plane在事务前创建。
+auto writer = kernel.topology().begin_transaction();
+auto moved = kernel.modify().move_face(*stock.value, plane_face(*stock.value,0,8), 1);
+if (!moved.value) { handle_error(moved); return; }
+auto replaced = kernel.modify().replace_face(
+    moved.value->output, plane_face(moved.value->output,2,3), *replacement.value);
+if (!replaced.value) { handle_error(replaced); return; }
+auto offset = kernel.modify().offset_body(replaced.value->output, 0.5, {});
+if (!offset.value) { handle_error(offset); return; }
+auto base = offset.value->output; // [-0.5,9.5] × [-0.5,5.5] × [-0.5,4.5]
+EdgeId selected {};
+auto edges = topo.edges_of_body(base);
+if (!edges.value) { handle_error(edges); return; }
+for (auto edge : *edges.value) {
+  auto endpoints = topo.vertices_of_edge(edge);
+  if (!endpoints.value) { handle_error(endpoints); return; }
+  auto a = topo.point_of_vertex((*endpoints.value)[0]);
+  auto b = topo.point_of_vertex((*endpoints.value)[1]);
+  if (!a.value || !b.value) return;
+  if (std::abs(a.value->x+0.5) < 1e-8 && std::abs(b.value->x+0.5) < 1e-8 &&
+      std::abs(a.value->y+0.5) < 1e-8 && std::abs(b.value->y+0.5) < 1e-8 &&
+      std::abs(a.value->z-b.value->z) > 4.9) selected = edge;
+}
+assert(selected.value != 0);
+auto chamfer = kernel.blends().chamfer_edges(base, std::array{selected}, 0.5);
+if (!chamfer.value) { handle_error(chamfer); return; }
+auto fillet = kernel.blends().fillet_edges(base, std::array{selected}, 0.5);
+if (!fillet.value) { handle_error(fillet); return; }
+auto cavity = kernel.modify().shell_body(base, {}, 0.5);
+if (!cavity.value) { handle_error(cavity); return; }
+auto open = kernel.modify().shell_body(base, std::array{plane_face(base,2,4.5)}, 0.5);
+if (!open.value) { handle_error(open); return; }
+std::array outputs {moved.value->output, replaced.value->output, base,
+                    chamfer.value->output, fillet.value->output,
+                    cavity.value->output, open.value->output};
+for (auto body : outputs) {
+  auto strict = kernel.validate().validate_all(body, ValidationMode::Strict);
+  if (strict.status != StatusCode::Ok) { handle_error(strict); return; }
+  auto mesh = kernel.convert().brep_to_mesh(body, {});
+  if (!mesh.value) { handle_error(mesh); return; }
+}
+auto open_mass = kernel.query().mass_properties(open.value->output);
+if (!open_mass.value) { handle_error(open_mass); return; }
+assert(std::abs(open_mass.value->volume-97.5) < 1e-7);
+assert(std::abs(open_mass.value->area-406.0) < 1e-7);
+assert(std::abs(open_mass.value->centroid.z-1.480769230769) < 1e-7);
+auto curved_mass = kernel.query().mass_properties(fillet.value->output);
+assert(curved_mass.status == StatusCode::NotImplemented && !curved_mass.value);
+// CORE-E-0004 / query.mass_properties.support_gate：网格成功不扩大质量支持域。
+auto continuation = kernel.modify().offset_body(chamfer.value->output, 0.2, {});
+assert(continuation.status == StatusCode::NotImplemented && !continuation.value);
+// MOD-E-0009 / modify.offset.support_gate，源与已有结果保持。
+auto rollback = writer.rollback();
+if (rollback.status != StatusCode::Ok) { handle_error(rollback); return; }
+for (auto body : outputs) assert(topo.has_body(body).value == std::optional{false});
+assert(topo.has_body(*stock.value).value == std::optional{true});
+```
+
+独立参考V/A依次120/158→135/174→180/202→300/280；倒角299.375/≈278.285533906、闭腔120/482、单开口97.5/406。圆角解析Circle/Cylinder与公开OBJ采样积分独立核对，默认5°角预算传播误差，解析V/A不作为质量服务输出。实际回归还验证立即来源、owned网格组件、Modify输入Eval/下游失效与Blend源Eval保持、稳定拒绝、失败缓存/ID隔离、七派生体完整回滚/绑定清理与源暖MeshId保留及重试；保存点由既有Query/Eval回归覆盖。本片段只展示主要调用与部分断言。
+
+仅完整祖先保留的owned轴对齐六Plane闭盒链和独立终点受认证；删除祖先后再Blend、一般曲面/批量/删除补面、终点后续盒域编辑未支持。拒绝循环实际覆盖倒角/圆角/单开口终点的offset/shell/move/chamfer，其他组合不宣称逐项注入。圆角质量/通用实体空间查询及无PCurve面面积仍不支持；无外部工业内核认证。完整限制见[API§8.3.3](AxiomKernel_详细模块接口清单.md#833-stage-6-固定机械夹具退出支持矩阵cycle-0091--s6-exit)。
+
 ## 9. 圆角与倒角样例
 
 ### 9.1 从当前公开边界选平行边（cycle-0088 / S6-BLEND）

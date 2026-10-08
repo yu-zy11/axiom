@@ -381,6 +381,8 @@ cycle-0088 为 E-0003..0006 增加公开常量，并将已有字典中的概念�
 
 回归中 NaN 顶点、proxy 面、悬空 curve 为 E-0003/support_gate，支撑线偏移、反向 coedge、缺失 edge 索引为 E-0006/validation；不要把所有损伤统一解释成几何退化。新 Topo getter 非有限顶点/悬空曲线为 `InvalidTopology / AXM-TOPO-E-0007`，非法或回滚句柄为 `InvalidInput / AXM-CORE-E-0001`，没有 getter 专用阶段。成功/拒绝/回滚断言及真实完整门禁见 [验收 §1.15](../quality/AxiomKernel_测试与验收方案.md#115-cycle-0088--s6-blend-门禁与逐项证据)；不能把防御性 validation 分支都称为已注入全部失败根因。
 
+cycle-0091 / S6-EXIT复用本节既有码与阶段，没有新增生产失败路径或常量。固定夹具从编辑/偏置后的10×6×5完整盒独立生成单边圆角/倒角，成功分别断言`AXM-BLEND-I-0001 / blend.fillet.complete`与`blend.chamfer.complete`；r=6以`OperationFailed / AXM-BLEND-E-0002 / blend.fillet.radius_gate`拒绝，d=1e-8以`DegenerateGeometry / AXM-BLEND-E-0005 / blend.chamfer.geometry_gate`拒绝。倒角/圆角/单开口抽壳终点再次倒角为`NotImplemented / AXM-BLEND-E-0003 / blend.chamfer.support_gate`。圆角质量仍明确`NotImplemented / AXM-CORE-E-0004 / query.mass_properties.support_gate`且无value；解析V/A仅用于采样OBJ参考。夹具保留完整祖先，不认证删除祖先后再Blend；成功Blend保持源Eval，失败隔离和回滚见[本批两条证据](../quality/AxiomKernel_测试与验收方案.md#118-cycle-0091--s6-exit-门禁与逐项证据)。
+
 ## 7.7 `MOD` 修改模块错误码
 
 | 错误码 | 严重级别 | 含义 |
@@ -437,6 +439,21 @@ cycle-0090 / S6-DIRECT-EDIT 新增 `kModMoveFaceInvalid`（E-0012）与 `kModDir
 简码均为 `AXM-MOD-` 前缀。失败Issue关联输入BodyId与目标FaceId；成功额外关联输出BodyId，外层/OpReport的diagnostic_id可查询、检索和JSON导出。源与结果在私有状态Strict验证，历史来源仅暂存隔离后恢复。失败无value、不发布、不消耗live模型ID；源拓扑/来源/索引、事务写数、Eval及暖缓存保持，诊断可增加。成功只追加新记录，登记活动事务范围并通知输入绑定Eval及下游失效。保存点/完整回滚清理派生几何/拓扑/表示/缓存与体Eval绑定，使消费节点失效，保留源暖Mesh身份；成功ID允许空档，累计遥测不承诺回退。
 
 [验收§1.17](../quality/AxiomKernel_测试与验收方案.md#117-cycle-0090--s6-direct-edit-门禁与逐项证据)覆盖输入/支持/数值稳定码与隔离，错误PCurve直接注入move的E-0013/source_validate。`.validate`是生产防御合同；输出随后删面后的Strict失败及回滚恢复不是服务内部结果validate失败注入，不宣称所有E-0013组合已直接注入。
+
+### cycle-0091 / S6-EXIT 固定机械夹具诊断与隔离证据
+
+公开签名、既有码和生产实现均不变，完成阶段沿用`modify.move_face.complete / modify.replace_face.complete / modify.offset.complete / modify.shell.complete`的`AXM-MOD-I-0001`。固定盒链保留完整祖先，结果体逐步对应立即源；不会因本批组合验收扩大一般曲面/删除补面/批量或终点后续操作资格。
+
+| 本批直接注入场景 | StatusCode / 稳定码 | Issue.stage |
+|---|---|---|
+| 倒角/圆角/单开口抽壳终点再偏置/抽壳/移动 | NotImplemented / `AXM-MOD-E-0009` | `modify.offset.support_gate / modify.shell.support_gate / modify.move_face.support_gate` |
+| +Z面移动−5导致盒域塌缩 | DegenerateGeometry / `AXM-MOD-E-0010` | `modify.move_face.geometry_gate` |
+| 负偏置−2.5导致接触/塌缩 | OperationFailed / `AXM-MOD-E-0002` | `modify.offset.self_intersection` |
+| 抽壳厚度2.5过大 | OperationFailed / `AXM-MOD-E-0003` | `modify.shell.thickness` |
+
+本批`stage6_mechanical_fixture::rejected`逐次核对稳定码/阶段/Error、非空诊断及no-value；live ID/拓扑版本、对象/几何计数、事务写数、stock/base当前面边和来源快照、暖缓存计数、Eval桥/重算/clean状态不变，早期派生体及事务sentinel保留。完整writer回滚清7个派生体及全部派生拓扑、整体几何/缓存/网格和体绑定，逐输出抽样Curve/Surface删除；使派生消费者失效，保留源暖MeshId、原拓扑/来源与源Eval，索引/runtime一致且重试成功。成功ID可空档、诊断可增加，累计遥测不承诺倒退。
+
+闭腔终点及replace/fillet续接没有在本批拒绝循环逐项注入；source_validate/validate历史防御分支不因此记为全部根因注入。保存点仍引用既有Query/Eval回归。[两条验收证据](../quality/AxiomKernel_测试与验收方案.md#118-cycle-0091--s6-exit-门禁与逐项证据)记录完整16/16、201.93 s门禁与[支持矩阵](../api/AxiomKernel_详细模块接口清单.md#833-stage-6-固定机械夹具退出支持矩阵cycle-0091--s6-exit)限制；不新增错误码或扩大查询支持域。
 
 ## 7.8 `QUERY` 查询分析错误码
 

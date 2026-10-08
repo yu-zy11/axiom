@@ -37,6 +37,11 @@ public:
     /// partial mesh or replacing the boundary with a bbox/creation-parameter mesh.
     /// Primitive tessellation applies only to unedited native primitives.
     /// Owned planar regions support straight-edge concave outlines and holes.
+    /// Finite trimmed Circle edges on planar caps and cylindrical strips bounded
+    /// by two opposite circular trims and two straight generators share arc
+    /// sampling, including the supported constant-radius box fillet boundary.
+    /// Strips require one four-edge loop without PCurves; this mesh support does
+    /// not extend the solid mass or spatial query services' curved-body domain.
     /// Owned parameter patches require a certified rectangular boundary on a
     /// plane, four-pole bilinear tensor surface, or line-segment swept surface
     /// (including rectangular trims). Tensor splines require degree one, equal

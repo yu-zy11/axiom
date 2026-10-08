@@ -17,6 +17,7 @@
 
 bool offset_shell_regression();
 bool direct_edit_regression();
+bool stage6_exit_regression();
 
 namespace {
 
@@ -5364,6 +5365,7 @@ bool test_stage3_model_query_chain() {
 }  // namespace
 
 int main() {
+    if (!stage6_exit_regression()) return 1;
     if (!offset_shell_regression()) return 1;
     if (!direct_edit_regression()) return 1;
     if (!stage6_blend_geometry_regression()) return 1;
