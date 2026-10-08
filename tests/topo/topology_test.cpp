@@ -18,6 +18,132 @@
 
 namespace {
 
+// S6-BLEND: store corruption cannot turn the box support certificate into a
+// silent repair. Failure consumes diagnostic IDs only, even with a live writer.
+bool stage6_blend_topology_guard_regression() {
+    for (const bool fillet : {true,false}) for (const int defect : {0,1,2,3,4,5}) {
+        auto state = std::make_shared<axiom::detail::KernelState>(axiom::KernelConfig{});
+        axiom::PrimitiveService primitives {state};
+        axiom::BlendService blends {state};
+        axiom::TopologyService topology {state};
+        axiom::DiagnosticService diagnostics {state};
+        axiom::ValidationService validation {state};
+        const auto body = primitives.box({0,0,0},4,5,6);
+        if (!body.value) return false;
+        auto& query = topology.query();
+        const auto faces = query.faces_of_body(*body.value);
+        const auto edges = query.edges_of_body(*body.value);
+        if (!faces.value || !edges.value) return false;
+        const auto face = faces.value->front();
+        const auto loop = state->faces.at(face.value).outer_loop;
+        const auto coedge = state->loops.at(loop.value).coedges.front();
+        const auto edge = state->coedges.at(coedge.value).edge_id;
+        const auto curve = state->edges.at(edge.value).curve_id;
+        const auto vertex = state->edges.at(edge.value).v0;
+        const auto original_edge = state->edges.at(edge.value);
+        const auto original_curve = state->curves.at(curve.value);
+        const auto original_vertex = state->vertices.at(vertex.value);
+        const auto original_coedge = state->coedges.at(coedge.value);
+        const auto original_face = state->faces.at(face.value);
+        const auto original_links = state->edge_to_coedges;
+        if (defect == 0) {
+            state->curves.at(curve.value).origin.x += 0.25;
+            state->curves.at(curve.value).origin.y += 0.25;
+            state->curves.at(curve.value).origin.z += 0.25;
+        }
+        if (defect == 1) state->vertices.at(vertex.value).point.x = std::numeric_limits<double>::quiet_NaN();
+        if (defect == 2) state->coedges.at(coedge.value).reversed = !original_coedge.reversed;
+        if (defect == 3) {
+            state->faces.at(face.value).mass_boundary_proxy = true;
+            // A legacy BlendResult with proxy faces remains outside the real
+            // planar mass path, even after owned chamfer bodies are admitted.
+            const auto original_kind = state->bodies.at(body.value->value).kind;
+            state->bodies.at(body.value->value).kind = axiom::detail::BodyKind::BlendResult;
+            const auto mass = query.body_mass_properties(*body.value);
+            state->bodies.at(body.value->value).kind = original_kind;
+            const auto report = diagnostics.get(mass.diagnostic_id);
+            if (mass.status != axiom::StatusCode::NotImplemented || mass.value || !report.value ||
+                std::none_of(report.value->issues.begin(),report.value->issues.end(),[](const auto& issue) {
+                    return issue.code == axiom::diag_codes::kCoreOperationUnsupported &&
+                           issue.stage == "query.mass_properties.support_gate";
+                })) return false;
+        }
+        if (defect == 4) state->edge_to_coedges.at(edge.value).clear();
+        if (defect == 5) state->edges.at(edge.value).curve_id = axiom::CurveId{std::numeric_limits<std::uint64_t>::max()};
+        const auto missing_vertex = query.point_of_vertex({});
+        const auto missing_edge = query.curve_of_edge({});
+        const auto vertex_diagnostic = diagnostics.get(missing_vertex.diagnostic_id);
+        const auto edge_diagnostic = diagnostics.get(missing_edge.diagnostic_id);
+        if (missing_vertex.status != axiom::StatusCode::InvalidInput || missing_vertex.value ||
+            missing_edge.status != axiom::StatusCode::InvalidInput || missing_edge.value ||
+            !vertex_diagnostic.value || !edge_diagnostic.value ||
+            std::none_of(vertex_diagnostic.value->issues.begin(),vertex_diagnostic.value->issues.end(),[](const auto& issue) {
+                return issue.code == axiom::diag_codes::kCoreInvalidHandle;
+            }) || std::none_of(edge_diagnostic.value->issues.begin(),edge_diagnostic.value->issues.end(),[](const auto& issue) {
+                return issue.code == axiom::diag_codes::kCoreInvalidHandle;
+            })) return false;
+        if (defect == 1) {
+            const auto nonfinite = query.point_of_vertex(vertex);
+            const auto report = diagnostics.get(nonfinite.diagnostic_id);
+            if (nonfinite.status != axiom::StatusCode::InvalidTopology || nonfinite.value || !report.value ||
+                std::none_of(report.value->issues.begin(),report.value->issues.end(),[](const auto& issue) {
+                    return issue.code == axiom::diag_codes::kTopoRelationInconsistent;
+                })) return false;
+        }
+        if (defect == 5) {
+            const auto dangling = query.curve_of_edge(edge);
+            const auto report = diagnostics.get(dangling.diagnostic_id);
+            if (dangling.status != axiom::StatusCode::InvalidTopology || dangling.value || !report.value ||
+                std::none_of(report.value->issues.begin(),report.value->issues.end(),[](const auto& issue) {
+                    return issue.code == axiom::diag_codes::kTopoRelationInconsistent;
+                })) return false;
+        }
+        auto transaction = topology.begin_transaction();
+        const auto sentinel = transaction.create_vertex({50,51,52});
+        if (!sentinel.value) return false;
+        const auto next_id = state->next_id, next_version = state->next_version;
+        const auto writes = transaction.write_operation_count().value;
+        const auto sizes = std::array{state->vertices.size(),state->edges.size(),state->coedges.size(),
+            state->loops.size(),state->faces.size(),state->shells.size(),state->bodies.size(),state->curves.size(),
+            state->surfaces.size(),state->meshes.size(),state->curve_eval_cache.size(),state->surface_eval_cache.size(),
+            state->tessellation_cache.size(),state->face_tessellation_cache.size()};
+        const auto links = state->edge_to_coedges;
+        const auto owners = state->face_to_shells;
+        const auto allocations = state->topology_service_allocation_ranges;
+        const auto rejected = fillet ? blends.fillet_edges(*body.value,std::array{edge},0.4)
+                                    : blends.chamfer_edges(*body.value,std::array{edge},0.4);
+        const auto diagnostic = diagnostics.get(rejected.diagnostic_id);
+        const bool support_failure = defect == 1 || defect == 3 || defect == 5;
+        if (rejected.status == axiom::StatusCode::Ok || rejected.value || !diagnostic.value ||
+            std::none_of(diagnostic.value->issues.begin(),diagnostic.value->issues.end(),[&](const auto& issue) {
+                return issue.code == (support_failure ? axiom::diag_codes::kBlendUnsupportedGeometry : axiom::diag_codes::kBlendTopologyFailure) &&
+                    issue.stage == std::string(fillet ? "blend.fillet." : "blend.chamfer.")+
+                        (support_failure ? "support_gate" : "validation");
+            }) || state->next_id != next_id || state->next_version != next_version ||
+            transaction.write_operation_count().value != writes ||
+            transaction.has_created_vertex(*sentinel.value).value != std::optional<bool>{true} ||
+            state->topology_service_allocation_ranges != allocations || state->edge_to_coedges != links ||
+            state->face_to_shells != owners || sizes != std::array{state->vertices.size(),state->edges.size(),state->coedges.size(),
+                state->loops.size(),state->faces.size(),state->shells.size(),state->bodies.size(),state->curves.size(),
+                state->surfaces.size(),state->meshes.size(),state->curve_eval_cache.size(),state->surface_eval_cache.size(),
+                state->tessellation_cache.size(),state->face_tessellation_cache.size()}) {
+            std::cerr << "Stage 6 topology guard fillet=" << fillet << " defect=" << defect << '\n';
+            return false;
+        }
+        state->edges.at(edge.value) = original_edge;
+        state->curves.at(curve.value) = original_curve;
+        state->vertices.at(vertex.value) = original_vertex;
+        state->coedges.at(coedge.value) = original_coedge;
+        state->faces.at(face.value) = original_face;
+        state->edge_to_coedges = original_links;
+        if (transaction.rollback().status != axiom::StatusCode::Ok ||
+            validation.validate_all(*body.value,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok ||
+            query.point_of_vertex(*sentinel.value).value) return false;
+    }
+    return true;
+}
+
+
 bool has_issue_code(const axiom::DiagnosticReport& report, std::string_view code) {
     for (const auto& issue : report.issues) {
         if (issue.code == code) {
@@ -52,6 +178,7 @@ bool issue_links_entities(const axiom::DiagnosticReport& report, std::string_vie
 }  // namespace
 
 int main() {
+    if (!stage6_blend_topology_guard_regression()) return 1;
     static_assert(!std::is_copy_constructible_v<axiom::TopologyTransaction>);
     static_assert(!std::is_copy_assignable_v<axiom::TopologyTransaction>);
     static_assert(std::is_move_constructible_v<axiom::TopologyTransaction>);

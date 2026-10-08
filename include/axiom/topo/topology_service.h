@@ -238,6 +238,10 @@ public:
     explicit TopologyQueryService(std::shared_ptr<detail::KernelState> state);
 
     Result<std::array<VertexId, 2>> vertices_of_edge(EdgeId edge_id) const;
+    /// 返回当前顶点坐标；不分配模型对象或修改几何求值缓存。
+    Result<Point3> point_of_vertex(VertexId vertex_id) const;
+    /// 返回边的三维支撑曲线；裁剪区间由 edge_curve_interval 查询。
+    Result<CurveId> curve_of_edge(EdgeId edge_id) const;
     Result<std::vector<CoedgeId>> coedges_of_edge(EdgeId edge_id) const;
     Result<std::vector<LoopId>> loops_of_edge(EdgeId edge_id) const;
     Result<std::vector<FaceId>> faces_of_edge(EdgeId edge_id) const;

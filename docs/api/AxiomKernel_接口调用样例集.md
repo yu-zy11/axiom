@@ -770,29 +770,81 @@ auto healed = kernel.modify().delete_face_and_heal(body_id, target_face);
 
 ## 9. 圆角与倒角样例
 
-## 9.1 常半径圆角
+### 9.1 从当前公开边界选平行边（cycle-0088 / S6-BLEND）
+
+以下片段延续已创建的 `kernel`；使用 4×5×6 轴对齐盒的四条 Z 向凸边，半径/退让距离均为 0.4，退让区互不干涉。X/Y 轴同样支持。选择和核验使用公开查询；所需标准头包括 `<vector>`、`<cmath>`、`<cassert>`。
 
 ```cpp
-std::vector<EdgeId> edges = {edge_1, edge_2, edge_3};
-auto fillet = kernel.blends().fillet_edges(body_id, edges, 3.0);
-```
-
-## 9.2 倒角
-
-```cpp
-auto chamfer = kernel.blends().chamfer_edges(body_id, edges, 2.0);
-```
-
-## 9.3 圆角失败处理建议
-
-```cpp
-if (fillet.status != StatusCode::Ok) {
-  auto diag = kernel.diagnostics().get(fillet.diagnostic_id);
-  if (contains_issue(diag, "AXM-BLEND-E-0002")) {
-    suggest_user("请减小圆角半径");
-  }
+auto source = kernel.primitives().box({0,0,0}, 4,5,6);
+if (!source.value) { handle_error(source); return; }
+auto& topo = kernel.topology().query();
+auto source_edges = topo.edges_of_body(*source.value);
+if (!source_edges.value) { handle_error(source_edges); return; }
+std::vector<EdgeId> edges;
+for (auto edge : *source_edges.value) {
+  auto vertices = topo.vertices_of_edge(edge);
+  if (!vertices.value) { handle_error(vertices); return; }
+  auto a = topo.point_of_vertex((*vertices.value)[0]);
+  auto b = topo.point_of_vertex((*vertices.value)[1]);
+  if (!a.value || !b.value) { return; }
+  if (std::abs(a.value->x-b.value->x) < 1e-12 &&
+      std::abs(a.value->y-b.value->y) < 1e-12 &&
+      std::abs(a.value->z-b.value->z) > 5.0) edges.push_back(edge);
 }
+assert(edges.size() == 4);
+// 可选 1–4 条同轴平行边；每次从同一 source 生成独立结果。
+auto fillet = kernel.blends().fillet_edges(*source.value, edges, 0.4);
+if (!fillet.value) { handle_error(fillet); return; }
+auto fillet_strict = kernel.validate().validate_all(
+    fillet.value->output, ValidationMode::Strict);
+if (fillet_strict.status != StatusCode::Ok) { handle_error(fillet_strict); return; }
 ```
+
+### 9.2 公开核对真实圆弧及倒角
+
+```cpp
+auto rounded_edges = topo.edges_of_body(fillet.value->output);
+if (!rounded_edges.value) { handle_error(rounded_edges); return; }
+std::size_t arc_count = 0;
+for (auto edge : *rounded_edges.value) {
+  auto curve = topo.curve_of_edge(edge);
+  auto interval = topo.edge_curve_interval(edge);
+  if (!curve.value || !interval.value) { return; }
+  if (!*interval.value) continue;  // 兼容直边可无显式区间
+  const auto range = **interval.value;
+  auto mid = kernel.curve_service().eval(
+      *curve.value, (range.start_parameter+range.end_parameter)/2, 2);
+  if (!mid.value) { handle_error(mid); return; }
+  if (std::abs(mid.value->curvature) < 1e-12) continue;
+  ++arc_count;
+  auto length = topo.edge_length(edge);
+  assert(length.value);
+  assert(std::abs(mid.value->curvature-1/0.4) < 1e-8);
+  assert(std::abs(*length.value-std::acos(-1.0)*0.4/2) < 1e-8);
+}
+assert(arc_count == 8);  // 每条圆角棱边两端各有一个四分之一圆弧
+
+// 倒角仍调用原 source；distance 是邻接平面的退让距离。
+auto chamfer = kernel.blends().chamfer_edges(*source.value, edges, 0.4);
+if (!chamfer.value) { handle_error(chamfer); return; }
+auto chamfer_strict = kernel.validate().validate_all(
+    chamfer.value->output, ValidationMode::Strict);
+if (chamfer_strict.status != StatusCode::Ok) { handle_error(chamfer_strict); return; }
+auto mass = kernel.query().mass_properties(chamfer.value->output);
+if (!mass.value) { handle_error(mass); return; }
+const double section = 4*5-4*0.4*0.4/2;
+const double perimeter = 2*(4+5)+4*(std::sqrt(2.0)-2)*0.4;
+assert(std::abs(mass.value->volume-6*section) < 1e-8);
+assert(std::abs(mass.value->area-(2*section+6*perimeter)) < 1e-8);
+```
+
+斜面边宽为 `sqrt(2)*0.4`。`surface_of_face` 可取得真实 Cylinder/Plane 支撑，独立曲率与端点切触检查见 [验收 §1.15](../quality/AxiomKernel_测试与验收方案.md#115-cycle-0088--s6-blend-门禁与逐项证据)。getter 只读不分配模型对象或写几何缓存，诊断与读审计可增长。圆角体通用质量/实体空间查询及无 PCurve 面面积不支持；圆角质量明确返回 NotImplemented、无 value 与 `query.mass_properties.support_gate`，不能照用上述倒角积分参考。
+
+### 9.3 失败与回滚
+
+失败使用 `diagnostic_id` 查询 `Issue.code/stage`，前缀为 `blend.fillet.` 或 `blend.chamfer.`：input_gate/E-0001 检查输入，support_gate/E-0003 检查当前边界，intersection_gate/E-0004 拒绝非平行边与角区，radius_gate 或 distance_gate/E-0002 表示退让接触/重叠，geometry_gate/E-0005 表示容差或浮点退化，validation/E-0006 表示 Strict 失败。成功为 complete/I-0001；具体文案见 [字典 §7.6](../diagnostics/AxiomKernel_错误码与诊断码字典.md#76-blend-圆角倒角错误码)。
+
+失败无输出，不改变源模型、ID、索引、Eval 或暖缓存。成功输出由活动事务登记，保存点及完整 writer 回滚清理派生几何/缓存并保留源暖缓存；已成功分配的 ID 不承诺复用。仅支持当前完整轴对齐矩形闭壳及互不干涉平行凸边；一般曲面、连续二次圆角、变半径/变距未支持，不能对 fillet 输出继续倒角并期待成功。调度器最终完整 CTest 16/16、200.33 s 通过，本片段为文档样例，本轮未编译运行样例。
 
 ## 10. 查询与分析样例
 

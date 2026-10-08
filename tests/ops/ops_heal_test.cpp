@@ -4,6 +4,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <span>
@@ -15,6 +16,235 @@
 #include "axiom/sdk/kernel.h"
 
 namespace {
+
+// Stage 6: inspect actual public topology and independently evaluate the
+// quarter-circle construction; no creation metadata or bounding-box oracle.
+bool stage6_blend_geometry_regression() {
+    const double pi = std::acos(-1.0);
+    const auto xyz = [](const axiom::Point3& p) { return std::array{p.x,p.y,p.z}; };
+    for (const int axis : {0,1,2}) for (const int count : {1,2,3,4}) for (const int first_corner : {0,1,2,3}) {
+        if (count != 1 && first_corner != 0) continue;
+        axiom::Kernel kernel;
+        const double scale = axis == 0 ? 0.1 : axis == 1 ? 1.0 : 10.0;
+        const axiom::Point3 origin {-7*scale,11*scale,-3*scale};
+        const std::array dimensions {4*scale,5*scale,6*scale};
+        const double radius = 0.4*scale, epsilon = 1e-8*scale;
+        const int u = (axis+1)%3, v = (axis+2)%3;
+        const auto low = xyz(origin);
+        const auto source = kernel.primitives().box(origin,dimensions[0],dimensions[1],dimensions[2]);
+        const auto fail = [&](int line) {
+            std::cerr << "Stage 6 blend geometry axis=" << axis << " corners=" << count << " line=" << line << '\n';
+            return false;
+        };
+        if (!source.value) return fail(__LINE__);
+        auto& query = kernel.topology().query();
+        const auto source_edges = query.edges_of_body(*source.value);
+        const auto source_faces = query.faces_of_body(*source.value);
+        if (!source_edges.value || !source_faces.value) return fail(__LINE__);
+        std::array<axiom::EdgeId,4> corners {};
+        for (const auto edge : *source_edges.value) {
+            const auto endpoints = query.vertices_of_edge(edge);
+            if (!endpoints.value) return fail(__LINE__);
+            const auto a = query.point_of_vertex((*endpoints.value)[0]);
+            const auto b = query.point_of_vertex((*endpoints.value)[1]);
+            if (!a.value || !b.value) return fail(__LINE__);
+            const auto p = xyz(*a.value), q = xyz(*b.value);
+            if (std::abs(p[axis]-q[axis]) < dimensions[axis]/2) continue;
+            const int corner = (p[u] > low[u]+dimensions[u]/2 ? 1 : 0) +
+                               (p[v] > low[v]+dimensions[v]/2 ? 2 : 0);
+            corners[corner] = edge;
+        }
+        std::vector<axiom::EdgeId> selected {corners[first_corner]};
+        std::vector<int> selected_corners {first_corner};
+        if (count >= 2) { selected.push_back(corners[3]); selected_corners.push_back(3); }
+        if (count == 3) { selected.push_back(corners[1]); selected_corners.push_back(1); }
+        if (count == 4) { selected.push_back(corners[1]); selected.push_back(corners[2]); selected_corners.insert(selected_corners.end(),{1,2}); }
+        if (std::any_of(selected.begin(),selected.end(),[](auto edge) { return edge.value == 0; })) return fail(__LINE__);
+        for (const bool fillet : {true,false}) {
+            const auto result = fillet ? kernel.blends().fillet_edges(*source.value,selected,radius)
+                                       : kernel.blends().chamfer_edges(*source.value,selected,radius);
+            const auto diagnostic = kernel.diagnostics().get(result.diagnostic_id);
+            if (result.status != axiom::StatusCode::Ok || !result.value || result.value->output == *source.value ||
+                !result.value->warnings.empty() || !diagnostic.value ||
+                std::none_of(diagnostic.value->issues.begin(),diagnostic.value->issues.end(),[&](const auto& issue) {
+                    return issue.stage == (fillet ? "blend.fillet.complete" : "blend.chamfer.complete");
+                })) return fail(__LINE__);
+            const auto body = result.value->output;
+            const auto edges = query.edges_of_body(body);
+            const auto faces = query.faces_of_body(body);
+            const auto vertices = query.vertex_count_of_body(body);
+            const auto boundary_edges = query.boundary_edge_count_of_body(body);
+            const auto non_manifold_edges = query.non_manifold_edge_count_of_body(body);
+            const auto strict = kernel.validate().validate_all(body,axiom::ValidationMode::Strict);
+            const auto current_source_edges = query.edges_of_body(*source.value);
+            const auto current_source_faces = query.faces_of_body(*source.value);
+            if (!edges.value || !faces.value || edges.value->size() != 12+3*count || faces.value->size() != 6+count ||
+                vertices.value != std::optional<std::uint64_t>{static_cast<std::uint64_t>(8+2*count)} ||
+                // This legacy query counts edges owned by one shell, rather
+                // than edges with an unmatched face use. Check closure below.
+                boundary_edges.value != std::optional<std::uint64_t>{static_cast<std::uint64_t>(12+3*count)} ||
+                non_manifold_edges.value != std::optional<std::uint64_t>{0} ||
+                strict.status != axiom::StatusCode::Ok ||
+                current_source_edges.value != source_edges.value ||
+                current_source_faces.value != source_faces.value) {
+                std::cerr << "Stage 6 blend boundary fillet=" << fillet << " first_corner=" << first_corner
+                          << " vertices=" << vertices.value.value_or(0)
+                          << " edges=" << (edges.value ? edges.value->size() : 0)
+                          << " faces=" << (faces.value ? faces.value->size() : 0)
+                          << " boundary_edges=" << boundary_edges.value.value_or(std::numeric_limits<std::uint64_t>::max())
+                          << " non_manifold_edges=" << non_manifold_edges.value.value_or(std::numeric_limits<std::uint64_t>::max())
+                          << " Strict=" << static_cast<int>(strict.status)
+                          << " source_edges_same=" << (current_source_edges.value == source_edges.value)
+                          << " source_faces_same=" << (current_source_faces.value == source_faces.value) << '\n';
+                const auto report = kernel.diagnostics().get(strict.diagnostic_id);
+                if (report.value) for (const auto& issue : report.value->issues)
+                    std::cerr << issue.stage << " " << issue.code << " " << issue.message << '\n';
+                return fail(__LINE__);
+            }
+            std::size_t arc_count = 0, cylinder_count = 0;
+            std::vector<axiom::Point3> arc_midpoints;
+            for (const auto edge : *edges.value) {
+                if (query.coedge_count_of_edge(edge).value != std::optional<std::uint64_t>{2}) return fail(__LINE__);
+                const auto uses = query.coedges_of_edge(edge);
+                const auto adjacent = query.faces_of_edge(edge);
+                const auto endpoints = query.vertices_of_edge(edge);
+                if (!uses.value || uses.value->size() != 2 || (*uses.value)[0] == (*uses.value)[1] ||
+                    !adjacent.value || adjacent.value->size() != 2 || (*adjacent.value)[0] == (*adjacent.value)[1] ||
+                    !endpoints.value || query.owner_count_of_edge(edge).value != std::optional<std::uint64_t>{1})
+                    return fail(__LINE__);
+                // The public loop vertex order records each coedge's directed
+                // start. Require exactly two face uses, with opposite ends.
+                std::array<axiom::VertexId,2> starts {}, ends {};
+                for (std::size_t face_index = 0; face_index < 2; ++face_index) {
+                    const auto loops = query.loops_of_face((*adjacent.value)[face_index]);
+                    if (!loops.value || loops.value->size() != 1) return fail(__LINE__);
+                    const auto loop_edges = query.edges_of_loop(loops.value->front());
+                    const auto loop_vertices = query.vertices_of_loop(loops.value->front());
+                    if (!loop_edges.value || !loop_vertices.value || loop_edges.value->size() != loop_vertices.value->size() ||
+                        std::count(loop_edges.value->begin(),loop_edges.value->end(),edge) != 1) return fail(__LINE__);
+                    const auto index = static_cast<std::size_t>(std::find(loop_edges.value->begin(),loop_edges.value->end(),edge)-
+                                                               loop_edges.value->begin());
+                    starts[face_index] = (*loop_vertices.value)[index];
+                    ends[face_index] = (*loop_vertices.value)[(index+1)%loop_vertices.value->size()];
+                    if (!((starts[face_index] == (*endpoints.value)[0] && ends[face_index] == (*endpoints.value)[1]) ||
+                          (starts[face_index] == (*endpoints.value)[1] && ends[face_index] == (*endpoints.value)[0])))
+                        return fail(__LINE__);
+                }
+                if (starts[0] != ends[1] || ends[0] != starts[1]) return fail(__LINE__);
+                const auto curve = query.curve_of_edge(edge);
+                const auto interval = query.edge_curve_interval(edge);
+                if (!curve.value || !interval.value) return fail(__LINE__);
+                if (!*interval.value) continue;
+                const auto range = **interval.value;
+                const auto mid = kernel.curve_service().eval(*curve.value,(range.start_parameter+range.end_parameter)/2,2);
+                if (!mid.value) return fail(__LINE__);
+                if (std::abs(mid.value->curvature) < 1e-12) continue;
+                ++arc_count;
+                const auto length = query.edge_length(edge);
+                if (!fillet || !length.value || std::abs(*length.value-radius*pi/2) > epsilon ||
+                    std::abs(mid.value->curvature-1/radius) > 1e-8/radius) return fail(__LINE__);
+                const auto p = xyz(mid.value->point);
+                bool matched = false;
+                for (const int corner : selected_corners) {
+                    const double su = (corner&1) ? -1.0 : 1.0, sv = (corner&2) ? -1.0 : 1.0;
+                    const double cu = low[u]+((corner&1) ? dimensions[u]-radius : radius);
+                    const double cv = low[v]+((corner&2) ? dimensions[v]-radius : radius);
+                    // Independent 45-degree point, circle radius and tangent.
+                    if (std::abs(p[u]-(cu-su*radius/std::sqrt(2.0))) > epsilon ||
+                        std::abs(p[v]-(cv-sv*radius/std::sqrt(2.0))) > epsilon) continue;
+                    const auto t = mid.value->tangent;
+                    const std::array tangent {t.x,t.y,t.z};
+                    if (std::abs(std::hypot(p[u]-cu,p[v]-cv)-radius) > epsilon ||
+                        std::abs(tangent[u]*(p[u]-cu)+tangent[v]*(p[v]-cv)) > epsilon ||
+                        std::abs(tangent[axis]) > epsilon) return fail(__LINE__);
+                    for (const double parameter : {range.start_parameter,range.end_parameter}) {
+                        const auto end = kernel.curve_service().point_at_parameter(*curve.value,parameter);
+                        if (!end.value) return fail(__LINE__);
+                        const auto ep = xyz(*end.value);
+                        if (std::abs(std::hypot(ep[u]-cu,ep[v]-cv)-radius) > epsilon ||
+                            std::abs((ep[u]-cu)*(ep[v]-cv)) > epsilon*radius) return fail(__LINE__);
+                    }
+                    matched = true;
+                    break;
+                }
+                if (!matched) return fail(__LINE__);
+                arc_midpoints.push_back(mid.value->point);
+            }
+            if (arc_count != (fillet ? 2u*count : 0u)) return fail(__LINE__);
+            for (const auto face : *faces.value) {
+                const auto surface = query.surface_of_face(face);
+                if (!surface.value) return fail(__LINE__);
+                const auto evaluated = kernel.surface_service().eval(*surface.value,0,0,2);
+                if (!evaluated.value) return fail(__LINE__);
+                const double curvature = std::max(std::abs(evaluated.value->k1),std::abs(evaluated.value->k2));
+                if (curvature < 1e-12) continue;
+                ++cylinder_count;
+                if (!fillet || std::abs(curvature-1/radius) > 1e-8/radius ||
+                    std::min(std::abs(evaluated.value->k1),std::abs(evaluated.value->k2)) > 1e-8/radius) return fail(__LINE__);
+                // Each real quarter-cylinder contains both corresponding cap arc
+                // midpoints; closest_point independently solves its analytic surface.
+                int matches = 0;
+                for (const auto point : arc_midpoints) {
+                    const auto closest = kernel.surface_service().closest_point(*surface.value,point);
+                    if (!closest.value) return fail(__LINE__);
+                    const auto p = xyz(point), q = xyz(*closest.value);
+                    if (std::hypot(std::hypot(p[0]-q[0],p[1]-q[1]),p[2]-q[2]) < epsilon) ++matches;
+                }
+                if (matches != 2) return fail(__LINE__);
+            }
+            if (cylinder_count != (fillet ? static_cast<std::size_t>(count) : 0u)) return fail(__LINE__);
+            if (fillet) {
+                // The planar chamfer mass path must not approximate a curved
+                // fillet boundary as a polyhedron or a creation-time box.
+                const auto mass = kernel.query().mass_properties(body);
+                const auto report = kernel.diagnostics().get(mass.diagnostic_id);
+                if (mass.status != axiom::StatusCode::NotImplemented || mass.value || !report.value ||
+                    std::none_of(report.value->issues.begin(),report.value->issues.end(),[](const auto& issue) {
+                        return issue.code == axiom::diag_codes::kCoreOperationUnsupported &&
+                               issue.stage == "query.mass_properties.support_gate";
+                    })) return fail(__LINE__);
+            }
+            if (!fillet) {
+                const auto mass = kernel.query().mass_properties(body);
+                const double section = dimensions[u]*dimensions[v]-count*radius*radius/2;
+                const double perimeter = 2*(dimensions[u]+dimensions[v])+count*(std::sqrt(2.0)-2)*radius;
+                if (!mass.value || std::abs(mass.value->volume-section*dimensions[axis]) > 1e-8*scale*scale*scale ||
+                    std::abs(mass.value->area-(2*section+perimeter*dimensions[axis])) > 1e-8*scale*scale) {
+                    std::cerr << std::setprecision(17) << "Stage 6 chamfer mass first_corner=" << first_corner
+                              << " status=" << static_cast<int>(mass.status) << " has_value=" << mass.value.has_value()
+                              << " volume=" << (mass.value ? mass.value->volume : 0)
+                              << " expected_volume=" << section*dimensions[axis]
+                              << " area=" << (mass.value ? mass.value->area : 0)
+                              << " expected_area=" << 2*section+perimeter*dimensions[axis] << '\n';
+                    const auto report = kernel.diagnostics().get(mass.diagnostic_id);
+                    if (report.value) for (const auto& issue : report.value->issues)
+                        std::cerr << issue.stage << " " << issue.code << " " << issue.message << '\n';
+                    return fail(__LINE__);
+                }
+                for (const int corner : selected_corners) for (const bool upper : {false,true}) {
+                    int found = 0;
+                    for (const auto edge : *edges.value) {
+                        const auto endpoints = query.vertices_of_edge(edge);
+                        if (!endpoints.value) return fail(__LINE__);
+                        const auto a = query.point_of_vertex((*endpoints.value)[0]), b = query.point_of_vertex((*endpoints.value)[1]);
+                        if (!a.value || !b.value) return fail(__LINE__);
+                        const auto p = xyz(*a.value), q = xyz(*b.value);
+                        const double z = low[axis]+(upper ? dimensions[axis] : 0);
+                        const double cu = low[u]+((corner&1) ? dimensions[u] : 0);
+                        const double cv = low[v]+((corner&2) ? dimensions[v] : 0);
+                        if (std::abs(p[axis]-z)>epsilon || std::abs(q[axis]-z)>epsilon) continue;
+                        if (std::abs(std::abs(p[u]-cu)+std::abs(p[v]-cv)-radius)<epsilon &&
+                            std::abs(std::abs(q[u]-cu)+std::abs(q[v]-cv)-radius)<epsilon &&
+                            std::abs(std::hypot(p[u]-q[u],p[v]-q[v])-radius*std::sqrt(2.0))<epsilon) ++found;
+                    }
+                    if (found != 1) return fail(__LINE__);
+                }
+            }
+        }
+    }
+    return true;
+}
+
 
 // Fixed first-generation sewing corpus: six disconnected planar patches of a
 // 2x3x4 box. Only the top patch moves, and one side is deliberately reversed.
@@ -5131,6 +5361,7 @@ bool test_stage3_model_query_chain() {
 }  // namespace
 
 int main() {
+    if (!stage6_blend_geometry_regression()) return 1;
     if (!stage5_repaired_modeling_chain_regression()) {
         std::cerr << "Stage 5 repaired modeling and batch atomicity regression failed\n";
         return 1;
@@ -6046,75 +6277,6 @@ int main() {
     if (!concave_retry.value ||
         kernel.validate().validate_all(*concave_retry.value, axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok ||
         kernel.validate().validate_all(*prism.value, axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok) return 1;
-
-    auto box_edges = kernel.topology().query().edges_of_body(*box_a.value);
-    if (box_edges.status != axiom::StatusCode::Ok || !box_edges.value.has_value() ||
-        box_edges.value->empty()) {
-        std::cerr << "expected edges on box for fillet/chamfer test\n";
-        return 1;
-    }
-    std::vector<axiom::EdgeId> single_edge {box_edges.value->front()};
-    auto fillet_ok = kernel.blends().fillet_edges(*box_a.value, single_edge, 0.5);
-    if (fillet_ok.status != axiom::StatusCode::Ok || !fillet_ok.value.has_value()) {
-        std::cerr << "fillet_edges failed\n";
-        return 1;
-    }
-    auto fillet_ok_diag = kernel.diagnostics().get(fillet_ok.value->diagnostic_id);
-    if (fillet_ok_diag.status != axiom::StatusCode::Ok || !fillet_ok_diag.value.has_value() ||
-        !has_issue_stage(*fillet_ok_diag.value, "blend.fillet.placeholder")) {
-        std::cerr << "expected blend.fillet.placeholder staged diagnostic for fillet\n";
-        return 1;
-    }
-    if (!has_warning_code(fillet_ok.value->warnings, axiom::diag_codes::kBlendApproximatePlaceholder)) {
-        std::cerr << "expected fillet placeholder capability warning\n";
-        return 1;
-    }
-    auto chamfer_ok = kernel.blends().chamfer_edges(*box_a.value, single_edge, 0.3);
-    if (chamfer_ok.status != axiom::StatusCode::Ok || !chamfer_ok.value.has_value()) {
-        std::cerr << "chamfer_edges failed\n";
-        return 1;
-    }
-    if (!has_warning_code(chamfer_ok.value->warnings, axiom::diag_codes::kBlendApproximatePlaceholder)) {
-        std::cerr << "expected chamfer placeholder capability warning\n";
-        return 1;
-    }
-
-    if (box_edges.value->size() < 2) {
-        std::cerr << "expected at least two edges for multi-edge blend diagnostic test\n";
-        return 1;
-    }
-    std::vector<axiom::EdgeId> two_edges {(*box_edges.value)[0], (*box_edges.value)[1]};
-    auto fillet_multi = kernel.blends().fillet_edges(*box_a.value, two_edges, 0.4);
-    if (fillet_multi.status != axiom::StatusCode::Ok || !fillet_multi.value.has_value()) {
-        std::cerr << "fillet_edges (multi) failed\n";
-        return 1;
-    }
-    if (!has_warning_code(fillet_multi.value->warnings, axiom::diag_codes::kBlendMultiEdgeCornerPlaceholder)) {
-        std::cerr << "expected multi-edge fillet corner placeholder warning\n";
-        return 1;
-    }
-    auto fillet_multi_diag = kernel.diagnostics().get(fillet_multi.value->diagnostic_id);
-    if (fillet_multi_diag.status != axiom::StatusCode::Ok || !fillet_multi_diag.value.has_value() ||
-        !has_issue_code(*fillet_multi_diag.value, axiom::diag_codes::kBlendMultiEdgeCornerPlaceholder) ||
-        !has_issue_stage(*fillet_multi_diag.value, "blend.fillet.multi_edge")) {
-        std::cerr << "expected diagnostic issue kBlendMultiEdgeCornerPlaceholder for multi-edge fillet\n";
-        return 1;
-    }
-    auto chamfer_multi = kernel.blends().chamfer_edges(*box_a.value, two_edges, 0.25);
-    if (chamfer_multi.status != axiom::StatusCode::Ok || !chamfer_multi.value.has_value()) {
-        std::cerr << "chamfer_edges (multi) failed\n";
-        return 1;
-    }
-    if (!has_warning_code(chamfer_multi.value->warnings, axiom::diag_codes::kBlendMultiEdgeCornerPlaceholder)) {
-        std::cerr << "expected multi-edge chamfer corner placeholder warning\n";
-        return 1;
-    }
-    auto chamfer_multi_diag = kernel.diagnostics().get(chamfer_multi.value->diagnostic_id);
-    if (chamfer_multi_diag.status != axiom::StatusCode::Ok || !chamfer_multi_diag.value.has_value() ||
-        !has_issue_code(*chamfer_multi_diag.value, axiom::diag_codes::kBlendMultiEdgeCornerPlaceholder)) {
-        std::cerr << "expected diagnostic issue kBlendMultiEdgeCornerPlaceholder for multi-edge chamfer\n";
-        return 1;
-    }
 
     auto box_shells = kernel.topology().query().shells_of_body(*box_a.value);
     if (box_shells.status != axiom::StatusCode::Ok || !box_shells.value.has_value() || box_shells.value->empty()) {

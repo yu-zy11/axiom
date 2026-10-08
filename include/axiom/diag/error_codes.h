@@ -106,9 +106,19 @@ inline constexpr std::string_view kBoolStageRepair = "AXM-BOOL-D-0018";
 
 inline constexpr std::string_view kBlendInvalidTarget = "AXM-BLEND-E-0001";
 inline constexpr std::string_view kBlendParameterTooLarge = "AXM-BLEND-E-0002";
-/// 圆角/倒角等混合特征当前仍为占位近似（拓扑骨架 + 参数门禁），未提供工业级几何生成。
+/// 真实圆角/倒角当前不支持的实体、支撑曲面或边配置。
+inline constexpr std::string_view kBlendUnsupportedGeometry = "AXM-BLEND-E-0003";
+/// 选中边角区相交或非平行选边；相邻退让区接触/重叠复用 E-0002。
+inline constexpr std::string_view kBlendIntersectingEdges = "AXM-BLEND-E-0004";
+/// 容差或浮点分辨率下无法形成非退化的真实补面。
+inline constexpr std::string_view kBlendDegenerateGeometry = "AXM-BLEND-E-0005";
+/// 真实结果物化或 Strict 后验验证失败；模型保持不变。
+inline constexpr std::string_view kBlendTopologyFailure = "AXM-BLEND-E-0006";
+/// 已生成独立真实补面/闭壳，并完成 Strict 后验验证。
+inline constexpr std::string_view kBlendCompleted = "AXM-BLEND-I-0001";
+/// 历史拓扑占位警告（保留稳定码）；真实圆角/倒角路径不再返回此警告。
 inline constexpr std::string_view kBlendApproximatePlaceholder = "AXM-BLEND-W-0001";
-/// 一次处理多条边：角区/连续滚球/变半径未实现，与单边的拓扑占位同级提示。
+/// 历史多边角区占位警告（保留稳定码）；不支持角区现在返回结构化失败。
 inline constexpr std::string_view kBlendMultiEdgeCornerPlaceholder = "AXM-BLEND-W-0002";
 
 inline constexpr std::string_view kModOffsetInvalid = "AXM-MOD-E-0001";

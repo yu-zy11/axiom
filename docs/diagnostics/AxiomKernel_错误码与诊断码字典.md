@@ -361,16 +361,25 @@ prep隔离新增两输入网格暖缓存、固定CurveId域及四点无缓存poi
 
 ## 7.6 `BLEND` 圆角倒角错误码
 
-| 错误码 | 严重级别 | 含义 |
-|---|---|---|
-| `AXM-BLEND-E-0001` | Error | 目标边不存在 |
-| `AXM-BLEND-E-0002` | Error | 半径或倒角距离非法 |
-| `AXM-BLEND-E-0003` | Error | 邻面不支持当前圆角求解 |
-| `AXM-BLEND-E-0004` | Error | 角区求解失败 |
-| `AXM-BLEND-E-0005` | Warning | 局部圆角结果存在近自交风险 |
-| `AXM-BLEND-E-0006` | Error | 圆角修剪失败 |
-| `AXM-BLEND-W-0001` | Warning | 圆角/倒角为拓扑占位与参数门禁：工业级滚球、角区、变半径等未实现 |
-| `AXM-BLEND-W-0002` | Warning | 一次处理多条边时角区/连续圆角或倒角/变半径仍为占位实现 |
+cycle-0088 为 E-0003..0006 增加公开常量，并将已有字典中的概念语义对齐真实路径；新增 I-0001，无 BLEND-D 码。阶段前缀为 `blend.fillet.` 或 `blend.chamfer.`。
+
+| 码 / 常量 | 级别 / StatusCode | 阶段后缀 | 含义 |
+|---|---|---|---|
+| `AXM-BLEND-E-0001` / `kBlendInvalidTarget` | Error / InvalidInput | input_gate | 无效体、空集合、非法/重复/外来边，非有限或非正参数、非法容差策略 |
+| `AXM-BLEND-E-0002` / `kBlendParameterTooLarge` | Error / OperationFailed | radius_gate / distance_gate | 参数过大、退让区域接触或重叠、剩余侧壁不大于线性容差 |
+| `AXM-BLEND-E-0003` / `kBlendUnsupportedGeometry` | Error / NotImplemented | support_gate | 当前实体、支撑几何或边界不属于受支持轴对齐矩形六平面闭壳 |
+| `AXM-BLEND-E-0004` / `kBlendIntersectingEdges` | Error / NotImplemented | intersection_gate | 非平行选边或相交角区不支持；非平行但不共顶点也拒绝 |
+| `AXM-BLEND-E-0005` / `kBlendDegenerateGeometry` | Error / DegenerateGeometry | geometry_gate | 参数不大于容差、非有限坐标/尺寸，或退让位置因浮点分辨率退化 |
+| `AXM-BLEND-E-0006` / `kBlendTopologyFailure` | Error / InvalidTopology | validation | 源闭壳或真实结果未通过 Strict 后验验证 |
+| `AXM-BLEND-I-0001` / `kBlendCompleted` | Info | complete | 已发布独立真实解析闭壳并通过 Strict |
+| `AXM-BLEND-W-0001` / `kBlendApproximatePlaceholder` | Warning（历史） | 历史占位阶段 | 保留稳定码；真实圆角/倒角不返回占位警告 |
+| `AXM-BLEND-W-0002` / `kBlendMultiEdgeCornerPlaceholder` | Warning（历史） | 历史多边阶段 | 保留稳定码；当前不支持角区返回结构化失败 |
+
+支持限当前完整轴对齐矩形闭壳、三轴任一方向的 1–4 条互不干涉平行凸边；范围见 [API §8.4.1](../api/AxiomKernel_详细模块接口清单.md#841-stage-6-真实圆角与倒角支持矩阵cycle-0088--s6-blend)。Circle/Cylinder 共享采样使 Strict 可用，不扩大圆角体质量/空间查询或无 PCurve 面面积资格。真实平面倒角进入既有质量路径；圆角与旧 proxy BlendResult 质量仍为 `NotImplemented / AXM-CORE-E-0004 / query.mass_properties.support_gate`、无 value。
+
+源/结果几何与 Strict 均在私有暂存状态检查，保留源关系索引，避免静默修复输入。失败无 value，不消耗模型 ID，不改源索引、next_version、活动事务写数/服务分配范围、Eval 或暖缓存，诊断可增加。成功只追加新模型与关系、登记活动事务服务分配范围；保存点/完整回滚移除派生几何及网格/缓存，保留源暖缓存；成功分配的 ID 不承诺复用。失败 Issue 关联输入 BodyId，成功 Issue 关联输入及输出 BodyId。
+
+回归中 NaN 顶点、proxy 面、悬空 curve 为 E-0003/support_gate，支撑线偏移、反向 coedge、缺失 edge 索引为 E-0006/validation；不要把所有损伤统一解释成几何退化。新 Topo getter 非有限顶点/悬空曲线为 `InvalidTopology / AXM-TOPO-E-0007`，非法或回滚句柄为 `InvalidInput / AXM-CORE-E-0001`，没有 getter 专用阶段。成功/拒绝/回滚断言及真实完整门禁见 [验收 §1.15](../quality/AxiomKernel_测试与验收方案.md#115-cycle-0088--s6-blend-门禁与逐项证据)；不能把防御性 validation 分支都称为已注入全部失败根因。
 
 ## 7.7 `MOD` 修改模块错误码
 
@@ -588,7 +597,7 @@ prep隔离新增两输入网格暖缓存、固定CurveId域及四点无缓存poi
 | `AXM-BOOL-W-0001` | 布尔预处理近退化/仅接触或受限 bbox 语义告警（包括分离输入与 Split 占位）；`Issue.stage=bool.prep` |
 | `AXM-BOOL-W-0002` | 壳/区域级无局部候选，交集回退全局 bbox 或减运算保留左体；`Issue.stage=bool.prep` |
 | `AXM-BOOL-W-0003` | 布尔结果在重建后 Strict 验证仍残留问题（可审计告警） |
-| `AXM-BLEND-W-0002` | 圆角/倒角一次处理多条边时角区仍为占位实现 |
+| `AXM-BLEND-W-0002` | 历史多边角区占位码；真实路径不返回，当前不支持角区结构化拒绝 |
 | `AXM-HEAL-W-0001` | 修复时删除了局部小特征 |
 | `AXM-IO-W-0001` | 导入后部分属性未映射 |
 | `AXM-TES-W-0001` | 三角化误差达到上限边缘 |

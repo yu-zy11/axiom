@@ -3,6 +3,7 @@
 #include "axiom/internal/geo/geo_rep_tessellation_link.h"
 #include "axiom/internal/core/topology_materialization.h"
 #include "axiom/internal/topo/topo_service_internal.h"
+#include "axiom/internal/math/math_internal_utils.h"
 
 #include <algorithm>
 #include <array>
@@ -1046,6 +1047,47 @@ bool straight_edge_matches(const KernelState& state, const EdgeRecord& edge, Sca
     return true;
 }
 
+// Shared arc stations keep planar caps and their cylindrical walls welded.
+// Only finite, explicitly trimmed analytic circles are accepted here.
+bool sample_circle_edge(const KernelState& state, const EdgeRecord& edge,
+                        const TessellationOptions& options, Scalar tolerance,
+                        std::vector<Point3>& points) {
+    const auto curve = state.curves.find(edge.curve_id.value);
+    const auto start = state.vertices.find(edge.v0.value), end = state.vertices.find(edge.v1.value);
+    if (curve == state.curves.end() || start == state.vertices.end() || end == state.vertices.end() ||
+        curve->second.kind != CurveKind::Circle || !edge.has_parameter_interval) return false;
+    const auto& c = curve->second;
+    const Scalar span = edge.end_parameter - edge.start_parameter;
+    if (!finite_point(c.origin) || !finite_point(start->second.point) || !finite_point(end->second.point) ||
+        !(c.radius > 0.0) || !std::isfinite(c.radius) || !std::isfinite(edge.start_parameter) ||
+        !std::isfinite(edge.end_parameter) || !(std::abs(span) > 0.0) || std::abs(span) > 2.0 * kPi ||
+        !std::isfinite(norm(c.axis_u)) || !std::isfinite(norm(c.axis_v)) ||
+        std::abs(norm(c.axis_u) - 1.0) > 1e-12 || std::abs(norm(c.axis_v) - 1.0) > 1e-12 ||
+        std::abs(dot(c.axis_u, c.axis_v)) > 1e-12) return false;
+    const auto circle_segments = segments_for_circle(c.radius, options);
+    if (circle_segments == 0) return false;
+    const auto count = std::max<std::size_t>(1, static_cast<std::size_t>(
+        std::ceil(static_cast<Scalar>(circle_segments) * std::abs(span) / (2.0 * kPi))));
+    if (count > 4096) return false;
+    points.clear();
+    points.reserve(count + 1);
+    for (std::size_t i = 0; i <= count; ++i) {
+        const Scalar t = edge.start_parameter + span * static_cast<Scalar>(i) / static_cast<Scalar>(count);
+        const Scalar a = c.radius * std::cos(t), b = c.radius * std::sin(t);
+        const auto p = add_point_vec(c.origin,
+            Vec3{c.axis_u.x * a + c.axis_v.x * b, c.axis_u.y * a + c.axis_v.y * b,
+                 c.axis_u.z * a + c.axis_v.z * b});
+        if (!finite_point(p)) return false;
+        points.push_back(p);
+    }
+    if (norm(subtract(points.front(), start->second.point)) > tolerance ||
+        norm(subtract(points.back(), end->second.point)) > tolerance) return false;
+    // Endpoints are the topology authority, shared by every incident face.
+    points.front() = start->second.point;
+    points.back() = end->second.point;
+    return true;
+}
+
 MeshRecord tessellate_face_planar_mesh(const KernelState& state, FaceId face_id, const TessellationOptions& options) {
     MeshRecord mesh;
     mesh.source_body = BodyId{0};
@@ -1067,13 +1109,29 @@ MeshRecord tessellate_face_planar_mesh(const KernelState& state, FaceId face_id,
         const auto loop_record = state.loops.find(loop_id.value);
         if (loop_record == state.loops.end() ||
             !topo_internal::validate_loop_record(state, loop_record->second, reason)) return {};
-        if (!topo_internal::loop_vertex_chain_3d(state, loop_id, ring, reason) || ring.size() < 3) return {};
+        std::vector<Point3> vertices;
+        if (!topo_internal::loop_vertex_chain_3d(state, loop_id, vertices, reason) || vertices.size() < 3) return {};
         const auto& loop = state.loops.at(loop_id.value);
         for (const auto coedge_id : loop.coedges) {
             const auto& edge = state.edges.at(state.coedges.at(coedge_id.value).edge_id.value);
             const auto curve = state.curves.find(edge.curve_id.value);
-            if (curve == state.curves.end() || !straight_edge_matches(state, edge, tolerance)) return {};
+            if (curve == state.curves.end()) return {};
             const auto& coedge = state.coedges.at(coedge_id.value);
+            if (curve->second.kind == CurveKind::Circle) {
+                if (coedge.pcurve_id.value != 0) return {};
+                const auto& circle = curve->second;
+                if (std::abs(dot(subtract(circle.origin, surface->second.origin), support_normal)) > tolerance ||
+                    std::abs(dot(circle.axis_u, support_normal)) > 1e-12 ||
+                    std::abs(dot(circle.axis_v, support_normal)) > 1e-12) return {};
+                std::vector<Point3> arc;
+                if (!sample_circle_edge(state, edge, options, tolerance, arc)) return {};
+                if (coedge.reversed) std::reverse(arc.begin(), arc.end());
+                ring.insert(ring.end(), arc.begin(), arc.end() - 1);
+            } else {
+                if (!straight_edge_matches(state, edge, tolerance)) return {};
+                ring.push_back(state.vertices.at(coedge.reversed ? edge.v1.value : edge.v0.value).point);
+            }
+            if (ring.size() > 16384) return {};
             if (coedge.pcurve_id.value != 0) {
                 const auto pc = state.pcurves.find(coedge.pcurve_id.value);
                 if (pc == state.pcurves.end() || pc->second.poles.size() < 2) return {};
@@ -1139,6 +1197,84 @@ MeshRecord tessellate_face_planar_mesh(const KernelState& state, FaceId face_id,
     return mesh;
 }
 
+// Analytic cylindrical strip bounded by two opposite circular trims and two
+// straight generators. No UV-box fallback: certify both physical boundaries.
+MeshRecord tessellate_cylinder_strip(const KernelState& state, FaceId face_id,
+                                     const TessellationOptions& options) {
+    MeshRecord mesh;
+    const auto& face = state.faces.at(face_id.value);
+    const auto& surface = state.surfaces.at(face.surface_id.value);
+    if (!face.inner_loops.empty() || !finite_point(surface.origin) ||
+        !(surface.radius_a > 0.0) || !std::isfinite(surface.radius_a) ||
+        !std::isfinite(norm(surface.axis)) || !(norm(surface.axis) > 0.0) ||
+        !std::isfinite(norm(surface.normal)) || !(norm(surface.normal) > 0.0)) return {};
+    const auto axis = normalize(surface.axis);
+    const auto normal_axis = normalize(surface.normal);
+    if (norm(Vec3{axis.x - normal_axis.x, axis.y - normal_axis.y, axis.z - normal_axis.z}) > 1e-12) return {};
+    const auto loop = state.loops.find(face.outer_loop.value);
+    std::string reason;
+    if (loop == state.loops.end() || loop->second.coedges.size() != 4 ||
+        !topo_internal::validate_loop_record(state, loop->second, reason)) return {};
+    const Scalar tolerance = std::min(std::max<Scalar>(1e-12, std::abs(state.config.tolerance.linear)),
+                                      options.chordal_error * 0.25);
+    std::array<std::vector<Point3>, 4> boundary;
+    std::vector<std::size_t> arcs;
+    for (std::size_t i = 0; i < 4; ++i) {
+        const auto& coedge = state.coedges.at(loop->second.coedges[i].value);
+        const auto& edge = state.edges.at(coedge.edge_id.value);
+        if (coedge.pcurve_id.value != 0) return {};
+        const auto curve = state.curves.find(edge.curve_id.value);
+        if (curve == state.curves.end()) return {};
+        if (curve->second.kind == CurveKind::Circle) {
+            const auto& c = curve->second;
+            if (std::abs(c.radius - surface.radius_a) > tolerance ||
+                std::abs(dot(c.axis_u, axis)) > 1e-12 || std::abs(dot(c.axis_v, axis)) > 1e-12 ||
+                norm(reject_vec(subtract(c.origin, surface.origin), axis)) > tolerance ||
+                !sample_circle_edge(state, edge, options, tolerance, boundary[i])) return {};
+            arcs.push_back(i);
+        } else {
+            if (!straight_edge_matches(state, edge, tolerance)) return {};
+            boundary[i] = {state.vertices.at(edge.v0.value).point, state.vertices.at(edge.v1.value).point};
+            const auto delta = subtract(boundary[i].back(), boundary[i].front());
+            if (norm(reject_vec(delta, axis)) > tolerance) return {};
+        }
+        if (coedge.reversed) std::reverse(boundary[i].begin(), boundary[i].end());
+    }
+    if (arcs.size() != 2 || (arcs[0] + 2) % 4 != arcs[1]) return {};
+    const auto& a = boundary[arcs[0]];
+    auto b = boundary[arcs[1]];
+    std::reverse(b.begin(), b.end());
+    if (a.size() != b.size() || a.size() < 2) return {};
+    const auto travel = subtract(b.front(), a.front());
+    const Scalar height = dot(travel, axis);
+    if (!std::isfinite(height) || std::abs(height) <= tolerance ||
+        norm(reject_vec(travel, axis)) > tolerance) return {};
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (norm(subtract(b[i], add_point_vec(a[i], travel))) > tolerance) return {};
+        for (const auto& p : {a[i], b[i]}) {
+            const auto radial = reject_vec(subtract(p, surface.origin), axis);
+            if (std::abs(norm(radial) - surface.radius_a) > tolerance) return {};
+            mesh.vertices.push_back(p);
+            if (options.compute_normals) mesh.normals.push_back(normalize(radial));
+            if (options.generate_texcoords)
+                mesh.texcoords.push_back(Point2{static_cast<Scalar>(i) / static_cast<Scalar>(a.size() - 1),
+                                                static_cast<Scalar>(mesh.vertices.size() % 2 == 0)});
+        }
+    }
+    for (std::size_t i = 0; i + 1 < a.size(); ++i) {
+        const Index a0 = static_cast<Index>(2 * i), b0 = a0 + 1, a1 = a0 + 2, b1 = a0 + 3;
+        const auto n = cross(subtract(mesh.vertices[a1], mesh.vertices[a0]),
+                             subtract(mesh.vertices[b1], mesh.vertices[a0]));
+        const auto radial = reject_vec(subtract(mesh.vertices[a0], surface.origin), axis);
+        if (!std::isfinite(norm(n)) || !(norm(n) > 0.0)) return {};
+        if (dot(n, radial) > 0.0) add_quad(mesh.indices, a0, a1, b1, b0);
+        else add_quad(mesh.indices, a0, b0, b1, a1);
+    }
+    mesh.bbox = mesh_bbox_from_vertices(mesh.vertices);
+    mesh.label = "mesh_from_cylinder_strip";
+    return mesh;
+}
+
 MeshRecord tessellate_face(const KernelState& state, FaceId face_id, const TessellationOptions& options) {
     const auto face_it = state.faces.find(face_id.value);
     if (face_it == state.faces.end() || !has_valid_tessellation_options(options)) return {};
@@ -1147,6 +1283,8 @@ MeshRecord tessellate_face(const KernelState& state, FaceId face_id, const Tesse
     if (surface_it == state.surfaces.end()) return {};
     if (surface_it->second.kind == SurfaceKind::Plane)
         return tessellate_face_planar_mesh(state, face_id, options);
+    if (surface_it->second.kind == SurfaceKind::Cylinder)
+        return tessellate_cylinder_strip(state, face_id, options);
     // Four straight, certified isoparametric edges are the supported curved
     // boundary. Never replace arbitrary loops or trim holes with their UV bbox.
     if (!face.inner_loops.empty()) return {};

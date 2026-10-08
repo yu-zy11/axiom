@@ -41,8 +41,11 @@ MeshRecord tessellate_torus(const BodyRecord& body, const TessellationOptions& o
 // Face-level planar tessellation from the owned outer/inner loops and edge supports.
 MeshRecord tessellate_face_planar(const KernelState& state, FaceId face_id, const TessellationOptions& options);
 
-// Topo-driven face tessellation: straight-edge planar regions (including holes)
-// or certified rectangular bilinear/line-segment swept patches. Tensor splines
+// Topo-driven face tessellation: planar regions with straight or explicitly
+// trimmed circular edges (including holes), cylindrical strips bounded by two
+// opposite circular arcs and two axial generators, or certified rectangular
+// bilinear/line-segment swept patches. Caps and cylinders share arc stations.
+// Tensor splines
 // require degree one, equal weights and unit clamped knots. General curve trims
 // and higher-order/derived patches fail instead of filling their UV bbox.
 MeshRecord tessellate_face(const KernelState& state, FaceId face_id, const TessellationOptions& options);

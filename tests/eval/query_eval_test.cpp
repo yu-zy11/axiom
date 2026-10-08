@@ -12,6 +12,166 @@
 
 namespace {
 
+// Failure and service allocations preserve the active writer's own changes;
+// rolling back derived geometry also discards its Eval and tessellation caches.
+bool stage6_blend_eval_rollback_regression() {
+    for (const bool fillet : {true,false}) {
+        axiom::Kernel kernel;
+        auto& query = kernel.topology().query();
+        const auto source = kernel.primitives().box({0,0,0},4,5,6);
+        const auto foreign = kernel.primitives().box({10,10,10},4,5,6);
+        const auto wedge = kernel.primitives().wedge({0,0,0},4,5,6);
+        const auto rounded_coordinates = kernel.primitives().box({1e16,1e16,1e16},32,40,48);
+        if (!source.value || !foreign.value || !wedge.value || !rounded_coordinates.value) return false;
+        const auto edges = query.edges_of_body(*source.value);
+        const auto foreign_edges = query.edges_of_body(*foreign.value);
+        const auto wedge_edges = query.edges_of_body(*wedge.value);
+        const auto rounded_edges = query.edges_of_body(*rounded_coordinates.value);
+        const auto faces = query.faces_of_body(*source.value);
+        if (!edges.value || !foreign_edges.value || !wedge_edges.value || !rounded_edges.value || !faces.value || edges.value->empty()) return false;
+        const auto edge = edges.value->front();
+        const auto curve = query.curve_of_edge(edge);
+        const auto surface = query.surface_of_face(faces.value->front());
+        const auto node = kernel.eval_graph().register_node(axiom::NodeKind::Geometry,"body:"+std::to_string(source.value->value));
+        const auto consumer = kernel.eval_graph().register_node(axiom::NodeKind::Analysis,"Stage6:blend:consumer");
+        if (!curve.value || !surface.value || !node.value || !consumer.value ||
+            kernel.eval_graph().add_dependency(*consumer.value,*node.value).status != axiom::StatusCode::Ok ||
+            kernel.eval_graph().recompute(*consumer.value).status != axiom::StatusCode::Ok ||
+            !kernel.curve_service().eval(*curve.value,0.5,1).value ||
+            !kernel.surface_service().eval(*surface.value,0,0,1).value ||
+            !kernel.convert().brep_to_mesh(*source.value,{}).value) return false;
+        const auto stores = [&] {
+            const auto r = kernel.runtime_store_counts();
+            if (!r.value) return std::array<std::uint64_t,10>{};
+            return std::array{kernel.object_count_total().value.value_or(0),kernel.geometry_count().value.value_or(0),
+                kernel.body_count().value.value_or(0),r.value->mesh_records,r.value->tessellation_cache_entries,
+                r.value->face_tessellation_cache_entries,r.value->intersection_records,r.value->curve_eval_cache_entries,
+                r.value->surface_eval_cache_entries,r.value->eval_node_records};
+        };
+        const auto valid_eval = [&] {
+            return kernel.eval_graph().is_invalid(*node.value).value == std::optional<bool>{false} &&
+                kernel.eval_graph().is_invalid(*consumer.value).value == std::optional<bool>{false} &&
+                kernel.eval_graph().has_dependency(*consumer.value,*node.value).value == std::optional<bool>{true} &&
+                kernel.eval_graph_store_maps_consistent().value == std::optional<bool>{true} &&
+                kernel.runtime_tessellation_caches_consistent().value == std::optional<bool>{true};
+        };
+        const auto recomputes = kernel.eval_graph().total_recompute_count().value;
+        const auto baseline = stores();
+        const auto blend = [&](axiom::BodyId body, const std::vector<axiom::EdgeId>& selection, double parameter) {
+            return fillet ? kernel.blends().fillet_edges(body,selection,parameter)
+                          : kernel.blends().chamfer_edges(body,selection,parameter);
+        };
+        const auto reject = [&](axiom::BodyId body, const std::vector<axiom::EdgeId>& selection, double parameter,
+                                std::string_view code, std::string_view stage) {
+            const auto before = stores();
+            const auto result = blend(body,selection,parameter);
+            const auto diagnostic = kernel.diagnostics().get(result.diagnostic_id);
+            return result.status != axiom::StatusCode::Ok && !result.value && diagnostic.value && stores() == before &&
+                valid_eval() && kernel.eval_graph().total_recompute_count().value == recomputes &&
+                query.edges_of_body(*source.value).value == edges.value && query.faces_of_body(*source.value).value == faces.value &&
+                std::any_of(diagnostic.value->issues.begin(),diagnostic.value->issues.end(),[&](const auto& issue) {
+                    return issue.code == code && issue.stage == std::string(fillet ? "blend.fillet." : "blend.chamfer.")+std::string(stage);
+                });
+        };
+        axiom::EdgeId crossing {};
+        const auto endpoints = query.vertices_of_edge(edge);
+        if (!endpoints.value) return false;
+        for (const auto candidate : *edges.value) {
+            if (candidate == edge) continue;
+            const auto other = query.vertices_of_edge(candidate);
+            if (!other.value) return false;
+            if ((*other.value)[0] == (*endpoints.value)[0] || (*other.value)[1] == (*endpoints.value)[0] ||
+                (*other.value)[0] == (*endpoints.value)[1] || (*other.value)[1] == (*endpoints.value)[1]) {
+                crossing = candidate; break;
+            }
+        }
+        if (!crossing.value) return false;
+        const auto point_xyz = [](const axiom::Point3& p) { return std::array{p.x,p.y,p.z}; };
+        const auto base_point = query.point_of_vertex((*endpoints.value)[0]);
+        const auto end_point = query.point_of_vertex((*endpoints.value)[1]);
+        if (!base_point.value || !end_point.value) return false;
+        const auto p = point_xyz(*base_point.value), q = point_xyz(*end_point.value);
+        int direction = 0;
+        while (direction < 3 && std::abs(p[direction]-q[direction]) < 1e-8) ++direction;
+        if (direction == 3) return false;
+        axiom::EdgeId adjacent_parallel {};
+        double contact_parameter = 0;
+        for (const auto candidate : *edges.value) {
+            if (candidate == edge) continue;
+            const auto other = query.vertices_of_edge(candidate);
+            if (!other.value) return false;
+            const auto first_point = query.point_of_vertex((*other.value)[0]);
+            const auto second_point = query.point_of_vertex((*other.value)[1]);
+            if (!first_point.value || !second_point.value) return false;
+            const auto a = point_xyz(*first_point.value), b = point_xyz(*second_point.value);
+            if (std::abs(a[direction]-b[direction]) < 1e-8) continue;
+            int different_cross_coordinates = 0;
+            double cross_distance = 0;
+            for (int c = 0; c < 3; ++c) if (c != direction && std::abs(a[c]-p[c]) > 1e-8) {
+                ++different_cross_coordinates; cross_distance = std::abs(a[c]-p[c]);
+            }
+            if (different_cross_coordinates == 1) {
+                adjacent_parallel = candidate; contact_parameter = cross_distance/2; break;
+            }
+        }
+        if (!adjacent_parallel.value) return false;
+        for (const bool active : {false,true}) {
+            auto transaction = kernel.topology().begin_transaction();
+            if (!active && transaction.rollback().status != axiom::StatusCode::Ok) return false;
+            const auto sentinel = active ? transaction.create_vertex({30,31,32}) : axiom::Result<axiom::VertexId>{};
+            const auto writes = transaction.write_operation_count().value;
+            if ((active && !sentinel.value) ||
+                !reject({}, {edge},0.4,axiom::diag_codes::kBlendInvalidTarget,"input_gate") ||
+                !reject(*source.value,{},0.4,axiom::diag_codes::kBlendInvalidTarget,"input_gate") ||
+                !reject(*source.value,{edge,edge},0.4,axiom::diag_codes::kBlendInvalidTarget,"input_gate") ||
+                !reject(*source.value,{foreign_edges.value->front()},0.4,axiom::diag_codes::kBlendInvalidTarget,"input_gate") ||
+                !reject(*source.value,{edge,crossing},0.4,axiom::diag_codes::kBlendIntersectingEdges,"intersection_gate") ||
+                !reject(*wedge.value,{wedge_edges.value->front()},0.4,axiom::diag_codes::kBlendUnsupportedGeometry,"support_gate") ||
+                !reject(*source.value,{edge},1e-12,axiom::diag_codes::kBlendDegenerateGeometry,"geometry_gate") ||
+                !reject(*rounded_coordinates.value,{rounded_edges.value->front()},0.4,axiom::diag_codes::kBlendDegenerateGeometry,"geometry_gate") ||
+                !reject(*source.value,{edge,adjacent_parallel},contact_parameter,axiom::diag_codes::kBlendParameterTooLarge,fillet ? "radius_gate" : "distance_gate") ||
+                !reject(*source.value,{edge},6,axiom::diag_codes::kBlendParameterTooLarge,fillet ? "radius_gate" : "distance_gate")) return false;
+            for (const double parameter : {0.0,-1.0,std::numeric_limits<double>::infinity(),std::numeric_limits<double>::quiet_NaN()})
+                if (!reject(*source.value,{edge},parameter,axiom::diag_codes::kBlendInvalidTarget,"input_gate")) return false;
+            if (active && (transaction.write_operation_count().value != writes ||
+                transaction.has_created_vertex(*sentinel.value).value != std::optional<bool>{true} ||
+                transaction.rollback().status != axiom::StatusCode::Ok || stores() != baseline)) return false;
+        }
+        // Two successful allocations: a service savepoint rollback keeps the
+        // preceding result, then writer rollback restores the warmed source.
+        auto transaction = kernel.topology().begin_transaction();
+        const auto sentinel = transaction.create_vertex({40,41,42});
+        const auto writes = transaction.write_operation_count().value;
+        const auto first = blend(*source.value,{edge},0.4);
+        const auto savepoint = transaction.create_savepoint();
+        const auto second = blend(*source.value,{edge},0.3);
+        if (!sentinel.value || !first.value || !savepoint.value || !second.value) return false;
+        const auto generated_faces = query.faces_of_body(second.value->output);
+        const auto generated_edges = query.edges_of_body(second.value->output);
+        if (!generated_faces.value || !generated_edges.value) return false;
+        const auto generated_surface = query.surface_of_face(generated_faces.value->front());
+        const auto generated_curve = query.curve_of_edge(generated_edges.value->front());
+        if (!generated_surface.value || !generated_curve.value ||
+            !kernel.surface_service().eval(*generated_surface.value,0,0,1).value ||
+            !kernel.curve_service().eval(*generated_curve.value,0.5,1).value ||
+            !kernel.convert().brep_to_mesh(second.value->output,{}).value || !valid_eval() ||
+            transaction.write_operation_count().value != writes ||
+            transaction.rollback_to_savepoint(*savepoint.value).status != axiom::StatusCode::Ok ||
+            query.has_body(second.value->output).value != std::optional<bool>{false} ||
+            query.has_body(first.value->output).value != std::optional<bool>{true} ||
+            kernel.has_surface_id(*generated_surface.value).value != std::optional<bool>{false} ||
+            kernel.has_curve_id(*generated_curve.value).value != std::optional<bool>{false} || !valid_eval() ||
+            transaction.rollback().status != axiom::StatusCode::Ok || stores() != baseline || !valid_eval() ||
+            kernel.eval_graph().total_recompute_count().value != recomputes ||
+            query.has_body(first.value->output).value != std::optional<bool>{false}) return false;
+        const auto retry = blend(*source.value,{edge},0.4);
+        if (!retry.value || !valid_eval() ||
+            kernel.validate().validate_all(retry.value->output,axiom::ValidationMode::Strict).status != axiom::StatusCode::Ok) return false;
+    }
+    return true;
+}
+
+
 // Derived solids participate in writer/savepoint rollback while existing Eval
 // dependencies remain valid. Spatial queries read the new material boundary.
 bool rebuilt_boundary_eval_rollback_regression() {
@@ -2922,6 +3082,10 @@ bool curve_curve_intersection_regression() {
 }  // namespace
 
 int main() {
+    if (!stage6_blend_eval_rollback_regression()) {
+        std::cerr << "Stage 6 blend failure/Eval/cache rollback regression failed\n";
+        return 1;
+    }
     if (!rebuilt_boundary_eval_rollback_regression()) {
         std::cerr << "rebuilt boundary query/Eval savepoint regression\n";
         return 1;

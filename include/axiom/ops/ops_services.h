@@ -316,7 +316,15 @@ class BlendService {
 public:
     explicit BlendService(std::shared_ptr<detail::KernelState> state);
 
+    /// 在当前边界仍为轴对齐矩形毛坯的单条或多条平行凸边上生成常半径真实圆柱补面，
+    /// 并重建独立闭壳（圆弧封盖边界），通过 Strict 验证后发布。
+    /// 相交角区、退让区接触、非平行边、非矩形当前闭壳不受支持，明确阶段诊断。
+    /// 半径须有限、正且大于容差/坐标分辨率；失败不修改模型、ID 或 Eval/缓存。
+    /// 活动拓扑事务可回滚结果。公开面/边/顶点及曲线/曲面求值可查真实几何；
+    /// 圆角体的质量、面积及实体空间查询仍受对应查询服务的曲面支持范围限制。
     Result<OpReport> fillet_edges(BodyId body_id, std::span<const EdgeId> edges, Scalar radius);
+    /// 同圆角的毛坯/选边/事务边界；生成真实平面等距倒角，distance 为在每个
+    /// 邻接平面上从原棱边量取的退让距离，不是倒角斜面的宽度。
     Result<OpReport> chamfer_edges(BodyId body_id, std::span<const EdgeId> edges, Scalar distance);
 
 private:
