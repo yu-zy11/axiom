@@ -2279,54 +2279,6 @@ Result<OpReport> ModifyService::draft_faces(BodyId body_id, std::span<const Face
     return ok_result(make_report(StatusCode::Ok, output, diag), diag);
 }
 
-Result<OpReport> ModifyService::replace_face(BodyId body_id, FaceId target, SurfaceId replacement) {
-    if (!detail::has_body(*state_, body_id) || state_->faces.find(target.value) == state_->faces.end() || !detail::has_surface(*state_, replacement)) {
-        return op_report_error_with_stage(
-            *state_, StatusCode::InvalidInput, diag_codes::kModReplaceFaceIncompatible,
-            "替换面失败：目标实体、目标面或替换曲面无效", "替换面失败", "modify.replace_face.input_gate",
-            std::span<const std::uint64_t> {});
-    }
-    auto record = state_->bodies[body_id.value];
-    detach_owned_topology(*state_, record);
-    record.kind = detail::BodyKind::Modified;
-    record.label = "replace_face";
-    append_unique_body(record.source_bodies, body_id);
-    append_unique_face(record.source_faces, target);
-    append_shells_for_face_owned_by_body(*state_, record.source_shells, target, body_id);
-    const auto output = make_body(state_, record, "已完成替换面");
-    detail::invalidate_eval_for_bodies(*state_, {body_id});
-    const auto diag = state_->create_diagnostic("替换面操作完成");
-    return ok_result(make_report(StatusCode::Ok, output, diag), diag);
-}
-
-Result<OpReport> ModifyService::delete_face_and_heal(BodyId body_id, FaceId target) {
-    if (!detail::has_body(*state_, body_id) || state_->faces.find(target.value) == state_->faces.end()) {
-        return op_report_error_with_stage(
-            *state_, StatusCode::InvalidInput, diag_codes::kModDeleteFaceHealFailure,
-            "删除面补面失败：目标实体或目标面无效", "删除面补面失败", "modify.delete_face.input_gate",
-            std::span<const std::uint64_t> {});
-    }
-    auto record = state_->bodies[body_id.value];
-    detach_owned_topology(*state_, record);
-    record.kind = detail::BodyKind::Modified;
-    record.label = "delete_face_and_heal";
-    append_unique_body(record.source_bodies, body_id);
-    append_unique_face(record.source_faces, target);
-    append_shells_for_face(*state_, record.source_shells, target);
-    const auto output = make_body(state_, record, "已完成删除面补面");
-    detail::invalidate_eval_for_bodies(*state_, {body_id});
-    const auto diag = state_->create_diagnostic("删除面补面操作完成");
-    auto report = make_report(StatusCode::Ok, output, diag,
-                              {detail::make_warning(diag_codes::kHealFeatureRemovedWarning, "局部面删除后已执行简化补面")});
-    {
-        auto heal_warn = detail::make_warning_issue(diag_codes::kHealFeatureRemovedWarning, "局部面删除后执行了补面简化");
-        heal_warn.related_entities = {body_id.value, output.value, target.value};
-        heal_warn.stage = "modify.delete_face.heal";
-        state_->append_diagnostic_issue(diag, std::move(heal_warn));
-    }
-    return ok_result(report, diag);
-}
-
 QueryService::QueryService(std::shared_ptr<detail::KernelState> state) : state_(std::move(state)) {}
 
 Result<IntersectionId> QueryService::intersect(CurveId curve_id, SurfaceId surface_id) const {

@@ -18,6 +18,94 @@
 
 namespace {
 
+// S6-DIRECT-EDIT: current topology/source ownership and Strict validation
+// determine support, including failures inside an existing transaction.
+bool direct_edit_topology_regression() {
+    axiom::Kernel kernel;
+    auto& query=kernel.topology().query();
+    const auto stock=kernel.primitives().box({0,0,0},4,5,6);
+    if (!stock.value) return false;
+    const auto faces=query.faces_of_body(*stock.value);
+    const auto edges=query.edges_of_body(*stock.value);
+    const auto shells=query.shells_of_body(*stock.value);
+    if (!faces.value || !edges.value || !shells.value) return false;
+    axiom::FaceId top {};
+    for (const auto face : *faces.value) {
+        const auto bbox=query.bbox_of_face(face);
+        if (bbox.value && bbox.value->min.z==6 && bbox.value->max.z==6) top=face;
+    }
+    if (!top.value) return false;
+    const auto coedges=query.coedges_of_edge(edges.value->front());
+    const auto wrong=kernel.pcurves().make_polyline(std::array<axiom::Point2,2>{{{100,100},{101,100}}});
+    if (!coedges.value || coedges.value->empty() || !wrong.value) return false;
+    {
+        auto transaction=kernel.topology().begin_transaction();
+        if (transaction.set_coedge_pcurve(coedges.value->front(),*wrong.value).status!=axiom::StatusCode::Ok) return false;
+        const auto next=kernel.next_object_id().value, objects=kernel.object_count_total().value;
+        const auto writes=transaction.write_operation_count().value;
+        const auto rejected=kernel.modify().move_face(*stock.value,top,1);
+        const auto report=kernel.diagnostics().get(rejected.diagnostic_id);
+        if (rejected.status!=axiom::StatusCode::InvalidTopology || rejected.value || !report.value ||
+            kernel.next_object_id().value!=next || kernel.object_count_total().value!=objects ||
+            transaction.write_operation_count().value!=writes || query.faces_of_body(*stock.value).value!=faces.value ||
+            std::none_of(report.value->issues.begin(),report.value->issues.end(),[](const auto& issue) {
+                return issue.code==axiom::diag_codes::kModDirectEditValidateFailed && issue.stage=="modify.move_face.source_validate";
+            }) || transaction.rollback().status!=axiom::StatusCode::Ok) return false;
+    }
+    // A tiny non-axis normal with a large tangential origin represents a
+    // substantially different plane; projecting it would fabricate a result.
+    const auto tilted=kernel.surfaces().make_plane({1e12,0,6},{1e-11,0,1});
+    if (!tilted.value) return false;
+    {
+        auto transaction=kernel.topology().begin_transaction();
+        if (transaction.replace_surface(top,*tilted.value).status!=axiom::StatusCode::Ok) return false;
+        const auto next=kernel.next_object_id().value;
+        const auto rejected=kernel.modify().move_face(*stock.value,top,1);
+        const auto report=kernel.diagnostics().get(rejected.diagnostic_id);
+        if (rejected.status!=axiom::StatusCode::NotImplemented || rejected.value || !report.value ||
+            kernel.next_object_id().value!=next ||
+            std::none_of(report.value->issues.begin(),report.value->issues.end(),[](const auto& issue) {
+                return issue.code==axiom::diag_codes::kModUnsupportedGeometry && issue.stage=="modify.move_face.support_gate";
+            }) || transaction.rollback().status!=axiom::StatusCode::Ok) return false;
+    }
+    const auto moved=kernel.modify().move_face(*stock.value,top,1);
+    if (!moved.value) return false;
+    auto source_faces=query.source_faces_of_body(moved.value->output).value;
+    auto expected_faces=*faces.value;
+    if (!source_faces) return false;
+    const auto by_id=[](auto left,auto right) { return left.value<right.value; };
+    std::sort(source_faces->begin(),source_faces->end(),by_id);
+    std::sort(expected_faces.begin(),expected_faces.end(),by_id);
+    if (*source_faces!=expected_faces ||
+        query.source_shells_of_body(moved.value->output).value!=shells.value ||
+        kernel.validate().validate_all(moved.value->output,axiom::ValidationMode::Strict).status!=axiom::StatusCode::Ok) return false;
+    const auto moved_faces=query.faces_of_body(moved.value->output);
+    if (!moved_faces.value) return false;
+    {
+        auto transaction=kernel.topology().begin_transaction();
+        const auto alias=transaction.create_body(*shells.value);
+        if (!alias.value) return false;
+        const auto next=kernel.next_object_id().value;
+        const auto rejected=kernel.modify().move_face(*stock.value,top,1);
+        const auto report=kernel.diagnostics().get(rejected.diagnostic_id);
+        if (rejected.status!=axiom::StatusCode::NotImplemented || rejected.value || !report.value ||
+            kernel.next_object_id().value!=next ||
+            std::none_of(report.value->issues.begin(),report.value->issues.end(),[](const auto& issue) {
+                return issue.code==axiom::diag_codes::kModUnsupportedGeometry && issue.stage=="modify.move_face.support_gate";
+            }) || transaction.rollback().status!=axiom::StatusCode::Ok) return false;
+    }
+    {
+        auto transaction=kernel.topology().begin_transaction();
+        if (transaction.delete_face(moved_faces.value->front()).status!=axiom::StatusCode::Ok ||
+            kernel.validate().validate_all(moved.value->output,axiom::ValidationMode::Strict).status==axiom::StatusCode::Ok ||
+            transaction.rollback().status!=axiom::StatusCode::Ok) return false;
+    }
+    return query.faces_of_body(moved.value->output).value==moved_faces.value &&
+        kernel.validate().validate_all(moved.value->output,axiom::ValidationMode::Strict).status==axiom::StatusCode::Ok &&
+        query.faces_of_body(*stock.value).value==faces.value &&
+        kernel.topology().validate().validate_indices_consistency().status==axiom::StatusCode::Ok;
+}
+
 // S6-BLEND: store corruption cannot turn the box support certificate into a
 // silent repair. Failure consumes diagnostic IDs only, even with a live writer.
 bool stage6_blend_topology_guard_regression() {
@@ -178,6 +266,10 @@ bool issue_links_entities(const axiom::DiagnosticReport& report, std::string_vie
 }  // namespace
 
 int main() {
+    if (!direct_edit_topology_regression()) {
+        std::cerr << "Stage 6 direct edit topology/source guard regression failed\n";
+        return 1;
+    }
     if (!stage6_blend_topology_guard_regression()) return 1;
     static_assert(!std::is_copy_constructible_v<axiom::TopologyTransaction>);
     static_assert(!std::is_copy_assignable_v<axiom::TopologyTransaction>);
@@ -3854,47 +3946,25 @@ int main() {
         return 1;
     }
     auto repair_feature = kernel.repair().auto_repair(*repair_source.value, axiom::RepairMode::Safe);
-    if (replace_face_feature.status != axiom::StatusCode::Ok || !replace_face_feature.value.has_value() ||
-        repair_feature.status != axiom::StatusCode::Ok || !repair_feature.value.has_value()) {
-        std::cerr << "expected feature operations on topology body to succeed\n";
+    const auto replace_report=kernel.diagnostics().get(replace_face_feature.diagnostic_id);
+    if (replace_face_feature.status!=axiom::StatusCode::DegenerateGeometry || replace_face_feature.value ||
+        !replace_report.value || !has_issue_code(*replace_report.value,axiom::diag_codes::kModDegenerateGeometry) ||
+        std::none_of(replace_report.value->issues.begin(),replace_report.value->issues.end(),[](const auto& issue) {
+            return issue.stage=="modify.replace_face.geometry_gate";
+        }) ||
+        repair_feature.status!=axiom::StatusCode::Ok || !repair_feature.value) {
+        std::cerr << "open one-face body must reject replacement; closed Safe repair must succeed\n";
         return 1;
     }
-
-    auto replace_feature_shells = kernel.topology().query().source_shells_of_body(replace_face_feature.value->output);
-    auto repair_feature_shells = kernel.topology().query().source_shells_of_body(repair_feature.value->output);
-    auto replace_feature_owned_shells = kernel.topology().query().shells_of_body(replace_face_feature.value->output);
-    auto repair_feature_owned_shells = kernel.topology().query().shells_of_body(repair_feature.value->output);
-    auto replace_feature_owned_faces = replace_feature_owned_shells.status == axiom::StatusCode::Ok &&
-                                               replace_feature_owned_shells.value.has_value() &&
-                                               replace_feature_owned_shells.value->size() == 1
-                                           ? kernel.topology().query().faces_of_shell(replace_feature_owned_shells.value->front())
-                                           : axiom::Result<std::vector<axiom::FaceId>> {};
-    auto repair_feature_owned_faces = repair_feature_owned_shells.status == axiom::StatusCode::Ok &&
-                                              repair_feature_owned_shells.value.has_value() &&
-                                              repair_feature_owned_shells.value->size() == 1
-                                          ? kernel.topology().query().faces_of_shell(repair_feature_owned_shells.value->front())
-                                          : axiom::Result<std::vector<axiom::FaceId>> {};
-    auto replace_feature_strict_valid = kernel.validate().validate_topology(replace_face_feature.value->output, axiom::ValidationMode::Strict);
-    auto repair_feature_strict_valid = kernel.validate().validate_topology(repair_feature.value->output, axiom::ValidationMode::Strict);
-    auto replace_feature_topo_valid = kernel.topology().validate().validate_body(replace_face_feature.value->output);
-    auto repair_feature_topo_valid = kernel.topology().validate().validate_body(repair_feature.value->output);
-    if (replace_feature_shells.status != axiom::StatusCode::Ok || !replace_feature_shells.value.has_value() ||
-        replace_feature_shells.value->size() != 1 || replace_feature_shells.value->front().value != shell.value->value ||
-        repair_feature_shells.status != axiom::StatusCode::Ok || !repair_feature_shells.value.has_value() ||
-        repair_feature_shells.value->size() != 1 || repair_feature_shells.value->front() != repair_source_shells.value->front() ||
-        replace_feature_owned_shells.status != axiom::StatusCode::Ok || !replace_feature_owned_shells.value.has_value() ||
-        repair_feature_owned_shells.status != axiom::StatusCode::Ok || !repair_feature_owned_shells.value.has_value() ||
-        replace_feature_owned_faces.status != axiom::StatusCode::Ok || !replace_feature_owned_faces.value.has_value() ||
-        repair_feature_owned_faces.status != axiom::StatusCode::Ok || !repair_feature_owned_faces.value.has_value() ||
-        replace_feature_owned_shells.value->size() != 1 ||
-        repair_feature_owned_shells.value->size() != 1 ||
-        replace_feature_owned_faces.value->size() != 6 ||
-        repair_feature_owned_faces.value->size() != 6 ||
-        replace_feature_strict_valid.status != axiom::StatusCode::Ok ||
-        repair_feature_strict_valid.status != axiom::StatusCode::Ok ||
-        replace_feature_topo_valid.status != axiom::StatusCode::Ok ||
-        repair_feature_topo_valid.status != axiom::StatusCode::Ok) {
-        std::cerr << "derived body source shells are unexpected\n";
+    const auto repair_feature_shells=kernel.topology().query().source_shells_of_body(repair_feature.value->output);
+    const auto repair_feature_owned_shells=kernel.topology().query().shells_of_body(repair_feature.value->output);
+    const auto repair_feature_owned_faces=kernel.topology().query().faces_of_body(repair_feature.value->output);
+    if (!repair_feature_shells.value || *repair_feature_shells.value!=*repair_source_shells.value ||
+        !repair_feature_owned_shells.value || repair_feature_owned_shells.value->size()!=1 ||
+        !repair_feature_owned_faces.value || repair_feature_owned_faces.value->size()!=6 ||
+        kernel.validate().validate_topology(repair_feature.value->output,axiom::ValidationMode::Strict).status!=axiom::StatusCode::Ok ||
+        kernel.topology().validate().validate_body(repair_feature.value->output).status!=axiom::StatusCode::Ok) {
+        std::cerr << "repair source shells and owned topology are unexpected\n";
         return 1;
     }
 
@@ -3968,15 +4038,13 @@ int main() {
     }
 
     auto replace_face_after_shared_shell = kernel.modify().replace_face(*body.value, *face.value, *plane1.value);
-    if (replace_face_after_shared_shell.status != axiom::StatusCode::Ok || !replace_face_after_shared_shell.value.has_value()) {
-        std::cerr << "replace_face should succeed when source face is shared by multiple shells\n";
-        return 1;
-    }
-    auto replace_after_shared_source_shells = kernel.topology().query().source_shells_of_body(replace_face_after_shared_shell.value->output);
-    if (replace_after_shared_source_shells.status != axiom::StatusCode::Ok || !replace_after_shared_source_shells.value.has_value() ||
-        replace_after_shared_source_shells.value->size() != 1 ||
-        replace_after_shared_source_shells.value->front().value != shell.value->value) {
-        std::cerr << "replace_face should prefer source shells owned by source body in shared-face scenario\n";
+    const auto shared_replace_report=kernel.diagnostics().get(replace_face_after_shared_shell.diagnostic_id);
+    if (replace_face_after_shared_shell.status!=axiom::StatusCode::DegenerateGeometry || replace_face_after_shared_shell.value ||
+        !shared_replace_report.value || !has_issue_code(*shared_replace_report.value,axiom::diag_codes::kModDegenerateGeometry) ||
+        std::none_of(shared_replace_report.value->issues.begin(),shared_replace_report.value->issues.end(),[](const auto& issue) {
+            return issue.stage=="modify.replace_face.geometry_gate";
+        })) {
+        std::cerr << "shared open face is outside the closed six-plane direct edit support\n";
         return 1;
     }
 

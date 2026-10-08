@@ -16,6 +16,7 @@
 #include "axiom/sdk/kernel.h"
 
 bool offset_shell_regression();
+bool direct_edit_regression();
 
 namespace {
 
@@ -5364,6 +5365,7 @@ bool test_stage3_model_query_chain() {
 
 int main() {
     if (!offset_shell_regression()) return 1;
+    if (!direct_edit_regression()) return 1;
     if (!stage6_blend_geometry_regression()) return 1;
     if (!stage5_repaired_modeling_chain_regression()) {
         std::cerr << "Stage 5 repaired modeling and batch atomicity regression failed\n";
@@ -6381,59 +6383,18 @@ int main() {
 
     auto replace_face = kernel.modify().replace_face(*box_a.value, *face.value, *plane1.value);
     auto delete_face_and_heal = kernel.modify().delete_face_and_heal(*box_a.value, *face.value);
-    if (replace_face.status != axiom::StatusCode::Ok || !replace_face.value.has_value() ||
-        delete_face_and_heal.status != axiom::StatusCode::Ok || !delete_face_and_heal.value.has_value()) {
-        std::cerr << "failed modify operations on face\n";
-        return 1;
-    }
-
-    auto delete_face_diag = kernel.diagnostics().get(delete_face_and_heal.value->diagnostic_id);
-    if (delete_face_diag.status != axiom::StatusCode::Ok || !delete_face_diag.value.has_value() ||
-        !has_issue_code(*delete_face_diag.value, axiom::diag_codes::kHealFeatureRemovedWarning) ||
-        !has_issue_stage(*delete_face_diag.value, "modify.delete_face.heal")) {
-        std::cerr << "expected warning diagnostic for delete_face_and_heal\n";
-        return 1;
-    }
-
-    auto replace_face_sources = kernel.topology().query().source_faces_of_body(replace_face.value->output);
-    auto delete_face_sources = kernel.topology().query().source_faces_of_body(delete_face_and_heal.value->output);
-    auto replace_face_bodies = kernel.topology().query().source_bodies_of_body(replace_face.value->output);
-    auto replace_face_shells = kernel.topology().query().source_shells_of_body(replace_face.value->output);
-    auto delete_face_shells = kernel.topology().query().source_shells_of_body(delete_face_and_heal.value->output);
-    auto replace_face_owned_shells = kernel.topology().query().shells_of_body(replace_face.value->output);
-    auto delete_face_owned_shells = kernel.topology().query().shells_of_body(delete_face_and_heal.value->output);
-    auto replace_face_owned_faces = replace_face_owned_shells.status == axiom::StatusCode::Ok && replace_face_owned_shells.value.has_value() &&
-                                            replace_face_owned_shells.value->size() == 1
-                                        ? kernel.topology().query().faces_of_shell(replace_face_owned_shells.value->front())
-                                        : axiom::Result<std::vector<axiom::FaceId>> {};
-    auto delete_face_owned_faces = delete_face_owned_shells.status == axiom::StatusCode::Ok && delete_face_owned_shells.value.has_value() &&
-                                           delete_face_owned_shells.value->size() == 1
-                                       ? kernel.topology().query().faces_of_shell(delete_face_owned_shells.value->front())
-                                       : axiom::Result<std::vector<axiom::FaceId>> {};
-    if (replace_face_sources.status != axiom::StatusCode::Ok || !replace_face_sources.value.has_value() ||
-        delete_face_sources.status != axiom::StatusCode::Ok || !delete_face_sources.value.has_value() ||
-        replace_face_bodies.status != axiom::StatusCode::Ok || !replace_face_bodies.value.has_value() ||
-        replace_face_shells.status != axiom::StatusCode::Ok || !replace_face_shells.value.has_value() ||
-        delete_face_shells.status != axiom::StatusCode::Ok || !delete_face_shells.value.has_value() ||
-        replace_face_owned_shells.status != axiom::StatusCode::Ok || !replace_face_owned_shells.value.has_value() ||
-        delete_face_owned_shells.status != axiom::StatusCode::Ok || !delete_face_owned_shells.value.has_value() ||
-        replace_face_owned_faces.status != axiom::StatusCode::Ok || !replace_face_owned_faces.value.has_value() ||
-        delete_face_owned_faces.status != axiom::StatusCode::Ok || !delete_face_owned_faces.value.has_value() ||
-        replace_face_sources.value->size() != 1 || replace_face_sources.value->front().value != face.value->value ||
-        delete_face_sources.value->size() != 1 || delete_face_sources.value->front().value != face.value->value ||
-        replace_face_bodies.value->size() != 1 || replace_face_bodies.value->front().value != box_a.value->value ||
-        !replace_face_shells.value->empty() ||
-        !delete_face_shells.value->empty() ||
-        replace_face_owned_shells.value->size() != 1 ||
-        delete_face_owned_shells.value->size() != 1 ||
-        replace_face_owned_faces.value->size() != 6 ||
-        delete_face_owned_faces.value->size() != 6) {
-        std::cerr << "modify result provenance is unexpected\n";
-        return 1;
-    }
-
-    if (!unsupported_mass(replace_face.value->output)) {
-        std::cerr << "proxy mass must fail with no value and stable support stage\n";
+    // A standalone triangular face is not owned by this box. The old proxy
+    // success path could silently ignore it; real direct editing rejects it.
+    const auto replace_diag=kernel.diagnostics().get(replace_face.diagnostic_id);
+    const auto delete_diag=kernel.diagnostics().get(delete_face_and_heal.diagnostic_id);
+    if (replace_face.status!=axiom::StatusCode::InvalidInput || replace_face.value ||
+        delete_face_and_heal.status!=axiom::StatusCode::InvalidInput || delete_face_and_heal.value ||
+        !replace_diag.value || !delete_diag.value ||
+        !has_issue_code(*replace_diag.value,axiom::diag_codes::kModReplaceFaceIncompatible) ||
+        !has_issue_stage(*replace_diag.value,"modify.replace_face.input_gate") ||
+        !has_issue_code(*delete_diag.value,axiom::diag_codes::kModDeleteFaceHealFailure) ||
+        !has_issue_stage(*delete_diag.value,"modify.delete_face.input_gate")) {
+        std::cerr << "standalone face must fail direct edit ownership gate\n";
         return 1;
     }
     const auto source_mass_after_replace = kernel.query().mass_properties(*box_a.value);

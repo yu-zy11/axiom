@@ -57,6 +57,7 @@ add_library(axiom_ops STATIC
     src/axiom/ops/ops_services.cpp
     src/axiom/ops/blend_services.cpp
     src/axiom/ops/offset_shell_services.cpp
+    src/axiom/ops/direct_edit_services.cpp
     src/axiom/ops/ops_service_internal.cpp
     src/axiom/ops/boolean_split_classify.cpp
     src/axiom/ops/boolean_rebuild.cpp

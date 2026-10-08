@@ -389,14 +389,16 @@ cycle-0088 为 E-0003..0006 增加公开常量，并将已有字典中的概念�
 | `AXM-MOD-E-0002` | Error | 偏置后发生自交 |
 | `AXM-MOD-E-0003` | Error | 抽壳失败 |
 | `AXM-MOD-E-0004` | Error | 拔模方向非法 |
-| `AXM-MOD-E-0005` | Error | 替换面与目标不兼容 |
-| `AXM-MOD-E-0006` | Error | 删除面补面失败 |
+| `AXM-MOD-E-0005` | Error | 替换输入/目标无效，或替换曲面不为严格平行轴对齐Plane |
+| `AXM-MOD-E-0006` | Error | 删除补面目标无效或不属于当前体；合法选择的算法不支持使用E-0009 |
 | `AXM-MOD-E-0007` | Warning | 修改导致小特征被移除 |
-| `AXM-MOD-E-0008` | Error | 抽壳源或真实结果未通过 Strict，结果未发布（既有公开常量，本轮补录） |
-| `AXM-MOD-E-0009` | Error | 当前实际边界或开口选择不在认证支持域 |
-| `AXM-MOD-E-0010` | Error | 距离/厚度、残余边界或坐标分辨率数值退化 |
+| `AXM-MOD-E-0008` | Error | 抽壳源或真实结果未通过 Strict，结果未发布（既有公开常量，cycle-0089补录） |
+| `AXM-MOD-E-0009` | Error | 当前实际边界/开口选择不在认证支持域，或删除补面尚无认证算法 |
+| `AXM-MOD-E-0010` | Error | 距离/厚度/编辑位移、残余边界或坐标分辨率数值退化 |
 | `AXM-MOD-E-0011` | Error | 偏置源或真实结果未通过 Strict，结果未发布 |
-| `AXM-MOD-I-0001` | Info | 真实偏置/抽壳边界通过私有 Strict 后发布 |
+| `AXM-MOD-E-0012` | Error | 移动面输入/目标无效、零或非有限距离、非法容差 |
+| `AXM-MOD-E-0013` | Error | 直接编辑源或真实暂存结果未通过Strict，结果未发布 |
+| `AXM-MOD-I-0001` | Info | 真实偏置/抽壳/移动面/替换面边界通过私有Strict后发布 |
 
 cycle-0089 / S6-OFFSET-SHELL 新增 E-0009/0010/0011 与 I-0001 公开常量，复用 E-0001/0002/0003/0008；没有新增 MOD-D 码。支持限当前 owned 轴对齐六平面矩形闭壳及无开口/单面开口抽壳，见 [API §8.3.1](../api/AxiomKernel_详细模块接口清单.md#831-stage-6-真实偏置与抽壳支持矩阵cycle-0089--s6-offset-shell)。
 
@@ -416,6 +418,25 @@ cycle-0089 / S6-OFFSET-SHELL 新增 E-0009/0010/0011 与 I-0001 公开常量，�
 表中 E/I 简写均为 `AXM-MOD-` 前缀。失败 Issue 关联源 BodyId，成功关联源和输出 BodyId；外层及 OpReport 可用 diagnostic_id 查询、按阶段/码检索和 JSON 导出。源当前 owned 边界与结果在私有暂存状态 Strict 核验，历史 body/shell/face 来源只在暂存隔离与恢复，live 源不变。失败无 value、不泄漏部分模型、不消耗 live ID，源拓扑/来源/索引、next_version、事务写数/分配范围、Eval clean/dirty 状态及桥/重算计数、暖缓存保持，诊断允许增加。
 
 成功仅追加新模型与关系，登记活动事务范围，并通知直接输入绑定 Eval 节点及下游失效；不自动重算业务算法。回滚移除派生几何/拓扑/表示/缓存、保留源暖 Mesh 身份，成功已分配 ID 允许空档。[验收 §1.16](../quality/AxiomKernel_测试与验收方案.md#116-cycle-0089--s6-offset-shell-门禁与逐项证据)直接覆盖两种 source_validate 及偏置输出 validate；抽壳输出 validate 属防御合同，不宣称全部根因直接注入。修改式 Safe 修复保形不在本工作流内。
+
+cycle-0090 / S6-DIRECT-EDIT 新增 `kModMoveFaceInvalid`（E-0012）与 `kModDirectEditValidateFailed`（E-0013），复用E-0005/0006，E-0009/0010/I-0001扩展至直接编辑；不新增MOD-D码。支持限独占完整owned轴对齐六平面盒单面移动/严格平行Plane替换，删除补面明确不支持，见[API§8.3.2](../api/AxiomKernel_详细模块接口清单.md#832-stage-6-真实直接编辑支持矩阵cycle-0090--s6-direct-edit)。
+
+| StatusCode / 稳定码 | Issue.stage | 根因 / 结果 |
+|---|---|---|
+| InvalidInput / E-0012 | `modify.move_face.input_gate` | 无效体/目标、异属面、零/非有限距离或非法容差 |
+| InvalidInput / E-0005 | `modify.replace_face.input_gate` | 无效体/目标、异属面、无效Surface或非法容差 |
+| InvalidInput / E-0005 | `modify.replace_face.support_gate` | 替换为非Plane、非有限平面、非平行/倾斜法向；即使微小离轴分量也拒绝 |
+| InvalidInput / E-0006 | `modify.delete_face.input_gate` | 无效体/目标或异属面 |
+| NotImplemented / E-0009 | `modify.delete_face.support_gate` | 合法owned目标仍无认证删除补面算法，无输出 |
+| NotImplemented / E-0009 | `modify.move_face.support_gate` / `modify.replace_face.support_gate` | 当前源边界非完整独占轴对齐六平面盒，含共享/开放/一般曲面/非轴对齐 |
+| DegenerateGeometry / E-0010 | `modify.move_face.geometry_gate` / `modify.replace_face.geometry_gate` | 亚容差/无变化、塌缩/接触/近容差余宽、位移不可表示或数值溢出 |
+| InvalidTopology / E-0013 | `modify.move_face.source_validate` / `modify.replace_face.source_validate` | 当前源未通过私有Strict |
+| InvalidTopology / E-0013 | `modify.move_face.validate` / `modify.replace_face.validate` | 暂存重建结果未通过Strict，未发布 |
+| Ok / I-0001 | `modify.move_face.complete` / `modify.replace_face.complete` | 独立真实边界发布成功 |
+
+简码均为 `AXM-MOD-` 前缀。失败Issue关联输入BodyId与目标FaceId；成功额外关联输出BodyId，外层/OpReport的diagnostic_id可查询、检索和JSON导出。源与结果在私有状态Strict验证，历史来源仅暂存隔离后恢复。失败无value、不发布、不消耗live模型ID；源拓扑/来源/索引、事务写数、Eval及暖缓存保持，诊断可增加。成功只追加新记录，登记活动事务范围并通知输入绑定Eval及下游失效。保存点/完整回滚清理派生几何/拓扑/表示/缓存与体Eval绑定，使消费节点失效，保留源暖Mesh身份；成功ID允许空档，累计遥测不承诺回退。
+
+[验收§1.17](../quality/AxiomKernel_测试与验收方案.md#117-cycle-0090--s6-direct-edit-门禁与逐项证据)覆盖输入/支持/数值稳定码与隔离，错误PCurve直接注入move的E-0013/source_validate。`.validate`是生产防御合同；输出随后删面后的Strict失败及回滚恢复不是服务内部结果validate失败注入，不宣称所有E-0013组合已直接注入。
 
 ## 7.8 `QUERY` 查询分析错误码
 

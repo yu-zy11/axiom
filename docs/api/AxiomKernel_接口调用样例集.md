@@ -803,11 +803,74 @@ assert(std::abs(cavity_mass.value->area-242.0) < 1e-7);
 
 片段未独立编译，本轮未运行测试；执行证据来自已通过调度器完整门禁的 [Ops/Heal/Rep 回归与两条验收证据](../quality/AxiomKernel_测试与验收方案.md#116-cycle-0089--s6-offset-shell-门禁与逐项证据)。独立参考为解析公式/公开 OBJ 积分，无外部工业内核认证；完整支持与限制见 [API §8.3.1](AxiomKernel_详细模块接口清单.md#831-stage-6-真实偏置与抽壳支持矩阵cycle-0089--s6-offset-shell)。
 
-## 8.3 删除面补面
+## 8.3 直接编辑：移动面、替换面与删除补面拒绝
+
+以下独立片段延续已有`kernel`，标准头包括`<cmath>`、`<cassert>`。只支持独占完整owned轴对齐六平面盒的单面移动/严格平行Plane替换。目标从每次输入的当前公开拓扑选取，连续编辑须重新选结果面，不能复用源FaceId。
 
 ```cpp
-auto healed = kernel.modify().delete_face_and_heal(body_id, target_face);
+auto source = kernel.primitives().box({0,0,0}, 4,5,6);
+if (!source.value) { handle_error(source); return; }
+auto& topo = kernel.topology().query();
+auto faces = topo.faces_of_body(*source.value);
+if (!faces.value) { handle_error(faces); return; }
+FaceId top {};
+for (auto face : *faces.value) {
+  auto bounds = topo.bbox_of_face(face);
+  if (!bounds.value) { handle_error(bounds); return; }
+  if (std::abs(bounds.value->min.z-6.0) < 1e-9 &&
+      std::abs(bounds.value->max.z-6.0) < 1e-9) top = face;
+}
+assert(top.value != 0);
+auto moved = kernel.modify().move_face(*source.value, top, 1.0);
+if (!moved.value) { handle_error(moved); return; }
+auto strict = kernel.validate().validate_all(moved.value->output, ValidationMode::Strict);
+if (strict.status != StatusCode::Ok) { handle_error(strict); return; }
+auto mass = kernel.query().mass_properties(moved.value->output);
+if (!mass.value) { handle_error(mass); return; }
+assert(std::abs(mass.value->volume-140.0) < 1e-7);
+assert(std::abs(mass.value->area-166.0) < 1e-7);
+auto inside = topo.locate_point(moved.value->output, {2,2.5,6.5});
+auto source_outside = topo.locate_point(*source.value, {2,2.5,6.5});
+auto boundary = topo.locate_point(moved.value->output, {2,2.5,7});
+if (!inside.value || !source_outside.value || !boundary.value) { return; }
+assert(inside.value->location == BodyPointLocation::Inside);
+assert(source_outside.value->location == BodyPointLocation::Outside);
+assert(boundary.value->location == BodyPointLocation::Boundary);
+
+// 从当前4×5×7结果选右面，以x=4.5的Plane替换。
+auto current_faces = topo.faces_of_body(moved.value->output);
+if (!current_faces.value) { handle_error(current_faces); return; }
+FaceId right {};
+for (auto face : *current_faces.value) {
+  auto bounds = topo.bbox_of_face(face);
+  if (!bounds.value) { handle_error(bounds); return; }
+  if (std::abs(bounds.value->min.x-4.0) < 1e-9 &&
+      std::abs(bounds.value->max.x-4.0) < 1e-9) right = face;
+}
+assert(right.value != 0);
+auto plane = kernel.surfaces().make_plane({4.5,0,0}, {1,0,0});
+if (!plane.value) { handle_error(plane); return; }
+auto replaced = kernel.modify().replace_face(moved.value->output, right, *plane.value);
+if (!replaced.value) { handle_error(replaced); return; }
+auto replaced_strict = kernel.validate().validate_all(replaced.value->output, ValidationMode::Strict);
+if (replaced_strict.status != StatusCode::Ok) { handle_error(replaced_strict); return; }
+auto replaced_mass = kernel.query().mass_properties(replaced.value->output);
+if (!replaced_mass.value) { handle_error(replaced_mass); return; }
+assert(std::abs(replaced_mass.value->volume-157.5) < 1e-7);
+assert(std::abs(replaced_mass.value->area-178.0) < 1e-7);
+assert(std::abs(replaced_mass.value->centroid.x-2.25) < 1e-7);
+assert(std::abs(replaced_mass.value->centroid.y-2.5) < 1e-7);
+assert(std::abs(replaced_mass.value->centroid.z-3.5) < 1e-7);
+
+// 删除补面尚无认证路径：合法目标也返回结构化不支持，无结果。
+auto deleted = kernel.modify().delete_face_and_heal(*source.value, top);
+assert(deleted.status == StatusCode::NotImplemented && !deleted.value);
+// diagnostic_id对应AXM-MOD-E-0009 / modify.delete_face.support_gate。
 ```
+
+移动正值沿目标外法向扩张、负值收缩；四邻面延伸/重裁，结果重建8角点/12直边/6面。替换Plane支持反向法向，任意非零离轴分量均拒绝。位移须大于内核有效线性容差，剩余各轴尺寸须大于两倍容差且坐标可表示；无变化替换、塌缩/近容差、一般曲面、共享/开放边界和批量编辑拒绝。非法/异属删除目标为E-0006/input_gate，合法删除目标为E-0009/support_gate。
+
+失败不发布、不消耗live模型ID，源拓扑/来源/索引、Eval和暖缓存保持；成功追加独立Generic/ExactBRep、全部六面逐面对应立即源并通知输入Eval及下游失效。活动事务保存点/完整回滚清派生几何/拓扑/表示/缓存和体绑定，保留源暖Mesh身份，成功ID允许空档、诊断可增加。详细范围和阶段见[API§8.3.2](AxiomKernel_详细模块接口清单.md#832-stage-6-真实直接编辑支持矩阵cycle-0090--s6-direct-edit)及[MOD字典](../diagnostics/AxiomKernel_错误码与诊断码字典.md#77-mod-修改模块错误码)。片段未独立编译；执行证据来自已通过调度器完整16/16门禁的[两条验收证据](../quality/AxiomKernel_测试与验收方案.md#117-cycle-0090--s6-direct-edit-门禁与逐项证据)，参考为解析公式/公开OBJ积分，无外部工业内核认证。本轮文档工作未构建或运行测试。
 
 ## 9. 圆角与倒角样例
 

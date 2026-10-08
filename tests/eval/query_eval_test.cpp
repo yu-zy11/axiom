@@ -12,6 +12,76 @@
 
 namespace {
 
+bool direct_edit_query_eval_regression() {
+    axiom::Kernel kernel;
+    auto& query=kernel.topology().query();
+    auto& eval=kernel.eval_graph();
+    const auto source=kernel.primitives().box({0,0,0},4,5,6);
+    if (!source.value) return false;
+    const auto faces=query.faces_of_body(*source.value);
+    if (!faces.value) return false;
+    axiom::FaceId top {};
+    for (const auto face : *faces.value) {
+        const auto bbox=query.bbox_of_face(face);
+        if (bbox.value && bbox.value->min.z==6 && bbox.value->max.z==6) top=face;
+    }
+    const auto mesh=kernel.convert().brep_to_mesh(*source.value,{});
+    const auto node=eval.register_node(axiom::NodeKind::Geometry,"body:"+std::to_string(source.value->value));
+    const auto consumer=eval.register_node(axiom::NodeKind::Analysis,"direct_edit:downstream");
+    if (!top.value || !mesh.value || !node.value || !consumer.value ||
+        eval.add_dependency(*consumer.value,*node.value).status!=axiom::StatusCode::Ok) return false;
+    auto transaction=kernel.topology().begin_transaction();
+    const auto savepoint=transaction.create_savepoint();
+    const auto moved=kernel.modify().move_face(*source.value,top,1);
+    if (!savepoint.value || !moved.value ||
+        eval.is_invalid(*node.value).value!=std::optional<bool>{true} ||
+        eval.is_invalid(*consumer.value).value!=std::optional<bool>{true}) return false;
+    const auto mass=kernel.query().mass_properties(moved.value->output);
+    const auto inside=query.locate_point(moved.value->output,{2,2.5,6.5});
+    const auto source_outside=query.locate_point(*source.value,{2,2.5,6.5});
+    const auto boundary=query.locate_point(moved.value->output,{2,2.5,7});
+    if (!mass.value || std::abs(mass.value->volume-140)>1e-7 || std::abs(mass.value->area-166)>1e-7 ||
+        !inside.value || inside.value->location!=axiom::BodyPointLocation::Inside ||
+        !source_outside.value || source_outside.value->location!=axiom::BodyPointLocation::Outside ||
+        !boundary.value || boundary.value->location!=axiom::BodyPointLocation::Boundary ||
+        eval.recompute(*consumer.value).status!=axiom::StatusCode::Ok) return false;
+    const auto output_mesh=kernel.convert().brep_to_mesh(moved.value->output,{});
+    const auto recomputes=eval.total_recompute_count().value;
+    const auto failed=kernel.modify().move_face(*source.value,top,-6);
+    if (failed.status==axiom::StatusCode::Ok || failed.value ||
+        eval.is_invalid(*node.value).value!=std::optional<bool>{false} ||
+        eval.is_invalid(*consumer.value).value!=std::optional<bool>{false} ||
+        eval.total_recompute_count().value!=recomputes || !output_mesh.value ||
+        transaction.rollback_to_savepoint(*savepoint.value).status!=axiom::StatusCode::Ok ||
+        query.has_body(moved.value->output).value!=std::optional<bool>{false} ||
+        kernel.convert().inspect_mesh(*output_mesh.value).value ||
+        kernel.convert().brep_to_mesh(*source.value,{}).value!=mesh.value ||
+        transaction.rollback().status!=axiom::StatusCode::Ok) return false;
+    // Historical source damage is not the current edited body's boundary.
+    // Chained editing validates that current boundary in private staging.
+    const auto first=kernel.modify().move_face(*source.value,top,.5);
+    if (!first.value) return false;
+    const auto first_faces=query.faces_of_body(first.value->output);
+    if (!first_faces.value) return false;
+    axiom::FaceId first_top {};
+    for (const auto face : *first_faces.value) {
+        const auto bbox=query.bbox_of_face(face);
+        if (bbox.value && bbox.value->min.z==6.5 && bbox.value->max.z==6.5) first_top=face;
+    }
+    auto stale_transaction=kernel.topology().begin_transaction();
+    if (!first_top.value || stale_transaction.delete_face(top).status!=axiom::StatusCode::Ok) return false;
+    const auto second=kernel.modify().move_face(first.value->output,first_top,.5);
+    if (!second.value || query.source_bodies_of_body(second.value->output).value!=std::optional{std::vector{first.value->output}} ||
+        query.source_faces_of_body(second.value->output).value!=first_faces.value ||
+        kernel.validate().validate_all(second.value->output,axiom::ValidationMode::Strict).status!=axiom::StatusCode::Ok ||
+        !kernel.query().mass_properties(second.value->output).value ||
+        stale_transaction.rollback().status!=axiom::StatusCode::Ok) return false;
+    return query.has_face(top).value==std::optional<bool>{true} &&
+        query.has_body(second.value->output).value==std::optional<bool>{false} &&
+        kernel.query().mass_properties(first.value->output).value.has_value() &&
+        kernel.core_runtime_invariants_hold().value==std::optional<bool>{true};
+}
+
 // Failure and service allocations preserve the active writer's own changes;
 // rolling back derived geometry also discards its Eval and tessellation caches.
 bool stage6_blend_eval_rollback_regression() {
@@ -3082,6 +3152,10 @@ bool curve_curve_intersection_regression() {
 }  // namespace
 
 int main() {
+    if (!direct_edit_query_eval_regression()) {
+        std::cerr << "Stage 6 direct edit query/Eval/savepoint regression failed\n";
+        return 1;
+    }
     if (!stage6_blend_eval_rollback_regression()) {
         std::cerr << "Stage 6 blend failure/Eval/cache rollback regression failed\n";
         return 1;

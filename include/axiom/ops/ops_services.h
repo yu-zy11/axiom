@@ -324,7 +324,28 @@ public:
     /// isolation follow offset_body; no partial body is published on failure.
     Result<OpReport> shell_body(BodyId body_id, std::span<const FaceId> removed_faces, Scalar thickness);
     Result<OpReport> draft_faces(BodyId body_id, std::span<const FaceId> faces, const Vec3& pull_dir, Scalar angle);
+    /// Move one currently owned face of a complete axis-aligned six-plane rectangular
+    /// closed ExactBRep by a finite nonzero signed distance along its outward normal.
+    /// Positive expands, negative contracts the selected side; adjacent planes are
+    /// retrimmed to an independently rebuilt boundary. The kernel's linear tolerance
+    /// gates distance, remaining thickness and representability in world coordinates.
+    /// Current source and result pass Strict in private staging, excluding obsolete
+    /// historical source provenance from the source check. Failure preserves live model
+    /// IDs, source topology/provenance, Eval and warm caches. Success returns a new body
+    /// with immediate face/shell/body provenance, invalidates input Eval consumers and
+    /// registers the result for active transaction rollback. No source is edited in place.
+    /// General surfaces, shared/open boundaries and collapsed results are unsupported.
+    Result<OpReport> move_face(BodyId body_id, FaceId target, Scalar signed_distance);
+    /// Replace a currently owned rectangular box face with a parallel Plane, extending
+    /// or trimming its four adjacent faces and rebuilding all real boundary geometry.
+    /// Either replacement normal sign is accepted; outward output orientation is kept.
+    /// A displacement exceeding kernel tolerance is required. The supported domain,
+    /// Strict staging, immediate provenance and isolation contract follow move_face.
+    /// Nonparallel/curved replacements and no-op replacements return staged diagnostics.
     Result<OpReport> replace_face(BodyId body_id, FaceId target, SurfaceId replacement);
+    /// Face deletion with adjacent-surface healing is unsupported in this package.
+    /// Valid owned selections return NotImplemented with modify.delete_face.support_gate;
+    /// invalid or foreign selections return InvalidInput. No result is published.
     Result<OpReport> delete_face_and_heal(BodyId body_id, FaceId target);
 
 private:

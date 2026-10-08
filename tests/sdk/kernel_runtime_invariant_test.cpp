@@ -12,6 +12,81 @@
 
 namespace {
 
+bool direct_edit_runtime_rollback_regression() {
+    for (const bool replacement : {false,true}) {
+        axiom::Kernel kernel;
+        auto& query=kernel.topology().query();
+        const auto source=kernel.primitives().box({0,0,0},4,5,6);
+        const auto plane=kernel.surfaces().make_plane({0,0,7},{0,0,1});
+        if (!source.value || !plane.value) return false;
+        const auto faces=query.faces_of_body(*source.value);
+        const auto edges=query.edges_of_body(*source.value);
+        if (!faces.value || !edges.value) return false;
+        axiom::FaceId top {};
+        for (const auto face : *faces.value) {
+            const auto bbox=query.bbox_of_face(face);
+            if (bbox.value && bbox.value->min.z==6 && bbox.value->max.z==6) top=face;
+        }
+        const auto source_mesh=kernel.convert().brep_to_mesh(*source.value,{});
+        const auto source_curve=query.curve_of_edge(edges.value->front());
+        const auto source_surface=query.surface_of_face(top);
+        if (!top.value || !source_mesh.value || !source_curve.value || !source_surface.value ||
+            !kernel.curve_service().eval(*source_curve.value,0,1).value ||
+            !kernel.surface_service().eval(*source_surface.value,0,0,1).value) return false;
+        const auto baseline=kernel.runtime_store_counts();
+        const auto objects=kernel.object_count_total().value, geometry=kernel.geometry_count().value;
+        auto transaction=kernel.topology().begin_transaction();
+        const auto sentinel=transaction.create_vertex({30,31,32});
+        const auto result=replacement ? kernel.modify().replace_face(*source.value,top,*plane.value)
+                                      : kernel.modify().move_face(*source.value,top,1);
+        if (!sentinel.value || !result.value || !baseline.value) return false;
+        const auto body=result.value->output;
+        const auto output_faces=query.faces_of_body(body);
+        const auto output_edges=query.edges_of_body(body);
+        const auto output_vertices=query.vertices_of_body(body);
+        const auto output_shells=query.shells_of_body(body);
+        const auto output_mesh=kernel.convert().brep_to_mesh(body,{});
+        if (!output_faces.value || !output_edges.value || !output_vertices.value || !output_shells.value || !output_mesh.value) return false;
+        const auto curve=query.curve_of_edge(output_edges.value->front());
+        const auto surface=query.surface_of_face(output_faces.value->front());
+        const auto node=kernel.eval_graph().register_node(axiom::NodeKind::Geometry,"body:"+std::to_string(body.value));
+        const auto consumer=kernel.eval_graph().register_node(axiom::NodeKind::Analysis,"direct_edit:discarded");
+        if (!curve.value || !surface.value || !node.value || !consumer.value ||
+            !kernel.curve_service().eval(*curve.value,0,1).value || !kernel.surface_service().eval(*surface.value,0,0,1).value ||
+            kernel.eval_graph().add_dependency(*consumer.value,*node.value).status!=axiom::StatusCode::Ok) return false;
+        const auto writes=transaction.write_operation_count().value;
+        const auto failed=kernel.modify().move_face(*source.value,top,-6);
+        if (failed.status==axiom::StatusCode::Ok || failed.value || transaction.write_operation_count().value!=writes ||
+            query.has_body(body).value!=std::optional<bool>{true} ||
+            query.has_vertex(*sentinel.value).value!=std::optional<bool>{true} ||
+            transaction.rollback().status!=axiom::StatusCode::Ok) return false;
+        const auto after=kernel.runtime_store_counts();
+        if (!after.value || kernel.object_count_total().value!=objects || kernel.geometry_count().value!=geometry ||
+            query.has_body(body).value!=std::optional<bool>{false} || query.has_vertex(*sentinel.value).value!=std::optional<bool>{false} ||
+            kernel.has_curve_id(*curve.value).value!=std::optional<bool>{false} || kernel.has_surface_id(*surface.value).value!=std::optional<bool>{false} ||
+            kernel.convert().inspect_mesh(*output_mesh.value).value ||
+            after.value->mesh_records!=baseline.value->mesh_records ||
+            after.value->tessellation_cache_entries!=baseline.value->tessellation_cache_entries ||
+            after.value->face_tessellation_cache_entries!=baseline.value->face_tessellation_cache_entries ||
+            after.value->curve_eval_cache_entries!=baseline.value->curve_eval_cache_entries ||
+            after.value->surface_eval_cache_entries!=baseline.value->surface_eval_cache_entries ||
+            kernel.eval_graph().is_invalid(*node.value).value!=std::optional<bool>{true} ||
+            kernel.eval_graph().is_invalid(*consumer.value).value!=std::optional<bool>{true}) return false;
+        for (const auto id : *output_faces.value) if (query.has_face(id).value!=std::optional<bool>{false}) return false;
+        for (const auto id : *output_edges.value) if (query.has_edge(id).value!=std::optional<bool>{false}) return false;
+        for (const auto id : *output_vertices.value) if (query.has_vertex(id).value!=std::optional<bool>{false}) return false;
+        for (const auto id : *output_shells.value) if (query.has_shell(id).value!=std::optional<bool>{false}) return false;
+        const auto bindings=kernel.eval_graph().body_binding_bodies();
+        if (!bindings.value || std::find(bindings.value->begin(),bindings.value->end(),body)!=bindings.value->end() ||
+            kernel.convert().brep_to_mesh(*source.value,{}).value!=source_mesh.value ||
+            query.faces_of_body(*source.value).value!=faces.value ||
+            kernel.runtime_tessellation_caches_consistent().value!=std::optional<bool>{true} ||
+            kernel.eval_graph_store_maps_consistent().value!=std::optional<bool>{true} ||
+            kernel.core_runtime_invariants_hold().value!=std::optional<bool>{true}) return false;
+    }
+    return true;
+}
+
 bool tess_metrics_empty(const axiom::TessellationCacheStats& s) {
     return s.body_cache_hits == 0 && s.body_cache_misses == 0 && s.body_cache_stale_evictions == 0 &&
            s.face_cache_hits == 0 && s.face_cache_misses == 0 && s.face_cache_stale_evictions == 0;
@@ -126,6 +201,10 @@ bool stage3_discarded_body_runtime_regression() {
 }  // namespace
 
 int main() {
+    if (!direct_edit_runtime_rollback_regression()) {
+        std::cerr << "Stage 6 direct edit runtime rollback regression failed\n";
+        return 1;
+    }
     if (!stage3_discarded_body_runtime_regression()) {
         std::cerr << "Stage 3 discarded-body runtime consistency regression failed\n";
         return 1;
